@@ -64,19 +64,18 @@
 
 use std::{cmp::Ordering, mem::size_of};
 
-// Group accumulation maps key on GroupKeyRef and read group ORDER from a
-// separate `ordering` Vec (first-seen order), never from map iteration. So the
-// hasher is observationally invisible: swapping SipHash -> FxHash changes only
-// bucket placement, not any output value or order. FxHash (rustc-hash) is pure
-// safe Rust; on the hot string-key path it is ~2x the std SipHasher.
-use rustc_hash::FxHashMap;
-
 use bumpalo::{Bump, collections::Vec as BumpVec};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexError, IndexLabel, align_union, validate_alignment_plan};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::{DType, NullKind, Scalar, Timedelta, Timestamp};
+// Group accumulation maps key on GroupKeyRef and read group ORDER from a
+// separate `ordering` Vec (first-seen order), never from map iteration. So the
+// hasher is observationally invisible: swapping SipHash -> FxHash changes only
+// bucket placement, not any output value or order. FxHash (rustc-hash) is pure
+// safe Rust; on the hot string-key path it is ~2x the std SipHasher.
+use rustc_hash::FxHashMap;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -687,6 +686,13 @@ fn groupby_sum_int64(
     values: &[Scalar],
     options: GroupByOptions,
 ) -> Result<Series, GroupByError> {
+    if let Some((out_index, out_values)) =
+        try_groupby_sum_dense_int64_values(keys, values, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new("sum", Index::new(out_index), out_column)?);
+    }
+
     let mut ordering = Vec::<GroupKeyRef<'_>>::new();
     let mut slot = FxHashMap::<GroupKeyRef<'_>, (usize, i128)>::default();
 
@@ -765,6 +771,84 @@ fn dense_int64_range(keys: &[Scalar], dropna: bool) -> Option<(i64, i64, bool)> 
         }
     }
     Some((min_key, max_key, saw_int_key))
+}
+
+/// Dense-bucket fast path for dtype-preserving `Int64`/`Bool` sums.
+///
+/// The generic `groupby_sum_int64` path exists to preserve pandas' integer
+/// output dtype, but it still hashes every bounded integer key. This helper
+/// keeps that dtype/overflow behavior while using direct-address buckets when
+/// every non-dropped key is `Int64` and the key span is bounded.
+fn try_groupby_sum_dense_int64_values(
+    keys: &[Scalar],
+    values: &[Scalar],
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    let (min_key, max_key, saw_int_key) = dense_int64_range(keys, dropna)?;
+
+    if !saw_int_key {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    let span = i128::from(max_key) - i128::from(min_key) + 1;
+    if span <= 0 || span > DENSE_INT_KEY_RANGE_LIMIT {
+        return None;
+    }
+
+    let bucket_len = usize::try_from(span).ok()?;
+    let mut sums = vec![0_i128; bucket_len];
+    let mut seen = vec![false; bucket_len];
+    let mut ordering = Vec::<i64>::new();
+
+    for (key, value) in keys.iter().zip(values.iter()) {
+        let key = match key {
+            Scalar::Int64(v) => *v,
+            Scalar::Null(_) if dropna => continue,
+            _ => return None,
+        };
+
+        let raw = i128::from(key) - i128::from(min_key);
+        let bucket = usize::try_from(raw).ok()?;
+        if !seen[bucket] {
+            seen[bucket] = true;
+            ordering.push(key);
+        }
+
+        match value {
+            Scalar::Int64(v) => sums[bucket] += i128::from(*v),
+            Scalar::Bool(v) => sums[bucket] += i128::from(*v),
+            _ => return None,
+        }
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    if sort {
+        for (bucket, was_seen) in seen.iter().enumerate() {
+            if !*was_seen {
+                continue;
+            }
+            let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+            out_index.push(IndexLabel::Int64(key));
+            out_values.push(match i64::try_from(sums[bucket]) {
+                Ok(value) => Scalar::Int64(value),
+                Err(_) => Scalar::Float64(sums[bucket] as f64),
+            });
+        }
+    } else {
+        for key in ordering {
+            let raw = i128::from(key) - i128::from(min_key);
+            let bucket = usize::try_from(raw).ok()?;
+            out_index.push(IndexLabel::Int64(key));
+            out_values.push(match i64::try_from(sums[bucket]) {
+                Ok(value) => Scalar::Int64(value),
+                Err(_) => Scalar::Float64(sums[bucket] as f64),
+            });
+        }
+    }
+
+    Some((out_index, out_values))
 }
 
 /// Dense-bucket fast path for `Int64` keys.
@@ -1653,6 +1737,7 @@ mod tests {
     use super::{
         GroupByExecutionOptions, GroupByOptions, groupby_nunique, groupby_prod, groupby_size,
         groupby_sum, groupby_sum_with_options, groupby_sum_with_trace,
+        try_groupby_sum_dense_int64_values,
     };
 
     #[test]
@@ -1738,10 +1823,7 @@ mod tests {
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
         assert_eq!(
             out.values(),
-            &[
-                Scalar::Utf8("xy".to_owned()),
-                Scalar::Utf8("z".to_owned()),
-            ]
+            &[Scalar::Utf8("xy".to_owned()), Scalar::Utf8("z".to_owned()),]
         );
     }
 
@@ -1975,11 +2057,7 @@ mod tests {
         );
         assert_eq!(
             out.values(),
-            &[
-                Scalar::Int64(4),
-                Scalar::Int64(2),
-                Scalar::Int64(4),
-            ]
+            &[Scalar::Int64(4), Scalar::Int64(2), Scalar::Int64(4),]
         );
     }
 
@@ -2028,11 +2106,101 @@ mod tests {
         );
         assert_eq!(
             out.values(),
-            &[
-                Scalar::Int64(4),
-                Scalar::Int64(2),
-                Scalar::Int64(4)
-            ]
+            &[Scalar::Int64(4), Scalar::Int64(2), Scalar::Int64(4)]
+        );
+    }
+
+    #[test]
+    fn dense_int64_value_path_preserves_sort_and_first_seen_order() {
+        let keys = vec![
+            Scalar::Int64(10),
+            Scalar::Int64(5),
+            Scalar::Int64(10),
+            Scalar::Int64(-2),
+        ];
+        let values = vec![
+            Scalar::Int64(1),
+            Scalar::Int64(2),
+            Scalar::Int64(3),
+            Scalar::Int64(4),
+        ];
+
+        let (sorted_index, sorted_values) =
+            try_groupby_sum_dense_int64_values(&keys, &values, true, true).expect("dense");
+        assert_eq!(
+            sorted_index,
+            vec![(-2_i64).into(), 5_i64.into(), 10_i64.into()]
+        );
+        assert_eq!(
+            sorted_values,
+            vec![Scalar::Int64(4), Scalar::Int64(2), Scalar::Int64(4)]
+        );
+
+        let (first_seen_index, first_seen_values) =
+            try_groupby_sum_dense_int64_values(&keys, &values, true, false).expect("dense");
+        assert_eq!(
+            first_seen_index,
+            vec![10_i64.into(), 5_i64.into(), (-2_i64).into()]
+        );
+        assert_eq!(
+            first_seen_values,
+            vec![Scalar::Int64(4), Scalar::Int64(2), Scalar::Int64(4)]
+        );
+    }
+
+    #[test]
+    fn groupby_sum_dense_int64_value_path_preserves_bool_and_overflow() {
+        let bool_keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .expect("keys");
+        let bool_values = Series::from_values(
+            "value",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .expect("values");
+
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_sum(
+            &bool_keys,
+            &bool_values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .expect("groupby");
+        assert_eq!(out.index().labels(), &[1_i64.into(), 2_i64.into()]);
+        assert_eq!(out.values(), &[Scalar::Int64(1), Scalar::Int64(1)]);
+
+        let overflow_keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(7), Scalar::Int64(7)],
+        )
+        .expect("keys");
+        let overflow_values = Series::from_values(
+            "value",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(i64::MAX), Scalar::Int64(1)],
+        )
+        .expect("values");
+
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_sum(
+            &overflow_keys,
+            &overflow_values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .expect("groupby");
+        assert_eq!(out.index().labels(), &[7_i64.into()]);
+        assert_eq!(
+            out.values(),
+            &[Scalar::Float64((i128::from(i64::MAX) + 1) as f64)]
         );
     }
 
@@ -2532,10 +2700,7 @@ mod tests {
             )
             .expect("arena groupby");
             assert_eq!(out.index().labels().len(), 2);
-            assert_eq!(
-                out.values(),
-                &[Scalar::Int64(10), Scalar::Int64(20)]
-            );
+            assert_eq!(out.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
         }
     }
 
@@ -3004,21 +3169,41 @@ mod tests {
         let nums = |s: &Series| -> Vec<f64> {
             s.values()
                 .iter()
-                .filter_map(|v| if let Scalar::Float64(f) = v { Some(*f) } else { None })
+                .filter_map(|v| {
+                    if let Scalar::Float64(f) = v {
+                        Some(*f)
+                    } else {
+                        None
+                    }
+                })
                 .collect()
         };
         let approx = |a: f64, b: f64, ctx: &str| {
             assert!((a - b).abs() < 1e-9, "{ctx}: got {a}, expected {b}");
         };
 
-        let var = groupby_var(&keys, &values, GroupByOptions::default(), &RuntimePolicy::strict(), &mut ledger).unwrap();
+        let var = groupby_var(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
         let vv = nums(&var);
         approx(vv[0], 9.583333333333334, "var a");
         approx(vv[1], 12.8, "var b");
 
-        let std = groupby_std(&keys, &values, GroupByOptions::default(), &RuntimePolicy::strict(), &mut ledger).unwrap();
+        let std = groupby_std(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
         let sv = nums(&std);
-        approx(sv[0], 3.0956959368821988, "std a");
+        approx(sv[0], 3.095_695_936_882_199, "std a");
         approx(sv[1], 3.5777087639996634, "std b");
     }
 

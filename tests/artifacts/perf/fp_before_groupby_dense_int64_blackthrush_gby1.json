@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.cargo-target/frankenpandas-blackthrush-groupby-pass1-before/release-perf/groupby-bench --rows 500000 --key-cardinality 512 --iters 5",
+      "mean": 0.12450606181999999,
+      "stddev": 0.008662252178845928,
+      "median": 0.12003859252,
+      "user": 0.0770856,
+      "system": 0.04696478,
+      "min": 0.11499713402,
+      "max": 0.13957115302,
+      "times": [
+        0.12875699102,
+        0.12010481802,
+        0.11791831302,
+        0.13957115302,
+        0.11968479102,
+        0.13903689002,
+        0.11997236702,
+        0.11984682802,
+        0.12517133302,
+        0.11499713402
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

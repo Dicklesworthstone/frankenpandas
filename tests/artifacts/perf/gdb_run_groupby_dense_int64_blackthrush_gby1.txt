@@ -1,0 +1,30 @@
+Breakpoint 1 at 0x325ed: file /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/sort/stable/mod.rs, line 115.
+static fn driftsort_main<fp_groupby::GroupKeyRef, alloc::slice::{impl#0}::sort_by::{closure_env#0}<fp_groupby::GroupKeyRef, fp_groupby::sort_group_ordering_by::{closure_env#0}<fp_groupby::groupby_sum_int64::{closure_env#1}>>, alloc::vec::Vec<fp_groupby::GroupKeyRef, alloc::alloc::Global>>();
+Breakpoint 2 at 0x3bdf6: file crates/fp-groupby/src/lib.rs, line 690.
+static fn groupby_sum_int64();
+Breakpoint 3 at 0x32fc4: file /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/sort/shared/smallsort.rs, line 597.
+static fn insertion_sort_shift_left<fp_groupby::GroupKeyRef, alloc::slice::{impl#0}::sort_by::{closure_env#0}<fp_groupby::GroupKeyRef, fp_groupby::sort_group_ordering_by::{closure_env#0}<fp_groupby::groupby_sum_int64::{closure_env#1}>>>();
+Breakpoint 4 at 0x32b47: file /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/sort/shared/pivot.rs, line 65.
+static fn median3_rec<fp_groupby::GroupKeyRef, alloc::slice::{impl#0}::sort_by::{closure_env#0}<fp_groupby::GroupKeyRef, fp_groupby::sort_group_ordering_by::{closure_env#0}<fp_groupby::groupby_sum_int64::{closure_env#1}>>>();
+Breakpoint 5 at 0x36397: file /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/sort/stable/quicksort.rs, line 26.
+static fn quicksort<fp_groupby::GroupKeyRef, alloc::slice::{impl#0}::sort_by::{closure_env#0}<fp_groupby::GroupKeyRef, fp_groupby::sort_group_ordering_by::{closure_env#0}<fp_groupby::groupby_sum_int64::{closure_env#1}>>>();
+Breakpoint 6 at 0x33ad0: file /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/sort/stable/drift.rs, line 27.
+static fn sort<fp_groupby::GroupKeyRef, alloc::slice::{impl#0}::sort_by::{closure_env#0}<fp_groupby::GroupKeyRef, fp_groupby::sort_group_ordering_by::{closure_env#0}<fp_groupby::groupby_sum_int64::{closure_env#1}>>>();
+Breakpoint 7 at 0x39bf3: file /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs, line 196.
+static fn {closure#0}<fp_groupby::GroupKeyRef, fp_groupby::sort_group_ordering_by::{closure_env#0}<fp_groupby::groupby_sum_int64::{closure_env#1}>>();
+Successfully created breakpoints 1-7.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+
+Breakpoint 2, groupby_sum_int64 () at crates/fp-groupby/src/lib.rs:690
+690	    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+#0  groupby_sum_int64 () at crates/fp-groupby/src/lib.rs:690
+#1  0x0000555555593928 in groupby_sum_with_arena () at crates/fp-groupby/src/lib.rs:326
+#2  groupby_sum_with_trace () at crates/fp-groupby/src/lib.rs:197
+#3  groupby_sum_with_options () at crates/fp-groupby/src/lib.rs:157
+#4  0x00005555555a6395 in groupby_sum () at crates/fp-groupby/src/lib.rs:138
+#5  main () at crates/fp-groupby/src/bin/groupby-bench.rs:53
+#6  0x00005555555a5833 in call_once<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#7  __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#8  0x00005555555a58c1 in {closure#0}<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#9  0x00005555555d70de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287

@@ -1,0 +1,3 @@
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/.cargo-target/frankenpandas-blackthrush-groupby-pass1-before/release-perf/groupby-bench.
+Use `info auto-load python-scripts [REGEXP]' to list them.
