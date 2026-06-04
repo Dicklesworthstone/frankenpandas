@@ -8202,6 +8202,26 @@ impl Series {
             Scalar::Float64(v) => v,
             _ => return Ok(Scalar::Float64(f64::NAN)),
         };
+        // Typed second pass over the contiguous all-valid buffer (count == n).
+        // mean_val is reused from the typed self.mean(); the (v-mean)^2 row-order
+        // fold matches the Scalar loop below exactly — bit-identical, no Scalar
+        // materialization.
+        if let Some(data) = self.column.as_f64_slice() {
+            let mut sum_sq_diff = 0.0_f64;
+            for &v in data {
+                let diff = v - mean_val;
+                sum_sq_diff += diff * diff;
+            }
+            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
+        }
+        if let Some(data) = self.column.as_i64_slice() {
+            let mut sum_sq_diff = 0.0_f64;
+            for &v in data {
+                let diff = v as f64 - mean_val;
+                sum_sq_diff += diff * diff;
+            }
+            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
+        }
         let mut sum_sq_diff = 0.0_f64;
         for val in self.column.values() {
             if !val.is_missing() {
@@ -8255,6 +8275,24 @@ impl Series {
             Scalar::Float64(v) => v,
             _ => return Ok(Scalar::Float64(f64::NAN)),
         };
+        // Typed second pass over the contiguous all-valid buffer (count == n);
+        // bit-identical row-order fold, no Scalar materialization (see var()).
+        if let Some(data) = self.column.as_f64_slice() {
+            let mut sum_sq_diff = 0.0_f64;
+            for &v in data {
+                let diff = v - mean_val;
+                sum_sq_diff += diff * diff;
+            }
+            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - ddof as f64)));
+        }
+        if let Some(data) = self.column.as_i64_slice() {
+            let mut sum_sq_diff = 0.0_f64;
+            for &v in data {
+                let diff = v as f64 - mean_val;
+                sum_sq_diff += diff * diff;
+            }
+            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - ddof as f64)));
+        }
         let mut sum_sq_diff = 0.0_f64;
         for val in self.column.values() {
             if !val.is_missing() {
@@ -34036,39 +34074,115 @@ impl DataFrame {
             )));
         }
 
-        // Extract self as row-major f64 matrix
-        let self_rows: Vec<Vec<f64>> = (0..m)
-            .map(|row| {
-                self.column_order
-                    .iter()
-                    .map(|name| {
-                        self.columns[name].values()[row]
-                            .to_f64()
-                            .unwrap_or(f64::NAN)
-                    })
-                    .collect()
-            })
-            .collect();
+        let n = other.num_columns();
 
-        // Build result
+        // Register-blocked GEMM. Two structural changes over the naive triple
+        // loop, both bit-identical to it:
+        //   1. Typed extraction: pull each all-valid Float64 column as a
+        //      contiguous &[f64] (as_f64_slice) instead of per-element Scalar
+        //      to_f64 dispatch; non-typed / nullable columns fall back to the
+        //      identical Scalar path, so every C[i][j] sees the same operands.
+        //   2. A 4x4 micro-kernel runs 16 INDEPENDENT accumulators over one
+        //      shared l-loop. Each accumulator C[i][j] starts at 0.0 and does
+        //      `acc += a[i][l] * b[j][l]` for l = 0..k — the exact same
+        //      left-fold (and the same f64 products) as the scalar
+        //      `row.zip(col).map(a*b).sum()`. Interleaving 16 chains hides the
+        //      FP-add latency that bottlenecks the single sequential reduction,
+        //      without reassociating any one cell's sum. Bit-identical.
+        //
+        // a: row-major (m x k), a[i*k + l] = self[i][l]
+        // b: row-major-by-other-column (n x k), b[j*k + l] = other[l][j]
+        let mut a = vec![0.0_f64; m * k];
+        for (l, name) in self.column_order.iter().enumerate() {
+            let col = &self.columns[name];
+            if let Some(s) = col.as_f64_slice() {
+                for i in 0..m {
+                    a[i * k + l] = s[i];
+                }
+            } else {
+                let vals = col.values();
+                for i in 0..m {
+                    a[i * k + l] = vals[i].to_f64().unwrap_or(f64::NAN);
+                }
+            }
+        }
+        let mut b = vec![0.0_f64; n * k];
+        for (j, name) in other.column_order.iter().enumerate() {
+            let col = &other.columns[name];
+            if let Some(s) = col.as_f64_slice() {
+                b[j * k..j * k + k].copy_from_slice(s);
+            } else {
+                let vals = col.values();
+                for l in 0..k {
+                    b[j * k + l] = vals[l].to_f64().unwrap_or(f64::NAN);
+                }
+            }
+        }
+
+        // c: row-major (m x n), c[i*n + j]
+        let mut c = vec![0.0_f64; m * n];
+        const BI: usize = 4;
+        const BJ: usize = 4;
+        // Packed B-panel: bpanel[l*BJ + dj] holds the BJ other-columns of the
+        // current jj-block interleaved by depth l, so the micro-kernel's dj
+        // loop reads BJ contiguous f64 per l (one cache line, SSE2-vectorizable)
+        // instead of striding by k. Packed once per jj-block, reused across all
+        // m/BI row-blocks. Pure data movement — accumulation order is unchanged.
+        let mut bpanel = vec![0.0_f64; k * BJ];
+        let mut jj = 0;
+        while jj < n {
+            let bj = BJ.min(n - jj);
+            for dj in 0..bj {
+                let bcol = &b[(jj + dj) * k..(jj + dj) * k + k];
+                for l in 0..k {
+                    bpanel[l * BJ + dj] = bcol[l];
+                }
+            }
+            let mut ii = 0;
+            while ii < m {
+                let bi = BI.min(m - ii);
+                let mut acc = [[0.0_f64; BJ]; BI];
+                if bi == BI && bj == BJ {
+                    // Hot path: fixed 4x4 tile, contiguous packed b — the dj
+                    // FMAs vectorize, the 16 accumulators hide add latency.
+                    for l in 0..k {
+                        let bp = &bpanel[l * BJ..l * BJ + BJ];
+                        for (di, acc_row) in acc.iter_mut().enumerate() {
+                            let av = a[(ii + di) * k + l];
+                            for dj in 0..BJ {
+                                acc_row[dj] += av * bp[dj];
+                            }
+                        }
+                    }
+                } else {
+                    for l in 0..k {
+                        for (di, acc_row) in acc.iter_mut().enumerate().take(bi) {
+                            let av = a[(ii + di) * k + l];
+                            for (dj, slot) in acc_row.iter_mut().enumerate().take(bj) {
+                                *slot += av * bpanel[l * BJ + dj];
+                            }
+                        }
+                    }
+                }
+                for (di, acc_row) in acc.iter().enumerate().take(bi) {
+                    for (dj, slot) in acc_row.iter().enumerate().take(bj) {
+                        c[(ii + di) * n + (jj + dj)] = *slot;
+                    }
+                }
+                ii += BI;
+            }
+            jj += BJ;
+        }
+
+        // Assemble result columns (per other column j, length m).
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
-
-        for other_col_name in &other.column_order {
-            let other_col = &other.columns[other_col_name];
-            let other_vec: Vec<f64> = other_col
-                .values()
-                .iter()
-                .map(|v| v.to_f64().unwrap_or(f64::NAN))
-                .collect();
-
+        for (j, other_col_name) in other.column_order.iter().enumerate() {
             let mut vals = Vec::with_capacity(m);
-            for row in &self_rows {
-                let dot_val: f64 = row.iter().zip(&other_vec).map(|(a, b)| a * b).sum();
-                vals.push(Scalar::Float64(dot_val));
+            for i in 0..m {
+                vals.push(c[i * n + j]);
             }
-
-            result_cols.insert(other_col_name.clone(), Column::from_values(vals)?);
+            result_cols.insert(other_col_name.clone(), Column::from_f64_values(vals));
             col_order.push(other_col_name.clone());
         }
 
