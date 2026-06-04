@@ -589,3 +589,47 @@ fn series_rank_all_methods_na_options_pct_match_pandas() {
         );
     }
 }
+
+#[test]
+fn series_quantile_all_interpolations_with_nan_match_pandas() {
+    // Differential guard vs pandas 2.2.3 for Series.quantile across all five
+    // interpolation modes with a trailing NaN (which must be dropped before
+    // interpolating). s = [1, 2, 3, 4, NaN]; q in {0.1,0.25,0.5,0.75,0.9}.
+    use fp_columnar::Column;
+    use fp_frame::Series;
+    use fp_index::{Index, IndexLabel};
+    use fp_types::{NullKind, Scalar};
+
+    let labels: Vec<IndexLabel> = (0..5).map(IndexLabel::Int64).collect();
+    let vals = vec![
+        Scalar::Float64(1.0),
+        Scalar::Float64(2.0),
+        Scalar::Float64(3.0),
+        Scalar::Float64(4.0),
+        Scalar::Null(NullKind::NaN),
+    ];
+    let s = Series::new("s", Index::new(labels), Column::from_values(vals).unwrap())
+        .expect("series");
+
+    let qs = [0.1, 0.25, 0.5, 0.75, 0.9];
+    let expect: &[(&str, [f64; 5])] = &[
+        ("linear", [1.3, 1.75, 2.5, 3.25, 3.7]),
+        ("lower", [1.0, 1.0, 2.0, 3.0, 3.0]),
+        ("higher", [2.0, 2.0, 3.0, 4.0, 4.0]),
+        ("nearest", [1.0, 2.0, 3.0, 3.0, 4.0]),
+        ("midpoint", [1.5, 1.5, 2.5, 3.5, 3.5]),
+    ];
+    for (interp, want) in expect {
+        for (q, w) in qs.iter().zip(want) {
+            let got = s
+                .quantile_with_interpolation(*q, interp)
+                .expect("quantile")
+                .to_f64()
+                .unwrap();
+            assert!(
+                (got - w).abs() < 1e-9,
+                "quantile(q={q}, interp={interp}) => {got}, want {w}"
+            );
+        }
+    }
+}
