@@ -11,37 +11,81 @@
   "left": {
     "name": "a",
     "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 20 }
+      {
+        "kind": "int64",
+        "value": 10
+      },
+      {
+        "kind": "int64",
+        "value": 20
+      }
     ]
   },
   "right": {
     "name": "b",
     "index": [
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 30 },
-      { "kind": "int64", "value": 40 }
+      {
+        "kind": "int64",
+        "value": 30
+      },
+      {
+        "kind": "int64",
+        "value": 40
+      }
     ]
   },
-  "column_order": ["b"],
+  "column_order": [
+    "b"
+  ],
   "expected_frame": {
     "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "columns": {
       "b": [
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 30 },
-        { "kind": "int64", "value": 40 }
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "float64",
+          "value": 30.0
+        },
+        {
+          "kind": "float64",
+          "value": 40.0
+        }
       ]
     }
   }

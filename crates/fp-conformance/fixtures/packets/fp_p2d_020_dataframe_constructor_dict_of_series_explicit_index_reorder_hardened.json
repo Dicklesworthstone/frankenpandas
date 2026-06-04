@@ -11,42 +11,90 @@
   "left": {
     "name": "a",
     "index": [
-      { "kind": "utf8", "value": "k1" },
-      { "kind": "utf8", "value": "k2" }
+      {
+        "kind": "utf8",
+        "value": "k1"
+      },
+      {
+        "kind": "utf8",
+        "value": "k2"
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 5 },
-      { "kind": "int64", "value": 6 }
+      {
+        "kind": "int64",
+        "value": 5
+      },
+      {
+        "kind": "int64",
+        "value": 6
+      }
     ]
   },
   "right": {
     "name": "b",
     "index": [
-      { "kind": "utf8", "value": "k2" },
-      { "kind": "utf8", "value": "k3" }
+      {
+        "kind": "utf8",
+        "value": "k2"
+      },
+      {
+        "kind": "utf8",
+        "value": "k3"
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 7 },
-      { "kind": "int64", "value": 8 }
+      {
+        "kind": "int64",
+        "value": 7
+      },
+      {
+        "kind": "int64",
+        "value": 8
+      }
     ]
   },
   "index": [
-    { "kind": "utf8", "value": "k3" },
-    { "kind": "utf8", "value": "k1" }
+    {
+      "kind": "utf8",
+      "value": "k3"
+    },
+    {
+      "kind": "utf8",
+      "value": "k1"
+    }
   ],
   "expected_frame": {
     "index": [
-      { "kind": "utf8", "value": "k3" },
-      { "kind": "utf8", "value": "k1" }
+      {
+        "kind": "utf8",
+        "value": "k3"
+      },
+      {
+        "kind": "utf8",
+        "value": "k1"
+      }
     ],
     "columns": {
       "a": [
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 5 }
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "float64",
+          "value": 5.0
+        }
       ],
       "b": [
-        { "kind": "int64", "value": 8 },
-        { "kind": "null", "value": "null" }
+        {
+          "kind": "float64",
+          "value": 8.0
+        },
+        {
+          "kind": "null",
+          "value": "null"
+        }
       ]
     }
   }
