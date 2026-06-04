@@ -27558,6 +27558,26 @@ impl DataFrame {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        // pandas DataFrame(dict-of-series) keeps the LAST series for a repeated
+        // name and does NOT union the dropped series' index — so a duplicate
+        // column name collapses to a single column with only the surviving
+        // series' index. Dedup by name (keep last value, first-appearance
+        // column order) BEFORE computing the union. (br-frankenpandas-vsnuu)
+        let materialized_series = {
+            let mut name_order: Vec<String> = Vec::new();
+            let mut by_name: BTreeMap<String, Series> = BTreeMap::new();
+            for series in materialized_series {
+                if !by_name.contains_key(&series.name) {
+                    name_order.push(series.name.clone());
+                }
+                by_name.insert(series.name.clone(), series);
+            }
+            name_order
+                .into_iter()
+                .map(|name| by_name.remove(&name).expect("name present"))
+                .collect::<Vec<_>>()
+        };
+
         // Phase 1: Compute global union index across all series.
         let has_duplicates = materialized_series.iter().any(|s| s.index.has_duplicates());
         let first_index = &materialized_series[0].index;
@@ -46480,12 +46500,14 @@ mod tests {
             df.index().labels(),
             &[1_i64.into(), 2_i64.into(), 3_i64.into()]
         );
+        // pandas promotes the int column to Float64 because alignment introduces
+        // a missing value at label 3. (br-frankenpandas-vsnuu)
         assert_eq!(
             df.column("a").expect("a").values(),
             &[
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Null(NullKind::Null)
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN)
             ]
         );
     }
@@ -46554,9 +46576,11 @@ mod tests {
             df.column("x").unwrap().values(),
             &[Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)]
         );
-        assert_eq!(df.column("y").unwrap().values()[0], Scalar::Int64(5));
+        // y has no value at label "b", so alignment promotes it to Float64.
+        // (br-frankenpandas-vsnuu)
+        assert_eq!(df.column("y").unwrap().values()[0], Scalar::Float64(5.0));
         assert!(df.column("y").unwrap().values()[1].is_missing());
-        assert_eq!(df.column("y").unwrap().values()[2], Scalar::Int64(4));
+        assert_eq!(df.column("y").unwrap().values()[2], Scalar::Float64(4.0));
 
         // Identical (unsorted) indexes -> keep the shared order [b, a, c].
         let z = Series::from_values(
@@ -46574,6 +46598,25 @@ mod tests {
                 IndexLabel::Utf8("c".into()),
             ]
         );
+    }
+
+    #[test]
+    fn dataframe_from_series_duplicate_name_keeps_last() {
+        let first =
+            Series::from_values("dup", vec![1_i64.into()], vec![Scalar::Int64(1)]).expect("first");
+        let second =
+            Series::from_values("dup", vec![2_i64.into()], vec![Scalar::Int64(2)]).expect("second");
+
+        let df = DataFrame::from_series(vec![first, second]).expect("frame");
+        assert_eq!(df.index().labels(), &[2_i64.into()]);
+        assert_eq!(
+            df.column_names()
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dup"]
+        );
+        assert_eq!(df.column("dup").expect("dup").values(), &[Scalar::Int64(2)]);
     }
 
     // ---- Series sub/mul/div tests ----
