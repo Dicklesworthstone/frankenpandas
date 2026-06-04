@@ -12328,7 +12328,7 @@ impl Series {
     fn average_ranks(values: &[f64]) -> Vec<f64> {
         let n = values.len();
         let mut indexed: Vec<(usize, f64)> = values.iter().copied().enumerate().collect();
-        indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut ranks = vec![0.0; n];
         let mut i = 0;
