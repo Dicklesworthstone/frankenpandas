@@ -12776,6 +12776,7 @@ impl Series {
         Some(order)
     }
 
+    #[cfg(test)]
     fn kendall_no_tie_fast_with_order(x_order: &[usize], y: &[f64]) -> Option<f64> {
         if x_order.len() != y.len() {
             return None;
@@ -12784,6 +12785,36 @@ impl Series {
         let mut y_order: Vec<f64> = x_order.iter().map(|idx| y[*idx]).collect();
         let discordant = Self::count_f64_inversions(&mut y_order) as f64;
         let n = y.len() as f64;
+        let n_pairs = n * (n - 1.0) / 2.0;
+        if n_pairs < f64::EPSILON {
+            Some(f64::NAN)
+        } else {
+            Some((n_pairs - 2.0 * discordant) / n_pairs)
+        }
+    }
+
+    fn kendall_rank_by_row_from_order(order: &[usize]) -> Vec<usize> {
+        let mut rank_by_row = vec![0_usize; order.len()];
+        for (rank, &row) in order.iter().enumerate() {
+            rank_by_row[row] = rank;
+        }
+        rank_by_row
+    }
+
+    fn kendall_no_tie_fast_with_ordered_ranks(
+        x_order: &[usize],
+        y_rank_by_row: &[usize],
+    ) -> Option<f64> {
+        if x_order.len() != y_rank_by_row.len() {
+            return None;
+        }
+
+        let mut y_order = Vec::with_capacity(x_order.len());
+        for &idx in x_order {
+            y_order.push(*y_rank_by_row.get(idx)?);
+        }
+        let discordant = Self::count_usize_inversions(&mut y_order) as f64;
+        let n = y_rank_by_row.len() as f64;
         let n_pairs = n * (n - 1.0) / 2.0;
         if n_pairs < f64::EPSILON {
             Some(f64::NAN)
@@ -12809,6 +12840,53 @@ impl Series {
             let (scratch_left, scratch_right) = scratch.split_at_mut(mid);
             Self::count_f64_inversions_recursive(left, scratch_left)
                 + Self::count_f64_inversions_recursive(right, scratch_right)
+        };
+
+        let mut left = 0;
+        let mut right = mid;
+        let mut out = 0;
+
+        while left < mid && right < len {
+            if values[left] <= values[right] {
+                scratch[out] = values[left];
+                left += 1;
+            } else {
+                scratch[out] = values[right];
+                inversions += (mid - left) as u64;
+                right += 1;
+            }
+            out += 1;
+        }
+
+        if left < mid {
+            scratch[out..out + (mid - left)].copy_from_slice(&values[left..mid]);
+            out += mid - left;
+        }
+        if right < len {
+            scratch[out..out + (len - right)].copy_from_slice(&values[right..len]);
+        }
+
+        values.copy_from_slice(&scratch[..len]);
+        inversions
+    }
+
+    fn count_usize_inversions(values: &mut [usize]) -> u64 {
+        let mut scratch = values.to_vec();
+        Self::count_usize_inversions_recursive(values, &mut scratch)
+    }
+
+    fn count_usize_inversions_recursive(values: &mut [usize], scratch: &mut [usize]) -> u64 {
+        let len = values.len();
+        if len < 2 {
+            return 0;
+        }
+
+        let mid = len / 2;
+        let mut inversions = {
+            let (left, right) = values.split_at_mut(mid);
+            let (scratch_left, scratch_right) = scratch.split_at_mut(mid);
+            Self::count_usize_inversions_recursive(left, scratch_left)
+                + Self::count_usize_inversions_recursive(right, scratch_right)
         };
 
         let mut left = 0;
@@ -33697,6 +33775,14 @@ impl DataFrame {
         } else {
             Vec::new()
         };
+        let kendall_rank_by_row: Vec<Option<Vec<usize>>> = if method == "kendall" {
+            kendall_orders
+                .iter()
+                .map(|order| order.as_deref().map(Series::kendall_rank_by_row_from_order))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Spearman and Kendall correlation matrices are exactly symmetric to the
         // last bit: spearman routes through `pearson_on_slices`, whose covariance
@@ -33736,15 +33822,18 @@ impl DataFrame {
                         kendall_values.get(i).and_then(Option::as_ref),
                         kendall_values.get(j).and_then(Option::as_ref),
                         kendall_orders.get(i).and_then(Option::as_ref),
-                        kendall_orders.get(j).and_then(Option::as_ref),
+                        kendall_rank_by_row.get(j).and_then(Option::as_ref),
                     ) {
-                        (Some(_left), Some(right), Some(left_order), Some(_right_order)) => {
-                            Series::kendall_no_tie_fast_with_order(left_order, right)
-                                .unwrap_or_else(|| {
-                                    series_list[i]
-                                        .corr_kendall(&series_list[j])
-                                        .unwrap_or(f64::NAN)
-                                })
+                        (Some(_left), Some(_right), Some(left_order), Some(right_rank_by_row)) => {
+                            Series::kendall_no_tie_fast_with_ordered_ranks(
+                                left_order,
+                                right_rank_by_row,
+                            )
+                            .unwrap_or_else(|| {
+                                series_list[i]
+                                    .corr_kendall(&series_list[j])
+                                    .unwrap_or(f64::NAN)
+                            })
                         }
                         (Some(left), Some(right), _, _) => {
                             Series::kendall_no_tie_fast_slices(left, right).unwrap_or_else(|| {
@@ -62122,6 +62211,10 @@ mod tests {
         let slice_fast = Series::kendall_no_tie_fast_slices(&x, &y).unwrap();
         let x_order = Series::kendall_no_tie_order(&x).unwrap();
         let ordered_fast = Series::kendall_no_tie_fast_with_order(&x_order, &y).unwrap();
+        let y_order = Series::kendall_no_tie_order(&y).unwrap();
+        let y_rank_by_row = Series::kendall_rank_by_row_from_order(&y_order);
+        let rank_fast =
+            Series::kendall_no_tie_fast_with_ordered_ranks(&x_order, &y_rank_by_row).unwrap();
 
         let mut concordant = 0_i64;
         let mut discordant = 0_i64;
@@ -62142,6 +62235,7 @@ mod tests {
         assert!((fast - expected).abs() < 1e-12);
         assert_eq!(slice_fast.to_bits(), fast.to_bits());
         assert_eq!(ordered_fast.to_bits(), fast.to_bits());
+        assert_eq!(rank_fast.to_bits(), fast.to_bits());
     }
 
     #[test]

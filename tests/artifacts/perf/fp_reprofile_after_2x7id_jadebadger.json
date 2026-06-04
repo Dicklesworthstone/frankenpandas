@@ -1,0 +1,148 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-2x7id-before/release-perf/examples/perf_profile series_add_align 100000 50",
+      "mean": 0.2582929848,
+      "stddev": 0.009445637943197836,
+      "median": 0.261442098,
+      "user": 0.13265977999999998,
+      "system": 0.1246417,
+      "min": 0.24429647100000002,
+      "max": 0.26702345,
+      "times": [
+        0.261442098,
+        0.26702345,
+        0.24429647100000002,
+        0.26537637000000003,
+        0.253326535
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-2x7id-before/release-perf/examples/perf_profile df_corr 5000 5",
+      "mean": 0.0690468384,
+      "stddev": 0.00482773830651262,
+      "median": 0.06812283400000001,
+      "user": 0.05718217999999999,
+      "system": 0.0111221,
+      "min": 0.063399707,
+      "max": 0.07597977700000001,
+      "times": [
+        0.07135122,
+        0.06812283400000001,
+        0.06638065400000001,
+        0.063399707,
+        0.07597977700000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-2x7id-before/release-perf/examples/perf_profile df_cov 5000 5",
+      "mean": 0.0625322766,
+      "stddev": 0.005912892166545304,
+      "median": 0.059800360000000004,
+      "user": 0.05301718,
+      "system": 0.009381500000000001,
+      "min": 0.057663322,
+      "max": 0.07160720400000001,
+      "times": [
+        0.07160720400000001,
+        0.06534759700000001,
+        0.059800360000000004,
+        0.057663322,
+        0.05824290000000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-2x7id-before/release-perf/examples/perf_profile df_spearman 2000 5",
+      "mean": 0.053468581800000005,
+      "stddev": 0.006104495328789902,
+      "median": 0.052155669,
+      "user": 0.04221598,
+      "system": 0.0110213,
+      "min": 0.046613100000000005,
+      "max": 0.06337276600000001,
+      "times": [
+        0.052155669,
+        0.046613100000000005,
+        0.06337276600000001,
+        0.05320844300000001,
+        0.051992931000000006
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-2x7id-before/release-perf/examples/perf_profile df_kendall 512 5",
+      "mean": 0.07252335160000001,
+      "stddev": 0.0008627352855515984,
+      "median": 0.072802769,
+      "user": 0.06863178,
+      "system": 0.0034861,
+      "min": 0.071464914,
+      "max": 0.073623463,
+      "times": [
+        0.072802769,
+        0.071854333,
+        0.07287127900000001,
+        0.073623463,
+        0.071464914
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-2x7id-before/release-perf/examples/perf_profile csv_read 100000 20",
+      "mean": 0.5124743281999999,
+      "stddev": 0.010220303731304782,
+      "median": 0.515700821,
+      "user": 0.6721319799999999,
+      "system": 0.22231209999999998,
+      "min": 0.49678673500000003,
+      "max": 0.523702809,
+      "times": [
+        0.49678673500000003,
+        0.517242092,
+        0.508939184,
+        0.515700821,
+        0.523702809
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
