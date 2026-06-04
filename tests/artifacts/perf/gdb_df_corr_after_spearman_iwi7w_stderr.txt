@@ -1,0 +1,22 @@
+perf_profile: scenario=df_corr n=5000 iters=1000
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+ptrace: Inappropriate ioctl for device.
+perf_profile: done 1000 iters in 9.569s (9.569 ms/iter), sink=64000
