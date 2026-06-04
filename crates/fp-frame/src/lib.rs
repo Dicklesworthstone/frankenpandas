@@ -13350,6 +13350,74 @@ impl Series {
     }
 }
 
+/// Minimum trailing-window width at which the order-statistics Fenwick path
+/// (O(n·log U)) beats the per-window sort for rolling median/quantile. Below
+/// this, the constant overhead of coordinate compression + Fenwick walks loses
+/// to a tiny `sort_by`, so the original path is kept.
+const ROLLING_ORDER_STAT_MIN_WINDOW: usize = 32;
+
+/// Selector for the rolling order-statistic kernel (median or a quantile).
+#[derive(Clone, Copy)]
+enum RollingOrderStat {
+    Median,
+    Quantile(f64),
+}
+
+impl RollingOrderStat {
+    /// Evaluate from a fully sorted ascending window (fallback path) —
+    /// byte-for-byte the original `apply_rolling` aggregation.
+    fn eval_sorted(self, sorted: &[f64]) -> f64 {
+        match self {
+            RollingOrderStat::Median => {
+                let mid = sorted.len() / 2;
+                if sorted.len().is_multiple_of(2) {
+                    (sorted[mid - 1] + sorted[mid]) / 2.0
+                } else {
+                    sorted[mid]
+                }
+            }
+            RollingOrderStat::Quantile(q) => {
+                let pos = q * (sorted.len() - 1) as f64;
+                let lo = pos.floor() as usize;
+                let hi = pos.ceil() as usize;
+                if lo == hi || hi >= sorted.len() {
+                    sorted[lo]
+                } else {
+                    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
+                }
+            }
+        }
+    }
+
+    /// Evaluate from a 0-indexed k-th order-statistic accessor over `count`
+    /// non-null values. Identical arithmetic to `eval_sorted`, with
+    /// `kth(k) == sorted[k]`.
+    fn eval_kth<F: Fn(usize) -> f64>(self, count: usize, kth: &F) -> f64 {
+        match self {
+            RollingOrderStat::Median => {
+                let mid = count / 2;
+                if count.is_multiple_of(2) {
+                    (kth(mid - 1) + kth(mid)) / 2.0
+                } else {
+                    kth(mid)
+                }
+            }
+            RollingOrderStat::Quantile(q) => {
+                let pos = q * (count - 1) as f64;
+                let lo = pos.floor() as usize;
+                let hi = pos.ceil() as usize;
+                if lo == hi || hi >= count {
+                    kth(lo)
+                } else {
+                    let l = kth(lo);
+                    let h = kth(hi);
+                    l + (h - l) * (pos - lo as f64)
+                }
+            }
+        }
+    }
+}
+
 /// Rolling window aggregation over a Series.
 ///
 /// Created by `Series::rolling()`. Provides methods for computing
@@ -13734,6 +13802,13 @@ impl Rolling<'_> {
 
     /// Rolling median.
     pub fn median(&self) -> Result<Series, FrameError> {
+        self.validate()?;
+        // For wide trailing windows, an order-statistics Fenwick tree replaces
+        // the O(n·window·log window) per-window sort with O(n·log U) sliding
+        // selection, bit-identically (see `rolling_order_stat_noncenter`).
+        if !self.center && self.window >= ROLLING_ORDER_STAT_MIN_WINDOW {
+            return self.rolling_order_stat_noncenter(RollingOrderStat::Median);
+        }
         self.apply_rolling(
             |nums| {
                 if nums.is_empty() {
@@ -13873,6 +13948,10 @@ impl Rolling<'_> {
     ///
     /// Matches `series.rolling(window).quantile(q)`.
     pub fn quantile(&self, q: f64) -> Result<Series, FrameError> {
+        self.validate()?;
+        if !self.center && self.window >= ROLLING_ORDER_STAT_MIN_WINDOW {
+            return self.rolling_order_stat_noncenter(RollingOrderStat::Quantile(q));
+        }
         self.apply_rolling(
             |nums| {
                 if nums.is_empty() {
@@ -13891,6 +13970,133 @@ impl Rolling<'_> {
             },
             self.series.name(),
         )
+    }
+
+    /// O(n·log U) trailing-window rolling median/quantile via an
+    /// order-statistics Fenwick tree over coordinate-compressed values.
+    ///
+    /// Bit-identical to the per-window sort: the k-th order statistic returned
+    /// by the Fenwick walk is exactly `sorted[k]`, and the median/quantile
+    /// arithmetic ((a+b)/2.0, linear interpolation) is unchanged. NaN/missing
+    /// cells are excluded exactly as `window_values` (is_missing then to_f64),
+    /// and emission matches the historical `apply_rolling` surface
+    /// (Null(NaN) below min_periods, Float64(NaN) for an empty-but-allowed
+    /// window). Coordinate compression collapses values that compare equal,
+    /// which would lose the sign bit of a -0.0 tied with +0.0; since the
+    /// per-window sort is stable and could surface either, the function falls
+    /// back to the exact per-window sort whenever any -0.0 is present (absent
+    /// from real columns). Only invoked for non-center windows at least
+    /// ROLLING_ORDER_STAT_MIN_WINDOW wide, where the log-time selection beats
+    /// the small-window sort.
+    fn rolling_order_stat_noncenter(
+        &self,
+        stat: RollingOrderStat,
+    ) -> Result<Series, FrameError> {
+        let vals = self.series.column().values();
+        let len = vals.len();
+        let window = self.window;
+        let min_periods = self.min_periods;
+
+        let value_at = |idx: usize| -> Option<f64> {
+            let v = &vals[idx];
+            if v.is_missing() {
+                None
+            } else {
+                v.to_f64().ok()
+            }
+        };
+
+        let has_neg_zero = vals
+            .iter()
+            .any(|v| matches!(v, Scalar::Float64(f) if *f == 0.0 && f.is_sign_negative()));
+
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+
+        if has_neg_zero {
+            // Exact per-window sort fallback (mirrors the apply_rolling agg).
+            let mut out = Vec::with_capacity(len);
+            for i in 0..len {
+                let start = (i + 1).saturating_sub(window);
+                let nums = Self::window_values(&vals[start..=i]);
+                if nums.len() < min_periods {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else if nums.is_empty() {
+                    out.push(Scalar::Float64(f64::NAN));
+                } else {
+                    let mut sorted = nums;
+                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    out.push(Scalar::Float64(stat.eval_sorted(&sorted)));
+                }
+            }
+            let column = Column::from_values(out)?;
+            return Series::new(self.series.name(), index, column);
+        }
+
+        // Coordinate-compress all non-null values to dense ranks 0..u.
+        let mut uniq: Vec<f64> = (0..len).filter_map(&value_at).collect();
+        uniq.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        uniq.dedup();
+        let u = uniq.len();
+        let rank_of = |x: f64| -> usize { uniq.partition_point(|&v| v < x) };
+
+        // Fenwick tree of counts over [0, u), 1-based internally.
+        let mut tree = vec![0_i64; u + 1];
+        let fen_add = |tree: &mut [i64], mut i: usize, delta: i64| {
+            i += 1;
+            while i <= u {
+                tree[i] += delta;
+                i += i & i.wrapping_neg();
+            }
+        };
+        // 0-indexed k-th order statistic -> compressed index.
+        let mut top_bit = 0_usize;
+        if u > 0 {
+            top_bit = 1;
+            while top_bit << 1 <= u {
+                top_bit <<= 1;
+            }
+        }
+        let fen_kth = |tree: &[i64], k: usize| -> usize {
+            let mut idx = 0_usize;
+            let mut rem = k as i64 + 1;
+            let mut pw = top_bit;
+            while pw > 0 {
+                if idx + pw <= u && tree[idx + pw] < rem {
+                    idx += pw;
+                    rem -= tree[idx];
+                }
+                pw >>= 1;
+            }
+            idx
+        };
+
+        let mut out = Vec::with_capacity(len);
+        let mut count = 0_usize;
+        for i in 0..len {
+            if i >= window
+                && let Some(x) = value_at(i - window)
+            {
+                fen_add(&mut tree, rank_of(x), -1);
+                count -= 1;
+            }
+            if let Some(x) = value_at(i) {
+                fen_add(&mut tree, rank_of(x), 1);
+                count += 1;
+            }
+
+            if count < min_periods {
+                out.push(Scalar::Null(NullKind::NaN));
+            } else if count == 0 {
+                out.push(Scalar::Float64(f64::NAN));
+            } else {
+                let kth = |k: usize| uniq[fen_kth(&tree, k)];
+                out.push(Scalar::Float64(stat.eval_kth(count, &kth)));
+            }
+        }
+
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Apply a custom function over the rolling window.
