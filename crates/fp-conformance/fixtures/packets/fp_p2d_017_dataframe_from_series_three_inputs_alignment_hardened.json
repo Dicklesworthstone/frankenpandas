@@ -101,16 +101,16 @@
     "columns": {
       "a": [
         {
-          "kind": "int64",
-          "value": 1
+          "kind": "float64",
+          "value": 1.0
         },
         {
           "kind": "null",
           "value": "null"
         },
         {
-          "kind": "int64",
-          "value": 3
+          "kind": "float64",
+          "value": 3.0
         },
         {
           "kind": "null",
@@ -123,12 +123,12 @@
           "value": "null"
         },
         {
-          "kind": "int64",
-          "value": 10
+          "kind": "float64",
+          "value": 10.0
         },
         {
-          "kind": "int64",
-          "value": 30
+          "kind": "float64",
+          "value": 30.0
         },
         {
           "kind": "null",
@@ -145,12 +145,12 @@
           "value": "null"
         },
         {
-          "kind": "int64",
-          "value": 100
+          "kind": "float64",
+          "value": 100.0
         },
         {
-          "kind": "int64",
-          "value": 400
+          "kind": "float64",
+          "value": 400.0
         }
       ]
     }
