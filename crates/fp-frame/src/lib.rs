@@ -5928,6 +5928,27 @@ impl Series {
         // The previous single missing_seen flag collapsed ALL kinds, diverging
         // from drop_duplicates' NullKind-aware keying. Verified vs live pandas
         // 2.2.3.
+        // Hash-free direct-address fast path: a bounded-range all-valid Int64
+        // column dedups via a dense seen-bit table indexed by (v-min), pushing
+        // each value on first sight — O(n), no hashing, first-seen order
+        // preserved (bit-identical to the HashMap-insertion-order path; all
+        // valid ⇒ no NullKind keying needed).
+        if self.categorical.is_none()
+            && let Some(data) = self.column.as_i64_slice()
+            && let Some((min, range)) = i64_dense_histogram_range(data)
+        {
+            let mut seen_slot = vec![false; range];
+            let mut out: Vec<Scalar> = Vec::new();
+            for &v in data {
+                let slot = (v as i128 - min as i128) as usize;
+                if !seen_slot[slot] {
+                    seen_slot[slot] = true;
+                    out.push(Scalar::Int64(v));
+                }
+            }
+            return out;
+        }
+
         let mut seen: Vec<Scalar> = Vec::new();
         let mut seen_keys: HashMap<ScalarKey<'_>, ()> = HashMap::new();
         for value in self.column.values() {
@@ -5963,6 +5984,25 @@ impl Series {
         // unique()/drop_duplicates), so e.g. an object column holding both None
         // and NaN reports nunique(dropna=False)=2, matching pandas. float/Int64
         // columns hold a single NullKind so all missing still collapse to one.
+        // Hash-free direct-address fast path: all-valid bounded-range Int64
+        // counts distinct via a dense seen-bit table (dropna is moot — no
+        // missing). Bit-identical to the HashMap distinct count.
+        if self.categorical.is_none()
+            && let Some(data) = self.column.as_i64_slice()
+            && let Some((min, range)) = i64_dense_histogram_range(data)
+        {
+            let mut seen_slot = vec![false; range];
+            let mut distinct = 0usize;
+            for &v in data {
+                let slot = (v as i128 - min as i128) as usize;
+                if !seen_slot[slot] {
+                    seen_slot[slot] = true;
+                    distinct += 1;
+                }
+            }
+            return distinct;
+        }
+
         let mut seen_keys: HashMap<ScalarKey<'_>, ()> = HashMap::new();
         for value in self.column.values() {
             if value.is_missing() && dropna {
@@ -115160,6 +115200,108 @@ mod test_select_columns_perf_76e1fd {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn unique_nunique_dense_matches_reference() {
+        // Independent linear-scan reference: first-seen distinct values and
+        // count. The dense seen-bit fast path must be bit-identical for
+        // bounded-range all-valid Int64 (unique preserves first-seen order;
+        // nunique is the distinct count, dropna moot when all valid).
+        let mut state: u64 = 0x6A09_E667_F3BC_C909;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..150 {
+            let n = (next() % 280) as usize + 1;
+            let data: Vec<i64> = (0..n).map(|_| (next() % 12) as i64 - 5).collect();
+            let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let series = Series::new(
+                "s".to_owned(),
+                Index::new(labels),
+                Column::from_i64_values(data.clone()),
+            )
+            .unwrap();
+
+            let mut want_unique: Vec<i64> = Vec::new();
+            for &v in &data {
+                if !want_unique.contains(&v) {
+                    want_unique.push(v);
+                }
+            }
+            let got_unique: Vec<i64> = series
+                .unique()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Int64(c) => *c,
+                    other => panic!("unexpected {other:?}"),
+                })
+                .collect();
+            assert_eq!(got_unique, want_unique, "trial {trial} unique");
+            assert_eq!(series.nunique(), want_unique.len(), "trial {trial} nunique");
+            assert_eq!(
+                series.nunique_with_dropna(false),
+                want_unique.len(),
+                "trial {trial} nunique dropna=false"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn unique_dense_timing_vs_hashmap() {
+        use std::{collections::HashSet, time::Instant};
+        let n = 5_000_000usize;
+        let iters = 10;
+        for cardinality in [1_000u64, 2_000_000u64] {
+            let mut state: u64 = 0x3C6E_F372_FE94_F82B ^ cardinality;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let data: Vec<i64> = (0..n).map(|_| (next() % cardinality) as i64).collect();
+            let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let series = Series::new(
+                "s".to_owned(),
+                Index::new(labels),
+                Column::from_i64_values(data.clone()),
+            )
+            .unwrap();
+
+            let t0 = Instant::now();
+            let mut chk = 0usize;
+            for _ in 0..iters {
+                chk ^= series.unique().len();
+            }
+            let dense = t0.elapsed();
+
+            // OLD: HashSet<i64> first-seen dedup over the values.
+            let vals = series.values().to_vec();
+            let t1 = Instant::now();
+            let mut chk2 = 0usize;
+            for _ in 0..iters {
+                let mut seen: HashSet<i64> = HashSet::new();
+                let mut out = 0usize;
+                for v in &vals {
+                    if let Scalar::Int64(i) = v {
+                        if seen.insert(*i) {
+                            out += 1;
+                        }
+                    }
+                }
+                chk2 ^= out;
+            }
+            let scalar = t1.elapsed();
+            eprintln!(
+                "unique 5M i64 card={cardinality} x{iters}: dense={dense:?} hashset={scalar:?} ratio={:.2}x (chk {chk}/{chk2})",
+                scalar.as_secs_f64() / dense.as_secs_f64()
+            );
         }
     }
 
