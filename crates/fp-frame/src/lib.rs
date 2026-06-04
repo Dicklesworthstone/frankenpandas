@@ -8815,6 +8815,47 @@ impl Series {
     ///
     /// Matches `pd.Series.cumsum(skipna=True)`.
     pub fn cumsum(&self) -> Result<Self, FrameError> {
+        // Typed fast path: an all-valid Int64/Float64 column runs the prefix
+        // sum over its contiguous buffer and re-ingests typed — no lazy Scalar
+        // materialization, no 32B-per-cell Vec<Scalar>. Bit-identical: the
+        // Int64 branch below is the same wrapping_add prefix; the Float64
+        // general path is the same `acc += v` running sum (no missing rows
+        // since the buffer is all-valid). Empty falls through (dtype rules).
+        if let Some(data) = self.column.as_i64_slice()
+            && !data.is_empty()
+        {
+            let mut acc = 0_i64;
+            let out: Vec<i64> = data
+                .iter()
+                .map(|&v| {
+                    acc = acc.wrapping_add(v);
+                    acc
+                })
+                .collect();
+            return Series::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_i64_values(out),
+            );
+        }
+        if let Some(data) = self.column.as_f64_slice()
+            && !data.is_empty()
+        {
+            let mut acc = 0.0_f64;
+            let out: Vec<f64> = data
+                .iter()
+                .map(|&v| {
+                    acc += v;
+                    acc
+                })
+                .collect();
+            return Series::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_f64_values(out),
+            );
+        }
+
         let values = self.column.values();
         if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Int64(_))) {
             let mut acc = 0_i64;
@@ -115736,6 +115777,141 @@ mod test_select_columns_perf_76e1fd {
         assert_eq!(xa.data.len(), 2);
         assert_eq!(xa.name, Some("vals".to_owned()));
         assert!(xa.coord("idx").is_some());
+    }
+
+    #[test]
+    fn cumsum_typed_matches_reference() {
+        // The typed cumsum fast path must be bit-identical to the prefix-sum
+        // reference for all-valid Int64 (wrapping_add) and Float64 (acc+=v).
+        let mut state: u64 = 0x2B99_2DDF_A232_5719;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..150 {
+            let n = (next() % 400) as usize + 1;
+            let raw: Vec<i64> = (0..n).map(|_| (next() % 2000) as i64 - 1000).collect();
+            let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+
+            let si = Series::new(
+                "s".to_owned(),
+                Index::new(labels.clone()),
+                Column::from_i64_values(raw.clone()),
+            )
+            .unwrap();
+            let mut acc = 0i64;
+            let want_i: Vec<i64> = raw
+                .iter()
+                .map(|&v| {
+                    acc = acc.wrapping_add(v);
+                    acc
+                })
+                .collect();
+            let got_i: Vec<i64> = si
+                .cumsum()
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Int64(x) => *x,
+                    o => panic!("{o:?}"),
+                })
+                .collect();
+            assert_eq!(got_i, want_i, "trial {trial} cumsum int");
+
+            let fraw: Vec<f64> = raw.iter().map(|&v| v as f64 / 8.0).collect();
+            let sf = Series::new(
+                "s".to_owned(),
+                Index::new(labels.clone()),
+                Column::from_f64_values(fraw.clone()),
+            )
+            .unwrap();
+            let mut accf = 0.0f64;
+            let want_f: Vec<f64> = fraw
+                .iter()
+                .map(|&v| {
+                    accf += v;
+                    accf
+                })
+                .collect();
+            let got_f: Vec<f64> = sf
+                .cumsum()
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Float64(x) => *x,
+                    o => panic!("{o:?}"),
+                })
+                .collect();
+            for (g, w) in got_f.iter().zip(&want_f) {
+                assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} cumsum float");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn cumsum_typed_timing() {
+        use std::time::Instant;
+        let n = 5_000_000usize;
+        let iters = 10;
+        let mut state: u64 = 0x0A2C_5B7D_91E3_46F0;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let data: Vec<f64> = (0..n).map(|_| (next() % 1000) as f64).collect();
+        let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+        let mk = || {
+            Series::new(
+                "s".to_owned(),
+                Index::new(labels.clone()),
+                Column::from_f64_values(data.clone()),
+            )
+            .unwrap()
+        };
+        let t0 = Instant::now();
+        let mut chk = 0usize;
+        for _ in 0..iters {
+            chk ^= mk().cumsum().unwrap().len();
+        }
+        let typed = t0.elapsed();
+        let t1 = Instant::now();
+        let mut chk2 = 0usize;
+        for _ in 0..iters {
+            let s = mk();
+            let mut acc = 0.0f64;
+            let out: Vec<Scalar> = s
+                .column
+                .values()
+                .iter()
+                .map(|v| {
+                    acc += v.to_f64().unwrap();
+                    Scalar::Float64(acc)
+                })
+                .collect();
+            let r = s
+                .with_labels_and_values_preserving_name(s.index.labels().to_vec(), out)
+                .unwrap();
+            chk2 ^= r.len();
+        }
+        let scalar = t1.elapsed();
+        let t2 = Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..iters {
+            sink ^= mk().len();
+        }
+        let build = t2.elapsed();
+        eprintln!(
+            "cumsum 5M f64 x{iters}: typed={typed:?} scalar={scalar:?} build={build:?} op-only={:.2}x (full {:.2}x, chk {chk}/{chk2}/{sink})",
+            scalar.saturating_sub(build).as_secs_f64() / typed.saturating_sub(build).as_secs_f64(),
+            scalar.as_secs_f64() / typed.as_secs_f64()
+        );
     }
 
     #[test]
