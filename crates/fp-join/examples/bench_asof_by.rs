@@ -7,10 +7,11 @@
 //! the left rows and driving the existing monotonic two-pointer once per group
 //! makes it O(L+R). Output is bit-identical.
 
+use std::time::Instant;
+
 use fp_frame::DataFrame;
 use fp_join::{DataFrameMergeExt, MergeAsofOptions, MergedDataFrame};
 use fp_types::Scalar;
-use std::time::Instant;
 
 fn frame(cols: Vec<(&str, Vec<Scalar>)>) -> DataFrame {
     let names: Vec<&str> = cols.iter().map(|(n, _)| *n).collect();
@@ -52,26 +53,52 @@ fn golden() -> String {
     // right: t=[1,2,3,5]      g=[a,a,b,b]  rv=[10,11,12,13]
     let left = frame(vec![
         ("t", (1..=6).map(Scalar::Int64).collect()),
-        ("g", ["a", "b", "a", "b", "a", "b"].iter().map(|s| Scalar::Utf8((*s).into())).collect()),
+        (
+            "g",
+            ["a", "b", "a", "b", "a", "b"]
+                .iter()
+                .map(|s| Scalar::Utf8((*s).into()))
+                .collect(),
+        ),
     ]);
     let right = frame(vec![
-        ("t", [1, 2, 3, 5].iter().map(|&x| Scalar::Int64(x)).collect()),
-        ("g", ["a", "a", "b", "b"].iter().map(|s| Scalar::Utf8((*s).into())).collect()),
-        ("rv", [10, 11, 12, 13].iter().map(|&x| Scalar::Int64(x)).collect()),
+        (
+            "t",
+            [1, 2, 3, 5].iter().map(|&x| Scalar::Int64(x)).collect(),
+        ),
+        (
+            "g",
+            ["a", "a", "b", "b"]
+                .iter()
+                .map(|s| Scalar::Utf8((*s).into()))
+                .collect(),
+        ),
+        (
+            "rv",
+            [10, 11, 12, 13].iter().map(|&x| Scalar::Int64(x)).collect(),
+        ),
     ]);
 
-    let b = left.merge_asof_with_options(&right, "t", "backward", opts("g")).unwrap();
+    let b = left
+        .merge_asof_with_options(&right, "t", "backward", opts("g"))
+        .unwrap();
     out.push_str(&format!("backward:{}\n", dump(&b)));
-    let f = left.merge_asof_with_options(&right, "t", "forward", opts("g")).unwrap();
+    let f = left
+        .merge_asof_with_options(&right, "t", "forward", opts("g"))
+        .unwrap();
     out.push_str(&format!("forward:{}\n", dump(&f)));
-    let nr = left.merge_asof_with_options(&right, "t", "nearest", opts("g")).unwrap();
+    let nr = left
+        .merge_asof_with_options(&right, "t", "nearest", opts("g"))
+        .unwrap();
     out.push_str(&format!("nearest:{}\n", dump(&nr)));
 
     // no-exact + tolerance
     let mut o2 = opts("g");
     o2.allow_exact_matches = false;
     o2.tolerance = Some(1.0);
-    let t = left.merge_asof_with_options(&right, "t", "backward", o2).unwrap();
+    let t = left
+        .merge_asof_with_options(&right, "t", "backward", o2)
+        .unwrap();
     out.push_str(&format!("noexact_tol1:{}\n", dump(&t)));
     out
 }
@@ -91,12 +118,19 @@ fn main() {
     let left = frame(vec![("t", lt), ("g", lg)]);
     let right = frame(vec![("t", rt), ("g", rg), ("rv", rv)]);
 
-    let _ = left.merge_asof_with_options(&right, "t", "backward", opts("g")).unwrap();
+    let _ = left
+        .merge_asof_with_options(&right, "t", "backward", opts("g"))
+        .unwrap();
 
     let t0 = Instant::now();
-    let m = left.merge_asof_with_options(&right, "t", "backward", opts("g")).unwrap();
+    let m = left
+        .merge_asof_with_options(&right, "t", "backward", opts("g"))
+        .unwrap();
     let d = t0.elapsed();
     assert_eq!(m.index.len(), n);
 
-    println!("TIMING n={n} groups={groups} asof_by={:.3}ms", d.as_secs_f64() * 1e3);
+    println!(
+        "TIMING n={n} groups={groups} asof_by={:.3}ms",
+        d.as_secs_f64() * 1e3
+    );
 }
