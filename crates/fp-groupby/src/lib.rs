@@ -1030,7 +1030,7 @@ pub enum AggFunc {
 /// Dense direct-address streaming `groupby_agg` for bounded all-valid `Int64`
 /// keys and numeric (`Int64`/`Float64`) values, for the aggregations whose
 /// result is a single-pass fold over each group's in-order non-missing values:
-/// `Mean`, `Count`, `Size`, `First`, `Last`.
+/// `Mean`, `Count`, `Size`, `First`, `Last`, `Min`, `Max`, `Prod`.
 ///
 /// Replaces the generic path's `FxHashMap<GroupKeyRef, (usize, Vec<Scalar>,
 /// usize)>` — which hashes every row AND clones every value into a per-group
@@ -1056,7 +1056,14 @@ fn try_groupby_agg_dense_int64(
 ) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
     if !matches!(
         func,
-        AggFunc::Mean | AggFunc::Count | AggFunc::Size | AggFunc::First | AggFunc::Last
+        AggFunc::Mean
+            | AggFunc::Count
+            | AggFunc::Size
+            | AggFunc::First
+            | AggFunc::Last
+            | AggFunc::Min
+            | AggFunc::Max
+            | AggFunc::Prod
     ) {
         return None;
     }
@@ -1072,9 +1079,19 @@ fn try_groupby_agg_dense_int64(
     let bucket_len = usize::try_from(span).ok()?;
 
     let needs_mean = matches!(func, AggFunc::Mean);
-    let needs_value = matches!(func, AggFunc::First | AggFunc::Last);
+    let needs_prod = matches!(func, AggFunc::Prod);
+    // First/Last/Min/Max all retain a representative scalar per bucket.
+    let needs_value = matches!(
+        func,
+        AggFunc::First | AggFunc::Last | AggFunc::Min | AggFunc::Max
+    );
 
     let mut sum = vec![0.0_f64; bucket_len];
+    let mut prod = if needs_prod {
+        vec![1.0_f64; bucket_len]
+    } else {
+        Vec::new()
+    };
     let mut non_missing = vec![0_i64; bucket_len];
     let mut total = vec![0_i64; bucket_len];
     let mut value_slot: Vec<Option<Scalar>> = if needs_value {
@@ -1107,12 +1124,42 @@ fn try_groupby_agg_dense_int64(
             let x = value.to_f64().ok()?;
             sum[bucket] += x;
         }
+        if needs_prod {
+            // nanprod multiplies to_f64() of every non-missing value in order.
+            let x = value.to_f64().ok()?;
+            prod[bucket] *= x;
+        }
         if needs_value {
             match func {
                 AggFunc::First if value_slot[bucket].is_none() => {
                     value_slot[bucket] = Some(value.clone());
                 }
                 AggFunc::Last => value_slot[bucket] = Some(value.clone()),
+                // nanmin/nanmax: keep the first non-missing on a tie (strict
+                // </>), dtype preserved. Only Int64/Float64 columns take this
+                // path; any other value dtype bails to the generic nanmin/nanmax.
+                AggFunc::Min => {
+                    let replace = match (value_slot[bucket].as_ref(), value) {
+                        (None, _) => true,
+                        (Some(Scalar::Int64(a)), Scalar::Int64(b)) => b < a,
+                        (Some(Scalar::Float64(a)), Scalar::Float64(b)) => b < a,
+                        _ => return None,
+                    };
+                    if replace {
+                        value_slot[bucket] = Some(value.clone());
+                    }
+                }
+                AggFunc::Max => {
+                    let replace = match (value_slot[bucket].as_ref(), value) {
+                        (None, _) => true,
+                        (Some(Scalar::Int64(a)), Scalar::Int64(b)) => b > a,
+                        (Some(Scalar::Float64(a)), Scalar::Float64(b)) => b > a,
+                        _ => return None,
+                    };
+                    if replace {
+                        value_slot[bucket] = Some(value.clone());
+                    }
+                }
                 _ => {}
             }
         }
@@ -1137,10 +1184,12 @@ fn try_groupby_agg_dense_int64(
             }
             AggFunc::Count => Scalar::Int64(non_missing[bucket]),
             AggFunc::Size => Scalar::Int64(total[bucket]),
-            AggFunc::First | AggFunc::Last => value_slot[bucket]
+            AggFunc::First | AggFunc::Last | AggFunc::Min | AggFunc::Max => value_slot[bucket]
                 .take()
                 .unwrap_or(Scalar::Null(NullKind::NaN)),
-            _ => unreachable!("dense path gated to Mean/Count/Size/First/Last"),
+            // nanprod over all-missing / empty group is the 1.0 identity.
+            AggFunc::Prod => Scalar::Float64(prod[bucket]),
+            _ => unreachable!("dense path gated to the supported aggregations"),
         };
         out_values.push(agg);
     }

@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use fp_frame::Series;
 use fp_groupby::{
-    GroupByOptions, groupby_count, groupby_first, groupby_last, groupby_mean, groupby_size,
-    groupby_sum,
+    GroupByOptions, groupby_count, groupby_first, groupby_last, groupby_max, groupby_mean,
+    groupby_min, groupby_prod, groupby_size, groupby_sum,
 };
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
@@ -43,6 +43,9 @@ fn run_agg(
         "size" => groupby_size(keys, values, opts, &policy, &mut ledger)?,
         "first" => groupby_first(keys, values, opts, &policy, &mut ledger)?,
         "last" => groupby_last(keys, values, opts, &policy, &mut ledger)?,
+        "min" => groupby_min(keys, values, opts, &policy, &mut ledger)?,
+        "max" => groupby_max(keys, values, opts, &policy, &mut ledger)?,
+        "prod" => groupby_prod(keys, values, opts, &policy, &mut ledger)?,
         "sum" => groupby_sum(keys, values, opts, &policy, &mut ledger)?,
         other => return Err(format!("unknown agg '{other}'").into()),
     };
