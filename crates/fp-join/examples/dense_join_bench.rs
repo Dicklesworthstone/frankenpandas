@@ -121,6 +121,61 @@ fn mk_card(n: usize) -> i64 {
     ((n as f64 / 4.0).sqrt() as i64).max(2)
 }
 
+fn mku_card(n: usize) -> i64 {
+    // card^2 ~= n so the two-key combos are ~all distinct (near-1:1 inner join,
+    // output ~= n). With a single payload column the build (composite key hash
+    // vs packed dense) dominates — isolating dense_packed_int64_inner_positions.
+    ((n as f64).sqrt() as i64 + 1).max(2)
+}
+
+fn run_mk(n: usize, card: i64, n_val: usize, golden_mode: bool, iters: usize) {
+    let left = build_mk_frame("lv", n, card, 7, n_val);
+    let right = build_mk_frame("rv", n, card, 13, n_val);
+    if golden_mode {
+        let merged =
+            merge_dataframes_on(&left, &right, &["id1", "id2"], JoinType::Inner).expect("mk join");
+        let out =
+            DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+                .expect("rebuild mk frame");
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |x: u64| {
+            h ^= x;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        mix(out.len() as u64);
+        for name in out.column_names() {
+            for s in name.bytes() {
+                mix(u64::from(s));
+            }
+            let col = out.column(name).expect("col");
+            for v in col.values().iter() {
+                match v {
+                    Scalar::Int64(i) => mix(*i as u64),
+                    Scalar::Null(_) => mix(0xDEAD_BEEF),
+                    other => mix(format!("{other:?}")
+                        .bytes()
+                        .fold(0u64, |a, b| a.wrapping_mul(131).wrapping_add(u64::from(b)))),
+                }
+            }
+        }
+        println!("rows={} digest={:016x}", out.len(), h);
+        return;
+    }
+    let start = Instant::now();
+    let mut sink: usize = 0;
+    for _ in 0..iters {
+        let out =
+            merge_dataframes_on(&left, &right, &["id1", "id2"], JoinType::Inner).expect("mk join");
+        sink = sink.wrapping_add(out.index.len());
+    }
+    let elapsed = start.elapsed();
+    eprintln!(
+        "dense_join_bench: n={n} card={card} n_val={n_val} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
+        elapsed.as_secs_f64(),
+        elapsed.as_secs_f64() * 1000.0 / iters as f64,
+    );
+}
+
 fn golden_mk(n: usize) {
     let card = mk_card(n);
     let left = build_mk_frame("lv", n, card, 7, 4);
@@ -163,6 +218,17 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("golden_mk") {
         let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000);
         golden_mk(n);
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("golden_mku") {
+        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000);
+        run_mk(n, mku_card(n), 1, true, 0);
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("mku") {
+        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(200_000);
+        let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+        run_mk(n, mku_card(n), 1, false, iters);
         return;
     }
     if args.get(1).map(String::as_str) == Some("mk") {

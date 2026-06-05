@@ -706,6 +706,15 @@ fn scalar_to_key_component(s: &fp_types::Scalar) -> JoinKeyComponent {
 /// shares `Vec`'s `Hash`/`Eq`/`Ord`/`Deref<[T]>` semantics, so the join result
 /// (key equality, grouping, output order) is bit-identical.
 type CompositeJoinKey = smallvec::SmallVec<[JoinKeyComponent; 1]>;
+
+/// `(left_positions, right_positions, out_row_keys)` produced by the merge
+/// position-computation phase. `out_row_keys` is `Some` only when the rows must
+/// be reordered by join key (sort or outer join).
+type MergeRowPositions = (
+    Vec<Option<usize>>,
+    Vec<Option<usize>>,
+    Option<Vec<CompositeJoinKey>>,
+);
 type JoinPositionBucket = smallvec::SmallVec<[usize; 1]>;
 
 fn collect_join_key_columns<'a>(
@@ -2125,6 +2134,18 @@ fn dense_int64_inner_positions(
 ) -> Option<(Vec<usize>, Vec<usize>)> {
     let left = left_key.as_i64_slice()?;
     let right = right_key.as_i64_slice()?;
+    dense_i64_inner_positions_slices(left, right)
+}
+
+/// Core counting-sort/CSR inner-join over two `i64` key slices (see
+/// [`dense_int64_inner_positions`]). Emits `(left_pos, right_pos)` pairs with
+/// right positions ascending per left key, left probed ascending — matching the
+/// hash path's bucket-insertion order. Returns `None` for a span wider than the
+/// bounded direct-address gate so the caller falls back to hashing.
+fn dense_i64_inner_positions_slices(
+    left: &[i64],
+    right: &[i64],
+) -> Option<(Vec<usize>, Vec<usize>)> {
     if right.is_empty() || left.is_empty() {
         return Some((Vec::new(), Vec::new()));
     }
@@ -2178,6 +2199,89 @@ fn dense_int64_inner_positions(
         }
     }
     Some((left_positions, right_positions))
+}
+
+/// Hash-free inner-join positions for a MULTI-column key whose every component
+/// is an all-valid, bounded-range Int64 column. Packs each row's composite key
+/// into a single `i64` via a mixed-radix code over the per-column spans
+/// (`packed = Σ_c (val_c - min_c) · stride_c`, `stride_0 = 1`, `stride_c =
+/// stride_{c-1}·range_{c-1}`), then runs the dense CSR core on the packed keys.
+///
+/// The packing is a bijection on the joint key box (mins/ranges computed over
+/// BOTH sides so left- and right-side codes are comparable), so two composite
+/// keys collide under packing IFF every component is equal — identical to the
+/// `CompositeJoinKey` equality the FxHashMap path uses. Pair order is therefore
+/// byte-for-byte the same as the hash path. Returns `None` (caller falls back to
+/// the composite-hash path) for any non-Int64 / any-missing component or when
+/// the packed span exceeds the bounded direct-address gate.
+fn dense_packed_int64_inner_positions(
+    left_cols: &[&Column],
+    right_cols: &[&Column],
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let k = left_cols.len();
+    if k == 0 || k != right_cols.len() {
+        return None;
+    }
+
+    let left_slices: Vec<&[i64]> = left_cols
+        .iter()
+        .map(|c| c.as_i64_slice())
+        .collect::<Option<Vec<_>>>()?;
+    let right_slices: Vec<&[i64]> = right_cols
+        .iter()
+        .map(|c| c.as_i64_slice())
+        .collect::<Option<Vec<_>>>()?;
+
+    let n_left = left_slices[0].len();
+    let n_right = right_slices[0].len();
+    if n_left == 0 || n_right == 0 {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    // Per-column min and span over BOTH sides; product = joint packed span.
+    let mut mins = vec![0i64; k];
+    let mut strides = vec![1i128; k];
+    let mut total: i128 = 1;
+    for c in 0..k {
+        let mut mn = right_slices[c][0];
+        let mut mx = right_slices[c][0];
+        for &v in left_slices[c].iter().chain(right_slices[c].iter()) {
+            if v < mn {
+                mn = v;
+            }
+            if v > mx {
+                mx = v;
+            }
+        }
+        mins[c] = mn;
+        let range = (mx as i128) - (mn as i128) + 1;
+        strides[c] = total;
+        total = total.checked_mul(range)?;
+        // Gate the packed span the same way the single-key core does, up front
+        // (the product can overflow the bounded table for wide multi-keys).
+        if total > (1i128 << 24) {
+            return None;
+        }
+    }
+    if total > 16 * ((n_left + n_right) as i128) {
+        return None;
+    }
+
+    let pack = |slices: &[&[i64]], n: usize| -> Vec<i64> {
+        (0..n)
+            .map(|row| {
+                let mut acc: i128 = 0;
+                for c in 0..k {
+                    acc += ((slices[c][row] as i128) - (mins[c] as i128)) * strides[c];
+                }
+                acc as i64
+            })
+            .collect()
+    };
+    let packed_left = pack(&left_slices, n_left);
+    let packed_right = pack(&right_slices, n_right);
+
+    dense_i64_inner_positions_slices(&packed_left, &packed_right)
 }
 
 fn merge_single_key_inner_unsorted(
@@ -2479,113 +2583,142 @@ pub fn merge_dataframes_on_with_options(
         );
     }
 
-    // Convert key columns to hashable composite keys.
-    let left_keys = collect_composite_keys(&left_key_columns);
-    let right_keys = collect_composite_keys(&right_key_columns);
-    if let Some(validate_mode) = validate_mode {
-        validate_merge_cardinality(validate_mode, &left_keys, &right_keys)?;
-    }
-
-    // Build only the probe maps required by the selected join direction.
-    let right_map = if matches!(
-        join_type,
-        JoinType::Inner | JoinType::Left | JoinType::Outer
-    ) {
-        let mut m = FxHashMap::<&CompositeJoinKey, JoinPositionBucket>::with_capacity_and_hasher(
-            right_keys.len(),
-            Default::default(),
-        );
-        for (pos, key) in right_keys.iter().enumerate() {
-            m.entry(key).or_default().push(pos);
-        }
-        Some(m)
-    } else {
-        None
-    };
-
-    let left_map = if matches!(join_type, JoinType::Right | JoinType::Outer) {
-        let mut m = FxHashMap::<&CompositeJoinKey, JoinPositionBucket>::with_capacity_and_hasher(
-            left_keys.len(),
-            Default::default(),
-        );
-        for (pos, key) in left_keys.iter().enumerate() {
-            m.entry(key).or_default().push(pos);
-        }
-        Some(m)
-    } else {
-        None
-    };
-
-    // Compute row position mappings.
-    let row_capacity = match join_type {
-        JoinType::Inner => left_keys.len().min(right_keys.len()),
-        JoinType::Left => left_keys.len(),
-        JoinType::Right => right_keys.len(),
-        JoinType::Outer => left_keys.len().saturating_add(right_keys.len()),
-        JoinType::Cross => left_keys.len().saturating_mul(right_keys.len()),
-    };
-    let mut left_positions = Vec::<Option<usize>>::with_capacity(row_capacity);
-    let mut right_positions = Vec::<Option<usize>>::with_capacity(row_capacity);
     let needs_key_order = sort || matches!(join_type, JoinType::Outer);
-    let mut out_row_keys =
-        needs_key_order.then(|| Vec::<CompositeJoinKey>::with_capacity(row_capacity));
 
-    match join_type {
-        JoinType::Inner | JoinType::Left | JoinType::Outer => {
-            let right_map = right_map
-                .as_ref()
-                .expect("right_map required for Inner, Left, and Outer joins");
-            for (left_pos, key) in left_keys.iter().enumerate() {
-                if let Some(matches) = right_map.get(key) {
-                    for &right_pos in matches {
-                        push_merge_row_key(&mut out_row_keys, key);
-                        left_positions.push(Some(left_pos));
-                        right_positions.push(Some(right_pos));
-                    }
-                    continue;
-                }
+    // Hash-free fast path: a plain inner join on all-valid bounded-Int64 key
+    // column(s) packs the composite key into one i64 and runs the dense CSR
+    // core, skipping CompositeJoinKey materialization + FxHashMap build/probe.
+    // Gated to inner joins with no sort/indicator/validate, where the emitted
+    // (left,right) pairs are byte-for-byte identical to the hash path.
+    let packed_inner = if matches!(join_type, JoinType::Inner)
+        && !sort
+        && validate_mode.is_none()
+        && indicator_name.is_none()
+    {
+        dense_packed_int64_inner_positions(&left_key_columns, &right_key_columns)
+    } else {
+        None
+    };
 
-                if matches!(join_type, JoinType::Left | JoinType::Outer) {
-                    push_merge_row_key(&mut out_row_keys, key);
-                    left_positions.push(Some(left_pos));
-                    right_positions.push(None);
-                }
+    let (mut left_positions, mut right_positions, out_row_keys): MergeRowPositions =
+        if let Some((lp, rp)) = packed_inner {
+            (
+                lp.into_iter().map(Some).collect(),
+                rp.into_iter().map(Some).collect(),
+                None,
+            )
+        } else {
+            // Convert key columns to hashable composite keys.
+            let left_keys = collect_composite_keys(&left_key_columns);
+            let right_keys = collect_composite_keys(&right_key_columns);
+            if let Some(validate_mode) = validate_mode {
+                validate_merge_cardinality(validate_mode, &left_keys, &right_keys)?;
             }
 
-            if matches!(join_type, JoinType::Outer) {
-                let left_map = left_map.as_ref().expect("left_map required for Outer join");
-                for (right_pos, key) in right_keys.iter().enumerate() {
-                    if !left_map.contains_key(key) {
+            // Build only the probe maps required by the selected join direction.
+            let right_map = if matches!(
+                join_type,
+                JoinType::Inner | JoinType::Left | JoinType::Outer
+            ) {
+                let mut m =
+                    FxHashMap::<&CompositeJoinKey, JoinPositionBucket>::with_capacity_and_hasher(
+                        right_keys.len(),
+                        Default::default(),
+                    );
+                for (pos, key) in right_keys.iter().enumerate() {
+                    m.entry(key).or_default().push(pos);
+                }
+                Some(m)
+            } else {
+                None
+            };
+
+            let left_map = if matches!(join_type, JoinType::Right | JoinType::Outer) {
+                let mut m =
+                    FxHashMap::<&CompositeJoinKey, JoinPositionBucket>::with_capacity_and_hasher(
+                        left_keys.len(),
+                        Default::default(),
+                    );
+                for (pos, key) in left_keys.iter().enumerate() {
+                    m.entry(key).or_default().push(pos);
+                }
+                Some(m)
+            } else {
+                None
+            };
+
+            // Compute row position mappings.
+            let row_capacity = match join_type {
+                JoinType::Inner => left_keys.len().min(right_keys.len()),
+                JoinType::Left => left_keys.len(),
+                JoinType::Right => right_keys.len(),
+                JoinType::Outer => left_keys.len().saturating_add(right_keys.len()),
+                JoinType::Cross => left_keys.len().saturating_mul(right_keys.len()),
+            };
+            let mut left_positions = Vec::<Option<usize>>::with_capacity(row_capacity);
+            let mut right_positions = Vec::<Option<usize>>::with_capacity(row_capacity);
+            let mut out_row_keys =
+                needs_key_order.then(|| Vec::<CompositeJoinKey>::with_capacity(row_capacity));
+
+            match join_type {
+                JoinType::Inner | JoinType::Left | JoinType::Outer => {
+                    let right_map = right_map
+                        .as_ref()
+                        .expect("right_map required for Inner, Left, and Outer joins");
+                    for (left_pos, key) in left_keys.iter().enumerate() {
+                        if let Some(matches) = right_map.get(key) {
+                            for &right_pos in matches {
+                                push_merge_row_key(&mut out_row_keys, key);
+                                left_positions.push(Some(left_pos));
+                                right_positions.push(Some(right_pos));
+                            }
+                            continue;
+                        }
+
+                        if matches!(join_type, JoinType::Left | JoinType::Outer) {
+                            push_merge_row_key(&mut out_row_keys, key);
+                            left_positions.push(Some(left_pos));
+                            right_positions.push(None);
+                        }
+                    }
+
+                    if matches!(join_type, JoinType::Outer) {
+                        let left_map = left_map.as_ref().expect("left_map required for Outer join");
+                        for (right_pos, key) in right_keys.iter().enumerate() {
+                            if !left_map.contains_key(key) {
+                                push_merge_row_key(&mut out_row_keys, key);
+                                left_positions.push(None);
+                                right_positions.push(Some(right_pos));
+                            }
+                        }
+                    }
+                }
+                JoinType::Right => {
+                    let left_map = left_map.as_ref().expect("left_map required for Right join");
+                    for (right_pos, key) in right_keys.iter().enumerate() {
+                        if let Some(matches) = left_map.get(key) {
+                            for &left_pos in matches {
+                                push_merge_row_key(&mut out_row_keys, key);
+                                left_positions.push(Some(left_pos));
+                                right_positions.push(Some(right_pos));
+                            }
+                            continue;
+                        }
+
                         push_merge_row_key(&mut out_row_keys, key);
                         left_positions.push(None);
                         right_positions.push(Some(right_pos));
                     }
                 }
-            }
-        }
-        JoinType::Right => {
-            let left_map = left_map.as_ref().expect("left_map required for Right join");
-            for (right_pos, key) in right_keys.iter().enumerate() {
-                if let Some(matches) = left_map.get(key) {
-                    for &left_pos in matches {
-                        push_merge_row_key(&mut out_row_keys, key);
-                        left_positions.push(Some(left_pos));
-                        right_positions.push(Some(right_pos));
-                    }
-                    continue;
+                JoinType::Cross => {
+                    return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+                        "cross join must be handled by merge_dataframes_cross".to_owned(),
+                    )));
                 }
-
-                push_merge_row_key(&mut out_row_keys, key);
-                left_positions.push(None);
-                right_positions.push(Some(right_pos));
             }
-        }
-        JoinType::Cross => {
-            return Err(JoinError::Frame(FrameError::CompatibilityRejected(
-                "cross join must be handled by merge_dataframes_cross".to_owned(),
-            )));
-        }
-    }
+
+            (left_positions, right_positions, out_row_keys)
+        };
 
     if needs_key_order {
         let out_row_keys = out_row_keys
