@@ -8207,7 +8207,31 @@ impl Column {
     }
 
     /// Compute element-wise floor.
+    /// Typed fast path shared by floor/ceil/trunc: an all-valid Float64 (or
+    /// Int64) column maps `f` over its contiguous buffer and re-ingests via
+    /// `from_f64_values`, skipping lazy Scalar materialization + the 32 B/cell
+    /// Vec<Scalar> + Column::new revalidation. Returns `None` (fall back to the
+    /// scalar loop) for nullable / non-numeric columns. Bit-identical: all-valid
+    /// ⇒ the `is_missing → NaN` branch never fires; for Int64 the scalar path
+    /// casts `x as f64` and `f(x as f64) == x as f64` since the cast is integral;
+    /// floor/ceil/trunc of finite/Inf inputs never synthesize a NaN, and
+    /// from_f64_values re-marks any NaN exactly as Self::new would.
+    fn typed_float_unary(&self, f: fn(f64) -> f64) -> Option<Self> {
+        if let Some(data) = self.as_f64_slice() {
+            return Some(Self::from_f64_values(data.iter().map(|&x| f(x)).collect()));
+        }
+        if let Some(data) = self.as_i64_slice() {
+            return Some(Self::from_f64_values(
+                data.iter().map(|&x| f(x as f64)).collect(),
+            ));
+        }
+        None
+    }
+
     pub fn floor(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::floor) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8230,6 +8254,9 @@ impl Column {
 
     /// Compute element-wise ceiling.
     pub fn ceil(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::ceil) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8252,6 +8279,9 @@ impl Column {
 
     /// Compute element-wise truncation toward zero.
     pub fn trunc(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::trunc) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
