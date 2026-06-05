@@ -33,6 +33,25 @@ fn run_filter(col: &Column) -> Column {
     col.filter_by_mask(&mask).expect("filter")
 }
 
+fn build_other(n: usize) -> Column {
+    // Same length as build_column(n) but a distinct (negated-scramble) value set.
+    let values: Vec<Scalar> = (0..n as i64)
+        .map(|i| {
+            let h = (i as u64).wrapping_mul(0xff51_afd7_ed55_8ccd);
+            Scalar::Float64(1.0 - ((h >> 11) as f64) / (1u64 << 52) as f64)
+        })
+        .collect();
+    Column::new(DType::Float64, values).expect("f64 other column")
+}
+
+fn run_where(col: &Column, other: &Column) -> Column {
+    // mask = col > 0; col.where(mask, other) — typed branchless select.
+    let cond = col
+        .compare_scalar(&Scalar::Float64(0.0), ComparisonOp::Gt)
+        .expect("compare");
+    col.where_cond_series(&cond, other).expect("where")
+}
+
 fn digest(col: &Column) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |x: u64| {
@@ -63,6 +82,40 @@ fn main() {
             "filter_golden n={n} out_len={} digest={:016x}",
             out.len(),
             digest(&out)
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("golden_where") {
+        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000);
+        let col = build_column(n);
+        let other = build_other(n);
+        let out = run_where(&col, &other);
+        println!(
+            "where_golden n={n} out_len={} digest={:016x}",
+            out.len(),
+            digest(&out)
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("where") {
+        let n: usize = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000_000);
+        let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+        let col = build_column(n);
+        let other = build_other(n);
+        let start = Instant::now();
+        let mut sink: usize = 0;
+        for _ in 0..iters {
+            let out = run_where(&col, &other);
+            sink = sink.wrapping_add(out.len());
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "where_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
+            elapsed.as_secs_f64(),
+            elapsed.as_secs_f64() * 1000.0 / iters as f64,
         );
         return;
     }

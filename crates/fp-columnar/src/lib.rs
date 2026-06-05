@@ -6102,6 +6102,26 @@ impl Column {
                 right: cond.values.len().max(other.values.len()),
             });
         }
+        // Typed branchless select: all-valid Bool cond and same-typed all-valid
+        // numeric self/other compute the result straight over the contiguous
+        // buffers, with no per-element Scalar dispatch/clone or output Vec<Scalar>.
+        // Bit-identical — with an all-valid cond there is no missing branch, and
+        // for matching dtypes cast_scalar(o, self.dtype) is the identity, so each
+        // slot is cond[i] ? self[i] : other[i]. Mixed/nullable inputs fall back.
+        if let Some(cb) = cond.as_bool_slice() {
+            if let (Some(s), Some(o)) = (self.as_f64_slice(), other.as_f64_slice()) {
+                let out: Vec<f64> = (0..s.len())
+                    .map(|i| if cb[i] { s[i] } else { o[i] })
+                    .collect();
+                return Ok(Self::from_f64_values(out));
+            }
+            if let (Some(s), Some(o)) = (self.as_i64_slice(), other.as_i64_slice()) {
+                let out: Vec<i64> = (0..s.len())
+                    .map(|i| if cb[i] { s[i] } else { o[i] })
+                    .collect();
+                return Ok(Self::from_i64_values(out));
+            }
+        }
         let out: Vec<Scalar> = self
             .values
             .iter()
@@ -6129,6 +6149,22 @@ impl Column {
                 left: self.values.len(),
                 right: cond.values.len().max(other.values.len()),
             });
+        }
+        // Typed branchless select (inverse of where_cond_series): cond true picks
+        // other, false picks self. Same isomorphism argument.
+        if let Some(cb) = cond.as_bool_slice() {
+            if let (Some(s), Some(o)) = (self.as_f64_slice(), other.as_f64_slice()) {
+                let out: Vec<f64> = (0..s.len())
+                    .map(|i| if cb[i] { o[i] } else { s[i] })
+                    .collect();
+                return Ok(Self::from_f64_values(out));
+            }
+            if let (Some(s), Some(o)) = (self.as_i64_slice(), other.as_i64_slice()) {
+                let out: Vec<i64> = (0..s.len())
+                    .map(|i| if cb[i] { o[i] } else { s[i] })
+                    .collect();
+                return Ok(Self::from_i64_values(out));
+            }
         }
         let out: Vec<Scalar> = self
             .values
@@ -6265,6 +6301,28 @@ impl Column {
                 left: self.values.len(),
                 right: cond.values.len(),
             });
+        }
+        // Typed branchless select against a scalar `other`. For Float64 self,
+        // Column::new coerces other to Float64, so other.to_f64() (non-missing)
+        // is the exact false-branch value; for Int64 self only an Int64 other
+        // stays lossless, so that path requires Scalar::Int64. All-valid cond =>
+        // no missing branch. Bit-identical; other cases fall back.
+        if !other.is_missing()
+            && let Some(cb) = cond.as_bool_slice()
+        {
+            if let Some(s) = self.as_f64_slice()
+                && let Ok(o) = other.to_f64()
+            {
+                let out: Vec<f64> = (0..s.len()).map(|i| if cb[i] { s[i] } else { o }).collect();
+                return Ok(Self::from_f64_values(out));
+            }
+            if let Some(s) = self.as_i64_slice()
+                && let Scalar::Int64(o) = other
+            {
+                let o = *o;
+                let out: Vec<i64> = (0..s.len()).map(|i| if cb[i] { s[i] } else { o }).collect();
+                return Ok(Self::from_i64_values(out));
+            }
         }
         let out: Vec<Scalar> = self
             .values
@@ -6726,6 +6784,25 @@ impl Column {
                 left: self.values.len(),
                 right: cond.values.len(),
             });
+        }
+        // Typed branchless select (inverse of where_cond scalar): cond true picks
+        // the scalar other, false picks self. Same isomorphism argument.
+        if !other.is_missing()
+            && let Some(cb) = cond.as_bool_slice()
+        {
+            if let Some(s) = self.as_f64_slice()
+                && let Ok(o) = other.to_f64()
+            {
+                let out: Vec<f64> = (0..s.len()).map(|i| if cb[i] { o } else { s[i] }).collect();
+                return Ok(Self::from_f64_values(out));
+            }
+            if let Some(s) = self.as_i64_slice()
+                && let Scalar::Int64(o) = other
+            {
+                let o = *o;
+                let out: Vec<i64> = (0..s.len()).map(|i| if cb[i] { o } else { s[i] }).collect();
+                return Ok(Self::from_i64_values(out));
+            }
         }
         let out: Vec<Scalar> = self
             .values
