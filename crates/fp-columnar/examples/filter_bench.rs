@@ -11,7 +11,7 @@
 
 use std::time::Instant;
 
-use fp_columnar::{Column, ComparisonOp};
+use fp_columnar::{ArithmeticOp, Column, ComparisonOp};
 use fp_types::{DType, Scalar};
 
 fn build_column(n: usize) -> Column {
@@ -54,6 +54,25 @@ fn run_where(col: &Column, other: &Column) -> Column {
 
 fn run_clip(col: &Column) -> Column {
     col.clip(Some(-0.5), Some(0.5)).expect("clip")
+}
+
+fn build_nullable(n: usize) -> Column {
+    // Aligned add with ~10% left-gaps -> a LazyNullableFloat64 column (nulls
+    // where the left side is unmatched).
+    let left = build_column(n);
+    let right = build_other(n);
+    let lp: Vec<Option<usize>> = (0..n)
+        .map(|i| if i % 10 == 0 { None } else { Some(i) })
+        .collect();
+    let rp: Vec<Option<usize>> = (0..n).map(Some).collect();
+    left.aligned_binary_f64(&right, &lp, &rp, ArithmeticOp::Add)
+        .expect("aligned add")
+}
+
+fn run_ntake(col: &Column) -> Column {
+    // Gather every even row (a 50%-selectivity positional take, as iloc/sort do).
+    let pos: Vec<usize> = (0..col.len()).filter(|i| i % 2 == 0).collect();
+    col.take_positions(&pos)
 }
 
 fn digest(col: &Column) -> u64 {
@@ -130,6 +149,37 @@ fn main() {
             "clip_golden n={n} out_len={} digest={:016x}",
             out.len(),
             digest(&out)
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("golden_ntake") {
+        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000);
+        let out = run_ntake(&build_nullable(n));
+        println!(
+            "ntake_golden n={n} out_len={} digest={:016x}",
+            out.len(),
+            digest(&out)
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("ntake") {
+        let n: usize = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000_000);
+        let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+        let col = build_nullable(n);
+        let start = Instant::now();
+        let mut sink: usize = 0;
+        for _ in 0..iters {
+            let out = run_ntake(&col);
+            sink = sink.wrapping_add(out.len());
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "ntake_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
+            elapsed.as_secs_f64(),
+            elapsed.as_secs_f64() * 1000.0 / iters as f64,
         );
         return;
     }

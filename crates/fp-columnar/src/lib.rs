@@ -1865,6 +1865,27 @@ impl Column {
             };
         }
 
+        // Typed nullable Float64 gather: when the source carries a contiguous
+        // f64 buffer with a validity mask (LazyNullableFloat64), gather the data
+        // and the validity bits directly instead of cloning a Scalar per row.
+        // Bit-identical: that variant materializes Float64(data[i]) when
+        // valid-or-NaN and Null(NaN) otherwise, so the missingness of slot `pos`
+        // is `validity.get(pos) && !data[pos].is_nan()`; carrying that exact bit
+        // (and the raw datum) into from_f64_values_with_validity reproduces the
+        // same Scalar at every slot, while skipping the 32 B/elem Vec<Scalar>.
+        if let ScalarValues::LazyNullableFloat64 { data: src, .. } = &self.values {
+            let mut data = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, &pos) in positions.iter().enumerate() {
+                let x = src[pos];
+                data.push(x);
+                if self.validity.get(pos) && !x.is_nan() {
+                    words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                }
+            }
+            return Self::from_f64_values_with_validity(data, ValidityMask { words, len: n });
+        }
+
         let mut values = Vec::with_capacity(n);
         let mut words = vec![0_u64; n.div_ceil(64)];
         for (out_idx, &pos) in positions.iter().enumerate() {
