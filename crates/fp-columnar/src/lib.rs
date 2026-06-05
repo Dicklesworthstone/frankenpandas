@@ -4790,6 +4790,19 @@ impl Column {
     /// returns 1.0 (matching pandas).
     #[must_use]
     pub fn prod(&self) -> Scalar {
+        // Typed reduction (mirror of `sum`): an all-valid Float64 column
+        // multiplies straight over its contiguous buffer instead of iterating a
+        // Vec<Scalar>. Bit-identical to nanprod's Float64 arm: a sequential
+        // left-fold seeded at 1.0 over the same values in the same order. all-
+        // valid ⇒ nothing is filtered and the all-missing→Null branch can't fire,
+        // so empty folds to Float64(1.0) exactly as nanprod returns for empty.
+        if let Some(data) = self.as_f64_slice() {
+            let mut p = 1.0_f64;
+            for &x in data {
+                p *= x;
+            }
+            return Scalar::Float64(p);
+        }
         nanprod(&self.values)
     }
 
@@ -8469,6 +8482,31 @@ impl Column {
         posinf: f64,
         neginf: f64,
     ) -> Result<Self, ColumnError> {
+        // Typed fast path (all-valid only, output Float64). all-valid Float64 has
+        // no NaN (NaN marks a column invalid), so only the ±Inf replacements can
+        // fire; the Int64 branch is a plain x as f64. Bit-identical to the scalar
+        // loop; from_f64_values re-marks a NaN replacement (e.g. posinf=NaN)
+        // missing exactly as Self::new would.
+        if let Some(data) = self.as_f64_slice() {
+            return Ok(Self::from_f64_values(
+                data.iter()
+                    .map(|&x| {
+                        if x == f64::INFINITY {
+                            posinf
+                        } else if x == f64::NEG_INFINITY {
+                            neginf
+                        } else {
+                            x
+                        }
+                    })
+                    .collect(),
+            ));
+        }
+        if let Some(data) = self.as_i64_slice() {
+            return Ok(Self::from_f64_values(
+                data.iter().map(|&x| x as f64).collect(),
+            ));
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             let result = match v {
@@ -9008,6 +9046,18 @@ impl Column {
     ///
     /// Matches np.sinc(x). Returns sin(pi*x) / (pi*x), with sinc(0) = 1.
     pub fn sinc(&self) -> Result<Self, ColumnError> {
+        // all-valid ⇒ no NaN, so the scalar formula reduces to 0->1 else
+        // sin(πx)/(πx) for both Float64 and Int64 (x as f64). Bit-identical.
+        if let Some(out) = self.typed_float_unary(|x| {
+            if x == 0.0 {
+                1.0
+            } else {
+                let px = std::f64::consts::PI * x;
+                px.sin() / px
+            }
+        }) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
