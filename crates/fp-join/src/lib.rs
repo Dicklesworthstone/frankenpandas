@@ -2163,6 +2163,26 @@ fn build_single_key_ordered_unique_outer_merge_output(
         collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
 
+    let mut left_take_positions = Vec::with_capacity(n);
+    let mut right_take_positions = Vec::with_capacity(n);
+    let mut all_positions_present = true;
+    for (left_pos, right_pos) in left_positions.iter().zip(right_positions.iter()) {
+        let (Some(left_pos), Some(right_pos)) = (*left_pos, *right_pos) else {
+            all_positions_present = false;
+            break;
+        };
+        left_take_positions.push(left_pos);
+        right_take_positions.push(right_pos);
+    }
+    let all_present_take_positions =
+        all_positions_present.then_some((left_take_positions, right_take_positions));
+    let all_present_left_positions = all_present_take_positions
+        .as_ref()
+        .map(|(positions, _)| positions.as_slice());
+    let all_present_right_positions = all_present_take_positions
+        .as_ref()
+        .map(|(_, positions)| positions.as_slice());
+
     for name in left.column_names() {
         let col = left
             .columns()
@@ -2174,37 +2194,51 @@ fn build_single_key_ordered_unique_outer_merge_output(
                     .columns()
                     .get(left_on[*left_key_idx])
                     .expect("left key column must exist");
-                let right_key_col = right
-                    .columns()
-                    .get(right_on[*right_key_idx])
-                    .expect("right key column must exist");
-                let values = left_positions
-                    .iter()
-                    .zip(right_positions.iter())
-                    .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
-                        (Some(pos), _) => left_key_col.values()[*pos].clone(),
-                        (None, Some(pos)) => right_key_col.values()[*pos].clone(),
-                        (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
-                    })
-                    .collect::<Vec<_>>();
+                let key_column = if let Some(positions) = all_present_left_positions {
+                    take_positions_typed(left_key_col, positions)
+                } else {
+                    let right_key_col = right
+                        .columns()
+                        .get(right_on[*right_key_idx])
+                        .expect("right key column must exist");
+                    let values = left_positions
+                        .iter()
+                        .zip(right_positions.iter())
+                        .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
+                            (Some(pos), _) => left_key_col.values()[*pos].clone(),
+                            (None, Some(pos)) => right_key_col.values()[*pos].clone(),
+                            (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
+                        })
+                        .collect::<Vec<_>>();
+                    Column::from_values(values)?
+                };
                 insert_merged_output_column(
                     &mut columns,
                     &mut column_order,
                     name.clone(),
-                    Column::from_values(values)?,
+                    key_column,
                 )?;
             } else {
+                let key_column = if let Some(positions) = all_present_left_positions {
+                    take_positions_typed(col, positions)
+                } else {
+                    reindex_outer_join_column(col, left_positions)?
+                };
                 insert_merged_output_column(
                     &mut columns,
                     &mut column_order,
                     name.clone(),
-                    reindex_outer_join_column(col, left_positions)?,
+                    key_column,
                 )?;
             }
             continue;
         }
 
-        let reindexed = reindex_outer_join_column(col, left_positions)?;
+        let reindexed = if let Some(positions) = all_present_left_positions {
+            take_positions_typed(col, positions)
+        } else {
+            reindex_outer_join_column(col, left_positions)?
+        };
         let out_name = if right_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.left.as_deref())
         } else {
@@ -2224,7 +2258,11 @@ fn build_single_key_ordered_unique_outer_merge_output(
             continue;
         }
 
-        let reindexed = reindex_outer_join_column(col, right_positions)?;
+        let reindexed = if let Some(positions) = all_present_right_positions {
+            take_positions_typed(col, positions)
+        } else {
+            reindex_outer_join_column(col, right_positions)?
+        };
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {

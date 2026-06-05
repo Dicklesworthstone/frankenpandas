@@ -1,0 +1,154 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-pandas-uza04-32-after-final/release-perf/join-bench --join-type outer --rows 20000 --right-rows 20000 --key-cardinality 1000 --iters 20 --warmup 3",
+      "mean": 0.8430613941,
+      "stddev": 0.05197638732668286,
+      "median": 0.8353299121000001,
+      "user": 0.29705746,
+      "system": 0.543156735,
+      "min": 0.7762260451,
+      "max": 0.9277846121000001,
+      "times": [
+        0.8149667531000001,
+        0.8414471891,
+        0.9277846121000001,
+        0.9095968691,
+        0.8452133641,
+        0.8292126351000001,
+        0.7762260451,
+        0.8000436851000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-pandas-uza04-32-after-final/release-perf/join-bench --join-type outer --rows 20000 --right-rows 20000 --key-cardinality 1000 --iters 20 --warmup 3 --force-generic",
+      "mean": 1.037189973225,
+      "stddev": 0.0856298145284394,
+      "median": 1.0265918111,
+      "user": 0.9674888350000002,
+      "system": 0.06573298500000001,
+      "min": 0.9480219161000001,
+      "max": 1.2089498571,
+      "times": [
+        1.2089498571,
+        1.0639861181,
+        0.9513056581000001,
+        1.0798131471,
+        0.9480219161000001,
+        0.9922594671000001,
+        1.0559225071,
+        0.9972611151
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-pandas-uza04-32-after-final/release-perf/join-bench --join-type inner --rows 20000 --right-rows 20000 --key-cardinality 1000 --iters 20 --warmup 3 --force-generic",
+      "mean": 0.860095768975,
+      "stddev": 0.02262213110495802,
+      "median": 0.8574124411000001,
+      "user": 0.36342546,
+      "system": 0.49535273499999993,
+      "min": 0.8216475071000001,
+      "max": 0.8969904191000001,
+      "times": [
+        0.8822335171000001,
+        0.8536864061000001,
+        0.8969904191000001,
+        0.8602528381000001,
+        0.8545720441000001,
+        0.8472550591000001,
+        0.8641283611000001,
+        0.8216475071000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-pandas-uza04-32-after-final/release-perf/join-bench --join-type right --rows 20000 --right-rows 20000 --key-cardinality 1000 --iters 20 --warmup 3 --force-generic",
+      "mean": 0.8486178993500002,
+      "stddev": 0.023863038111878218,
+      "median": 0.8452377721000002,
+      "user": 0.36730033500000003,
+      "system": 0.47826448499999996,
+      "min": 0.8007013311000001,
+      "max": 0.8755557321,
+      "times": [
+        0.8444458361000001,
+        0.8733295351000001,
+        0.8420855181000001,
+        0.8424129661,
+        0.8007013311000001,
+        0.8643825681,
+        0.8460297081000001,
+        0.8755557321
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-pandas-uza04-32-after-final/release-perf/join-bench --join-type left --rows 20000 --right-rows 20000 --key-cardinality 1000 --iters 20 --warmup 3 --force-generic",
+      "mean": 0.9193570422250001,
+      "stddev": 0.06889968580476824,
+      "median": 0.9240973421,
+      "user": 0.39679758499999995,
+      "system": 0.51549386,
+      "min": 0.8344416841000001,
+      "max": 1.0212234741000001,
+      "times": [
+        0.8844415141,
+        0.8623356151000001,
+        0.8526431981000001,
+        0.8344416841000001,
+        0.9651371301000001,
+        0.9637531701000001,
+        1.0212234741000001,
+        0.9708805521000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
