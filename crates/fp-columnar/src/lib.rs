@@ -8840,6 +8840,35 @@ impl Column {
     /// Missing values pass through unchanged. Result dtype is Float64
     /// (via `infer_dtype`) to accommodate fractional clipping.
     pub fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, ColumnError> {
+        // Typed fast path: an all-valid numeric column clamps straight over its
+        // contiguous buffer (output is always Float64), with no per-element
+        // Scalar dispatch/clone or output Vec<Scalar>. Bit-identical — the scalar
+        // loop applies the lower bound then the upper bound to v.to_f64(), which
+        // for an all-valid Float64/Int64 column is exactly data[i] (as f64). NaN
+        // floats mark the column invalid (validity.all() false), so as_*_slice
+        // declines and missing values keep the Scalar path.
+        let clamp = |mut x: f64| {
+            if let Some(lo) = lower
+                && x < lo
+            {
+                x = lo;
+            }
+            if let Some(hi) = upper
+                && x > hi
+            {
+                x = hi;
+            }
+            x
+        };
+        if let Some(data) = self.as_f64_slice() {
+            let out: Vec<f64> = data.iter().map(|&x| clamp(x)).collect();
+            return Ok(Self::from_f64_values(out));
+        }
+        if let Some(data) = self.as_i64_slice() {
+            let out: Vec<f64> = data.iter().map(|&x| clamp(x as f64)).collect();
+            return Ok(Self::from_f64_values(out));
+        }
+
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {

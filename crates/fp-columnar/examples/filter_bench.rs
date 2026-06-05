@@ -52,6 +52,10 @@ fn run_where(col: &Column, other: &Column) -> Column {
     col.where_cond_series(&cond, other).expect("where")
 }
 
+fn run_clip(col: &Column) -> Column {
+    col.clip(Some(-0.5), Some(0.5)).expect("clip")
+}
+
 fn digest(col: &Column) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |x: u64| {
@@ -114,6 +118,37 @@ fn main() {
         let elapsed = start.elapsed();
         eprintln!(
             "where_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
+            elapsed.as_secs_f64(),
+            elapsed.as_secs_f64() * 1000.0 / iters as f64,
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("golden_clip") {
+        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000);
+        let out = run_clip(&build_column(n));
+        println!(
+            "clip_golden n={n} out_len={} digest={:016x}",
+            out.len(),
+            digest(&out)
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("clip") {
+        let n: usize = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000_000);
+        let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+        let col = build_column(n);
+        let start = Instant::now();
+        let mut sink: usize = 0;
+        for _ in 0..iters {
+            let out = run_clip(&col);
+            sink = sink.wrapping_add(out.len());
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "clip_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
             elapsed.as_secs_f64(),
             elapsed.as_secs_f64() * 1000.0 / iters as f64,
         );
