@@ -128,6 +128,14 @@ fn run_add(int_a: &Column, int_b: &Column) -> Column {
     a.binary_numeric(&b, ArithmeticOp::Add).expect("add")
 }
 
+// Elementwise a < b on two freshly-cast typed Float64 columns: exercises the
+// column-vs-column comparison kernel's typed input/output.
+fn run_lt(int_a: &Column, int_b: &Column) -> Column {
+    let a = int_a.astype(DType::Float64).expect("astype a");
+    let b = int_b.astype(DType::Float64).expect("astype b");
+    a.lt(&b).expect("lt")
+}
+
 fn digest(col: &Column) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |x: u64| {
@@ -383,6 +391,38 @@ fn main() {
         let elapsed = start.elapsed();
         eprintln!(
             "add_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
+            elapsed.as_secs_f64(),
+            elapsed.as_secs_f64() * 1000.0 / iters as f64,
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("golden_lt") {
+        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000);
+        let out = run_lt(&build_int_column(n), &build_int_column2(n));
+        println!(
+            "lt_golden n={n} out_len={} digest={:016x}",
+            out.len(),
+            digest(&out)
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("lt") {
+        let n: usize = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000_000);
+        let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+        let a = build_int_column(n);
+        let b = build_int_column2(n);
+        let start = Instant::now();
+        let mut sink: usize = 0;
+        for _ in 0..iters {
+            let out = run_lt(&a, &b);
+            sink = sink.wrapping_add(out.len());
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "lt_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
             elapsed.as_secs_f64(),
             elapsed.as_secs_f64() * 1000.0 / iters as f64,
         );

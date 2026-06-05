@@ -3925,6 +3925,43 @@ impl Column {
             });
         }
 
+        // Typed fast path: both operands are all-valid contiguous Float64 (resp.
+        // Int64), so compare over the buffers and build the Bool result via
+        // from_bool_values — no Scalar materialization or per-element dispatch.
+        // Bit-identical to scalar_compare's same-dtype arm (the identical `a <op>
+        // b`); all-valid inputs mean no Null branch, and the comparisons never
+        // see a NaN (as_f64_slice excludes it).
+        if let (Some(l), Some(r)) = (self.as_f64_slice(), right.as_f64_slice()) {
+            let bools: Vec<bool> = l
+                .iter()
+                .zip(r)
+                .map(|(&a, &b)| match op {
+                    ComparisonOp::Gt => a > b,
+                    ComparisonOp::Lt => a < b,
+                    ComparisonOp::Eq => a == b,
+                    ComparisonOp::Ne => a != b,
+                    ComparisonOp::Ge => a >= b,
+                    ComparisonOp::Le => a <= b,
+                })
+                .collect();
+            return Ok(Self::from_bool_values(bools));
+        }
+        if let (Some(l), Some(r)) = (self.as_i64_slice(), right.as_i64_slice()) {
+            let bools: Vec<bool> = l
+                .iter()
+                .zip(r)
+                .map(|(&a, &b)| match op {
+                    ComparisonOp::Gt => a > b,
+                    ComparisonOp::Lt => a < b,
+                    ComparisonOp::Eq => a == b,
+                    ComparisonOp::Ne => a != b,
+                    ComparisonOp::Ge => a >= b,
+                    ComparisonOp::Le => a <= b,
+                })
+                .collect();
+            return Ok(Self::from_bool_values(bools));
+        }
+
         let values = self
             .values
             .iter()
