@@ -1,0 +1,102 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 58  of event 'cycles:P'
+# Event count (approx.): 33784254
+#
+# Overhead  Symbol                                                       Shared Object     IPC   [IPC Coverage]
+# ........  ...........................................................  ................  ....................
+#
+    24.59%  [.] <fp_columnar::Column>::take_positions                    perf_profile      -      -            
+            |          
+            |--13.85%--0xffffffff84feb92c
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          <fp_columnar::Column>::take_positions
+            |          
+             --10.74%--<fp_columnar::Column>::take_positions
+
+    22.91%  [k] 0xffffffff8621b2b7                                       [unknown]         -      -            
+            |          
+            |--15.21%--0xffffffff84c01199
+            |          <fp_columnar::ColumnData>::from_scalars
+            |          0
+            |          
+             --7.64%--0xffffffff85341641
+                       0xffffffff85342072
+                       0xffffffff853437ad
+                       0xffffffff853438f4
+                       0xffffffff853439e9
+                       0xffffffff853442bf
+                       0xffffffff853a3963
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       perf_profile::build_numeric_frame
+
+    18.85%  [.] <fp_frame::DataFrame>::loc_bool                          perf_profile      -      -            
+            |          
+            |--9.58%--0xfd21
+            |          
+             --9.27%--0xfc01
+
+    10.16%  [.] <fp_frame::DataFrame>::take_rows_by_positions_unchecked  perf_profile      -      -            
+     9.94%  [.] <fp_columnar::ValidityMask>::from_values                 perf_profile      -      -            
+     7.62%  [k] 0xffffffff853a5546                                       [unknown]         -      -            
+            |
+            ---0xffffffff85404a1a
+               0xffffffff85394c4c
+               0xffffffff8539f704
+               0xffffffff853a4d51
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               _dl_relocate_object_no_relro
+               _dl_relocate_object
+               dl_main
+               _dl_sysdep_start
+               _dl_start
+               _dl_start_user
+
+     5.56%  [k] 0xffffffff8536b5d0                                       [unknown]         -      -            
+            |
+            ---0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               perf_profile::build_numeric_frame
+
+     0.08%  [k] 0xffffffff853a3957                                       [unknown]         -      -            
+     0.07%  [k] 0xffffffff85343807                                       [unknown]         -      -            
+     0.06%  [k] 0xffffffff861f66b0                                       [unknown]         -      -            
+     0.06%  [k] 0xffffffff8621c6a9                                       [unknown]         -      -            
+     0.05%  [k] 0xffffffff8531772e                                       [unknown]         -      -            
+     0.05%  [k] 0xffffffff84f8c9d1                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d2bc                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d2c3                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d280                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d289                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff84fdedcb                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff85300b65                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff85300b80                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d285                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d286                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff8530d2cc                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff84fdedcd                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff85300b60                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff85300b66                                       [unknown]         -      -            
+     0.00%  [k] 0xffffffff85300b69                                       [unknown]         -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

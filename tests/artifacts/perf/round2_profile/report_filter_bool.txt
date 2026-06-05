@@ -1,0 +1,20 @@
+    62.23%  perf_profile  perf_profile          [.] <fp_columnar::Column>::take_positions
+            |          
+            |--60.68%--<fp_columnar::Column>::take_positions
+            |          |          
+            |           --0.91%--0x186a0
+            |          
+             --1.04%--0xffffffff84c00b90
+                       <fp_columnar::Column>::take_positions
+    10.66%  perf_profile  perf_profile          [.] <fp_frame::DataFrame>::take_rows_by_positions_unchecked
+            |          
+             --10.27%--<fp_frame::DataFrame>::take_rows_by_positions_unchecked
+     5.49%  perf_profile  perf_profile          [.] <fp_frame::DataFrame>::loc_bool
+            |
+            ---<fp_frame::DataFrame>::loc_bool
+               |          
+               |--3.23%--0xfd21
+               |          
+                --1.37%--0xfc01
+     2.42%  perf_profile  perf_profile          [.] core::ptr::drop_in_place::<fp_index::Index>
+            |          

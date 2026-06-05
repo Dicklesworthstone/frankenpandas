@@ -1,0 +1,3 @@
+perf_profile: scenario=inner_join 10000 150 n=100000 iters=200
+unknown scenario: inner_join 10000 150
+[ perf record: Woken up 2 times to write data ]

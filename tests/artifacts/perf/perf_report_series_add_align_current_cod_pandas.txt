@@ -1,0 +1,140 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 213  of event 'cycles:P'
+# Event count (approx.): 3521409135
+#
+# Overhead  Symbol                                                                                                                                                                                                                                                                                                                                              Shared Object     IPC   [IPC Coverage]
+# ........  ..................................................................................................................................................................................................................................................................................................................................................  ................  ....................
+#
+    16.26%  [.] <fp_frame::Series>::binary_op_with_policy                                                                                                                                                                                                                                                                                                       perf_profile      -      -            
+            |          
+            |--1.24%--0xffffffff8621b2b7
+            |          0xffffffff853dc6c9
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          <fp_frame::Series>::binary_op_with_policy
+            |          
+            |--1.23%--0xffffffff84c00b90
+            |          <fp_frame::Series>::binary_op_with_policy
+            |          
+            |--1.22%--0xffffffff853438a0
+            |          0xffffffff853439e9
+            |          0xffffffff853442bf
+            |          0xffffffff853a3963
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          <fp_frame::Series>::binary_op_with_policy
+            |          
+            |--0.80%--0xffffffff853a37d1
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          <fp_frame::Series>::binary_op_with_policy
+            |          
+            |--0.79%--0xffffffff85458fa1
+            |          0xffffffff853a33ec
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          <fp_frame::Series>::binary_op_with_policy
+            |          
+            |--0.61%--0xffffffff853d9143
+            |          0xffffffff853da487
+            |          0xffffffff853dc432
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          <fp_frame::Series>::binary_op_with_policy
+            |          
+            |--0.61%--<fp_frame::Series>::binary_op_with_policy
+            |          
+            |--0.61%--0xffffffff8623a345
+            |          0xffffffff853a3872
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          <fp_frame::Series>::binary_op_with_policy
+            |          
+            |--0.61%--0xffffffff86223c8e
+            |          <fp_frame::Series>::binary_op_with_policy
+            |          
+            |--0.61%--0xffffffff85393ee3
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          <fp_frame::Series>::binary_op_with_policy
+            |          
+            |--0.61%--0xffffffff853a3876
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          <fp_frame::Series>::binary_op_with_policy
+            |          
+            |--0.61%--0xffffffff84c00b93
+            |          <fp_frame::Series>::binary_op_with_policy
+            |          
+            |--0.61%--0xffffffff85452c7f
+            |          0xffffffff85458f9e
+            |          0xffffffff853a33ec
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          <fp_frame::Series>::binary_op_with_policy
+            |          
+            |--0.61%--0xffffffff857c0272
+            |          0xffffffff85404a1a
+            |          0xffffffff853a3437
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          <fp_frame::Series>::binary_op_with_policy
+            |          
+            |--0.61%--0xffffffff853a3ae8

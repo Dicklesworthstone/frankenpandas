@@ -1,0 +1,148 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-gbnf5-clean/release-perf/examples/perf_profile series_add_align 100000 50",
+      "mean": 0.25838215586,
+      "stddev": 0.018932023492093324,
+      "median": 0.25869791366,
+      "user": 0.13364598,
+      "system": 0.12347164,
+      "min": 0.23463972766,
+      "max": 0.28213770966,
+      "times": [
+        0.25869791366,
+        0.23463972766,
+        0.27057698266,
+        0.24585844566,
+        0.28213770966
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-gbnf5-clean/release-perf/examples/perf_profile df_corr 5000 5",
+      "mean": 0.07203361125999999,
+      "stddev": 0.006836293830321169,
+      "median": 0.07588209866000001,
+      "user": 0.06106937999999999,
+      "system": 0.010577040000000001,
+      "min": 0.06412030166,
+      "max": 0.07819695266,
+      "times": [
+        0.07588209866000001,
+        0.07687161166,
+        0.06412030166,
+        0.07819695266,
+        0.06509709166000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-gbnf5-clean/release-perf/examples/perf_profile df_cov 5000 5",
+      "mean": 0.06634689206000001,
+      "stddev": 0.002811376587335696,
+      "median": 0.06596798066000001,
+      "user": 0.05615277999999999,
+      "system": 0.00979724,
+      "min": 0.06347163166,
+      "max": 0.07064335566,
+      "times": [
+        0.06347163166,
+        0.06596798066000001,
+        0.06437628566,
+        0.06727520666,
+        0.07064335566
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-gbnf5-clean/release-perf/examples/perf_profile df_spearman 2000 5",
+      "mean": 0.05536940066,
+      "stddev": 0.006417027918367546,
+      "median": 0.056099418660000004,
+      "user": 0.04571298,
+      "system": 0.00934184,
+      "min": 0.047753882660000004,
+      "max": 0.062149007660000005,
+      "times": [
+        0.047753882660000004,
+        0.049935304660000006,
+        0.062149007660000005,
+        0.06090938966000001,
+        0.056099418660000004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-gbnf5-clean/release-perf/examples/perf_profile df_kendall 512 5",
+      "mean": 0.06865433626,
+      "stddev": 0.004440532928495388,
+      "median": 0.07055517866000001,
+      "user": 0.06566798,
+      "system": 0.00279824,
+      "min": 0.06378295166,
+      "max": 0.07373637366,
+      "times": [
+        0.06417269966,
+        0.07373637366,
+        0.07102447766,
+        0.06378295166,
+        0.07055517866000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-gbnf5-clean/release-perf/examples/perf_profile csv_read 100000 20",
+      "mean": 0.50672718266,
+      "stddev": 0.014235222003349127,
+      "median": 0.50144691366,
+      "user": 0.68840258,
+      "system": 0.21794564,
+      "min": 0.49378493166000004,
+      "max": 0.53001182566,
+      "times": [
+        0.53001182566,
+        0.50144691366,
+        0.49870995966000004,
+        0.49378493166000004,
+        0.50968228266
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

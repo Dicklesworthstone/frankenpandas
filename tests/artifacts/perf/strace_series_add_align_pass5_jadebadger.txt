@@ -1,0 +1,31 @@
+perf_profile: scenario=series_add_align n=100000 iters=50
+perf_profile: done 50 iters in 0.273s (5.460 ms/iter), sink=5000050
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ------------------
+ 88.97    0.014606          56       258           brk
+  3.40    0.000558          34        16           munmap
+  2.66    0.000436         436         1           execve
+  1.69    0.000278           8        33           mmap
+  0.87    0.000142          28         5           openat
+  0.49    0.000081          13         6           mprotect
+  0.43    0.000070          10         7           read
+  0.40    0.000065           3        19           write
+  0.18    0.000030          15         2           lseek
+  0.16    0.000027           5         5           fstat
+  0.16    0.000026           5         5           close
+  0.10    0.000017           3         5           rt_sigaction
+  0.07    0.000011           3         3           sigaltstack
+  0.05    0.000009           4         2           pread64
+  0.05    0.000008           4         2           rt_sigprocmask
+  0.05    0.000008           8         1         1 access
+  0.04    0.000007           3         2           prlimit64
+  0.04    0.000007           3         2           getrandom
+  0.03    0.000005           5         1           poll
+  0.03    0.000005           5         1           sched_getaffinity
+  0.03    0.000005           5         1           rseq
+  0.02    0.000004           4         1           arch_prctl
+  0.02    0.000004           4         1           set_tid_address
+  0.02    0.000004           4         1           set_robust_list
+  0.02    0.000003           3         1           gettid
+------ ----------- ----------- --------- --------- ------------------
+100.00    0.016416          43       381         1 total

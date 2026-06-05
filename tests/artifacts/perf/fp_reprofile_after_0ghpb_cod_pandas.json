@@ -1,0 +1,172 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-0ghpb/release-perf/examples/perf_profile csv_read 100000 20",
+      "mean": 0.41241824204000005,
+      "stddev": 0.0073156478322696115,
+      "median": 0.41064597624000004,
+      "user": 0.6509823600000001,
+      "system": 0.14588827999999998,
+      "min": 0.40370435524000003,
+      "max": 0.42373580624,
+      "times": [
+        0.41019019224000003,
+        0.40370435524000003,
+        0.41064597624000004,
+        0.42373580624,
+        0.41381488024
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-0ghpb/release-perf/examples/perf_profile csv_read_options 100000 20",
+      "mean": 0.41403716324000006,
+      "stddev": 0.004261129173076312,
+      "median": 0.41323972024000005,
+      "user": 0.6706319599999999,
+      "system": 0.14528828,
+      "min": 0.40911720024000003,
+      "max": 0.42050342224000004,
+      "times": [
+        0.41323972024000005,
+        0.41535004824000005,
+        0.40911720024000003,
+        0.41197542524,
+        0.42050342224000004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-0ghpb/release-perf/examples/perf_profile csv_read_no_na_filter 100000 20",
+      "mean": 0.41354173244000003,
+      "stddev": 0.008878785847441794,
+      "median": 0.40906806624000003,
+      "user": 0.68461056,
+      "system": 0.13610647999999997,
+      "min": 0.40806852324000004,
+      "max": 0.42898556324000003,
+      "times": [
+        0.40837029424000004,
+        0.40806852324000004,
+        0.41321621524,
+        0.42898556324000003,
+        0.40906806624000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-0ghpb/release-perf/examples/perf_profile df_spearman 5000 5",
+      "mean": 0.13559938684,
+      "stddev": 0.008142007425705177,
+      "median": 0.13721765824,
+      "user": 0.10403495999999998,
+      "system": 0.031040279999999996,
+      "min": 0.12639649724000002,
+      "max": 0.14528138624,
+      "times": [
+        0.12815083124,
+        0.14095056124000002,
+        0.13721765824,
+        0.12639649724000002,
+        0.14528138624
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-0ghpb/release-perf/examples/perf_profile df_corr 5000 15",
+      "mean": 0.05133783664,
+      "stddev": 0.005659524634598898,
+      "median": 0.04884804324,
+      "user": 0.04005396,
+      "system": 0.01076888,
+      "min": 0.04620191924,
+      "max": 0.05817590624,
+      "times": [
+        0.05665480524,
+        0.04884804324,
+        0.046808509240000004,
+        0.05817590624,
+        0.04620191924
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-0ghpb/release-perf/examples/perf_profile df_cov 5000 15",
+      "mean": 0.05242193063999999,
+      "stddev": 0.0030786133577662515,
+      "median": 0.051726758240000004,
+      "user": 0.040740359999999996,
+      "system": 0.011222279999999998,
+      "min": 0.050190977240000004,
+      "max": 0.05777652924,
+      "times": [
+        0.051726758240000004,
+        0.05185211524,
+        0.05056327324,
+        0.050190977240000004,
+        0.05777652924
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-0ghpb/release-perf/examples/perf_profile filter_bool 100000 50",
+      "mean": 0.08961055824,
+      "stddev": 0.006355125511777757,
+      "median": 0.09082482224,
+      "user": 0.06030635999999999,
+      "system": 0.02858148,
+      "min": 0.08292873324000001,
+      "max": 0.09738631424000001,
+      "times": [
+        0.08334260724,
+        0.09357031424000001,
+        0.08292873324000001,
+        0.09738631424000001,
+        0.09082482224
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

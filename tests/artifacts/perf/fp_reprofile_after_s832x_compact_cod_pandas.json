@@ -1,0 +1,220 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-s832x/release-perf/examples/perf_profile csv_read 100000 20",
+      "mean": 0.42755312188000005,
+      "stddev": 0.010923315999121072,
+      "median": 0.42737011928000007,
+      "user": 0.7001477000000002,
+      "system": 0.14701866,
+      "min": 0.41550190228000006,
+      "max": 0.44247517828000005,
+      "times": [
+        0.42737011928000007,
+        0.44247517828000005,
+        0.41893837428,
+        0.43348003528000006,
+        0.41550190228000006
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-s832x/release-perf/examples/perf_profile csv_read_options 100000 20",
+      "mean": 0.4301340358800001,
+      "stddev": 0.009090380014451001,
+      "median": 0.42856785828000005,
+      "user": 0.7007348999999999,
+      "system": 0.14625746,
+      "min": 0.41927936028000007,
+      "max": 0.44370946728000005,
+      "times": [
+        0.44370946728000005,
+        0.42599976228,
+        0.41927936028000007,
+        0.42856785828000005,
+        0.43311373128
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-s832x/release-perf/examples/perf_profile csv_read_no_na_filter 100000 20",
+      "mean": 0.41719852928000006,
+      "stddev": 0.006387809769398736,
+      "median": 0.41738019128000003,
+      "user": 0.6900335,
+      "system": 0.14227546,
+      "min": 0.40688280228000007,
+      "max": 0.42370776028000007,
+      "times": [
+        0.42098951028000003,
+        0.41703238228000006,
+        0.41738019128000003,
+        0.40688280228000007,
+        0.42370776028000007
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-s832x/release-perf/examples/perf_profile df_spearman 5000 5",
+      "mean": 0.09248295668,
+      "stddev": 0.0035913913902115005,
+      "median": 0.09370424928000001,
+      "user": 0.1142379,
+      "system": 0.02530826,
+      "min": 0.08795854228000001,
+      "max": 0.09664185428000001,
+      "times": [
+        0.09664185428000001,
+        0.09450127828,
+        0.09370424928000001,
+        0.08960885928000001,
+        0.08795854228000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-s832x/release-perf/examples/perf_profile df_corr 5000 15",
+      "mean": 0.05074083627999999,
+      "stddev": 0.004805963058938604,
+      "median": 0.04960490428,
+      "user": 0.0376383,
+      "system": 0.012899659999999999,
+      "min": 0.04618112728,
+      "max": 0.05757707828,
+      "times": [
+        0.04678504128,
+        0.04960490428,
+        0.04618112728,
+        0.05757707828,
+        0.05355603028
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-s832x/release-perf/examples/perf_profile df_cov 5000 15",
+      "mean": 0.05096206368,
+      "stddev": 0.003359898403866298,
+      "median": 0.05204138028,
+      "user": 0.038222900000000004,
+      "system": 0.01243826,
+      "min": 0.04616961528,
+      "max": 0.05445864128,
+      "times": [
+        0.05204138028,
+        0.04897586228,
+        0.05445864128,
+        0.04616961528,
+        0.05316481928
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-s832x/release-perf/examples/perf_profile filter_bool 100000 50",
+      "mean": 0.08493215008000002,
+      "stddev": 0.0017821471655970764,
+      "median": 0.08431144228000001,
+      "user": 0.0544485,
+      "system": 0.03016626,
+      "min": 0.08306992028000001,
+      "max": 0.08781134328000001,
+      "times": [
+        0.08424272128000002,
+        0.08431144228000001,
+        0.08781134328000001,
+        0.08522532328000001,
+        0.08306992028000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-s832x/release-perf/examples/perf_profile join_1to1 100000 20",
+      "mean": 0.04372068948,
+      "stddev": 0.004302617960207157,
+      "median": 0.04324075628,
+      "user": 0.017473299999999997,
+      "system": 0.02590826,
+      "min": 0.03768180328,
+      "max": 0.04796297328,
+      "times": [
+        0.04775406728,
+        0.03768180328,
+        0.04796297328,
+        0.04196384728,
+        0.04324075628
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-cod-pandas-reprofile-after-s832x/release-perf/examples/perf_profile series_add_align 100000 50",
+      "mean": 0.24343982568000003,
+      "stddev": 0.006515395908438474,
+      "median": 0.24387944228,
+      "user": 0.1263323,
+      "system": 0.11687026,
+      "min": 0.23375586228,
+      "max": 0.25204960228,
+      "times": [
+        0.25204960228,
+        0.24387944228,
+        0.24462300128,
+        0.23375586228,
+        0.24289122028000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

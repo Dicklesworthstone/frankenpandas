@@ -1,0 +1,100 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-after-9pyou-merge/release-perf/examples/perf_profile join_1to1 100000 50",
+      "mean": 0.29524095365999997,
+      "stddev": 0.02480302460927561,
+      "median": 0.29601765486,
+      "user": 0.13592089999999998,
+      "system": 0.15798846000000002,
+      "min": 0.26246346886,
+      "max": 0.33173008786,
+      "times": [
+        0.33173008786,
+        0.29601765486,
+        0.26246346886,
+        0.29770123286,
+        0.28829232386
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-after-9pyou-merge/release-perf/examples/perf_profile filter_bool 100000 200",
+      "mean": 0.25683206585999996,
+      "stddev": 0.006676411637777134,
+      "median": 0.25408176486,
+      "user": 0.22413369999999996,
+      "system": 0.03042146,
+      "min": 0.25298221286,
+      "max": 0.26873938486,
+      "times": [
+        0.25402828386,
+        0.25432868286,
+        0.25408176486,
+        0.25298221286,
+        0.26873938486
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-after-9pyou-merge/release-perf/examples/perf_profile sort_single 100000 200",
+      "mean": 0.08018012106000001,
+      "stddev": 0.011833649870458322,
+      "median": 0.07419745286,
+      "user": 0.06344369999999999,
+      "system": 0.016215260000000002,
+      "min": 0.07218882886,
+      "max": 0.10038141086,
+      "times": [
+        0.10038141086,
+        0.07218882886,
+        0.07419745286,
+        0.08112884986,
+        0.07300406286
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-jadebadger-after-9pyou-merge/release-perf/examples/perf_profile drop_duplicates 100000 80",
+      "mean": 0.06993660386,
+      "stddev": 0.00927635822417545,
+      "median": 0.06621083686,
+      "user": 0.05688469999999999,
+      "system": 0.01257086,
+      "min": 0.060535309860000004,
+      "max": 0.08436064086,
+      "times": [
+        0.07335282386,
+        0.06621083686,
+        0.08436064086,
+        0.06522340786,
+        0.060535309860000004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

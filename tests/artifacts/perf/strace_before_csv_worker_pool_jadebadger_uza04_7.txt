@@ -1,0 +1,115 @@
+perf_profile: scenario=csv_read n=100000 iters=20
+strace: Process 3360474 attached
+strace: Process 3360475 attached
+strace: Process 3360476 attached
+strace: Process 3360477 attached
+strace: Process 3360509 attached
+strace: Process 3360510 attached
+strace: Process 3360511 attached
+strace: Process 3360513 attached
+strace: Process 3360533 attached
+strace: Process 3360534 attached
+strace: Process 3360535 attached
+strace: Process 3360536 attached
+strace: Process 3360538 attached
+strace: Process 3360539 attached
+strace: Process 3360542 attached
+strace: Process 3360543 attached
+strace: Process 3360544 attached
+strace: Process 3360545 attached
+strace: Process 3360546 attached
+strace: Process 3360547 attached
+strace: Process 3360558 attached
+strace: Process 3360559 attached
+strace: Process 3360561 attached
+strace: Process 3360562 attached
+strace: Process 3360585 attached
+strace: Process 3360586 attached
+strace: Process 3360587 attached
+strace: Process 3360588 attached
+strace: Process 3360605 attached
+strace: Process 3360607 attached
+strace: Process 3360608 attached
+strace: Process 3360609 attached
+strace: Process 3360619 attached
+strace: Process 3360620 attached
+strace: Process 3360621 attached
+strace: Process 3360622 attached
+strace: Process 3360630 attached
+strace: Process 3360631 attached
+strace: Process 3360632 attached
+strace: Process 3360633 attached
+strace: Process 3360638 attached
+strace: Process 3360639 attached
+strace: Process 3360640 attached
+strace: Process 3360641 attached
+strace: Process 3360646 attached
+strace: Process 3360647 attached
+strace: Process 3360648 attached
+strace: Process 3360649 attached
+strace: Process 3360665 attached
+strace: Process 3360666 attached
+strace: Process 3360667 attached
+strace: Process 3360668 attached
+strace: Process 3360683 attached
+strace: Process 3360684 attached
+strace: Process 3360685 attached
+strace: Process 3360686 attached
+strace: Process 3360712 attached
+strace: Process 3360713 attached
+strace: Process 3360714 attached
+strace: Process 3360715 attached
+strace: Process 3360724 attached
+strace: Process 3360725 attached
+strace: Process 3360726 attached
+strace: Process 3360727 attached
+strace: Process 3360750 attached
+strace: Process 3360751 attached
+strace: Process 3360752 attached
+strace: Process 3360753 attached
+strace: Process 3360785 attached
+strace: Process 3360786 attached
+strace: Process 3360788 attached
+strace: Process 3360789 attached
+strace: Process 3360807 attached
+strace: Process 3360808 attached
+strace: Process 3360809 attached
+strace: Process 3360810 attached
+strace: Process 3360825 attached
+strace: Process 3360826 attached
+strace: Process 3360827 attached
+strace: Process 3360829 attached
+perf_profile: done 20 iters in 0.599s (29.966 ms/iter), sink=2000000
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ------------------
+ 28.48    0.031716          68       460           brk
+ 24.76    0.027571         599        46           futex
+  5.91    0.006579          82        80           clone3
+  5.76    0.006411          26       243           sigaltstack
+  5.31    0.005912          41       141           munmap
+  5.07    0.005650          42       134           mprotect
+  4.82    0.005371          16       323           rt_sigprocmask
+  4.45    0.004950          30       162           mmap
+  3.95    0.004403          54        81           gettid
+  2.42    0.002694          26       101           sched_getaffinity
+  2.27    0.002532          31        81           rseq
+  1.96    0.002186          26        81           set_robust_list
+  1.15    0.001280          10       126        20 openat
+  0.87    0.000972          11        88           madvise
+  0.83    0.000929           4       208           read
+  0.62    0.000689           5       120           statx
+  0.42    0.000464           4       106           close
+  0.41    0.000459         459         1           execve
+  0.31    0.000350           3       102           lseek
+  0.12    0.000137           7        19           write
+  0.02    0.000027           5         5           fstat
+  0.01    0.000016           2         6           rt_sigaction
+  0.01    0.000011           5         2           pread64
+  0.01    0.000008           4         2           prlimit64
+  0.01    0.000007           7         1         1 access
+  0.01    0.000006           3         2           getrandom
+  0.00    0.000005           5         1           poll
+  0.00    0.000005           5         1           set_tid_address
+  0.00    0.000004           4         1           arch_prctl
+------ ----------- ----------- --------- --------- ------------------
+100.00    0.111344          40      2724        21 total
