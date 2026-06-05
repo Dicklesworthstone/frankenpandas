@@ -9808,7 +9808,17 @@ impl Column {
         ascending: bool,
         dropna: bool,
     ) -> Result<(Self, Self), ColumnError> {
+        // O(N) tally: a `set_member_key`-keyed hash map gives O(1) lookup
+        // instead of the old O(distinct) linear `counts.iter().find(semantic_eq)`
+        // per value (O(N·distinct), quadratic for high-cardinality data). The
+        // `counts` Vec is still built in first-seen order, so the later
+        // stable count-sort breaks ties identically. Bit-identical: is_missing()
+        // is tested first (so NaN/NAT sentinels stay in missing_count exactly as
+        // before), and for the remaining values set_member_key equality matches
+        // semantic_eq (the same key Column::unique uses; ±0.0 normalized).
         let mut counts: Vec<(Scalar, usize)> = Vec::new();
+        let mut index: rustc_hash::FxHashMap<SetMemberKey<'_>, usize> =
+            rustc_hash::FxHashMap::default();
         let mut missing_count = 0_usize;
 
         for value in &self.values {
@@ -9816,13 +9826,15 @@ impl Column {
                 missing_count += 1;
                 continue;
             }
-
-            if let Some((_, count)) = counts
-                .iter_mut()
-                .find(|(existing, _)| existing.semantic_eq(value))
-            {
-                *count += 1;
+            let Some(key) = set_member_key(value) else {
+                // Unreachable: every non-missing scalar has a key.
+                counts.push((value.clone(), 1));
+                continue;
+            };
+            if let Some(&i) = index.get(&key) {
+                counts[i].1 += 1;
             } else {
+                index.insert(key, counts.len());
                 counts.push((value.clone(), 1));
             }
         }
