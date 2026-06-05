@@ -9120,9 +9120,16 @@ impl CategoricalIndex {
         F: FnOnce(Vec<&String>, Vec<&String>) -> Vec<String>,
     {
         let labels = op(self.labels.iter().collect(), other.labels.iter().collect());
+        // Dedup the union of categories with a seen-set instead of an O(k)
+        // `Vec::contains` per label (O(n·k) for high-cardinality categoricals).
+        // `seen` borrows self.categories + labels (both stable) — never the
+        // growing `categories` Vec — so a label is pushed iff it is neither an
+        // existing category nor already pushed this pass: identical first-seen
+        // order and dedup to the linear scan.
         let mut categories: Vec<String> = self.categories.clone();
+        let mut seen: FxHashSet<&String> = self.categories.iter().collect();
         for label in &labels {
-            if !categories.contains(label) {
+            if seen.insert(label) {
                 categories.push(label.clone());
             }
         }
@@ -9260,9 +9267,13 @@ impl CategoricalIndex {
     pub fn append(&self, other: &Self) -> Self {
         let mut labels = self.labels.clone();
         labels.extend_from_slice(&other.labels);
+        // Union categories with a seen-set, not O(k) `Vec::contains` per entry
+        // (see set_op_via_string). `seen` borrows self/other categories, never
+        // the growing `categories` Vec; identical first-seen order + dedup.
         let mut categories = self.categories.clone();
+        let mut seen: FxHashSet<&String> = self.categories.iter().collect();
         for cat in &other.categories {
-            if !categories.contains(cat) {
+            if seen.insert(cat) {
                 categories.push(cat.clone());
             }
         }
