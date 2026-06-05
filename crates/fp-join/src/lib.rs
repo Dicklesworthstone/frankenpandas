@@ -1547,6 +1547,197 @@ fn take_positions_typed(column: &Column, positions: &[usize]) -> Column {
     column.take_positions(positions)
 }
 
+enum FusedInt64Side {
+    Left,
+    Right,
+}
+
+struct FusedInt64OutputColumn<'a> {
+    name: String,
+    side: FusedInt64Side,
+    values: &'a [i64],
+}
+
+fn build_single_key_dense_i64_inner_merge_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_key: &Column,
+    right_key: &Column,
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<Option<MergedDataFrame>, JoinError> {
+    debug_assert_eq!(left_on.len(), 1);
+    debug_assert_eq!(right_on.len(), 1);
+
+    let Some(left_keys) = left_key.as_i64_slice() else {
+        return Ok(None);
+    };
+    let Some(right_keys) = right_key.as_i64_slice() else {
+        return Ok(None);
+    };
+
+    let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
+    let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
+    let left_key_name_set: HashSet<&str> = left_on.iter().copied().collect();
+    let right_key_name_set: HashSet<&str> = right_on.iter().copied().collect();
+    let shared_key_names = if left_on[0] == right_on[0] {
+        [left_on[0]].into_iter().collect::<HashSet<&str>>()
+    } else {
+        HashSet::new()
+    };
+    let overlapping_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+
+    let mut specs = Vec::<FusedInt64OutputColumn<'_>>::new();
+    for name in left.column_names() {
+        let col = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
+        let Some(values) = col.as_i64_slice() else {
+            return Ok(None);
+        };
+        let out_name = if left_key_name_set.contains(name.as_str()) {
+            name.clone()
+        } else if right_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.left.as_deref())
+        } else {
+            name.clone()
+        };
+        specs.push(FusedInt64OutputColumn {
+            name: out_name,
+            side: FusedInt64Side::Left,
+            values,
+        });
+    }
+
+    for name in right.column_names() {
+        let col = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
+        if right_key_name_set.contains(name.as_str()) && shared_key_names.contains(name.as_str()) {
+            continue;
+        }
+        let Some(values) = col.as_i64_slice() else {
+            return Ok(None);
+        };
+        let out_name = if left_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.right.as_deref())
+        } else {
+            name.clone()
+        };
+        specs.push(FusedInt64OutputColumn {
+            name: out_name,
+            side: FusedInt64Side::Right,
+            values,
+        });
+    }
+
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    if left_keys.is_empty() || right_keys.is_empty() {
+        let mut columns = std::collections::BTreeMap::new();
+        let mut column_order = Vec::with_capacity(specs.len());
+        for spec in specs {
+            insert_merged_output_column(
+                &mut columns,
+                &mut column_order,
+                spec.name,
+                Column::from_i64_values(Vec::new()),
+            )?;
+        }
+        return Ok(Some(MergedDataFrame {
+            index: Index::new(Vec::new()),
+            columns,
+            column_order,
+        }));
+    }
+
+    let mut min = right_keys[0];
+    let mut max = right_keys[0];
+    for &v in right_keys {
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+    }
+    let span = (max as i128) - (min as i128) + 1;
+    if span > (1i128 << 24) || span > 16 * (right_keys.len() as i128) {
+        return Ok(None);
+    }
+    let range = span as usize;
+
+    let mut offsets = vec![0usize; range + 1];
+    for &v in right_keys {
+        offsets[(v - min) as usize + 1] += 1;
+    }
+    for i in 0..range {
+        offsets[i + 1] += offsets[i];
+    }
+    let mut positions = vec![0usize; right_keys.len()];
+    let mut cursor = offsets.clone();
+    for (pos, &v) in right_keys.iter().enumerate() {
+        let bucket = (v - min) as usize;
+        positions[cursor[bucket]] = pos;
+        cursor[bucket] += 1;
+    }
+
+    let mut output_len = 0usize;
+    for &v in left_keys {
+        if v < min || v > max {
+            continue;
+        }
+        let bucket = (v - min) as usize;
+        let Some(new_output_len) = output_len.checked_add(offsets[bucket + 1] - offsets[bucket])
+        else {
+            return Ok(None);
+        };
+        output_len = new_output_len;
+    }
+
+    let mut output_data = specs
+        .iter()
+        .map(|_| Vec::<i64>::with_capacity(output_len))
+        .collect::<Vec<_>>();
+    for (left_pos, &v) in left_keys.iter().enumerate() {
+        if v < min || v > max {
+            continue;
+        }
+        let bucket = (v - min) as usize;
+        for &right_pos in &positions[offsets[bucket]..offsets[bucket + 1]] {
+            for (out, spec) in output_data.iter_mut().zip(specs.iter()) {
+                match spec.side {
+                    FusedInt64Side::Left => out.push(spec.values[left_pos]),
+                    FusedInt64Side::Right => out.push(spec.values[right_pos]),
+                }
+            }
+        }
+    }
+
+    let index = Index::new((0..output_len as i64).map(IndexLabel::from).collect());
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order = Vec::with_capacity(specs.len());
+    for (spec, data) in specs.into_iter().zip(output_data) {
+        debug_assert_eq!(data.len(), output_len);
+        insert_merged_output_column(
+            &mut columns,
+            &mut column_order,
+            spec.name,
+            Column::from_i64_values(data),
+        )?;
+    }
+
+    Ok(Some(MergedDataFrame {
+        index,
+        columns,
+        column_order,
+    }))
+}
+
 fn build_single_key_inner_merge_output(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -2356,6 +2547,18 @@ fn merge_single_key_inner_unsorted(
             &right_positions,
             suffixes,
         );
+    }
+
+    if let Some(merged) = build_single_key_dense_i64_inner_merge_output(
+        left,
+        right,
+        left_on,
+        right_on,
+        left_key_columns[0],
+        right_key_columns[0],
+        suffixes,
+    )? {
+        return Ok(merged);
     }
 
     // Hash-free dense direct-address build+probe for bounded all-valid Int64
@@ -4626,6 +4829,123 @@ mod tests {
         assert_eq!(fast.index, generic.index);
         assert_eq!(fast.column_order, generic.column_order);
         assert_eq!(fast.columns, generic.columns);
+    }
+
+    #[test]
+    fn merge_inner_dense_int64_fused_materialization_matches_generic_route() {
+        let left = DataFrame::from_dict(
+            &["id", "v", "overlap"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(20),
+                        Scalar::Int64(10),
+                        Scalar::Int64(21),
+                        Scalar::Int64(30),
+                    ],
+                ),
+                (
+                    "overlap",
+                    vec![
+                        Scalar::Int64(200),
+                        Scalar::Int64(100),
+                        Scalar::Int64(201),
+                        Scalar::Int64(300),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w", "overlap"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(2),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(4),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Int64(2000),
+                        Scalar::Int64(2001),
+                        Scalar::Int64(1000),
+                        Scalar::Int64(4000),
+                    ],
+                ),
+                (
+                    "overlap",
+                    vec![
+                        Scalar::Int64(20_000),
+                        Scalar::Int64(20_001),
+                        Scalar::Int64(10_000),
+                        Scalar::Int64(40_000),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::ManyToMany),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
+        assert_eq!(
+            fast.column_order,
+            ["id", "v", "overlap_x", "w", "overlap_y"]
+        );
+        assert_eq!(
+            fast.columns.get("id").unwrap().values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+            ]
+        );
+        assert_eq!(
+            fast.columns.get("w").unwrap().values(),
+            &[
+                Scalar::Int64(2000),
+                Scalar::Int64(2001),
+                Scalar::Int64(1000),
+                Scalar::Int64(2000),
+                Scalar::Int64(2001),
+            ]
+        );
+        assert!(
+            fast.columns
+                .values()
+                .all(|column| column.as_i64_slice().is_some())
+        );
     }
 
     #[test]
