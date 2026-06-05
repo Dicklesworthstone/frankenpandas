@@ -3918,6 +3918,39 @@ impl Column {
         // and the dtype-coercion scan in Column::new. Bit-identical — selects the
         // same positions in the same order, and an all-valid source yields an
         // all-valid result, exactly as the Scalar path + Column::new would.
+        //
+        // When the mask is an all-valid Bool column (the usual shape — it just
+        // came out of a comparison), read its contiguous `bool` buffer instead of
+        // `mask.values` (which would force the lazy-bool mask to materialize a
+        // full Vec<Scalar::Bool>). `as_bool_slice` returns the raw bits, and for
+        // an all-valid bool column `bits[i] == matches!(values[i],
+        // Scalar::Bool(true))`, so selection is identical.
+        if let Some(mask_bits) = mask.as_bool_slice() {
+            if let Some(data) = self.as_f64_slice() {
+                let gathered: Vec<f64> = data
+                    .iter()
+                    .zip(mask_bits)
+                    .filter_map(|(&v, &m)| m.then_some(v))
+                    .collect();
+                return Ok(Self::from_f64_values(gathered));
+            }
+            if let Some(data) = self.as_i64_slice() {
+                let gathered: Vec<i64> = data
+                    .iter()
+                    .zip(mask_bits)
+                    .filter_map(|(&v, &m)| m.then_some(v))
+                    .collect();
+                return Ok(Self::from_i64_values(gathered));
+            }
+            let values = self
+                .values
+                .iter()
+                .zip(mask_bits)
+                .filter_map(|(val, &m)| m.then_some(val.clone()))
+                .collect::<Vec<_>>();
+            return Self::new(self.dtype, values);
+        }
+
         if let Some(data) = self.as_f64_slice() {
             let gathered: Vec<f64> = data
                 .iter()
