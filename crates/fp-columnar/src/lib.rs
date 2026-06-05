@@ -7785,6 +7785,9 @@ impl Column {
 
     /// Square root of numeric values. Matches numpy's sqrt ufunc.
     pub fn sqrt(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::sqrt) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -7807,6 +7810,9 @@ impl Column {
 
     /// Exponential (e^x) of numeric values. Matches numpy's exp ufunc.
     pub fn exp(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::exp) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -7829,6 +7835,9 @@ impl Column {
 
     /// Natural logarithm of numeric values. Matches numpy's log ufunc.
     pub fn log(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::ln) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -7851,6 +7860,9 @@ impl Column {
 
     /// Base-10 logarithm of numeric values. Matches numpy's log10 ufunc.
     pub fn log10(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::log10) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -7873,6 +7885,9 @@ impl Column {
 
     /// Base-2 logarithm of numeric values. Matches numpy's log2 ufunc.
     pub fn log2(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::log2) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -7895,6 +7910,9 @@ impl Column {
 
     /// Compute element-wise sine.
     pub fn sin(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::sin) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -7917,6 +7935,9 @@ impl Column {
 
     /// Compute element-wise cosine.
     pub fn cos(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::cos) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -7939,6 +7960,9 @@ impl Column {
 
     /// Compute element-wise tangent.
     pub fn tan(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::tan) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -7961,6 +7985,9 @@ impl Column {
 
     /// Compute element-wise arcsine.
     pub fn asin(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::asin) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -7983,6 +8010,9 @@ impl Column {
 
     /// Compute element-wise arccosine.
     pub fn acos(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::acos) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8005,6 +8035,9 @@ impl Column {
 
     /// Compute element-wise arctangent.
     pub fn atan(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::atan) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8027,6 +8060,9 @@ impl Column {
 
     /// Compute element-wise hyperbolic sine.
     pub fn sinh(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::sinh) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8049,6 +8085,9 @@ impl Column {
 
     /// Compute element-wise hyperbolic cosine.
     pub fn cosh(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::cosh) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8071,6 +8110,9 @@ impl Column {
 
     /// Compute element-wise hyperbolic tangent.
     pub fn tanh(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::tanh) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8093,6 +8135,9 @@ impl Column {
 
     /// Compute element-wise inverse hyperbolic sine.
     pub fn asinh(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::asinh) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8115,6 +8160,9 @@ impl Column {
 
     /// Compute element-wise inverse hyperbolic cosine.
     pub fn acosh(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::acosh) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8137,6 +8185,9 @@ impl Column {
 
     /// Compute element-wise inverse hyperbolic tangent.
     pub fn atanh(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::atanh) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8514,6 +8565,9 @@ impl Column {
 
     /// Compute exp(x) - 1 with improved precision for small x.
     pub fn expm1(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::exp_m1) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8536,6 +8590,9 @@ impl Column {
 
     /// Compute ln(1 + x) with improved precision for small x.
     pub fn log1p(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::ln_1p) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8558,6 +8615,9 @@ impl Column {
 
     /// Compute element-wise cube root.
     pub fn cbrt(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::cbrt) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -8992,6 +9052,9 @@ impl Column {
 
     /// Convert angles from degrees to radians.
     pub fn radians(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::to_radians) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -9019,6 +9082,9 @@ impl Column {
 
     /// Convert angles from radians to degrees.
     pub fn degrees(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(f64::to_degrees) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -9046,6 +9112,9 @@ impl Column {
 
     /// Compute element-wise reciprocal (1/x).
     pub fn reciprocal(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_unary(|x| 1.0 / x) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
