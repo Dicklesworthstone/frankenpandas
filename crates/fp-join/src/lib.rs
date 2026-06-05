@@ -2652,7 +2652,7 @@ pub fn merge_dataframes_on_with_options(
                 // the right frame instead of leaving them null.
                 let left_key_col = left_key_columns[*left_key_idx];
                 let key_column = if let Some(positions) = inner_left_positions {
-                    left_key_col.take_positions(positions)
+                    take_positions_typed(left_key_col, positions)
                 } else {
                     let right_key_col = right_key_columns[*right_key_idx];
                     let values = left_positions
@@ -2674,7 +2674,7 @@ pub fn merge_dataframes_on_with_options(
                 )?;
             } else {
                 let key_column = if let Some(positions) = inner_left_positions {
-                    col.take_positions(positions)
+                    take_positions_typed(col, positions)
                 } else if matches!(join_type, JoinType::Outer) {
                     reindex_outer_join_column(col, &left_positions)?
                 } else {
@@ -2690,7 +2690,7 @@ pub fn merge_dataframes_on_with_options(
             continue;
         }
         let reindexed = if let Some(positions) = inner_left_positions {
-            col.take_positions(positions)
+            take_positions_typed(col, positions)
         } else if matches!(join_type, JoinType::Outer) {
             reindex_outer_join_column(col, &left_positions)?
         } else {
@@ -2717,7 +2717,7 @@ pub fn merge_dataframes_on_with_options(
             continue;
         }
         let reindexed = if let Some(positions) = inner_right_positions {
-            col.take_positions(positions)
+            take_positions_typed(col, positions)
         } else if matches!(join_type, JoinType::Outer) {
             reindex_outer_join_column(col, &right_positions)?
         } else {
