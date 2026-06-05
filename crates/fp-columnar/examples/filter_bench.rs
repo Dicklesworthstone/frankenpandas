@@ -86,6 +86,17 @@ fn run_astype(col: &Column) -> Column {
     col.astype(DType::Float64).expect("astype")
 }
 
+// Reduce a freshly-produced lazy-typed Float64 column (the common "cast/derive
+// then .sum()" pipeline); the cast is typed in both before/after so the ratio
+// reflects the reduction itself.
+fn run_sum(int_col: &Column) -> f64 {
+    let f = int_col.astype(DType::Float64).expect("astype");
+    match f.sum() {
+        Scalar::Float64(s) => s,
+        _ => 0.0,
+    }
+}
+
 fn digest(col: &Column) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |x: u64| {
@@ -220,6 +231,32 @@ fn main() {
         let elapsed = start.elapsed();
         eprintln!(
             "astype_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
+            elapsed.as_secs_f64(),
+            elapsed.as_secs_f64() * 1000.0 / iters as f64,
+        );
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("golden_sum") {
+        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5_000);
+        let s = run_sum(&build_int_column(n));
+        println!("sum_golden n={n} digest={:016x}", s.to_bits());
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("sum") {
+        let n: usize = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000_000);
+        let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+        let col = build_int_column(n);
+        let start = Instant::now();
+        let mut sink = 0.0f64;
+        for _ in 0..iters {
+            sink += run_sum(&col);
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "sum_bench n={n} iters={iters} {:.3}s ({:.3} ms/iter), sink={sink}",
             elapsed.as_secs_f64(),
             elapsed.as_secs_f64() * 1000.0 / iters as f64,
         );

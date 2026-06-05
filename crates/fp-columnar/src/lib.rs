@@ -4457,6 +4457,18 @@ impl Column {
     /// Empty column returns 0.0 (matching pandas).
     #[must_use]
     pub fn sum(&self) -> Scalar {
+        // Typed reduction: an all-valid Float64 column sums straight over its
+        // contiguous buffer instead of materializing/iterating a Vec<Scalar>.
+        // Bit-identical to nansum's Float64 arm: a sequential left-fold seeded
+        // at 0.0 over the same values in the same order (no Timedelta/missing
+        // branch applies to an all-valid Float64 column).
+        if let Some(data) = self.as_f64_slice() {
+            let mut s = 0.0_f64;
+            for &x in data {
+                s += x;
+            }
+            return Scalar::Float64(s);
+        }
         nansum(&self.values)
     }
 
@@ -4466,6 +4478,18 @@ impl Column {
     /// returns Null(NaN).
     #[must_use]
     pub fn mean(&self) -> Scalar {
+        // Typed reduction (see `sum`): for an all-valid Float64 column nanmean
+        // is `Σ / count` with count == len; an empty column stays Null(NaN).
+        if let Some(data) = self.as_f64_slice() {
+            if data.is_empty() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mut s = 0.0_f64;
+            for &x in data {
+                s += x;
+            }
+            return Scalar::Float64(s / data.len() as f64);
+        }
         nanmean(&self.values)
     }
 
