@@ -1508,6 +1508,34 @@ fn ensure_indicator_name_available(
     Ok(())
 }
 
+/// Positional gather that keeps an all-valid Int64 output column TYPED.
+///
+/// `Column::take_positions` already typed-fast-paths all-valid Float64 (it
+/// gathers into a contiguous `Vec<f64>` behind `lazy_all_valid_float64`), but
+/// for all-valid Int64 it materializes a `Vec<Scalar::Int64>` (32 B/elem). On
+/// the inner-merge output build — one gather per carried column — that Scalar
+/// rebuild dominates for integer payloads. Here we gather the contiguous `i64`
+/// buffer directly and hand it to `from_i64_values`, which yields the same
+/// lazy-typed all-valid Int64 column.
+///
+/// Bit-identical to `take_positions`: for an all-valid Int64 column the latter
+/// produces `Scalar::Int64(slice[pos])` at every output slot with an all-valid
+/// mask; `from_i64_values(gathered)` materializes exactly those scalars with the
+/// same all-valid mask (no NaN coercion path for i64), and `Column` equality
+/// ignores the internal data cache. `as_i64_slice` returns `Some` only for an
+/// all-valid, typed-backed Int64 column, so every other dtype / any-missing
+/// column falls through to the unchanged `take_positions`.
+fn take_positions_typed(column: &Column, positions: &[usize]) -> Column {
+    if let Some(slice) = column.as_i64_slice() {
+        let mut data = Vec::with_capacity(positions.len());
+        for &pos in positions {
+            data.push(slice[pos]);
+        }
+        return Column::from_i64_values(data);
+    }
+    column.take_positions(positions)
+}
+
 fn build_single_key_inner_merge_output(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -1549,12 +1577,12 @@ fn build_single_key_inner_merge_output(
             .get(name)
             .expect("left column listed in column_names must exist");
         if left_key_name_set.contains(name.as_str()) {
-            let key_column = col.take_positions(left_positions);
+            let key_column = take_positions_typed(col, left_positions);
             insert_merged_output_column(&mut columns, &mut column_order, name.clone(), key_column)?;
             continue;
         }
 
-        let reindexed = col.take_positions(left_positions);
+        let reindexed = take_positions_typed(col, left_positions);
         let out_name = if right_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.left.as_deref())
         } else {
@@ -1574,7 +1602,7 @@ fn build_single_key_inner_merge_output(
             continue;
         }
 
-        let reindexed = col.take_positions(right_positions);
+        let reindexed = take_positions_typed(col, right_positions);
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
