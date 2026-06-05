@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-pandas-uza04-30-before/release-perf/join-bench --join-type outer --rows 20000 --right-rows 20000 --key-cardinality 1000 --force-generic --iters 100 --warmup 3",
+      "mean": 4.57895715772,
+      "stddev": 0.28579941838564216,
+      "median": 4.527204233120001,
+      "user": 4.49089592,
+      "system": 0.07498974,
+      "min": 4.37730515462,
+      "max": 5.361664864620001,
+      "times": [
+        4.479027585620001,
+        4.50350378262,
+        4.57577584762,
+        4.55588139262,
+        4.58629375762,
+        4.41446655162,
+        4.38474795662,
+        4.37730515462,
+        4.550904683620001,
+        5.361664864620001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-pandas-uza04-30-after/release-perf/join-bench --join-type outer --rows 20000 --right-rows 20000 --key-cardinality 1000 --force-generic --iters 100 --warmup 3",
+      "mean": 3.9417788808200003,
+      "stddev": 0.18933582042501984,
+      "median": 3.85723398512,
+      "user": 3.8745086199999994,
+      "system": 0.061535040000000006,
+      "min": 3.80545731862,
+      "max": 4.31918633562,
+      "times": [
+        4.31918633562,
+        3.98017383762,
+        4.25616107862,
+        3.82142601462,
+        3.80545731862,
+        3.83133679962,
+        3.84905487962,
+        3.81855378062,
+        3.86541309062,
+        3.87102567262
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

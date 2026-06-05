@@ -2984,21 +2984,25 @@ pub fn merge_dataframes_on_with_options(
         sort_merge_rows_by_join_keys(out_row_keys, &mut left_positions, &mut right_positions);
     }
 
-    let inner_take_positions = matches!(join_type, JoinType::Inner).then(|| {
+    let all_positions_present = matches!(join_type, JoinType::Inner)
+        || (matches!(join_type, JoinType::Outer)
+            && left_positions.iter().all(Option::is_some)
+            && right_positions.iter().all(Option::is_some));
+    let all_present_take_positions = all_positions_present.then(|| {
         let left = left_positions
             .iter()
-            .map(|position| position.expect("inner join emits left positions for every row"))
+            .map(|position| position.expect("all-present join emits left positions for every row"))
             .collect::<Vec<_>>();
         let right = right_positions
             .iter()
-            .map(|position| position.expect("inner join emits right positions for every row"))
+            .map(|position| position.expect("all-present join emits right positions for every row"))
             .collect::<Vec<_>>();
         (left, right)
     });
-    let inner_left_positions = inner_take_positions
+    let all_present_left_positions = all_present_take_positions
         .as_ref()
         .map(|(positions, _)| positions.as_slice());
-    let inner_right_positions = inner_take_positions
+    let all_present_right_positions = all_present_take_positions
         .as_ref()
         .map(|(_, positions)| positions.as_slice());
 
@@ -3041,7 +3045,7 @@ pub fn merge_dataframes_on_with_options(
                 // Shared key name: for rows emitted from right-only keys, source key values from
                 // the right frame instead of leaving them null.
                 let left_key_col = left_key_columns[*left_key_idx];
-                let key_column = if let Some(positions) = inner_left_positions {
+                let key_column = if let Some(positions) = all_present_left_positions {
                     take_positions_typed(left_key_col, positions)
                 } else {
                     let right_key_col = right_key_columns[*right_key_idx];
@@ -3063,7 +3067,7 @@ pub fn merge_dataframes_on_with_options(
                     key_column,
                 )?;
             } else {
-                let key_column = if let Some(positions) = inner_left_positions {
+                let key_column = if let Some(positions) = all_present_left_positions {
                     take_positions_typed(col, positions)
                 } else if matches!(join_type, JoinType::Outer) {
                     reindex_outer_join_column(col, &left_positions)?
@@ -3079,7 +3083,7 @@ pub fn merge_dataframes_on_with_options(
             }
             continue;
         }
-        let reindexed = if let Some(positions) = inner_left_positions {
+        let reindexed = if let Some(positions) = all_present_left_positions {
             take_positions_typed(col, positions)
         } else if matches!(join_type, JoinType::Outer) {
             reindex_outer_join_column(col, &left_positions)?
@@ -3106,7 +3110,7 @@ pub fn merge_dataframes_on_with_options(
             // Shared same-name key already emitted from the left side.
             continue;
         }
-        let reindexed = if let Some(positions) = inner_right_positions {
+        let reindexed = if let Some(positions) = all_present_right_positions {
             take_positions_typed(col, positions)
         } else if matches!(join_type, JoinType::Outer) {
             reindex_outer_join_column(col, &right_positions)?
@@ -5538,6 +5542,95 @@ mod tests {
         assert_eq!(right_values[2], Scalar::Float64(200.0));
         assert_eq!(right_values[3], Scalar::Float64(201.0));
         assert!(right_values[7].is_missing());
+    }
+
+    #[test]
+    fn merge_outer_all_matched_dense_int64_duplicates_matches_generic_validated_route() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(20),
+                        Scalar::Int64(10),
+                        Scalar::Int64(21),
+                        Scalar::Int64(11),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(101),
+                        Scalar::Int64(201),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Outer).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Outer,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::ManyToMany),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
+        assert_eq!(
+            generic.columns.get("id").unwrap().values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+            ]
+        );
+        assert!(
+            generic
+                .columns
+                .values()
+                .all(|column| column.as_i64_slice().is_some())
+        );
     }
 
     #[test]
