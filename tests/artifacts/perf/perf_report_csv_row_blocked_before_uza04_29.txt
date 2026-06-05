@@ -1,0 +1,80 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 915  of event 'cycles:P'
+# Event count (approx.): 3086311511
+#
+# Overhead  Symbol                                                                                                                                                                                                                      IPC   [IPC Coverage]
+# ........  ..........................................................................................................................................................................................................................  ....................
+#
+    10.41%  [.] __memmove_avx_unaligned_erms                                                                                                                                                                                            -      -            
+            |          
+             --3.90%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       __memmove_avx_unaligned_erms
+
+     9.56%  [.] __memcmp_avx2_movbe                                                                                                                                                                                                     -      -            
+     7.20%  [k] 0xffffffff8621b2b7                                                                                                                                                                                                      -      -            
+            |          
+            |--2.98%--0xffffffff84c01199
+            |          |          
+            |          |--2.47%--__memmove_avx_unaligned_erms
+            |          |          
+            |           --0.50%--<alloc::vec::Vec<fp_index::IndexLabel> as core::clone::Clone>::clone
+            |          
+             --1.87%--__memmove_avx_unaligned_erms
+
+     5.21%  [.] <alloc::vec::Vec<fp_index::IndexLabel> as core::clone::Clone>::clone                                                                                                                                                    -      -            
+            |          
+             --2.62%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       <alloc::vec::Vec<fp_index::IndexLabel> as core::clone::Clone>::clone
+
+     5.06%  [.] core::num::imp::flt2dec::strategy::grisu::format_shortest_opt                                                                                                                                                           -      -            
+            |          
+            |--2.17%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+            |          core::fmt::float::float_to_decimal_common_shortest::<f64>
+            |          perf_profile::build_csv_string
+            |          0x18
+            |          0x15388025ff087f
+            |          
+             --0.50%--perf_profile::build_csv_string
+                       0x18
+                       0x15388025ff087f
+
+     4.57%  [k] 0xffffffff84c01192                                                                                                                                                                                                      -      -            
+            |          
+             --0.66%--0xffffffff84c00b90
+
+     1.84%  [.] fp_io::parse_f64_csv_number                                                                                                                                                                                             -      -            
+            |          
+            |--0.84%--fp_io::parse_f64_csv_number
+            |          
+             --0.67%--std::sys::backtrace::__rust_begin_short_backtrace::<fp_io::parse_simple_numeric_csv_parallel_chunks::{closure#0}::{closure#0}::{closure#0}, core::option::Option<(alloc::vec::Vec<fp_io::CsvTypedColumnValues>, i64)>>
+
+     1.63%  [.] core::fmt::float::float_to_decimal_common_shortest::<f64>                                                                                                                                                               -      -            
+            |          
