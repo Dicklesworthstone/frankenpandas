@@ -2654,6 +2654,19 @@ impl Column {
         // distinction needed (i.e. both Int64, or both Float64 / promoted to Float64).
         match out_dtype {
             DType::Float64 => {
+                // Typed-input fast path: both operands are already all-valid
+                // contiguous Float64 (as_f64_slice => validity.all() AND no NaN),
+                // so read the buffers directly — no Scalar materialization, no
+                // from_scalars copy, no nan-aware validity scan. Bit-identical to
+                // the general arm's all-valid branch: with both inputs valid and
+                // NaN-free, the combined validity is all-valid, so it returns
+                // from_f64_values(apply(l,r)) too (and from_f64_values still marks
+                // any operation-produced NaN missing, identically).
+                if let (Some(l), Some(r)) = (self.as_f64_slice(), right.as_f64_slice()) {
+                    let apply = binary_f64_apply(op);
+                    let result: Vec<f64> = l.iter().zip(r).map(|(&a, &b)| apply(a, b)).collect();
+                    return Some(Ok(Self::from_f64_values(result)));
+                }
                 let left_data = ColumnData::from_scalars(&self.values, DType::Float64);
                 let right_data = ColumnData::from_scalars(&right.values, DType::Float64);
                 let (ColumnData::Float64(l), ColumnData::Float64(r)) = (&left_data, &right_data)
@@ -2702,6 +2715,16 @@ impl Column {
                 // Both must actually be Int64 for the i64 fast path.
                 if self.dtype != DType::Int64 || right.dtype != DType::Int64 {
                     return None;
+                }
+                // Typed-input fast path (see the Float64 arm): both operands are
+                // all-valid contiguous i64 buffers, so feed vectorized_binary_i64
+                // directly — no from_scalars materialization. All-valid inputs =>
+                // all-valid result, so from_i64_values, identical to the general
+                // arm's all-valid branch.
+                if let (Some(l), Some(r)) = (self.as_i64_slice(), right.as_i64_slice()) {
+                    let (result_data, _validity) =
+                        vectorized_binary_i64(l, r, &self.validity, &right.validity, op)?;
+                    return Some(Ok(Self::from_i64_values(result_data)));
                 }
                 let left_data = ColumnData::from_scalars(&self.values, DType::Int64);
                 let right_data = ColumnData::from_scalars(&right.values, DType::Int64);
