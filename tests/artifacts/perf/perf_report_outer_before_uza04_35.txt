@@ -1,0 +1,561 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 63  of event 'cycles:P'
+# Event count (approx.): 1567712741
+#
+# Overhead  Command     Shared Object     Symbol                                                                                                                                                                                                                                                                                                         
+# ........  ..........  ................  ...............................................................................................................................................................................................................................................................................................................
+#
+    10.07%  join-bench  [unknown]         [k] 0xffffffff853d4785
+            |
+            ---0xffffffff8507eade
+               0xffffffff85089924
+               0xffffffff85090754
+               0xffffffff8506ca13
+               0xffffffff8506fd7b
+               0xffffffff8622f2bd
+               0xffffffff8622f947
+               0xffffffff86228929
+               0xffffffff86228a43
+               0xffffffff86227734
+               0xffffffff84c00f0b
+               push_mut<i64, alloc::alloc::Global> (inlined)
+               push<i64, alloc::alloc::Global> (inlined)
+               build_single_key_dense_i64_outer_all_matched_merge_output (inlined)
+               fp_join::merge_dataframes_on_with_options
+
+     8.35%  join-bench  [unknown]         [k] 0xffffffff8621b2b7
+            |          
+            |--3.05%--0xffffffff84feb8de
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          write<fp_types::Scalar> (inlined)
+            |          {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+            |          {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+            |          {closure#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+            |          {closure#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+            |          fold<i64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>>> (inlined)
+            |          fold<core::slice::iter::Iter<i64>, i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+            |          fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+            |          for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+            |          extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+            |          spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::alloc::Global> (inlined)
+            |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+            |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+            |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+            |          collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+            |          {closure#0} (inlined)
+            |          {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}> (inlined)
+            |          {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+            |          {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !>> (inlined)
+            |          <std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#0}>::{closure#0}, !>
+            |          initialize<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+            |          
+            |--2.50%--0xffffffff85395f66
+            |          0xffffffff853a3790
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          <alloc::vec::Vec<fp_index::IndexLabel> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<i64>, <fp_index::IndexLabel as core::convert::From<i64>>::from>>>::from_iter
+            |          {closure#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>> (inlined)
+            |          {closure#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>> (inlined)
+            |          {closure#0}<i64, fp_index::IndexLabel, (), fn(i64) -> fp_index::IndexLabel, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>>> (inlined)
+            |          fold<core::ops::range::Range<i64>, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_index::IndexLabel, (), fn(i64) -> fp_index::IndexLabel, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>>>> (inlined)
+            |          fold<fp_index::IndexLabel, core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>>> (inlined)
+            |          for_each<core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>> (inlined)
+            |          extend_trusted<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>> (inlined)
+            |          spec_extend<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>, alloc::alloc::Global> (inlined)
+            |          from_iter<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>> (inlined)
+            |          0xffffffffffffff2f
+            |          
+             --2.43%--0xffffffff853b84ee
+                       0xffffffff853a3872
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       write<fp_index::IndexLabel> (inlined)
+                       {closure#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>> (inlined)
+                       {closure#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>> (inlined)
+                       {closure#0}<i64, fp_index::IndexLabel, (), fn(i64) -> fp_index::IndexLabel, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>>> (inlined)
+                       fold<core::ops::range::Range<i64>, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_index::IndexLabel, (), fn(i64) -> fp_index::IndexLabel, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>>>> (inlined)
+                       fold<fp_index::IndexLabel, core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>>> (inlined)
+                       for_each<core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>> (inlined)
+                       extend_trusted<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>> (inlined)
+                       spec_extend<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>, alloc::alloc::Global> (inlined)
+                       from_iter<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>> (inlined)
+                       0xffffffffffffff2f
+
+     7.63%  join-bench  join-bench        [.] fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+            |          
+            |--4.95%--0xffffffff84feb92f
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          
+             --2.68%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+                       |          
+                        --2.68%--next<core::slice::iter::IterMut<alloc::vec::Vec<i64, alloc::alloc::Global>>, core::slice::iter::Iter<fp_join::FusedInt64OutputColumn>> (inlined)
+                                  build_single_key_dense_i64_outer_all_matched_merge_output (inlined)
+                                  fp_join::merge_dataframes_on_with_options
+
+     7.54%  join-bench  join-bench        [.] core::ptr::drop_in_place::<<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, _, _, _>, alloc::collections::btree::node::marker::KV>>::drop_key_val::Dropper<fp_columnar::Column>>
+            |          
+            |--5.11%--core::ptr::drop_in_place::<<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, _, _, _>, alloc::collections::btree::node::marker::KV>>::drop_key_val::Dropper<fp_columnar::Column>>
+            |          |          
+            |          |--2.59%--drop_in_place<[fp_types::Scalar]> (inlined)
+            |          |          drop<fp_types::Scalar, alloc::alloc::Global> (inlined)
+            |          |          drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+            |          |          assume_init_drop<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+            |          |          drop<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+            |          |          drop_in_place<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>>> (inlined)
+            |          |          drop_in_place<fp_columnar::ScalarValues> (inlined)
+            |          |          drop_in_place<fp_columnar::Column> (inlined)
+            |          |          assume_init_drop<fp_columnar::Column> (inlined)
+            |          |          drop<fp_columnar::Column> (inlined)
+            |          |          drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+            |          |          
+            |           --2.52%--drop<fp_types::Scalar, alloc::alloc::Global> (inlined)
+            |                     drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+            |                     assume_init_drop<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+            |                     drop<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+            |                     drop_in_place<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>>> (inlined)
+            |                     drop_in_place<fp_columnar::ScalarValues> (inlined)
+            |                     drop_in_place<fp_columnar::Column> (inlined)
+            |                     assume_init_drop<fp_columnar::Column> (inlined)
+            |                     drop<fp_columnar::Column> (inlined)
+            |                     drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+            |          
+             --2.43%--drop_in_place<[fp_types::Scalar]> (inlined)
+                       drop<fp_types::Scalar, alloc::alloc::Global> (inlined)
+                       drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+                       assume_init_drop<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+                       drop<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+                       drop_in_place<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>>> (inlined)
+                       drop_in_place<fp_columnar::ScalarValues> (inlined)
+                       drop_in_place<fp_columnar::Column> (inlined)
+                       assume_init_drop<fp_columnar::Column> (inlined)
+                       drop<fp_columnar::Column> (inlined)
+                       drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+
+     7.52%  join-bench  join-bench        [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |          
+            |--5.00%--0xffffffff8621b2b7
+            |          0xffffffff853dc6c9
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          
+             --2.42%--0xffffffff853da48b
+                       0xffffffff853dc432
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+
+     7.36%  join-bench  [vdso]            [.] __vdso_clock_gettime
+            |
+            ---__vdso_clock_gettime
+
+     6.38%  join-bench  libc.so.6         [.] _int_free_maybe_consolidate
+            |
+            ---0xffffffff84c00b90
+
+     4.99%  join-bench  [unknown]         [k] 0xffffffff84c01192
+            |          
+            |--2.52%--0xffffffff853a5106
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          write<fp_types::Scalar> (inlined)
+            |          {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+            |          {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+            |          {closure#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+            |          {closure#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+            |          fold<i64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>>> (inlined)
+            |          fold<core::slice::iter::Iter<i64>, i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+            |          fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+            |          for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+            |          extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+            |          spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::alloc::Global> (inlined)
+            |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+            |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+            |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+            |          collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+            |          {closure#0} (inlined)
+            |          {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}> (inlined)
+            |          {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+            |          {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !>> (inlined)
+            |          <std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#0}>::{closure#0}, !>
+            |          initialize<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+            |          
+             --2.47%--0xffffffff8622814a
+                       0xffffffff84c00bb7
+                       write<fp_types::Scalar> (inlined)
+                       {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+                       {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+                       {closure#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+                       {closure#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+                       fold<i64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>>> (inlined)
+                       fold<core::slice::iter::Iter<i64>, i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+                       fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+                       for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+                       extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+                       spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::alloc::Global> (inlined)
+                       from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+                       from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+                       from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+                       collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+                       {closure#0} (inlined)
+                       {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}> (inlined)
+                       {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+                       {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !>> (inlined)
+                       <std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#0}>::{closure#0}, !>
+                       initialize<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+
+     3.18%  join-bench  [unknown]         [k] 0xffffffff854529f6
+            |
+            ---0xffffffff8539b7d0
+               0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853ab2c0
+               0xffffffff853ab362
+               0xffffffff84f24dda
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __brk
+               __GI___sbrk (inlined)
+               __glibc_morecore (inlined)
+               systrim (inlined)
+               _int_free_chunk
+               <std::alloc::System as core::alloc::global::GlobalAlloc>::dealloc (inlined)
+               __rustc::__rdl_dealloc (inlined)
+               dealloc_nonnull (inlined)
+               deallocate_impl_runtime (inlined)
+               deallocate_impl (inlined)
+               deallocate (inlined)
+               deallocate<alloc::alloc::Global> (inlined)
+               drop<i64, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::raw_vec::RawVec<i64, alloc::alloc::Global>> (inlined)
+               drop_in_place<alloc::vec::Vec<i64, alloc::alloc::Global>> (inlined)
+               drop_in_place<fp_columnar::ScalarValues> (inlined)
+               drop_in_place<fp_columnar::Column> (inlined)
+               assume_init_drop<fp_columnar::Column> (inlined)
+               drop<fp_columnar::Column> (inlined)
+               drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+
+     2.58%  join-bench  [unknown]         [k] 0xffffffff853a3790
+            |
+            ---fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+               push<i64, alloc::alloc::Global> (inlined)
+               build_single_key_dense_i64_outer_all_matched_merge_output (inlined)
+               fp_join::merge_dataframes_on_with_options
+               0x61a7f
+
+     2.51%  join-bench  [unknown]         [k] 0xffffffff862280ca
+            |
+            ---0xffffffff8621b2b7
+               0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               <alloc::vec::Vec<fp_index::IndexLabel> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<i64>, <fp_index::IndexLabel as core::convert::From<i64>>::from>>>::from_iter
+               {closure#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>> (inlined)
+               {closure#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>> (inlined)
+               {closure#0}<i64, fp_index::IndexLabel, (), fn(i64) -> fp_index::IndexLabel, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>>> (inlined)
+               fold<core::ops::range::Range<i64>, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_index::IndexLabel, (), fn(i64) -> fp_index::IndexLabel, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>>>> (inlined)
+               fold<fp_index::IndexLabel, core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_index::IndexLabel, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>>> (inlined)
+               for_each<core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>>> (inlined)
+               extend_trusted<fp_index::IndexLabel, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>> (inlined)
+               spec_extend<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>, alloc::alloc::Global> (inlined)
+               from_iter<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<i64>, fn(i64) -> fp_index::IndexLabel>> (inlined)
+               0xffffffffffffff2f
+
+     2.50%  join-bench  [unknown]         [k] 0xffffffff85452a07
+            |
+            ---0xffffffff84c01246
+
+     2.49%  join-bench  [unknown]         [k] 0xffffffff853436a3
+            |
+            ---0xffffffff853433b2
+               0xffffffff853436a3
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae480
+               0xffffffff8539c2c1
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853ab2c0
+               0xffffffff853ab362
+               0xffffffff84f24dda
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __brk
+               __GI___sbrk (inlined)
+               __glibc_morecore (inlined)
+               systrim (inlined)
+               _int_free_chunk
+               <std::alloc::System as core::alloc::global::GlobalAlloc>::dealloc (inlined)
+               __rustc::__rdl_dealloc (inlined)
+               drop_in_place<fp_columnar::ScalarValues> (inlined)
+               drop_in_place<fp_columnar::Column> (inlined)
+               assume_init_drop<fp_columnar::Column> (inlined)
+               drop<fp_columnar::Column> (inlined)
+               drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+
+     2.49%  join-bench  join-bench        [.] core::ptr::drop_in_place::<fp_index::Index>
+            |
+            ---core::ptr::drop_in_place::<fp_index::Index>
+               drop<fp_index::IndexLabel, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>> (inlined)
+               drop_in_place<fp_index::Index> (inlined)
+
+     2.47%  join-bench  [unknown]         [k] 0xffffffff85153787
+            |
+            ---0xffffffff850c2ce2
+               0xffffffff85137e40
+               0xffffffff851524f6
+               0xffffffff85139003
+               0xffffffff85139f5d
+               0xffffffff84fc4bc8
+               0xffffffff8622777a
+               0xffffffff84c00f0b
+               0xffffffff853439ea
+               0xffffffff853a3963
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               write<fp_types::Scalar> (inlined)
+               {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+               {closure#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+               {closure#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+               fold<i64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>>> (inlined)
+               fold<core::slice::iter::Iter<i64>, i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+               fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+               for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+               extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::alloc::Global> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+               {closure#0} (inlined)
+               {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}> (inlined)
+               {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+               {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !>> (inlined)
+               <std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#0}>::{closure#0}, !>
+               initialize<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+
+     2.47%  join-bench  [unknown]         [k] 0xffffffff8534393d
+            |
+            ---<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+               {closure#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+               {closure#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+               fold<i64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>>> (inlined)
+               fold<core::slice::iter::Iter<i64>, i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+               fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+               for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+               extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::alloc::Global> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+               {closure#0} (inlined)
+               {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}> (inlined)
+               {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+               {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !>> (inlined)
+               <std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#0}>::{closure#0}, !>
+               initialize<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+
+     2.46%  join-bench  join-bench        [.] <fp_types::Scalar>::to_f64
+            |
+            ---<fp_types::Scalar>::to_f64
+
+     2.45%  join-bench  join-bench        [.] join_bench::main
+            |
+            ---join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+
+     2.44%  join-bench  [unknown]         [k] 0xffffffff85458faf
+            |
+            ---fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+               push<i64, alloc::alloc::Global> (inlined)
+               build_single_key_dense_i64_outer_all_matched_merge_output (inlined)
+               fp_join::merge_dataframes_on_with_options
+
+     2.43%  join-bench  [unknown]         [k] 0xffffffff85452e44
+            |
+            ---write<fp_types::Scalar> (inlined)
+               {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+               {closure#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+               {closure#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+               fold<i64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>>> (inlined)
+               fold<core::slice::iter::Iter<i64>, i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+               fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+               for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+               extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::alloc::Global> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+               {closure#0} (inlined)
+               {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}> (inlined)
+               {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+               {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !>> (inlined)
+               <std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#0}>::{closure#0}, !>
+               initialize<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+
+     2.42%  join-bench  [unknown]         [k] 0xffffffff854529fd
+            |
+            ---0xffffffff84c00b90
+               write<fp_types::Scalar> (inlined)
+               {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+               {closure#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+               {closure#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+               fold<i64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>>> (inlined)
+               fold<core::slice::iter::Iter<i64>, i64, (), core::iter::adapters::map::map_fold::{closure_env#0}<i64, fp_types::Scalar, (), fn(i64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>>> (inlined)
+               fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>>> (inlined)
+               for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>>> (inlined)
+               extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::alloc::Global> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>> (inlined)
+               collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<i64>>, fn(i64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+               {closure#0} (inlined)
+               {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}> (inlined)
+               {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+               {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !>> (inlined)
+               <std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#0}>::{closure#0}, !>
+               initialize<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#5}::as_slice::{closure_env#0}>, !> (inlined)
+
+     2.40%  join-bench  [unknown]         [k] 0xffffffff85452e13
+            |
+            ---0xffffffff85452a0c
+               0xffffffff853bbce1
+               0xffffffff8539ba10
+               0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853ab2c0
+               0xffffffff853ab362
+               0xffffffff84f24dda
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __brk
+               __GI___sbrk (inlined)
+               __glibc_morecore (inlined)
+               systrim (inlined)
+               _int_free_chunk
+               <std::alloc::System as core::alloc::global::GlobalAlloc>::dealloc (inlined)
+               __rustc::__rdl_dealloc (inlined)
+               drop_in_place<fp_columnar::ScalarValues> (inlined)
+               drop_in_place<fp_columnar::Column> (inlined)
+               assume_init_drop<fp_columnar::Column> (inlined)
+               drop<fp_columnar::Column> (inlined)
+               drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+
+     2.39%  join-bench  [unknown]         [k] 0xffffffff8541df4e
+            |
+            ---0xffffffff84c01199
+
+     2.27%  join-bench  join-bench        [.] <alloc::vec::Vec<fp_index::IndexLabel> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<fp_index::IndexLabel, core::iter::adapters::map::Map<core::ops::range::Range<i64>, <fp_index::IndexLabel as core::convert::From<i64>>::from>>>::from_iter
+            |
+            ---0xffffffff853d957d
+               0xffffffff853dc432
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+
+     0.11%  join-bench  [unknown]         [k] 0xffffffff853b8393
+     0.08%  join-bench  [unknown]         [k] 0xffffffff861f8905
+     0.00%  join-bench  [unknown]         [k] 0xffffffff853a4d2e
+     0.00%  join-bench  [unknown]         [k] 0xffffffff8508863a
+     0.00%  join-bench  [unknown]         [k] 0xffffffff8544ec0d
+     0.00%  perf-exec   [unknown]         [k] 0xffffffff853029e9
+     0.00%  join-bench  [unknown]         [k] 0xffffffff850c2910
+     0.00%  join-bench  [unknown]         [k] 0xffffffff8530d286
+     0.00%  join-bench  [unknown]         [k] 0xffffffff8530d2c3
+     0.00%  join-bench  [unknown]         [k] 0xffffffff84d0410b
+     0.00%  join-bench  [unknown]         [k] 0xffffffff84fdedcd
+     0.00%  join-bench  [unknown]         [k] 0xffffffff84fdedd9
+     0.00%  join-bench  [unknown]         [k] 0xffffffff85104b41
+     0.00%  join-bench  [unknown]         [k] 0xffffffff85104b45
+     0.00%  join-bench  [unknown]         [k] 0xffffffff8530d280
+     0.00%  join-bench  [unknown]         [k] 0xffffffff8530d289
+     0.00%  join-bench  [unknown]         [k] 0xffffffff8530d298
+     0.00%  join-bench  [unknown]         [k] 0xffffffff8530d2bc
+     0.00%  perf-exec   [unknown]         [k] 0xffffffff84fdedcb
+     0.00%  perf-exec   [unknown]         [k] 0xffffffff85104b2e
+     0.00%  perf-exec   [unknown]         [k] 0xffffffff8530d285
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

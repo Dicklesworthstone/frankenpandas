@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-pandas-uza04-35-before/release-perf/join-bench --join-type outer --rows 20000 --right-rows 20000 --key-cardinality 1000 --iters 20 --warmup 3",
+      "mean": 0.70358393532,
+      "stddev": 0.024201726804680135,
+      "median": 0.70655477152,
+      "user": 0.26514902,
+      "system": 0.4369029199999999,
+      "min": 0.67678155052,
+      "max": 0.75573801852,
+      "times": [
+        0.6797927045200001,
+        0.67678155052,
+        0.71042867452,
+        0.68029701852,
+        0.71078720352,
+        0.68740133752,
+        0.71063997552,
+        0.75573801852,
+        0.7212920015200001,
+        0.70268086852
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-pandas-uza04-35-before/release-perf/join-bench --join-type outer --rows 20000 --right-rows 20000 --key-cardinality 1000 --force-generic --iters 20 --warmup 3",
+      "mean": 0.72170571572,
+      "stddev": 0.030742326635132308,
+      "median": 0.7113661010200001,
+      "user": 0.28165091999999997,
+      "system": 0.43434571999999994,
+      "min": 0.68930994152,
+      "max": 0.78358219152,
+      "times": [
+        0.68930994152,
+        0.76429744252,
+        0.70091144752,
+        0.70237535052,
+        0.73461643052,
+        0.69811393852,
+        0.71728609452,
+        0.72111821252,
+        0.70544610752,
+        0.78358219152
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

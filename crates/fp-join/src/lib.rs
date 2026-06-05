@@ -2113,35 +2113,45 @@ fn build_single_key_dense_i64_outer_all_matched_merge_output(
         }
     }
 
-    let mut output_data = specs
-        .iter()
-        .map(|_| Vec::<i64>::with_capacity(output_len))
-        .collect::<Vec<_>>();
-    for (left_bucket, right_bucket) in left_buckets.into_iter().zip(right_buckets) {
-        if left_bucket.is_empty() {
-            continue;
-        }
-        for left_pos in left_bucket {
-            for &right_pos in &right_bucket {
-                for (out, spec) in output_data.iter_mut().zip(specs.iter()) {
-                    match spec.side {
-                        FusedInt64Side::Left => out.push(spec.values[left_pos]),
-                        FusedInt64Side::Right => out.push(spec.values[right_pos]),
+    let index = Index::new((0..output_len as i64).map(IndexLabel::from).collect());
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let FusedInt64OutputColumn { name, side, values } = spec;
+        let mut data = Vec::<i64>::with_capacity(output_len);
+        match side {
+            FusedInt64Side::Left => {
+                for (left_bucket, right_bucket) in left_buckets.iter().zip(right_buckets.iter()) {
+                    if left_bucket.is_empty() {
+                        continue;
+                    }
+                    let repeat_count = right_bucket.len();
+                    for &left_pos in left_bucket {
+                        let value = values[left_pos];
+                        for _ in 0..repeat_count {
+                            data.push(value);
+                        }
+                    }
+                }
+            }
+            FusedInt64Side::Right => {
+                for (left_bucket, right_bucket) in left_buckets.iter().zip(right_buckets.iter()) {
+                    if left_bucket.is_empty() {
+                        continue;
+                    }
+                    for _ in left_bucket {
+                        for &right_pos in right_bucket {
+                            data.push(values[right_pos]);
+                        }
                     }
                 }
             }
         }
-    }
-
-    let index = Index::new((0..output_len as i64).map(IndexLabel::from).collect());
-    let mut columns = std::collections::BTreeMap::new();
-    let mut column_order = Vec::with_capacity(specs.len());
-    for (spec, data) in specs.into_iter().zip(output_data) {
         debug_assert_eq!(data.len(), output_len);
         insert_merged_output_column(
             &mut columns,
             &mut column_order,
-            spec.name,
+            name,
             Column::from_i64_values(data),
         )?;
     }
