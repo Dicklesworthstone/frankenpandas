@@ -9181,6 +9181,20 @@ impl Column {
             return Self::new(DType::Int64, out);
         }
         let factor = 10f64.powi(decimals);
+        // Typed fast path (mirror of `abs`): an all-valid Float64 column rounds
+        // over its contiguous buffer and re-ingests typed, skipping the lazy
+        // Scalar materialization, the 32 B/cell Vec<Scalar>, and Column::new's
+        // revalidation passes. Bit-identical to the scalar loop below: the
+        // formula is the same `(x*factor).round_ties_even()/factor`, and
+        // from_f64_values re-marks any NaN result as missing exactly as
+        // `Self::new(Float64, ..)` would (all-valid ⇒ no is_missing branch).
+        if let Some(data) = self.as_f64_slice() {
+            return Ok(Self::from_f64_values(
+                data.iter()
+                    .map(|&x| (x * factor).round_ties_even() / factor)
+                    .collect(),
+            ));
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {

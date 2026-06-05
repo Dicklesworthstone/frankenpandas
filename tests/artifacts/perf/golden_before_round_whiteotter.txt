@@ -1,0 +1,8 @@
+f64_d0=[Float64(1.0), Float64(2.0), Float64(-2.0), Float64(0.0), Float64(1235.0), Float64(-0.0)]
+f64_d2=[Float64(1.23), Float64(2.5), Float64(-2.5), Float64(0.12), Float64(1234.57), Float64(-0.0)]
+f64_d3=[Float64(1.234), Float64(2.5), Float64(-2.5), Float64(0.125), Float64(1234.568), Float64(-0.0)]
+f64_d-1=[Float64(0.0), Float64(0.0), Float64(-0.0), Float64(0.0), Float64(1230.0), Float64(-0.0)]
+f64_d-2=[Float64(0.0), Float64(0.0), Float64(-0.0), Float64(0.0), Float64(1200.0), Float64(-0.0)]
+nf_d2=[Float64(1.23), Null(NaN), Float64(2.5)]
+i64_d0=[Int64(1234), Int64(-1567), Int64(45)]
+i64_dm2=[Int64(1200), Int64(-1600), Int64(0)]
