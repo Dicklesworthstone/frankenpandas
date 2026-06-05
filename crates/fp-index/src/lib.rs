@@ -8588,15 +8588,26 @@ impl CategoricalIndex {
         false
     }
 
+    /// First-occurrence category index for each category name, matching the
+    /// semantics of `categories.iter().position(...)` but built once in O(k).
+    /// `or_insert` keeps the first index if `categories` somehow has dupes.
+    fn category_index_map(&self) -> FxHashMap<&str, usize> {
+        let mut map: FxHashMap<&str, usize> = FxHashMap::default();
+        for (i, cat) in self.categories.iter().enumerate() {
+            map.entry(cat.as_str()).or_insert(i);
+        }
+        map
+    }
+
     #[must_use]
     pub fn codes(&self) -> Vec<Option<usize>> {
+        // O(n+k): hash category->index once instead of a linear
+        // `categories.position` scan per label. First-occurrence index
+        // preserved, so output is bit-identical.
+        let map = self.category_index_map();
         self.labels
             .iter()
-            .map(|label| {
-                self.categories
-                    .iter()
-                    .position(|category| category == label)
-            })
+            .map(|label| map.get(label.as_str()).copied())
             .collect()
     }
 
@@ -9410,12 +9421,8 @@ impl CategoricalIndex {
         }
         let mut best = 0;
         if self.ordered {
-            let position = |label: &String| {
-                self.categories
-                    .iter()
-                    .position(|cat| cat == label)
-                    .unwrap_or(0)
-            };
+            let map = self.category_index_map();
+            let position = |label: &String| map.get(label.as_str()).copied().unwrap_or(0);
             for i in 1..self.labels.len() {
                 if position(&self.labels[i]) > position(&self.labels[best]) {
                     best = i;
@@ -9441,12 +9448,8 @@ impl CategoricalIndex {
         }
         let mut best = 0;
         if self.ordered {
-            let position = |label: &String| {
-                self.categories
-                    .iter()
-                    .position(|cat| cat == label)
-                    .unwrap_or(usize::MAX)
-            };
+            let map = self.category_index_map();
+            let position = |label: &String| map.get(label.as_str()).copied().unwrap_or(usize::MAX);
             for i in 1..self.labels.len() {
                 if position(&self.labels[i]) < position(&self.labels[best]) {
                     best = i;
@@ -9471,13 +9474,9 @@ impl CategoricalIndex {
             return None;
         }
         if self.ordered {
-            // Compare by category position.
-            let position = |label: &String| {
-                self.categories
-                    .iter()
-                    .position(|cat| cat == label)
-                    .unwrap_or(usize::MAX)
-            };
+            // Compare by category position (hashed once, O(n+k)).
+            let map = self.category_index_map();
+            let position = |label: &String| map.get(label.as_str()).copied().unwrap_or(usize::MAX);
             self.labels
                 .iter()
                 .min_by_key(|label| position(label))
@@ -9494,12 +9493,8 @@ impl CategoricalIndex {
             return None;
         }
         if self.ordered {
-            let position = |label: &String| {
-                self.categories
-                    .iter()
-                    .position(|cat| cat == label)
-                    .unwrap_or(0)
-            };
+            let map = self.category_index_map();
+            let position = |label: &String| map.get(label.as_str()).copied().unwrap_or(0);
             self.labels
                 .iter()
                 .max_by_key(|label| position(label))
