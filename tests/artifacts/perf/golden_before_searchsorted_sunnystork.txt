@@ -1,0 +1,12 @@
+i64_left=[0, 0, 1, 1, 4, 4, 5]
+i64_right=[0, 1, 1, 3, 4, 5, 5]
+f64_left=[1, 0, 4, 4]
+f64_right=[3, 0, 4, 5]
+utf8_left=[0, 1, 4]
+utf8_right=[0, 3, 4]
+unsorted_left=[0, 0, 2, 2]
+unsorted_right=[0, 0, 2, 5]
+single_left=1
+single_right=3
+single_missing_left=4
+single_missing_right=5
