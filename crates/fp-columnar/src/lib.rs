@@ -2713,6 +2713,50 @@ impl Column {
         Self::new(DType::Float64, values)
     }
 
+    /// Same-index Float64 arithmetic fast path.
+    ///
+    /// Isomorphic to calling [`Self::aligned_binary_f64`] with
+    /// `Some(i)`/`Some(i)` positions for every row, but avoids allocating and
+    /// walking the identity alignment vectors.
+    pub fn aligned_binary_f64_same_positions(
+        &self,
+        right: &Self,
+        op: ArithmeticOp,
+    ) -> Result<Self, ColumnError> {
+        debug_assert_eq!(self.len(), right.len());
+        let out_len = self.len();
+
+        let lsrc = self.float64_binary_data();
+        let rsrc = right.float64_binary_data();
+        let lvalid = self.nan_aware_validity();
+        let rvalid = right.nan_aware_validity();
+        let apply = binary_f64_apply(op);
+
+        let mut data = Vec::with_capacity(out_len);
+        let mut all_valid = true;
+        for i in 0..out_len {
+            if lvalid.get(i) && rvalid.get(i) {
+                data.push(apply(lsrc[i], rsrc[i]));
+            } else {
+                all_valid = false;
+                break;
+            }
+        }
+        if all_valid {
+            return Ok(Self::from_f64_values(data));
+        }
+
+        let mut values = Vec::with_capacity(out_len);
+        for i in 0..out_len {
+            if lvalid.get(i) && rvalid.get(i) {
+                values.push(Scalar::Float64(apply(lsrc[i], rsrc[i])));
+            } else {
+                values.push(Scalar::Null(NullKind::NaN));
+            }
+        }
+        Self::new(DType::Float64, values)
+    }
+
     fn cached_float64_data(&self) -> Option<&[f64]> {
         match &self.data {
             Some(ColumnData::Float64(data)) if data.len() == self.values.len() => {
@@ -10116,6 +10160,42 @@ mod tests {
             &actual.values,
             ScalarValues::LazyAllValidFloat64 { values, .. } if values.get().is_none()
         ));
+    }
+
+    #[test]
+    fn aligned_binary_f64_same_positions_matches_identity_alignment() {
+        let left = Column::new(
+            DType::Float64,
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .expect("left");
+        let right = Column::new(
+            DType::Float64,
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .expect("right");
+        let positions = [Some(0), Some(1), Some(2)];
+
+        let expected = left
+            .aligned_binary_f64(&right, &positions, &positions, ArithmeticOp::Add)
+            .expect("identity aligned add");
+        let actual = left
+            .aligned_binary_f64_same_positions(&right, ArithmeticOp::Add)
+            .expect("same-position add");
+
+        assert_eq!(actual.dtype(), expected.dtype());
+        assert_eq!(actual.values(), expected.values());
+        for idx in 0..actual.len() {
+            assert_eq!(actual.validity().get(idx), expected.validity().get(idx));
+        }
     }
 
     #[test]
