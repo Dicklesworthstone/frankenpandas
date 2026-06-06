@@ -6125,6 +6125,34 @@ impl Column {
     /// values are ignored. For empty or all-missing columns the
     /// result is an empty same-dtype column.
     pub fn mode(&self) -> Result<Self, ColumnError> {
+        // Counting-sort fast path: an all-valid, bounded-range Int64 column
+        // tallies in O(n) via a dense direct-address histogram instead of the
+        // SipHash `HashMap` below, and emits the winners with NO sort. Walking
+        // the slots in ascending value order (slot s ↔ value `min + s`) yields
+        // the most-frequent values already ascending — identical to the
+        // `HashMap` path's `winners.sort_by(compare_scalars_na_last(.., true))`,
+        // which orders Int64 by exact `i64::cmp`. `as_i64_slice` is `Some` only
+        // for a fully-valid Int64 column, so there are no missing values to skip
+        // (matching `key_of`'s `None`-on-missing), and an empty column makes
+        // `i64_direct_address_range` return `None` → the `HashMap` path returns
+        // the empty same-dtype column exactly as before.
+        if let Some(data) = self.as_i64_slice()
+            && let Some((min, range)) = i64_direct_address_range(data)
+        {
+            let mut count = vec![0i64; range];
+            for &v in data {
+                count[(v as i128 - min as i128) as usize] += 1;
+            }
+            let max_count = count.iter().copied().max().unwrap_or(0);
+            let mut winners = Vec::new();
+            for (s, &c) in count.iter().enumerate() {
+                if c == max_count {
+                    winners.push(Scalar::Int64(min + s as i64));
+                }
+            }
+            return Self::new(self.dtype, winners);
+        }
+
         use std::collections::HashMap;
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {
