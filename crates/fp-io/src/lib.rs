@@ -622,7 +622,7 @@ enum CsvTypedColumnValues {
 }
 
 const SIMPLE_NUMERIC_CSV_PARALLEL_MIN_BYTES: usize = 1 << 20;
-const SIMPLE_NUMERIC_CSV_PARALLEL_MAX_WORKERS: usize = 4;
+const SIMPLE_NUMERIC_CSV_PARALLEL_MAX_WORKERS: usize = 8;
 
 fn trim_ascii_field(mut field: &[u8]) -> &[u8] {
     while let Some((first, rest)) = field.split_first() {

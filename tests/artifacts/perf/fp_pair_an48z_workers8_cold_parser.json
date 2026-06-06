@@ -1,0 +1,160 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-an48z-before/release-perf/examples/perf_profile csv_read 1000000 10",
+      "mean": 1.9868188545866667,
+      "stddev": 0.13791032255708693,
+      "median": 1.9523620359200002,
+      "user": 3.4374566666666664,
+      "system": 0.9205298666666666,
+      "min": 1.85706493242,
+      "max": 2.14980609942,
+      "times": [
+        2.14980609942,
+        1.88055263742,
+        2.0241714344200004,
+        2.14317091842,
+        1.85706493242,
+        1.86614710542
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-an48z-after-workers8/release-perf/examples/perf_profile csv_read 1000000 10",
+      "mean": 1.3847511137533335,
+      "stddev": 0.030911381692991225,
+      "median": 1.39523520642,
+      "user": 3.1558949999999997,
+      "system": 0.5741155333333333,
+      "min": 1.33326503342,
+      "max": 1.42053877242,
+      "times": [
+        1.36467751942,
+        1.39955494442,
+        1.3938104924199999,
+        1.42053877242,
+        1.39665992042,
+        1.33326503342
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-an48z-before/release-perf/examples/perf_profile csv_read_options 1000000 10",
+      "mean": 1.9963793435866666,
+      "stddev": 0.4063480484393055,
+      "median": 1.83767863942,
+      "user": 3.404564333333333,
+      "system": 0.9242652000000001,
+      "min": 1.80063364042,
+      "max": 2.8249005364200004,
+      "times": [
+        1.83440461342,
+        1.85748410942,
+        1.84095266542,
+        1.80063364042,
+        1.81990049642,
+        2.8249005364200004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-an48z-after-workers8/release-perf/examples/perf_profile csv_read_options 1000000 10",
+      "mean": 1.5031230719200002,
+      "stddev": 0.153208761301557,
+      "median": 1.4128711314200002,
+      "user": 3.626508,
+      "system": 0.5820647,
+      "min": 1.38981279442,
+      "max": 1.73149171542,
+      "times": [
+        1.73149171542,
+        1.38981279442,
+        1.40731052842,
+        1.4184317344200001,
+        1.66599755342,
+        1.40569410542
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-an48z-before/release-perf/examples/perf_profile csv_read_no_na_filter 1000000 10",
+      "mean": 1.88281960992,
+      "stddev": 0.0396451082494222,
+      "median": 1.87944170192,
+      "user": 3.1939386666666665,
+      "system": 0.8852051999999998,
+      "min": 1.83865168842,
+      "max": 1.93549154542,
+      "times": [
+        1.84644312742,
+        1.83865168842,
+        1.93549154542,
+        1.8965932014200002,
+        1.9174478944200002,
+        1.8622902024199999
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-cod-an48z-after-workers8/release-perf/examples/perf_profile csv_read_no_na_filter 1000000 10",
+      "mean": 1.4418133719200001,
+      "stddev": 0.06440036892570002,
+      "median": 1.43327793542,
+      "user": 3.3042420000000003,
+      "system": 0.5748302,
+      "min": 1.36666150342,
+      "max": 1.54962195442,
+      "times": [
+        1.54962195442,
+        1.39825149242,
+        1.36666150342,
+        1.4153818414200001,
+        1.45117402942,
+        1.46978941042
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
