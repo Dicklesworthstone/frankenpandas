@@ -1,0 +1,76 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-frankenpandas-cod-nj1j9-before/release-perf/examples/perf_profile csv_read 500000 3",
+      "mean": 0.5963605976800002,
+      "stddev": 0.00537072722857355,
+      "median": 0.59463046328,
+      "user": 0.7836532199999999,
+      "system": 0.13793598,
+      "min": 0.5906399332800001,
+      "max": 0.6049027462800001,
+      "times": [
+        0.6049027462800001,
+        0.5906399332800001,
+        0.59406912028,
+        0.59463046328,
+        0.59756072528
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-frankenpandas-cod-nj1j9-before/release-perf/examples/perf_profile csv_read_options 500000 3",
+      "mean": 0.6461247030800001,
+      "stddev": 0.08129148958179849,
+      "median": 0.6116255432800001,
+      "user": 0.84971082,
+      "system": 0.15329458,
+      "min": 0.5927848852800001,
+      "max": 0.78855814128,
+      "times": [
+        0.6116255432800001,
+        0.6012158992800001,
+        0.78855814128,
+        0.63643904628,
+        0.5927848852800001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-frankenpandas-cod-nj1j9-before/release-perf/examples/perf_profile csv_read_no_na_filter 500000 3",
+      "mean": 0.8676453256800001,
+      "stddev": 0.15514559408443895,
+      "median": 0.90173594428,
+      "user": 1.1425238199999999,
+      "system": 0.15865718,
+      "min": 0.60123056728,
+      "max": 1.00756087728,
+      "times": [
+        0.60123056728,
+        0.90173594428,
+        1.00756087728,
+        0.9260067682800001,
+        0.9016924712800001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

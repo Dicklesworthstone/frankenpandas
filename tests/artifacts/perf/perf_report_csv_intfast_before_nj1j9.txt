@@ -1,0 +1,2063 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 200  of event 'cycles:P'
+# Event count (approx.): 463106649
+#
+# Children      Self  Command       Shared Object         Symbol                                                                                                                                                                                                                      IPC   [IPC Coverage]
+# ........  ........  ............  ....................  ..........................................................................................................................................................................................................................  ....................
+#
+    66.08%     0.86%  perf_profile  perf_profile          [.] perf_profile::build_csv_string                                                                                                                                                                                          -      -            
+            |
+            ---perf_profile::build_csv_string
+               |          
+               |--61.47%--core::fmt::write
+               |          |          
+               |          |--58.15%--core::fmt::float::float_to_decimal_common_shortest::<f64>
+               |          |          |          
+               |          |          |--22.97%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+               |          |          |          
+               |          |          |--8.64%--__memmove_avx_unaligned_erms
+               |          |          |          |          
+               |          |          |          |--5.24%--0xffffffff84c00bb7
+               |          |          |          |          0xffffffff8622811f
+               |          |          |          |          0xffffffff84feb96b
+               |          |          |          |          0xffffffff853a5627
+               |          |          |          |          0xffffffff853a53ad
+               |          |          |          |          0xffffffff853a4de7
+               |          |          |          |          |          
+               |          |          |          |          |--3.41%--0xffffffff853a37ea
+               |          |          |          |          |          |          
+               |          |          |          |          |          |--2.56%--0xffffffff853a33d2
+               |          |          |          |          |          |          0xffffffff8541df1b
+               |          |          |          |          |          |          0xffffffff8541a9e8
+               |          |          |          |          |          |          0xffffffff853dda90
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |--1.71%--0xffffffff853dc432
+               |          |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |          |--0.86%--0xffffffff853d9574
+               |          |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |           --0.85%--0xffffffff853da487
+               |          |          |          |          |          |          |                     0xffffffff853d9102
+               |          |          |          |          |          |          |                     0xffffffff853d8dcc
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |           --0.86%--0xffffffff853dc6c9
+               |          |          |          |          |          |                     0xffffffff8621b2b7
+               |          |          |          |          |          |          
+               |          |          |          |          |           --0.85%--0xffffffff85404a01
+               |          |          |          |          |          
+               |          |          |          |          |--0.98%--0xffffffff853a3963
+               |          |          |          |          |          0xffffffff853442bf
+               |          |          |          |          |          0xffffffff853439e9
+               |          |          |          |          |          0xffffffff853438f4
+               |          |          |          |          |          0xffffffff853437b1
+               |          |          |          |          |          
+               |          |          |          |           --0.85%--0xffffffff853a3795
+               |          |          |          |          
+               |          |          |          |--0.86%--0xffffffff84d04109
+               |          |          |          |          
+               |          |          |           --0.80%--0xffffffff84c00b93
+               |          |          |          
+               |          |          |--5.17%--core::num::imp::flt2dec::strategy::dragon::format_shortest
+               |          |          |          
+               |          |          |--2.94%--<alloc::string::String as core::fmt::Write>::write_str
+               |          |          |          
+               |          |          |--0.84%--core::num::imp::flt2dec::digits_to_dec_str
+               |          |          |          
+               |          |           --0.83%--<core::fmt::Formatter>::write_formatted_parts
+               |          |          
+               |          |--1.67%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+               |          |          
+               |           --1.66%--core::num::imp::flt2dec::digits_to_dec_str
+               |          
+                --0.83%--<f64 as core::fmt::Display>::fmt
+
+    61.47%     3.47%  perf_profile  perf_profile          [.] core::fmt::write                                                                                                                                                                                                        -      -            
+            |          
+            |--58.01%--core::fmt::write
+            |          |          
+            |          |--54.68%--core::fmt::float::float_to_decimal_common_shortest::<f64>
+            |          |          |          
+            |          |          |--22.12%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+            |          |          |          
+            |          |          |--7.85%--__memmove_avx_unaligned_erms
+            |          |          |          |          
+            |          |          |          |--5.24%--0xffffffff84c00bb7
+            |          |          |          |          0xffffffff8622811f
+            |          |          |          |          0xffffffff84feb96b
+            |          |          |          |          0xffffffff853a5627
+            |          |          |          |          0xffffffff853a53ad
+            |          |          |          |          0xffffffff853a4de7
+            |          |          |          |          |          
+            |          |          |          |          |--3.41%--0xffffffff853a37ea
+            |          |          |          |          |          |          
+            |          |          |          |          |          |--2.56%--0xffffffff853a33d2
+            |          |          |          |          |          |          0xffffffff8541df1b
+            |          |          |          |          |          |          0xffffffff8541a9e8
+            |          |          |          |          |          |          0xffffffff853dda90
+            |          |          |          |          |          |          |          
+            |          |          |          |          |          |          |--1.71%--0xffffffff853dc432
+            |          |          |          |          |          |          |          |          
+            |          |          |          |          |          |          |          |--0.86%--0xffffffff853d9574
+            |          |          |          |          |          |          |          |          
+            |          |          |          |          |          |          |           --0.85%--0xffffffff853da487
+            |          |          |          |          |          |          |                     0xffffffff853d9102
+            |          |          |          |          |          |          |                     0xffffffff853d8dcc
+            |          |          |          |          |          |          |          
+            |          |          |          |          |          |           --0.86%--0xffffffff853dc6c9
+            |          |          |          |          |          |                     0xffffffff8621b2b7
+            |          |          |          |          |          |          
+            |          |          |          |          |           --0.85%--0xffffffff85404a01
+            |          |          |          |          |          
+            |          |          |          |          |--0.98%--0xffffffff853a3963
+            |          |          |          |          |          0xffffffff853442bf
+            |          |          |          |          |          0xffffffff853439e9
+            |          |          |          |          |          0xffffffff853438f4
+            |          |          |          |          |          0xffffffff853437b1
+            |          |          |          |          |          
+            |          |          |          |           --0.85%--0xffffffff853a3795
+            |          |          |          |          
+            |          |          |          |--0.86%--0xffffffff84d04109
+            |          |          |          |          
+            |          |          |           --0.80%--0xffffffff84c00b93
+            |          |          |          
+            |          |          |--5.17%--core::num::imp::flt2dec::strategy::dragon::format_shortest
+            |          |          |          
+            |          |          |--2.94%--<alloc::string::String as core::fmt::Write>::write_str
+            |          |          |          
+            |          |          |--0.84%--core::num::imp::flt2dec::digits_to_dec_str
+            |          |          |          
+            |          |           --0.83%--<core::fmt::Formatter>::write_formatted_parts
+            |          |          
+            |          |--1.67%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+            |          |          
+            |           --1.66%--core::num::imp::flt2dec::digits_to_dec_str
+            |          
+             --3.47%--perf_profile::build_csv_string
+                       core::fmt::write
+                       core::fmt::float::float_to_decimal_common_shortest::<f64>
+                       |          
+                       |--0.85%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+                       |          
+                        --0.79%--__memmove_avx_unaligned_erms
+
+    59.00%     5.03%  perf_profile  perf_profile          [.] core::fmt::float::float_to_decimal_common_shortest::<f64>                                                                                                                                                               -      -            
+            |          
+            |--53.97%--core::fmt::float::float_to_decimal_common_shortest::<f64>
+            |          |          
+            |          |--19.66%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+            |          |          
+            |          |--8.64%--__memmove_avx_unaligned_erms
+            |          |          |          
+            |          |          |--5.24%--0xffffffff84c00bb7
+            |          |          |          0xffffffff8622811f
+            |          |          |          0xffffffff84feb96b
+            |          |          |          0xffffffff853a5627
+            |          |          |          0xffffffff853a53ad
+            |          |          |          0xffffffff853a4de7
+            |          |          |          |          
+            |          |          |          |--3.41%--0xffffffff853a37ea
+            |          |          |          |          |          
+            |          |          |          |          |--2.56%--0xffffffff853a33d2
+            |          |          |          |          |          0xffffffff8541df1b
+            |          |          |          |          |          0xffffffff8541a9e8
+            |          |          |          |          |          0xffffffff853dda90
+            |          |          |          |          |          |          
+            |          |          |          |          |          |--1.71%--0xffffffff853dc432
+            |          |          |          |          |          |          |          
+            |          |          |          |          |          |          |--0.86%--0xffffffff853d9574
+            |          |          |          |          |          |          |          
+            |          |          |          |          |          |           --0.85%--0xffffffff853da487
+            |          |          |          |          |          |                     0xffffffff853d9102
+            |          |          |          |          |          |                     0xffffffff853d8dcc
+            |          |          |          |          |          |          
+            |          |          |          |          |           --0.86%--0xffffffff853dc6c9
+            |          |          |          |          |                     0xffffffff8621b2b7
+            |          |          |          |          |          
+            |          |          |          |           --0.85%--0xffffffff85404a01
+            |          |          |          |          
+            |          |          |          |--0.98%--0xffffffff853a3963
+            |          |          |          |          0xffffffff853442bf
+            |          |          |          |          0xffffffff853439e9
+            |          |          |          |          0xffffffff853438f4
+            |          |          |          |          0xffffffff853437b1
+            |          |          |          |          
+            |          |          |           --0.85%--0xffffffff853a3795
+            |          |          |          
+            |          |          |--0.86%--0xffffffff84d04109
+            |          |          |          
+            |          |           --0.80%--0xffffffff84c00b93
+            |          |          
+            |          |--5.17%--core::num::imp::flt2dec::strategy::dragon::format_shortest
+            |          |          
+            |          |--2.94%--<alloc::string::String as core::fmt::Write>::write_str
+            |          |          
+            |          |--0.84%--core::num::imp::flt2dec::digits_to_dec_str
+            |          |          
+            |           --0.83%--<core::fmt::Formatter>::write_formatted_parts
+            |          
+             --5.03%--perf_profile::build_csv_string
+                       |          
+                        --4.18%--core::fmt::write
+                                  core::fmt::float::float_to_decimal_common_shortest::<f64>
+                                  |          
+                                   --3.32%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+
+    41.04%    26.59%  perf_profile  perf_profile          [.] core::num::imp::flt2dec::strategy::grisu::format_shortest_opt                                                                                                                                                           -      -            
+            |          
+            |--26.59%--perf_profile::build_csv_string
+            |          |          
+            |          |--23.67%--core::fmt::write
+            |          |          |          
+            |          |          |--21.19%--core::fmt::float::float_to_decimal_common_shortest::<f64>
+            |          |          |          |          
+            |          |          |          |--8.52%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+            |          |          |          |          
+            |          |          |          |--3.47%--__memmove_avx_unaligned_erms
+            |          |          |          |          |          
+            |          |          |          |          |--0.86%--0xffffffff84d04109
+            |          |          |          |          |          
+            |          |          |          |          |--0.86%--0xffffffff84c00bb7
+            |          |          |          |          |          0xffffffff8622811f
+            |          |          |          |          |          0xffffffff84feb96b
+            |          |          |          |          |          0xffffffff853a5627
+            |          |          |          |          |          0xffffffff853a53ad
+            |          |          |          |          |          0xffffffff853a4de7
+            |          |          |          |          |          0xffffffff853a37ea
+            |          |          |          |          |          0xffffffff853a33d2
+            |          |          |          |          |          0xffffffff8541df1b
+            |          |          |          |          |          0xffffffff8541a9e8
+            |          |          |          |          |          0xffffffff853dda90
+            |          |          |          |          |          0xffffffff853dc432
+            |          |          |          |          |          0xffffffff853d9574
+            |          |          |          |          |          
+            |          |          |          |           --0.80%--0xffffffff84c00b93
+            |          |          |          |          
+            |          |          |          |--2.48%--core::num::imp::flt2dec::strategy::dragon::format_shortest
+            |          |          |          |          
+            |          |          |           --0.86%--<alloc::string::String as core::fmt::Write>::write_str
+            |          |          |          
+            |          |          |--1.67%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+            |          |          |          
+            |          |           --0.81%--core::num::imp::flt2dec::digits_to_dec_str
+            |          |          
+            |           --0.83%--<f64 as core::fmt::Display>::fmt
+            |          
+             --14.45%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+
+    20.20%     4.04%  perf_profile  libc.so.6             [.] __memmove_avx_unaligned_erms                                                                                                                                                                                            -      -            
+            |          
+            |--16.16%--__memmove_avx_unaligned_erms
+            |          |          
+            |          |--8.08%--0xffffffff84c00bb7
+            |          |          |          
+            |          |           --8.08%--0xffffffff8622811f
+            |          |                     |          
+            |          |                     |--7.34%--0xffffffff84feb96b
+            |          |                     |          0xffffffff853a5627
+            |          |                     |          |          
+            |          |                     |           --7.34%--0xffffffff853a53ad
+            |          |                     |                     0xffffffff853a4de7
+            |          |                     |                     |          
+            |          |                     |                     |--3.77%--0xffffffff853a37ea
+            |          |                     |                     |          |          
+            |          |                     |                     |          |--2.92%--0xffffffff853a33d2
+            |          |                     |                     |          |          0xffffffff8541df1b
+            |          |                     |                     |          |          0xffffffff8541a9e8
+            |          |                     |                     |          |          |          
+            |          |                     |                     |          |           --2.92%--0xffffffff853dda90
+            |          |                     |                     |          |                     |          
+            |          |                     |                     |          |                     |--1.62%--0xffffffff853dc432
+            |          |                     |                     |          |                     |          |          
+            |          |                     |                     |          |                     |          |--0.86%--0xffffffff853d9574
+            |          |                     |                     |          |                     |          |          
+            |          |                     |                     |          |                     |           --0.76%--0xffffffff853da487
+            |          |                     |                     |          |                     |                     0xffffffff853d9102
+            |          |                     |                     |          |                     |                     0xffffffff853d8f99
+            |          |                     |                     |          |                     |                     0xffffffff853d7d31
+            |          |                     |                     |          |                     |          
+            |          |                     |                     |          |                      --1.30%--0xffffffff853dc6c9
+            |          |                     |                     |          |                                0xffffffff8621b2b7
+            |          |                     |                     |          |          
+            |          |                     |                     |           --0.85%--0xffffffff85404a01
+            |          |                     |                     |          
+            |          |                     |                     |--1.11%--0xffffffff853a3963
+            |          |                     |                     |          0xffffffff853442bf
+            |          |                     |                     |          |          
+            |          |                     |                     |           --0.99%--0xffffffff853439e9
+            |          |                     |                     |                     0xffffffff853438f4
+            |          |                     |                     |                     |          
+            |          |                     |                     |                      --0.98%--0xffffffff853437b1
+            |          |                     |                     |          
+            |          |                     |                     |--0.86%--0xffffffff853a3957
+            |          |                     |                     |          0xffffffff853bb5d6
+            |          |                     |                     |          0xffffffff853b9650
+            |          |                     |                     |          0xffffffff8510f1d0
+            |          |                     |                     |          
+            |          |                     |                     |--0.85%--0xffffffff853a3795
+            |          |                     |                     |          
+            |          |                     |                      --0.75%--0xffffffff853a3876
+            |          |                     |          
+            |          |                      --0.73%--0xffffffff84feb808
+            |          |                                0xffffffff84c00f0b
+            |          |                                0xffffffff8622777a
+            |          |                                0xffffffff84fc4bc8
+            |          |                                0xffffffff85139f5d
+            |          |                                0xffffffff85139030
+            |          |                                0xffffffff851389fa
+            |          |                                0xffffffff8620d8eb
+            |          |          
+            |          |--1.16%--0xffffffff84c01199
+            |          |          
+            |          |--0.86%--0xffffffff84d04109
+            |          |          
+            |          |--0.82%--0xffffffff84c00b90
+            |          |          
+            |           --0.80%--0xffffffff84c00b93
+            |          
+             --4.04%--perf_profile::build_csv_string
+                       core::fmt::write
+                       core::fmt::float::float_to_decimal_common_shortest::<f64>
+                       |          
+                        --0.85%--__memmove_avx_unaligned_erms
+                                  0xffffffff84c00bb7
+                                  0xffffffff8622811f
+                                  0xffffffff84feb96b
+                                  0xffffffff853a5627
+                                  0xffffffff853a53ad
+                                  0xffffffff853a4de7
+                                  0xffffffff853a37ea
+                                  0xffffffff853a33d2
+                                  0xffffffff8541df1b
+                                  0xffffffff8541a9e8
+                                  0xffffffff853dda90
+                                  0xffffffff853dc432
+                                  0xffffffff853da487
+                                  0xffffffff853d9102
+                                  0xffffffff853d8dcc
+
+    13.58%     8.41%  perf_profile  perf_profile          [.] core::num::imp::flt2dec::strategy::dragon::format_shortest                                                                                                                                                              -      -            
+            |          
+            |--8.41%--perf_profile::build_csv_string
+            |          |          
+            |           --8.40%--core::fmt::write
+            |                     |          
+            |                     |--7.56%--core::fmt::float::float_to_decimal_common_shortest::<f64>
+            |                     |          |          
+            |                     |          |--2.93%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+            |                     |          |          
+            |                     |          |--2.08%--<alloc::string::String as core::fmt::Write>::write_str
+            |                     |          |          
+            |                     |           --0.84%--core::num::imp::flt2dec::digits_to_dec_str
+            |                     |          
+            |                      --0.85%--core::num::imp::flt2dec::digits_to_dec_str
+            |          
+             --5.17%--core::num::imp::flt2dec::strategy::dragon::format_shortest
+
+    11.48%     7.48%  perf_profile  perf_profile          [.] fp_io::parse_f64_csv_number                                                                                                                                                                                             -      -            
+            |          
+            |--4.71%--fp_io::parse_f64_csv_number
+            |          
+            |--2.41%--0x3030303030303030
+            |          fp_io::parse_f64_csv_number
+            |          
+            |--1.75%--std::sys::backtrace::__rust_begin_short_backtrace::<fp_io::parse_simple_numeric_csv_parallel_chunks::{closure#0}::{closure#0}::{closure#0}, core::option::Option<(alloc::vec::Vec<fp_io::CsvTypedColumnValues>, i64)>>
+            |          
+            |--1.03%--fp_io::push_csv_default_numeric_field
+            |          |          
+            |           --0.60%--0xffffffff84c00b90
+            |          
+            |--0.90%--0x39310a3337383931
+            |          fp_io::parse_f64_csv_number
+            |          
+             --0.62%--0x2e3736340a333736
+                       fp_io::parse_f64_csv_number
+
+    11.43%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00bb7                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84c00bb7
+               |          
+                --11.43%--0xffffffff8622811f
+                          |          
+                          |--10.69%--0xffffffff84feb96b
+                          |          0xffffffff853a5627
+                          |          |          
+                          |           --10.63%--0xffffffff853a53ad
+                          |                     |          
+                          |                     |--10.04%--0xffffffff853a4de7
+                          |                     |          |          
+                          |                     |          |--5.28%--0xffffffff853a37ea
+                          |                     |          |          |          
+                          |                     |          |          |--3.77%--0xffffffff853a33d2
+                          |                     |          |          |          0xffffffff8541df1b
+                          |                     |          |          |          0xffffffff8541a9e8
+                          |                     |          |          |          |          
+                          |                     |          |          |           --3.77%--0xffffffff853dda90
+                          |                     |          |          |                     |          
+                          |                     |          |          |                     |--2.47%--0xffffffff853dc432
+                          |                     |          |          |                     |          |          
+                          |                     |          |          |                     |          |--1.61%--0xffffffff853da487
+                          |                     |          |          |                     |          |          0xffffffff853d9102
+                          |                     |          |          |                     |          |          |          
+                          |                     |          |          |                     |          |          |--0.85%--0xffffffff853d8dcc
+                          |                     |          |          |                     |          |          |          
+                          |                     |          |          |                     |          |           --0.76%--0xffffffff853d8f99
+                          |                     |          |          |                     |          |                     0xffffffff853d7d31
+                          |                     |          |          |                     |          |          
+                          |                     |          |          |                     |           --0.86%--0xffffffff853d9574
+                          |                     |          |          |                     |          
+                          |                     |          |          |                      --1.30%--0xffffffff853dc6c9
+                          |                     |          |          |                                0xffffffff8621b2b7
+                          |                     |          |          |          
+                          |                     |          |          |--0.85%--0xffffffff85404a01
+                          |                     |          |          |          
+                          |                     |          |           --0.66%--0xffffffff853a3437
+                          |                     |          |                     0xffffffff85404a1a
+                          |                     |          |                     0xffffffff857c02ad
+                          |                     |          |          
+                          |                     |          |--1.37%--0xffffffff853a3957
+                          |                     |          |          0xffffffff853bb5d6
+                          |                     |          |          0xffffffff853b9650
+                          |                     |          |          |          
+                          |                     |          |          |--0.86%--0xffffffff8510f1d0
+                          |                     |          |          |          
+                          |                     |          |           --0.51%--0xffffffff84d04104
+                          |                     |          |          
+                          |                     |          |--1.11%--0xffffffff853a3963
+                          |                     |          |          0xffffffff853442bf
+                          |                     |          |          |          
+                          |                     |          |           --0.99%--0xffffffff853439e9
+                          |                     |          |                     0xffffffff853438f4
+                          |                     |          |                     |          
+                          |                     |          |                      --0.98%--0xffffffff853437b1
+                          |                     |          |          
+                          |                     |          |--0.85%--0xffffffff853a3795
+                          |                     |          |          
+                          |                     |          |--0.75%--0xffffffff853a3876
+                          |                     |          |          
+                          |                     |           --0.68%--0xffffffff853a3967
+                          |                     |          
+                          |                      --0.59%--0xffffffff853a4d51
+                          |                                0xffffffff8539f704
+                          |                                0xffffffff85394c6a
+                          |                                0xffffffff8541df1b
+                          |                                0xffffffff8541a9e8
+                          |                                0xffffffff853dda90
+                          |                                0xffffffff853dc3ae
+                          |          
+                           --0.73%--0xffffffff84feb808
+                                     0xffffffff84c00f0b
+                                     0xffffffff8622777a
+                                     0xffffffff84fc4bc8
+                                     0xffffffff85139f5d
+                                     0xffffffff85139030
+                                     0xffffffff851389fa
+                                     0xffffffff8620d8eb
+
+    11.43%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622811f                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff8622811f
+               |          
+               |--10.69%--0xffffffff84feb96b
+               |          0xffffffff853a5627
+               |          |          
+               |           --10.63%--0xffffffff853a53ad
+               |                     |          
+               |                     |--10.04%--0xffffffff853a4de7
+               |                     |          |          
+               |                     |          |--5.28%--0xffffffff853a37ea
+               |                     |          |          |          
+               |                     |          |          |--3.77%--0xffffffff853a33d2
+               |                     |          |          |          0xffffffff8541df1b
+               |                     |          |          |          0xffffffff8541a9e8
+               |                     |          |          |          |          
+               |                     |          |          |           --3.77%--0xffffffff853dda90
+               |                     |          |          |                     |          
+               |                     |          |          |                     |--2.47%--0xffffffff853dc432
+               |                     |          |          |                     |          |          
+               |                     |          |          |                     |          |--1.61%--0xffffffff853da487
+               |                     |          |          |                     |          |          0xffffffff853d9102
+               |                     |          |          |                     |          |          |          
+               |                     |          |          |                     |          |          |--0.85%--0xffffffff853d8dcc
+               |                     |          |          |                     |          |          |          
+               |                     |          |          |                     |          |           --0.76%--0xffffffff853d8f99
+               |                     |          |          |                     |          |                     0xffffffff853d7d31
+               |                     |          |          |                     |          |          
+               |                     |          |          |                     |           --0.86%--0xffffffff853d9574
+               |                     |          |          |                     |          
+               |                     |          |          |                      --1.30%--0xffffffff853dc6c9
+               |                     |          |          |                                0xffffffff8621b2b7
+               |                     |          |          |          
+               |                     |          |          |--0.85%--0xffffffff85404a01
+               |                     |          |          |          
+               |                     |          |           --0.66%--0xffffffff853a3437
+               |                     |          |                     0xffffffff85404a1a
+               |                     |          |                     0xffffffff857c02ad
+               |                     |          |          
+               |                     |          |--1.37%--0xffffffff853a3957
+               |                     |          |          0xffffffff853bb5d6
+               |                     |          |          0xffffffff853b9650
+               |                     |          |          |          
+               |                     |          |          |--0.86%--0xffffffff8510f1d0
+               |                     |          |          |          
+               |                     |          |           --0.51%--0xffffffff84d04104
+               |                     |          |          
+               |                     |          |--1.11%--0xffffffff853a3963
+               |                     |          |          0xffffffff853442bf
+               |                     |          |          |          
+               |                     |          |           --0.99%--0xffffffff853439e9
+               |                     |          |                     0xffffffff853438f4
+               |                     |          |                     |          
+               |                     |          |                      --0.98%--0xffffffff853437b1
+               |                     |          |          
+               |                     |          |--0.85%--0xffffffff853a3795
+               |                     |          |          
+               |                     |          |--0.75%--0xffffffff853a3876
+               |                     |          |          
+               |                     |           --0.68%--0xffffffff853a3967
+               |                     |          
+               |                      --0.59%--0xffffffff853a4d51
+               |                                0xffffffff8539f704
+               |                                0xffffffff85394c6a
+               |                                0xffffffff8541df1b
+               |                                0xffffffff8541a9e8
+               |                                0xffffffff853dda90
+               |                                0xffffffff853dc3ae
+               |          
+                --0.73%--0xffffffff84feb808
+                          0xffffffff84c00f0b
+                          0xffffffff8622777a
+                          0xffffffff84fc4bc8
+                          0xffffffff85139f5d
+                          0xffffffff85139030
+                          0xffffffff851389fa
+                          0xffffffff8620d8eb
+
+    10.69%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84feb96b                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84feb96b
+               0xffffffff853a5627
+               |          
+                --10.63%--0xffffffff853a53ad
+                          |          
+                          |--10.04%--0xffffffff853a4de7
+                          |          |          
+                          |          |--5.28%--0xffffffff853a37ea
+                          |          |          |          
+                          |          |          |--3.77%--0xffffffff853a33d2
+                          |          |          |          0xffffffff8541df1b
+                          |          |          |          0xffffffff8541a9e8
+                          |          |          |          |          
+                          |          |          |           --3.77%--0xffffffff853dda90
+                          |          |          |                     |          
+                          |          |          |                     |--2.47%--0xffffffff853dc432
+                          |          |          |                     |          |          
+                          |          |          |                     |          |--1.61%--0xffffffff853da487
+                          |          |          |                     |          |          0xffffffff853d9102
+                          |          |          |                     |          |          |          
+                          |          |          |                     |          |          |--0.85%--0xffffffff853d8dcc
+                          |          |          |                     |          |          |          
+                          |          |          |                     |          |           --0.76%--0xffffffff853d8f99
+                          |          |          |                     |          |                     0xffffffff853d7d31
+                          |          |          |                     |          |          
+                          |          |          |                     |           --0.86%--0xffffffff853d9574
+                          |          |          |                     |          
+                          |          |          |                      --1.30%--0xffffffff853dc6c9
+                          |          |          |                                0xffffffff8621b2b7
+                          |          |          |          
+                          |          |          |--0.85%--0xffffffff85404a01
+                          |          |          |          
+                          |          |           --0.66%--0xffffffff853a3437
+                          |          |                     0xffffffff85404a1a
+                          |          |                     0xffffffff857c02ad
+                          |          |          
+                          |          |--1.37%--0xffffffff853a3957
+                          |          |          0xffffffff853bb5d6
+                          |          |          0xffffffff853b9650
+                          |          |          |          
+                          |          |          |--0.86%--0xffffffff8510f1d0
+                          |          |          |          
+                          |          |           --0.51%--0xffffffff84d04104
+                          |          |          
+                          |          |--1.11%--0xffffffff853a3963
+                          |          |          0xffffffff853442bf
+                          |          |          |          
+                          |          |           --0.99%--0xffffffff853439e9
+                          |          |                     0xffffffff853438f4
+                          |          |                     |          
+                          |          |                      --0.98%--0xffffffff853437b1
+                          |          |          
+                          |          |--0.85%--0xffffffff853a3795
+                          |          |          
+                          |          |--0.75%--0xffffffff853a3876
+                          |          |          
+                          |           --0.68%--0xffffffff853a3967
+                          |          
+                           --0.59%--0xffffffff853a4d51
+                                     0xffffffff8539f704
+                                     0xffffffff85394c6a
+                                     0xffffffff8541df1b
+                                     0xffffffff8541a9e8
+                                     0xffffffff853dda90
+                                     0xffffffff853dc3ae
+
+    10.69%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a5627                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853a5627
+               |          
+                --10.63%--0xffffffff853a53ad
+                          |          
+                          |--10.04%--0xffffffff853a4de7
+                          |          |          
+                          |          |--5.28%--0xffffffff853a37ea
+                          |          |          |          
+                          |          |          |--3.77%--0xffffffff853a33d2
+                          |          |          |          0xffffffff8541df1b
+                          |          |          |          0xffffffff8541a9e8
+                          |          |          |          |          
+                          |          |          |           --3.77%--0xffffffff853dda90
+                          |          |          |                     |          
+                          |          |          |                     |--2.47%--0xffffffff853dc432
+                          |          |          |                     |          |          
+                          |          |          |                     |          |--1.61%--0xffffffff853da487
+                          |          |          |                     |          |          0xffffffff853d9102
+                          |          |          |                     |          |          |          
+                          |          |          |                     |          |          |--0.85%--0xffffffff853d8dcc
+                          |          |          |                     |          |          |          
+                          |          |          |                     |          |           --0.76%--0xffffffff853d8f99
+                          |          |          |                     |          |                     0xffffffff853d7d31
+                          |          |          |                     |          |          
+                          |          |          |                     |           --0.86%--0xffffffff853d9574
+                          |          |          |                     |          
+                          |          |          |                      --1.30%--0xffffffff853dc6c9
+                          |          |          |                                0xffffffff8621b2b7
+                          |          |          |          
+                          |          |          |--0.85%--0xffffffff85404a01
+                          |          |          |          
+                          |          |           --0.66%--0xffffffff853a3437
+                          |          |                     0xffffffff85404a1a
+                          |          |                     0xffffffff857c02ad
+                          |          |          
+                          |          |--1.37%--0xffffffff853a3957
+                          |          |          0xffffffff853bb5d6
+                          |          |          0xffffffff853b9650
+                          |          |          |          
+                          |          |          |--0.86%--0xffffffff8510f1d0
+                          |          |          |          
+                          |          |           --0.51%--0xffffffff84d04104
+                          |          |          
+                          |          |--1.11%--0xffffffff853a3963
+                          |          |          0xffffffff853442bf
+                          |          |          |          
+                          |          |           --0.99%--0xffffffff853439e9
+                          |          |                     0xffffffff853438f4
+                          |          |                     |          
+                          |          |                      --0.98%--0xffffffff853437b1
+                          |          |          
+                          |          |--0.85%--0xffffffff853a3795
+                          |          |          
+                          |          |--0.75%--0xffffffff853a3876
+                          |          |          
+                          |           --0.68%--0xffffffff853a3967
+                          |          
+                           --0.59%--0xffffffff853a4d51
+                                     0xffffffff8539f704
+                                     0xffffffff85394c6a
+                                     0xffffffff8541df1b
+                                     0xffffffff8541a9e8
+                                     0xffffffff853dda90
+                                     0xffffffff853dc3ae
+
+    10.63%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a53ad                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853a53ad
+               |          
+               |--10.04%--0xffffffff853a4de7
+               |          |          
+               |          |--5.28%--0xffffffff853a37ea
+               |          |          |          
+               |          |          |--3.77%--0xffffffff853a33d2
+               |          |          |          0xffffffff8541df1b
+               |          |          |          0xffffffff8541a9e8
+               |          |          |          |          
+               |          |          |           --3.77%--0xffffffff853dda90
+               |          |          |                     |          
+               |          |          |                     |--2.47%--0xffffffff853dc432
+               |          |          |                     |          |          
+               |          |          |                     |          |--1.61%--0xffffffff853da487
+               |          |          |                     |          |          0xffffffff853d9102
+               |          |          |                     |          |          |          
+               |          |          |                     |          |          |--0.85%--0xffffffff853d8dcc
+               |          |          |                     |          |          |          
+               |          |          |                     |          |           --0.76%--0xffffffff853d8f99
+               |          |          |                     |          |                     0xffffffff853d7d31
+               |          |          |                     |          |          
+               |          |          |                     |           --0.86%--0xffffffff853d9574
+               |          |          |                     |          
+               |          |          |                      --1.30%--0xffffffff853dc6c9
+               |          |          |                                0xffffffff8621b2b7
+               |          |          |          
+               |          |          |--0.85%--0xffffffff85404a01
+               |          |          |          
+               |          |           --0.66%--0xffffffff853a3437
+               |          |                     0xffffffff85404a1a
+               |          |                     0xffffffff857c02ad
+               |          |          
+               |          |--1.37%--0xffffffff853a3957
+               |          |          0xffffffff853bb5d6
+               |          |          0xffffffff853b9650
+               |          |          |          
+               |          |          |--0.86%--0xffffffff8510f1d0
+               |          |          |          
+               |          |           --0.51%--0xffffffff84d04104
+               |          |          
+               |          |--1.11%--0xffffffff853a3963
+               |          |          0xffffffff853442bf
+               |          |          |          
+               |          |           --0.99%--0xffffffff853439e9
+               |          |                     0xffffffff853438f4
+               |          |                     |          
+               |          |                      --0.98%--0xffffffff853437b1
+               |          |          
+               |          |--0.85%--0xffffffff853a3795
+               |          |          
+               |          |--0.75%--0xffffffff853a3876
+               |          |          
+               |           --0.68%--0xffffffff853a3967
+               |          
+                --0.59%--0xffffffff853a4d51
+                          0xffffffff8539f704
+                          0xffffffff85394c6a
+                          0xffffffff8541df1b
+                          0xffffffff8541a9e8
+                          0xffffffff853dda90
+                          0xffffffff853dc3ae
+
+    10.04%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a4de7                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853a4de7
+               |          
+               |--5.28%--0xffffffff853a37ea
+               |          |          
+               |          |--3.77%--0xffffffff853a33d2
+               |          |          0xffffffff8541df1b
+               |          |          0xffffffff8541a9e8
+               |          |          |          
+               |          |           --3.77%--0xffffffff853dda90
+               |          |                     |          
+               |          |                     |--2.47%--0xffffffff853dc432
+               |          |                     |          |          
+               |          |                     |          |--1.61%--0xffffffff853da487
+               |          |                     |          |          0xffffffff853d9102
+               |          |                     |          |          |          
+               |          |                     |          |          |--0.85%--0xffffffff853d8dcc
+               |          |                     |          |          |          
+               |          |                     |          |           --0.76%--0xffffffff853d8f99
+               |          |                     |          |                     0xffffffff853d7d31
+               |          |                     |          |          
+               |          |                     |           --0.86%--0xffffffff853d9574
+               |          |                     |          
+               |          |                      --1.30%--0xffffffff853dc6c9
+               |          |                                0xffffffff8621b2b7
+               |          |          
+               |          |--0.85%--0xffffffff85404a01
+               |          |          
+               |           --0.66%--0xffffffff853a3437
+               |                     0xffffffff85404a1a
+               |                     0xffffffff857c02ad
+               |          
+               |--1.37%--0xffffffff853a3957
+               |          0xffffffff853bb5d6
+               |          0xffffffff853b9650
+               |          |          
+               |          |--0.86%--0xffffffff8510f1d0
+               |          |          
+               |           --0.51%--0xffffffff84d04104
+               |          
+               |--1.11%--0xffffffff853a3963
+               |          0xffffffff853442bf
+               |          |          
+               |           --0.99%--0xffffffff853439e9
+               |                     0xffffffff853438f4
+               |                     |          
+               |                      --0.98%--0xffffffff853437b1
+               |          
+               |--0.85%--0xffffffff853a3795
+               |          
+               |--0.75%--0xffffffff853a3876
+               |          
+                --0.68%--0xffffffff853a3967
+
+     8.32%     5.11%  perf_profile  perf_profile          [.] std::sys::backtrace::__rust_begin_short_backtrace::<fp_io::parse_simple_numeric_csv_parallel_chunks::{closure#0}::{closure#0}::{closure#0}, core::option::Option<(alloc::vec::Vec<fp_io::CsvTypedColumnValues>, i64)>>  -      -            
+            |          
+            |--4.62%--std::sys::backtrace::__rust_begin_short_backtrace::<fp_io::parse_simple_numeric_csv_parallel_chunks::{closure#0}::{closure#0}::{closure#0}, core::option::Option<(alloc::vec::Vec<fp_io::CsvTypedColumnValues>, i64)>>
+            |          
+            |--2.09%--fp_io::parse_i64_ascii
+            |          
+             --1.11%--fp_io::push_csv_default_numeric_field
+
+     8.11%     8.11%  perf_profile  perf_profile          [.] <core::fmt::Formatter>::write_formatted_parts                                                                                                                                                                           -      -            
+            |
+            ---perf_profile::build_csv_string
+               core::fmt::write
+               core::fmt::float::float_to_decimal_common_shortest::<f64>
+               |          
+               |--4.87%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+               |          
+               |--0.83%--<core::fmt::Formatter>::write_formatted_parts
+               |          
+                --0.75%--core::num::imp::flt2dec::strategy::dragon::format_shortest
+
+     7.78%     3.78%  perf_profile  perf_profile          [.] fp_io::push_csv_default_numeric_field                                                                                                                                                                                   -      -            
+            |          
+            |--4.00%--fp_io::push_csv_default_numeric_field
+            |          |          
+            |          |--1.86%--0xffffffff84c00bb7
+            |          |          0xffffffff8622811f
+            |          |          |          
+            |          |           --1.86%--0xffffffff84feb96b
+            |          |                     0xffffffff853a5627
+            |          |                     0xffffffff853a53ad
+            |          |                     0xffffffff853a4de7
+            |          |                     |          
+            |          |                     |--0.68%--0xffffffff853a3967
+            |          |                     |          
+            |          |                     |--0.66%--0xffffffff853a37ea
+            |          |                     |          0xffffffff853a3437
+            |          |                     |          0xffffffff85404a1a
+            |          |                     |          0xffffffff857c02ad
+            |          |                     |          
+            |          |                      --0.51%--0xffffffff853a3957
+            |          |                                0xffffffff853bb5d6
+            |          |                                0xffffffff853b9650
+            |          |                                0xffffffff84d04104
+            |          |          
+            |           --1.05%--0xffffffff84c00b90
+            |          
+            |--0.67%--fp_io::parse_f64_csv_number
+            |          
+            |--0.65%--std::sys::backtrace::__rust_begin_short_backtrace::<fp_io::parse_simple_numeric_csv_parallel_chunks::{closure#0}::{closure#0}::{closure#0}, core::option::Option<(alloc::vec::Vec<fp_io::CsvTypedColumnValues>, i64)>>
+            |          
+            |--0.64%--0x3030303030303030
+            |          fast_float2::binary::compute_float::<f64>
+            |          
+            |--0.62%--0x303030312e383432
+            |          fp_io::parse_f64_csv_number
+            |          
+            |--0.60%--fp_io::parse_i64_ascii
+            |          
+             --0.59%--0x373035372c383836
+                       fp_io::parse_f64_csv_number
+
+     5.71%     2.78%  perf_profile  perf_profile          [.] <alloc::string::String as core::fmt::Write>::write_str                                                                                                                                                                  -      -            
+            |          
+            |--2.94%--<alloc::string::String as core::fmt::Write>::write_str
+            |          
+             --2.78%--perf_profile::build_csv_string
+                       core::fmt::write
+                       core::fmt::float::float_to_decimal_common_shortest::<f64>
+                       |          
+                       |--1.09%--core::num::imp::flt2dec::strategy::dragon::format_shortest
+                       |          
+                        --0.84%--core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+
+     5.28%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a37ea                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853a37ea
+               |          
+               |--3.77%--0xffffffff853a33d2
+               |          0xffffffff8541df1b
+               |          0xffffffff8541a9e8
+               |          |          
+               |           --3.77%--0xffffffff853dda90
+               |                     |          
+               |                     |--2.47%--0xffffffff853dc432
+               |                     |          |          
+               |                     |          |--1.61%--0xffffffff853da487
+               |                     |          |          0xffffffff853d9102
+               |                     |          |          |          
+               |                     |          |          |--0.85%--0xffffffff853d8dcc
+               |                     |          |          |          
+               |                     |          |           --0.76%--0xffffffff853d8f99
+               |                     |          |                     0xffffffff853d7d31
+               |                     |          |          
+               |                     |           --0.86%--0xffffffff853d9574
+               |                     |          
+               |                      --1.30%--0xffffffff853dc6c9
+               |                                0xffffffff8621b2b7
+               |          
+               |--0.85%--0xffffffff85404a01
+               |          
+                --0.66%--0xffffffff853a3437
+                          0xffffffff85404a1a
+                          0xffffffff857c02ad
+
+     4.36%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8541df1b                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff8541df1b
+               0xffffffff8541a9e8
+               |          
+                --4.36%--0xffffffff853dda90
+                          |          
+                          |--2.47%--0xffffffff853dc432
+                          |          |          
+                          |          |--1.61%--0xffffffff853da487
+                          |          |          0xffffffff853d9102
+                          |          |          |          
+                          |          |          |--0.85%--0xffffffff853d8dcc
+                          |          |          |          
+                          |          |           --0.76%--0xffffffff853d8f99
+                          |          |                     0xffffffff853d7d31
+                          |          |          
+                          |           --0.86%--0xffffffff853d9574
+                          |          
+                          |--1.30%--0xffffffff853dc6c9
+                          |          0xffffffff8621b2b7
+                          |          
+                           --0.59%--0xffffffff853dc3ae
+
+     4.36%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8541a9e8                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff8541a9e8
+               |          
+                --4.36%--0xffffffff853dda90
+                          |          
+                          |--2.47%--0xffffffff853dc432
+                          |          |          
+                          |          |--1.61%--0xffffffff853da487
+                          |          |          0xffffffff853d9102
+                          |          |          |          
+                          |          |          |--0.85%--0xffffffff853d8dcc
+                          |          |          |          
+                          |          |           --0.76%--0xffffffff853d8f99
+                          |          |                     0xffffffff853d7d31
+                          |          |          
+                          |           --0.86%--0xffffffff853d9574
+                          |          
+                          |--1.30%--0xffffffff853dc6c9
+                          |          0xffffffff8621b2b7
+                          |          
+                           --0.59%--0xffffffff853dc3ae
+
+     4.36%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853dda90                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853dda90
+               |          
+               |--2.47%--0xffffffff853dc432
+               |          |          
+               |          |--1.61%--0xffffffff853da487
+               |          |          0xffffffff853d9102
+               |          |          |          
+               |          |          |--0.85%--0xffffffff853d8dcc
+               |          |          |          
+               |          |           --0.76%--0xffffffff853d8f99
+               |          |                     0xffffffff853d7d31
+               |          |          
+               |           --0.86%--0xffffffff853d9574
+               |          
+               |--1.30%--0xffffffff853dc6c9
+               |          0xffffffff8621b2b7
+               |          
+                --0.59%--0xffffffff853dc3ae
+
+     3.77%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a33d2                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853a33d2
+               0xffffffff8541df1b
+               0xffffffff8541a9e8
+               |          
+                --3.77%--0xffffffff853dda90
+                          |          
+                          |--2.47%--0xffffffff853dc432
+                          |          |          
+                          |          |--1.61%--0xffffffff853da487
+                          |          |          0xffffffff853d9102
+                          |          |          |          
+                          |          |          |--0.85%--0xffffffff853d8dcc
+                          |          |          |          
+                          |          |           --0.76%--0xffffffff853d8f99
+                          |          |                     0xffffffff853d7d31
+                          |          |          
+                          |           --0.86%--0xffffffff853d9574
+                          |          
+                           --1.30%--0xffffffff853dc6c9
+                                     0xffffffff8621b2b7
+
+     3.61%     0.00%  perf_profile  [unknown]             [.] 0x3030303030303030                                                                                                                                                                                                      -      -            
+            |
+            ---0x3030303030303030
+               |          
+               |--2.41%--fp_io::parse_f64_csv_number
+               |          
+                --1.19%--fast_float2::binary::compute_float::<f64>
+
+     3.25%     0.56%  perf_profile  perf_profile          [.] fp_io::parse_i64_ascii                                                                                                                                                                                                  -      -            
+            |          
+            |--2.70%--fp_io::parse_i64_ascii
+            |          
+             --0.56%--0x3030303030303030
+                       fast_float2::binary::compute_float::<f64>
+
+     2.79%     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c0012b                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84c0012b
+               0xffffffff86220551
+               |          
+               |--1.23%--0xffffffff84f255ff
+               |          0xffffffff853f969b
+               |          |          
+               |           --0.80%--0xffffffff853f95fe
+               |                     0xffffffff853ae78e
+               |                     0xffffffff853adcca
+               |                     0xffffffff853fc852
+               |                     0xffffffff853435d8
+               |                     0xffffffff85459378
+               |                     0xffffffff85104b20
+               |          
+               |--0.99%--0xffffffff84f25500
+               |          0xffffffff84f81c56
+               |          |          
+               |           --0.92%--0xffffffff853aa864
+               |                     |          
+               |                      --0.86%--0xffffffff8536aa37
+               |                                0xffffffff862346a2
+               |                                |          
+               |                                 --0.86%--0xffffffff850cd0e9
+               |          
+                --0.55%--0xffffffff84f24dad
+                          0xffffffff853aa42b
+                          0xffffffff853ceac8
+                          0xffffffff853cc961
+                          0xffffffff853cc7f5
+                          0xffffffff853cb02c
+
+     2.79%     0.00%  perf_profile  [unknown]             [k] 0xffffffff86220551                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff86220551
+               |          
+               |--1.23%--0xffffffff84f255ff
+               |          0xffffffff853f969b
+               |          |          
+               |           --0.80%--0xffffffff853f95fe
+               |                     0xffffffff853ae78e
+               |                     0xffffffff853adcca
+               |                     0xffffffff853fc852
+               |                     0xffffffff853435d8
+               |                     0xffffffff85459378
+               |                     0xffffffff85104b20
+               |          
+               |--0.99%--0xffffffff84f25500
+               |          0xffffffff84f81c56
+               |          |          
+               |           --0.92%--0xffffffff853aa864
+               |                     |          
+               |                      --0.86%--0xffffffff8536aa37
+               |                                0xffffffff862346a2
+               |                                |          
+               |                                 --0.86%--0xffffffff850cd0e9
+               |          
+                --0.55%--0xffffffff84f24dad
+                          0xffffffff853aa42b
+                          0xffffffff853ceac8
+                          0xffffffff853cc961
+                          0xffffffff853cc7f5
+                          0xffffffff853cb02c
+
+     2.53%     0.06%  perf_profile  [unknown]             [.] 0xffffffff853dc432                                                                                                                                                                                                      -      -            
+            |          
+             --2.47%--0xffffffff853dc432
+                       |          
+                       |--1.61%--0xffffffff853da487
+                       |          0xffffffff853d9102
+                       |          |          
+                       |          |--0.85%--0xffffffff853d8dcc
+                       |          |          
+                       |           --0.76%--0xffffffff853d8f99
+                       |                     0xffffffff853d7d31
+                       |          
+                        --0.86%--0xffffffff853d9574
+
+     2.50%     0.00%  perf_profile  perf_profile          [.] core::num::imp::flt2dec::digits_to_dec_str                                                                                                                                                                              -      -            
+            |
+            ---core::num::imp::flt2dec::digits_to_dec_str
+
+     2.22%     0.00%  perf_profile  perf_profile          [.] fp_io::try_read_csv_str_simple_typed_numeric                                                                                                                                                                            -      -            
+            |
+            ---fp_io::try_read_csv_str_simple_typed_numeric
+               |          
+               |--1.23%--_int_free_chunk
+               |          __madvise
+               |          0xffffffff84c0012b
+               |          0xffffffff86220551
+               |          0xffffffff84f255ff
+               |          0xffffffff853f969b
+               |          |          
+               |           --0.80%--0xffffffff853f95fe
+               |                     0xffffffff853ae78e
+               |                     0xffffffff853adcca
+               |                     0xffffffff853fc852
+               |                     0xffffffff853435d8
+               |                     0xffffffff85459378
+               |                     0xffffffff85104b20
+               |          
+                --0.86%--<std::sys::thread::unix::Thread>::new
+                          pthread_create@GLIBC_2.2.5
+                          |          
+                           --0.86%--__mmap
+                                     0xffffffff84c0012b
+                                     0xffffffff86220551
+                                     0xffffffff84f25500
+                                     0xffffffff84f81c56
+                                     0xffffffff853aa864
+                                     0xffffffff8536aa37
+                                     0xffffffff862346a2
+                                     0xffffffff850cd0e9
+
+     2.04%     0.74%  perf_profile  [unknown]             [.] 0xffffffff8621b2b7                                                                                                                                                                                                      -      -            
+            |          
+            |--1.30%--0xffffffff8621b2b7
+            |          
+             --0.74%--__memmove_avx_unaligned_erms
+
+     2.04%     0.00%  perf_profile  [unknown]             [k] 0x0000000000000111                                                                                                                                                                                                      -      -            
+            |
+            ---0x111
+               |          
+               |--1.35%--fp_io::try_read_csv_str_simple_typed_numeric
+               |          |          
+               |           --1.23%--_int_free_chunk
+               |                     __madvise
+               |                     0xffffffff84c0012b
+               |                     0xffffffff86220551
+               |                     0xffffffff84f255ff
+               |                     0xffffffff853f969b
+               |                     |          
+               |                      --0.80%--0xffffffff853f95fe
+               |                                0xffffffff853ae78e
+               |                                0xffffffff853adcca
+               |                                0xffffffff853fc852
+               |                                0xffffffff853435d8
+               |                                0xffffffff85459378
+               |                                0xffffffff85104b20
+               |          
+                --0.69%--__memmove_avx_unaligned_erms
+                          |          
+                           --0.58%--0xffffffff84c00bb7
+                                     |          
+                                      --0.58%--0xffffffff8622811f
+                                                0xffffffff84feb96b
+                                                0xffffffff853a5627
+                                                |          
+                                                 --0.57%--0xffffffff853a53ad
+                                                           0xffffffff853a4de7
+
+     1.90%     0.70%  perf_profile  perf_profile          [.] fast_float2::binary::compute_float::<f64>                                                                                                                                                                               -      -            
+            |          
+            |--1.19%--fast_float2::binary::compute_float::<f64>
+            |          
+             --0.70%--std::sys::backtrace::__rust_begin_short_backtrace::<fp_io::parse_simple_numeric_csv_parallel_chunks::{closure#0}::{closure#0}::{closure#0}, core::option::Option<(alloc::vec::Vec<fp_io::CsvTypedColumnValues>, i64)>>
+
+     1.86%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00b90                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84c00b90
+
+     1.86%     1.19%  perf_profile  [unknown]             [.] 0xffffffff853a3437                                                                                                                                                                                                      -      -            
+            |          
+            |--1.19%--__memmove_avx_unaligned_erms
+            |          
+             --0.66%--0xffffffff853a3437
+                       0xffffffff85404a1a
+                       0xffffffff857c02ad
+
+     1.65%     0.82%  perf_profile  perf_profile          [.] <f64 as core::fmt::Display>::fmt                                                                                                                                                                                        -      -            
+            |          
+            |--0.83%--<f64 as core::fmt::Display>::fmt
+            |          
+             --0.82%--perf_profile::build_csv_string
+
+     1.63%     1.63%  perf_profile  perf_profile          [.] core::str::converts::from_utf8                                                                                                                                                                                          -      -            
+            |
+            ---0x30342c3832343333
+               fp_io::parse_f64_csv_number
+
+     1.63%     0.00%  perf_profile  [unknown]             [.] 0x30342c3832343333                                                                                                                                                                                                      -      -            
+            |
+            ---0x30342c3832343333
+               fp_io::parse_f64_csv_number
+
+     1.61%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853da487                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853da487
+               0xffffffff853d9102
+               |          
+               |--0.85%--0xffffffff853d8dcc
+               |          
+                --0.76%--0xffffffff853d8f99
+                          0xffffffff853d7d31
+
+     1.61%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853d9102                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853d9102
+               |          
+               |--0.85%--0xffffffff853d8dcc
+               |          
+                --0.76%--0xffffffff853d8f99
+                          0xffffffff853d7d31
+
+     1.37%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a3957                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853a3957
+               0xffffffff853bb5d6
+               0xffffffff853b9650
+               |          
+               |--0.86%--0xffffffff8510f1d0
+               |          
+                --0.51%--0xffffffff84d04104
+
+     1.37%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853bb5d6                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853bb5d6
+               0xffffffff853b9650
+               |          
+               |--0.86%--0xffffffff8510f1d0
+               |          
+                --0.51%--0xffffffff84d04104
+
+     1.37%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853b9650                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853b9650
+               |          
+               |--0.86%--0xffffffff8510f1d0
+               |          
+                --0.51%--0xffffffff84d04104
+
+     1.30%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853dc6c9                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853dc6c9
+               0xffffffff8621b2b7
+
+     1.29%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853ae78e                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853ae78e
+               0xffffffff853adcca
+               |          
+                --0.80%--0xffffffff853fc852
+                          0xffffffff853435d8
+                          0xffffffff85459378
+                          0xffffffff85104b20
+
+     1.29%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853adcca                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853adcca
+               |          
+                --0.80%--0xffffffff853fc852
+                          0xffffffff853435d8
+                          0xffffffff85459378
+                          0xffffffff85104b20
+
+     1.23%     0.00%  perf_profile  libc.so.6             [.] _int_free_chunk                                                                                                                                                                                                         -      -            
+            |
+            ---_int_free_chunk
+               __madvise
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f255ff
+               0xffffffff853f969b
+               |          
+                --0.80%--0xffffffff853f95fe
+                          0xffffffff853ae78e
+                          0xffffffff853adcca
+                          0xffffffff853fc852
+                          0xffffffff853435d8
+                          0xffffffff85459378
+                          0xffffffff85104b20
+
+     1.23%     0.00%  perf_profile  libc.so.6             [.] __madvise                                                                                                                                                                                                               -      -            
+            |
+            ---__madvise
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f255ff
+               0xffffffff853f969b
+               |          
+                --0.80%--0xffffffff853f95fe
+                          0xffffffff853ae78e
+                          0xffffffff853adcca
+                          0xffffffff853fc852
+                          0xffffffff853435d8
+                          0xffffffff85459378
+                          0xffffffff85104b20
+
+     1.23%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f255ff                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84f255ff
+               0xffffffff853f969b
+               |          
+                --0.80%--0xffffffff853f95fe
+                          0xffffffff853ae78e
+                          0xffffffff853adcca
+                          0xffffffff853fc852
+                          0xffffffff853435d8
+                          0xffffffff85459378
+                          0xffffffff85104b20
+
+     1.23%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853f969b                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853f969b
+               |          
+                --0.80%--0xffffffff853f95fe
+                          0xffffffff853ae78e
+                          0xffffffff853adcca
+                          0xffffffff853fc852
+                          0xffffffff853435d8
+                          0xffffffff85459378
+                          0xffffffff85104b20
+
+     1.17%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c01199                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84c01199
+
+     1.11%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a3963                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853a3963
+               0xffffffff853442bf
+               |          
+                --0.99%--0xffffffff853439e9
+                          0xffffffff853438f4
+                          |          
+                           --0.98%--0xffffffff853437b1
+
+     1.11%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853442bf                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853442bf
+               |          
+                --0.99%--0xffffffff853439e9
+                          0xffffffff853438f4
+                          |          
+                           --0.98%--0xffffffff853437b1
+
+     1.06%     1.06%  perf_profile  [unknown]             [k] 0xffffffff8623a4f9                                                                                                                                                                                                      -      -            
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c01199
+
+     0.99%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853439e9                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853439e9
+               0xffffffff853438f4
+               |          
+                --0.98%--0xffffffff853437b1
+
+     0.99%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853438f4                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853438f4
+               |          
+                --0.98%--0xffffffff853437b1
+
+     0.99%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f25500                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84f25500
+               0xffffffff84f81c56
+               |          
+                --0.92%--0xffffffff853aa864
+                          |          
+                           --0.86%--0xffffffff8536aa37
+                                     0xffffffff862346a2
+                                     |          
+                                      --0.86%--0xffffffff850cd0e9
+
+     0.99%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f81c56                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84f81c56
+               |          
+                --0.92%--0xffffffff853aa864
+                          |          
+                           --0.86%--0xffffffff8536aa37
+                                     0xffffffff862346a2
+                                     |          
+                                      --0.86%--0xffffffff850cd0e9
+
+     0.98%     0.98%  perf_profile  [unknown]             [k] 0xffffffff85455436                                                                                                                                                                                                      -      -            
+            |
+            ---perf_profile::build_csv_string
+               core::fmt::write
+               core::fmt::float::float_to_decimal_common_shortest::<f64>
+               __memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3963
+               0xffffffff853442bf
+               0xffffffff853439e9
+               0xffffffff853438f4
+               0xffffffff853437b1
+
+     0.98%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853437b1                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853437b1
+
+     0.93%     0.93%  perf_profile  perf_profile          [.] <fp_columnar::Column>::from_f64_values                                                                                                                                                                                  -      -            
+            |
+            ---<fp_columnar::Column>::from_f64_values
+
+     0.92%     0.00%  perf_profile  libc.so.6             [.] __mmap                                                                                                                                                                                                                  -      -            
+            |
+            ---__mmap
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f25500
+               0xffffffff84f81c56
+               0xffffffff853aa864
+               |          
+                --0.86%--0xffffffff8536aa37
+                          0xffffffff862346a2
+                          |          
+                           --0.86%--0xffffffff850cd0e9
+
+     0.92%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853aa864                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853aa864
+               |          
+                --0.86%--0xffffffff8536aa37
+                          0xffffffff862346a2
+                          |          
+                           --0.86%--0xffffffff850cd0e9
+
+     0.90%     0.00%  perf_profile  [unknown]             [.] 0x39310a3337383931                                                                                                                                                                                                      -      -            
+            |
+            ---0x39310a3337383931
+               fp_io::parse_f64_csv_number
+
+     0.86%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8510f1d0                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff8510f1d0
+
+     0.86%     0.86%  perf_profile  [unknown]             [k] 0xffffffff84fea986                                                                                                                                                                                                      -      -            
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3957
+               0xffffffff853bb5d6
+               0xffffffff853b9650
+               0xffffffff8510f1d0
+
+     0.86%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8536aa37                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff8536aa37
+               0xffffffff862346a2
+               |          
+                --0.86%--0xffffffff850cd0e9
+
+     0.86%     0.00%  perf_profile  [unknown]             [.] 0xffffffff862346a2                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff862346a2
+               |          
+                --0.86%--0xffffffff850cd0e9
+
+     0.86%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84d04109                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84d04109
+
+     0.86%     0.00%  perf_profile  libc.so.6             [.] pthread_create@GLIBC_2.2.5                                                                                                                                                                                              -      -            
+            |
+            ---pthread_create@GLIBC_2.2.5
+               |          
+                --0.86%--__mmap
+                          0xffffffff84c0012b
+                          0xffffffff86220551
+                          0xffffffff84f25500
+                          0xffffffff84f81c56
+                          0xffffffff853aa864
+                          0xffffffff8536aa37
+                          0xffffffff862346a2
+                          0xffffffff850cd0e9
+
+     0.86%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853d9574                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853d9574
+
+     0.86%     0.00%  perf_profile  perf_profile          [.] <std::sys::thread::unix::Thread>::new                                                                                                                                                                                   -      -            
+            |
+            ---<std::sys::thread::unix::Thread>::new
+               pthread_create@GLIBC_2.2.5
+               |          
+                --0.86%--__mmap
+                          0xffffffff84c0012b
+                          0xffffffff86220551
+                          0xffffffff84f25500
+                          0xffffffff84f81c56
+                          0xffffffff853aa864
+                          0xffffffff8536aa37
+                          0xffffffff862346a2
+                          0xffffffff850cd0e9
+
+     0.86%     0.86%  perf_profile  [unknown]             [k] 0xffffffff853a53a8                                                                                                                                                                                                      -      -            
+            |
+            ---perf_profile::build_csv_string
+               core::fmt::write
+               core::fmt::float::float_to_decimal_common_shortest::<f64>
+               __memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a37ea
+               0xffffffff853a33d2
+               0xffffffff8541df1b
+               0xffffffff8541a9e8
+               0xffffffff853dda90
+               0xffffffff853dc6c9
+               0xffffffff8621b2b7
+
+     0.86%     0.86%  perf_profile  [unknown]             [k] 0xffffffff86234282                                                                                                                                                                                                      -      -            
+            |
+            ---fp_io::try_read_csv_str_simple_typed_numeric
+               <std::sys::thread::unix::Thread>::new
+               pthread_create@GLIBC_2.2.5
+               __mmap
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f25500
+               0xffffffff84f81c56
+               0xffffffff853aa864
+               0xffffffff8536aa37
+               0xffffffff862346a2
+               0xffffffff850cd0e9
+
+     0.86%     0.00%  perf_profile  [unknown]             [.] 0xffffffff850cd0e9                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff850cd0e9
+
+     0.85%     0.85%  perf_profile  [unknown]             [k] 0xffffffff853a5723                                                                                                                                                                                                      -      -            
+            |
+            ---perf_profile::build_csv_string
+               core::fmt::write
+               core::fmt::float::float_to_decimal_common_shortest::<f64>
+               core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+
+     0.85%     0.85%  perf_profile  [unknown]             [k] 0xffffffff853ddbca                                                                                                                                                                                                      -      -            
+            |
+            ---perf_profile::build_csv_string
+               core::fmt::write
+               core::fmt::float::float_to_decimal_common_shortest::<f64>
+               __memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3795
+
+     0.85%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a3795                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853a3795
+
+     0.85%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853d8dcc                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853d8dcc
+
+     0.85%     0.85%  perf_profile  [unknown]             [k] 0xffffffff853ddb3d                                                                                                                                                                                                      -      -            
+            |
+            ---perf_profile::build_csv_string
+               core::fmt::write
+               core::fmt::float::float_to_decimal_common_shortest::<f64>
+               __memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a37ea
+               0xffffffff85404a01
+
+     0.85%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85404a01                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff85404a01
+
+     0.82%     0.82%  perf_profile  [unknown]             [k] 0xffffffff853b968d                                                                                                                                                                                                      -      -            
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00b90
+
+     0.81%     0.81%  perf_profile  perf_profile          [.] core::num::imp::flt2dec::strategy::dragon::mul_pow10                                                                                                                                                                    -      -            
+            |
+            ---perf_profile::build_csv_string
+               core::fmt::write
+               core::fmt::float::float_to_decimal_common_shortest::<f64>
+
+     0.80%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00b93                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84c00b93
+
+     0.80%     0.80%  perf_profile  [unknown]             [k] 0xffffffff853d43cc                                                                                                                                                                                                      -      -            
+            |
+            ---0x111
+               fp_io::try_read_csv_str_simple_typed_numeric
+               _int_free_chunk
+               __madvise
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f255ff
+               0xffffffff853f969b
+               0xffffffff853f95fe
+               0xffffffff853ae78e
+               0xffffffff853adcca
+               0xffffffff853fc852
+               0xffffffff853435d8
+               0xffffffff85459378
+               0xffffffff85104b20
+
+     0.80%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853f95fe                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853f95fe
+               0xffffffff853ae78e
+               0xffffffff853adcca
+               0xffffffff853fc852
+               0xffffffff853435d8
+               0xffffffff85459378
+               0xffffffff85104b20
+
+     0.80%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853fc852                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853fc852
+               0xffffffff853435d8
+               0xffffffff85459378
+               0xffffffff85104b20
+
+     0.80%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853435d8                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853435d8
+               0xffffffff85459378
+               0xffffffff85104b20
+
+     0.80%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85459378                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff85459378
+               0xffffffff85104b20
+
+     0.80%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85104b20                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff85104b20
+
+     0.79%     0.79%  perf_profile  [unknown]             [k] 0xffffffff853a5661                                                                                                                                                                                                      -      -            
+            |
+            ---perf_profile::build_csv_string
+               core::fmt::write
+               core::fmt::float::float_to_decimal_common_shortest::<f64>
+               core::num::imp::flt2dec::strategy::grisu::format_shortest_opt
+
+     0.78%     0.77%  perf_profile  [unknown]             [.] 0xffffffff853a33ec                                                                                                                                                                                                      -      -            
+            |          
+             --0.77%--__memmove_avx_unaligned_erms
+
+     0.76%     0.76%  perf_profile  [unknown]             [k] 0xffffffff853d7e8f                                                                                                                                                                                                      -      -            
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a37ea
+               0xffffffff853a33d2
+               0xffffffff8541df1b
+               0xffffffff8541a9e8
+               0xffffffff853dda90
+               0xffffffff853dc432
+               0xffffffff853da487
+               0xffffffff853d9102
+               0xffffffff853d8f99
+               0xffffffff853d7d31
+
+     0.76%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853d8f99                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853d8f99
+               0xffffffff853d7d31
+
+     0.76%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853d7d31                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853d7d31
+
+     0.75%     0.75%  perf_profile  [unknown]             [k] 0xffffffff84feb802                                                                                                                                                                                                      -      -            
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3876
+
+     0.75%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a3876                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853a3876
+
+     0.73%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84c00f0b                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84c00f0b
+               |          
+                --0.73%--0xffffffff8622777a
+                          0xffffffff84fc4bc8
+                          0xffffffff85139f5d
+                          0xffffffff85139030
+                          0xffffffff851389fa
+                          0xffffffff8620d8eb
+
+     0.73%     0.73%  perf_profile  [unknown]             [k] 0xffffffff8530d2e8                                                                                                                                                                                                      -      -            
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb808
+               0xffffffff84c00f0b
+               0xffffffff8622777a
+               0xffffffff84fc4bc8
+               0xffffffff85139f5d
+               0xffffffff85139030
+               0xffffffff851389fa
+               0xffffffff8620d8eb
+
+     0.73%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84feb808                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84feb808
+               0xffffffff84c00f0b
+               0xffffffff8622777a
+               0xffffffff84fc4bc8
+               0xffffffff85139f5d
+               0xffffffff85139030
+               0xffffffff851389fa
+               0xffffffff8620d8eb
+
+     0.73%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8622777a                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff8622777a
+               0xffffffff84fc4bc8
+               0xffffffff85139f5d
+               0xffffffff85139030
+               0xffffffff851389fa
+               0xffffffff8620d8eb
+
+     0.73%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84fc4bc8                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84fc4bc8
+               0xffffffff85139f5d
+               0xffffffff85139030
+               0xffffffff851389fa
+               0xffffffff8620d8eb
+
+     0.73%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85139f5d                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff85139f5d
+               0xffffffff85139030
+               0xffffffff851389fa
+               0xffffffff8620d8eb
+
+     0.73%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85139030                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff85139030
+               0xffffffff851389fa
+               0xffffffff8620d8eb
+
+     0.73%     0.00%  perf_profile  [unknown]             [.] 0xffffffff851389fa                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff851389fa
+               0xffffffff8620d8eb
+
+     0.73%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8620d8eb                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff8620d8eb
+
+     0.68%     0.68%  perf_profile  [unknown]             [k] 0xffffffff853dd916                                                                                                                                                                                                      -      -            
+            |
+            ---fp_io::push_csv_default_numeric_field
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3967
+
+     0.68%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a3967                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853a3967
+
+     0.67%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_start_user                                                                                                                                                                                                          -      -            
+            |
+            ---_dl_start_user
+               _dl_start
+               _dl_sysdep_start
+               dl_main
+               |          
+                --0.59%--_dl_relocate_object
+                          _dl_relocate_object_no_relro
+                          0xffffffff84c00bb7
+                          0xffffffff8622811f
+                          0xffffffff84feb96b
+                          0xffffffff853a5627
+                          0xffffffff853a53ad
+                          0xffffffff853a4d51
+                          0xffffffff8539f704
+                          0xffffffff85394c6a
+                          0xffffffff8541df1b
+                          0xffffffff8541a9e8
+                          0xffffffff853dda90
+                          0xffffffff853dc3ae
+
+     0.67%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_start                                                                                                                                                                                                               -      -            
+            |
+            ---_dl_start
+               _dl_sysdep_start
+               dl_main
+               |          
+                --0.59%--_dl_relocate_object
+                          _dl_relocate_object_no_relro
+                          0xffffffff84c00bb7
+                          0xffffffff8622811f
+                          0xffffffff84feb96b
+                          0xffffffff853a5627
+                          0xffffffff853a53ad
+                          0xffffffff853a4d51
+                          0xffffffff8539f704
+                          0xffffffff85394c6a
+                          0xffffffff8541df1b
+                          0xffffffff8541a9e8
+                          0xffffffff853dda90
+                          0xffffffff853dc3ae
+
+     0.67%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_sysdep_start                                                                                                                                                                                                        -      -            
+            |
+            ---_dl_sysdep_start
+               dl_main
+               |          
+                --0.59%--_dl_relocate_object
+                          _dl_relocate_object_no_relro
+                          0xffffffff84c00bb7
+                          0xffffffff8622811f
+                          0xffffffff84feb96b
+                          0xffffffff853a5627
+                          0xffffffff853a53ad
+                          0xffffffff853a4d51
+                          0xffffffff8539f704
+                          0xffffffff85394c6a
+                          0xffffffff8541df1b
+                          0xffffffff8541a9e8
+                          0xffffffff853dda90
+                          0xffffffff853dc3ae
+
+     0.67%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] dl_main                                                                                                                                                                                                                 -      -            
+            |
+            ---dl_main
+               |          
+                --0.59%--_dl_relocate_object
+                          _dl_relocate_object_no_relro
+                          0xffffffff84c00bb7
+                          0xffffffff8622811f
+                          0xffffffff84feb96b
+                          0xffffffff853a5627
+                          0xffffffff853a53ad
+                          0xffffffff853a4d51
+                          0xffffffff8539f704
+                          0xffffffff85394c6a
+                          0xffffffff8541df1b
+                          0xffffffff8541a9e8
+                          0xffffffff853dda90
+                          0xffffffff853dc3ae
+
+     0.66%     0.66%  perf_profile  [unknown]             [k] 0xffffffff853a4efc                                                                                                                                                                                                      -      -            
+            |
+            ---fp_io::push_csv_default_numeric_field
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a37ea
+               0xffffffff853a3437
+               0xffffffff85404a1a
+               0xffffffff857c02ad
+
+     0.66%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85404a1a                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff85404a1a
+               0xffffffff857c02ad
+
+     0.66%     0.00%  perf_profile  [unknown]             [.] 0xffffffff857c02ad                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff857c02ad
+
+     0.62%     0.00%  perf_profile  [unknown]             [.] 0x2e3736340a333736                                                                                                                                                                                                      -      -            
+            |
+            ---0x2e3736340a333736
+               fp_io::parse_f64_csv_number
+
+     0.62%     0.00%  perf_profile  [unknown]             [.] 0x303030312e383432                                                                                                                                                                                                      -      -            
+            |
+            ---0x303030312e383432
+               fp_io::parse_f64_csv_number
+
+     0.59%     0.00%  perf_profile  [unknown]             [.] 0x373035372c383836                                                                                                                                                                                                      -      -            
+            |
+            ---0x373035372c383836
+               fp_io::parse_f64_csv_number
+
+     0.59%     0.59%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_relocate_object_no_relro                                                                                                                                                                                            -      -            
+            |
+            ---_dl_start_user
+               _dl_start
+               _dl_sysdep_start
+               dl_main
+               _dl_relocate_object
+               _dl_relocate_object_no_relro
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4d51
+               0xffffffff8539f704
+               0xffffffff85394c6a
+               0xffffffff8541df1b
+               0xffffffff8541a9e8
+               0xffffffff853dda90
+               0xffffffff853dc3ae
+
+     0.59%     0.00%  perf_profile  ld-linux-x86-64.so.2  [.] _dl_relocate_object                                                                                                                                                                                                     -      -            
+            |
+            ---_dl_relocate_object
+               _dl_relocate_object_no_relro
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4d51
+               0xffffffff8539f704
+               0xffffffff85394c6a
+               0xffffffff8541df1b
+               0xffffffff8541a9e8
+               0xffffffff853dda90
+               0xffffffff853dc3ae
+
+     0.59%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853a4d51                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853a4d51
+               0xffffffff8539f704
+               0xffffffff85394c6a
+               0xffffffff8541df1b
+               0xffffffff8541a9e8
+               0xffffffff853dda90
+               0xffffffff853dc3ae
+
+     0.59%     0.00%  perf_profile  [unknown]             [.] 0xffffffff8539f704                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff8539f704
+               0xffffffff85394c6a
+               0xffffffff8541df1b
+               0xffffffff8541a9e8
+               0xffffffff853dda90
+               0xffffffff853dc3ae
+
+     0.59%     0.00%  perf_profile  [unknown]             [.] 0xffffffff85394c6a                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff85394c6a
+               0xffffffff8541df1b
+               0xffffffff8541a9e8
+               0xffffffff853dda90
+               0xffffffff853dc3ae
+
+     0.59%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853dc3ae                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853dc3ae
+
+     0.55%     0.00%  perf_profile  libc.so.6             [.] __munmap                                                                                                                                                                                                                -      -            
+            |
+            ---__munmap
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dad
+               0xffffffff853aa42b
+               0xffffffff853ceac8
+               0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     0.55%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84f24dad                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84f24dad
+               0xffffffff853aa42b
+               0xffffffff853ceac8
+               0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     0.55%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853aa42b                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853aa42b
+               0xffffffff853ceac8
+               0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     0.55%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853ceac8                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853ceac8
+               0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     0.55%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853cc961                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     0.55%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853cc7f5                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853cc7f5
+               0xffffffff853cb02c
+
+     0.55%     0.00%  perf_profile  [unknown]             [.] 0xffffffff853cb02c                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff853cb02c
+
+     0.51%     0.00%  perf_profile  [unknown]             [.] 0xffffffff84d04104                                                                                                                                                                                                      -      -            
+            |
+            ---0xffffffff84d04104
+
+     0.51%     0.51%  perf_profile  [unknown]             [k] 0xffffffff853ddb16                                                                                                                                                                                                      -      -            
+            |
+            ---fp_io::push_csv_default_numeric_field
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3957
+               0xffffffff853bb5d6
+               0xffffffff853b9650
+               0xffffffff84d04104
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
