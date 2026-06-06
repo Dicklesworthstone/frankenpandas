@@ -1742,7 +1742,10 @@ fn build_single_key_dense_i64_inner_merge_output(
         }
     }
 
-    let index = Index::new((0..output_len as i64).map(IndexLabel::from).collect());
+    // Lazy unit-range output index: identical labels (0..output_len as
+    // IndexLabel::Int64, materialized on demand), pre-proven unique and
+    // ascending — skips the eager Vec<IndexLabel> build for huge join outputs.
+    let index = Index::new_known_unique_int64_unit_range(0, output_len);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order = Vec::with_capacity(specs.len());
     for (spec, data) in specs.into_iter().zip(output_data) {
@@ -1939,7 +1942,10 @@ fn build_single_key_dense_i64_right_all_matched_merge_output(
         }
     }
 
-    let index = Index::new((0..output_len as i64).map(IndexLabel::from).collect());
+    // Lazy unit-range output index: identical labels (0..output_len as
+    // IndexLabel::Int64, materialized on demand), pre-proven unique and
+    // ascending — skips the eager Vec<IndexLabel> build for huge join outputs.
+    let index = Index::new_known_unique_int64_unit_range(0, output_len);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order = Vec::with_capacity(specs.len());
     for (spec, data) in specs.into_iter().zip(output_data) {
@@ -2113,7 +2119,10 @@ fn build_single_key_dense_i64_outer_all_matched_merge_output(
         }
     }
 
-    let index = Index::new((0..output_len as i64).map(IndexLabel::from).collect());
+    // Lazy unit-range output index: identical labels (0..output_len as
+    // IndexLabel::Int64, materialized on demand), pre-proven unique and
+    // ascending — skips the eager Vec<IndexLabel> build for huge join outputs.
+    let index = Index::new_known_unique_int64_unit_range(0, output_len);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order = Vec::with_capacity(specs.len());
     for spec in specs {
@@ -2177,7 +2186,8 @@ fn build_single_key_inner_merge_output(
     debug_assert_eq!(left_positions.len(), right_positions.len());
 
     let n = left_positions.len();
-    let index = Index::new((0..n as i64).map(IndexLabel::from).collect());
+    // Lazy unit-range output index (see build_single_key_dense_i64 site).
+    let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order: Vec<String> = Vec::new();
 
@@ -2259,7 +2269,8 @@ fn build_single_key_dense_left_merge_output(
     debug_assert_eq!(left_positions.len(), right_positions.len());
 
     let n = left_positions.len();
-    let index = Index::new((0..n as i64).map(IndexLabel::from).collect());
+    // Lazy unit-range output index (see build_single_key_dense_i64 site).
+    let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order: Vec<String> = Vec::new();
 
@@ -2330,7 +2341,8 @@ fn build_single_key_ordered_unique_left_merge_output(
     debug_assert_eq!(left.len(), right_positions.len());
 
     let n = left.len();
-    let index = Index::new((0..n as i64).map(IndexLabel::from).collect());
+    // Lazy unit-range output index (see build_single_key_dense_i64 site).
+    let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order: Vec<String> = Vec::new();
     let mut identity_positions = None;
@@ -2402,7 +2414,8 @@ fn build_single_key_ordered_unique_right_merge_output(
     debug_assert_eq!(right.len(), left_positions.len());
 
     let n = right.len();
-    let index = Index::new((0..n as i64).map(IndexLabel::from).collect());
+    // Lazy unit-range output index (see build_single_key_dense_i64 site).
+    let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order: Vec<String> = Vec::new();
     let mut identity_positions = None;
@@ -2485,7 +2498,8 @@ fn build_single_key_dense_right_merge_output(
     debug_assert_eq!(left_positions.len(), right_positions.len());
 
     let n = left_positions.len();
-    let index = Index::new((0..n as i64).map(IndexLabel::from).collect());
+    // Lazy unit-range output index (see build_single_key_dense_i64 site).
+    let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order: Vec<String> = Vec::new();
 
@@ -2567,7 +2581,8 @@ fn build_single_key_ordered_unique_outer_merge_output(
     debug_assert_eq!(left_positions.len(), right_positions.len());
 
     let n = left_positions.len();
-    let index = Index::new((0..n as i64).map(IndexLabel::from).collect());
+    // Lazy unit-range output index (see build_single_key_dense_i64 site).
+    let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order: Vec<String> = Vec::new();
 
@@ -2716,7 +2731,8 @@ fn build_single_key_ordered_identity_inner_merge_output(
 
     let n = left.len();
     debug_assert_eq!(n, right.len());
-    let index = Index::new((0..n as i64).map(IndexLabel::from).collect());
+    // Lazy unit-range output index (see build_single_key_dense_i64 site).
+    let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order: Vec<String> = Vec::new();
     let mut identity_positions = None;
@@ -3534,7 +3550,8 @@ pub fn merge_dataframes_on_with_options(
 
     // Build output columns by reindexing.
     let n = left_positions.len();
-    let index = Index::new((0..n as i64).map(IndexLabel::from).collect());
+    // Lazy unit-range output index (see build_single_key_dense_i64 site).
+    let index = Index::new_known_unique_int64_unit_range(0, n);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order: Vec<String> = Vec::new();
 

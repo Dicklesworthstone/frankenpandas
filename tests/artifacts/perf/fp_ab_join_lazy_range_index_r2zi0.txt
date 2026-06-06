@@ -1,0 +1,6 @@
+# br-frankenpandas-r2zi0 lazy unit-range join output indexes
+# inner_join 100000 card512 (19.5M output rows), internal per-iter ms, interleaved pairs
+# first session (load 25-49): B/A = 1448/844, 1198/1052, 1803/627, 759/423
+# confirm (load 50, stable): B = 733.7 725.9 739.1 721.7 706.2 703.0 | A = 421.9 413.0 429.0 432.8 417.4 415.1
+# min-based: 703.0 -> 413.0 ms = 1.70x; vs pandas 2.2.3 same shape 1234ms -> FP now 3.0x faster
+# goldens: inner_join 5000 be7d1711 / join_1to1 5000 18988b22 — identical before/after
