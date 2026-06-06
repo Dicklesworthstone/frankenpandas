@@ -65,7 +65,9 @@ fn build(n: usize, cardinality: i64) -> (DataFrame, DataFrame) {
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_else(|| "bench".to_string());
+    let mode = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "bench".to_string());
 
     if mode == "golden" {
         // Smaller deterministic case spanning backward/forward/nearest.
