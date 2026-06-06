@@ -72,7 +72,7 @@ use bumpalo::{Bump, collections::Vec as BumpVec};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexLabel};
-use fp_types::{DType, Scalar, TypeError};
+use fp_types::{DType, NullKind, Scalar, TypeError};
 // Join build maps key on &IndexLabel / &CompositeJoinKey and are LOOKUP-only:
 // output row order comes from probe-side iteration and per-key insertion-order
 // position Vecs, never from map iteration. So SipHash -> FxHash (rustc-hash,
@@ -4124,27 +4124,29 @@ fn merge_asof_grouped(
     ensure_sorted_non_decreasing(&left_vals, "left", on)?;
     ensure_sorted_non_decreasing(&right_vals, "right", on)?;
 
-    // Build group keys for left and right
-    let left_group_keys = build_group_keys(left, by_cols)?;
-    let right_group_keys = build_group_keys(right, by_cols)?;
+    // Dense u32 group ids over the `by` columns (shared id space for left and
+    // right). The single non-float `by` column case factorizes the column's
+    // scalars with a borrowed typed key — no per-row `format!`/`Vec<String>`
+    // allocation — and is bit-identical to the Debug-string grouping (see
+    // `build_group_ids`). Everything else falls back to the string path.
+    let (left_ids, right_ids) = build_group_ids(left, right, by_cols)?;
 
-    // Group right rows by their `by` key for asof matching (looked up by
-    // `.get()` per left row below). No per-group sort validation is needed: the
-    // global `ensure_sorted_non_decreasing` checks above already require the
+    // Group right rows by their `by` group id for asof matching (looked up by
+    // `.get()` per left group below). No per-group sort validation is needed:
+    // the global `ensure_sorted_non_decreasing` checks above already require the
     // `on` column to be non-decreasing over the whole frame, and every
     // per-group subsequence of a sorted column is itself sorted — so the old
     // per-group checks were unreachable (the global check fires first on any
-    // unsorted input). Dropping them also removes a redundant full-frame
-    // left-side grouping map. FxHashMap (vs std SipHash) speeds the build.
-    let mut right_groups: FxHashMap<Vec<String>, Vec<usize>> = FxHashMap::default();
-    for (idx, key) in right_group_keys.iter().enumerate() {
-        right_groups.entry(key.clone()).or_default().push(idx);
+    // unsorted input). FxHashMap (vs std SipHash) speeds the build.
+    let mut right_groups: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
+    for (idx, &id) in right_ids.iter().enumerate() {
+        right_groups.entry(id).or_default().push(idx);
     }
 
-    // Group LEFT rows by their `by` key (preserving the globally-sorted order
-    // within each group), then run the monotonic two-pointer asof sweep ONCE
-    // per group over all of the group's left values — instead of rebuilding the
-    // group's right-value vector and re-scanning it from scratch for every
+    // Group LEFT rows by their `by` group id (preserving the globally-sorted
+    // order within each group), then run the monotonic two-pointer asof sweep
+    // ONCE per group over all of the group's left values — instead of rebuilding
+    // the group's right-value vector and re-scanning it from scratch for every
     // individual left row (the old O(L·R) per group). compute_asof_matches
     // already drives a single left array with a monotonic cursor and handles
     // NaN left keys (→ None, cursor unchanged); because every per-group left
@@ -4152,14 +4154,14 @@ fn merge_asof_grouped(
     // grouped sweep yields the identical match for each left row as the old
     // fresh-per-row scan. Results are scattered by absolute left index, so the
     // output order is independent of group-iteration order.
-    let mut left_groups: FxHashMap<&Vec<String>, Vec<usize>> = FxHashMap::default();
-    for (left_idx, key) in left_group_keys.iter().enumerate() {
-        left_groups.entry(key).or_default().push(left_idx);
+    let mut left_groups: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
+    for (left_idx, &id) in left_ids.iter().enumerate() {
+        left_groups.entry(id).or_default().push(left_idx);
     }
 
     let mut right_matches: Vec<Option<usize>> = vec![None; left_vals.len()];
-    for (group_key, left_positions) in &left_groups {
-        let Some(group_indices) = right_groups.get(*group_key) else {
+    for (group_id, left_positions) in &left_groups {
+        let Some(group_indices) = right_groups.get(group_id) else {
             continue; // no right rows for this group -> all matches stay None
         };
         let group_right_vals: Vec<f64> = group_indices.iter().map(|&i| right_vals[i]).collect();
@@ -4181,6 +4183,115 @@ fn merge_asof_grouped(
     }
 
     build_asof_output(left, right, on, &right_matches, Some(by_cols))
+}
+
+/// Borrowed, allocation-free `by`-key for the single-column factorize fast
+/// path. Each variant is the typed payload of a `Scalar` whose *derived*
+/// `Debug` is injective and equality-consistent — so two scalars share a
+/// `ByKey` iff their `format!("{val:?}")` strings (the legacy group key) are
+/// equal. `Float64` (`-0.0` vs `0.0`, `NaN`) and `Interval` Debug strings
+/// disagree with value equality, so `from_scalar` returns `None` for them and
+/// the caller falls back to the string path.
+#[derive(PartialEq, Eq, Hash)]
+enum ByKey<'a> {
+    Null(u8),
+    Bool(bool),
+    Int(i64),
+    Str(&'a str),
+    Timedelta(i64),
+    Datetime(i64),
+    Period(i64),
+}
+
+impl<'a> ByKey<'a> {
+    fn from_scalar(s: &'a Scalar) -> Option<Self> {
+        Some(match s {
+            Scalar::Null(NullKind::Null) => ByKey::Null(0),
+            Scalar::Null(NullKind::NaN) => ByKey::Null(1),
+            Scalar::Null(NullKind::NaT) => ByKey::Null(2),
+            Scalar::Bool(b) => ByKey::Bool(*b),
+            Scalar::Int64(v) => ByKey::Int(*v),
+            Scalar::Utf8(s) => ByKey::Str(s.as_str()),
+            Scalar::Timedelta64(v) => ByKey::Timedelta(*v),
+            Scalar::Datetime64(v) => ByKey::Datetime(*v),
+            Scalar::Period(v) => ByKey::Period(*v),
+            Scalar::Float64(_) | Scalar::Interval(_) => return None,
+        })
+    }
+}
+
+/// Factorize a single `by` column over both frames into a shared u32 id space.
+/// Returns `None` (caller falls back to the string path) if any value is a
+/// `Float64`/`Interval` whose Debug string would not agree with typed equality.
+fn try_factorize_typed<'a>(
+    left: &'a [Scalar],
+    right: &'a [Scalar],
+) -> Option<(Vec<u32>, Vec<u32>)> {
+    let mut codes: FxHashMap<ByKey<'a>, u32> = FxHashMap::default();
+    let mut next = 0u32;
+    let mut left_ids = Vec::with_capacity(left.len());
+    for v in left {
+        let id = *codes.entry(ByKey::from_scalar(v)?).or_insert_with(|| {
+            let i = next;
+            next += 1;
+            i
+        });
+        left_ids.push(id);
+    }
+    let mut right_ids = Vec::with_capacity(right.len());
+    for v in right {
+        let id = *codes.entry(ByKey::from_scalar(v)?).or_insert_with(|| {
+            let i = next;
+            next += 1;
+            i
+        });
+        right_ids.push(id);
+    }
+    Some((left_ids, right_ids))
+}
+
+/// Build dense u32 group ids for the left and right frames over the `by`
+/// columns, sharing one id space. Returns `(left_ids, right_ids)`.
+///
+/// Fast path (a single non-float `by` column): factorize the column's scalars
+/// directly with the borrowed typed [`ByKey`] — zero per-row string formatting
+/// or allocation. Bit-identical to the `format!("{val:?}")` grouping because
+/// the typed key induces the exact same equality classes. Multi-column or
+/// float/interval `by` keys route to the original Debug-string builder, whose
+/// per-row composite keys are then interned to u32 (one clone per *distinct*
+/// group, not per row).
+fn build_group_ids(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    by_cols: &[String],
+) -> Result<(Vec<u32>, Vec<u32>), JoinError> {
+    if by_cols.len() == 1
+        && let (Some(lcol), Some(rcol)) = (
+            left.columns().get(&by_cols[0]),
+            right.columns().get(&by_cols[0]),
+        )
+        && let Some(ids) = try_factorize_typed(lcol.values(), rcol.values())
+    {
+        return Ok(ids);
+    }
+
+    let left_keys = build_group_keys(left, by_cols)?;
+    let right_keys = build_group_keys(right, by_cols)?;
+    let mut codes: FxHashMap<Vec<String>, u32> = FxHashMap::default();
+    let mut next = 0u32;
+    let mut intern = |k: &Vec<String>, codes: &mut FxHashMap<Vec<String>, u32>| -> u32 {
+        if let Some(&id) = codes.get(k) {
+            id
+        } else {
+            let id = next;
+            next += 1;
+            codes.insert(k.clone(), id);
+            id
+        }
+    };
+    let left_ids = left_keys.iter().map(|k| intern(k, &mut codes)).collect();
+    let right_ids = right_keys.iter().map(|k| intern(k, &mut codes)).collect();
+    Ok((left_ids, right_ids))
 }
 
 /// Build group keys from the `by` columns.
