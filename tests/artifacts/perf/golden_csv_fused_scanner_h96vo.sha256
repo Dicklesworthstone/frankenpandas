@@ -1,0 +1,10 @@
+# br-frankenpandas-h96vo fused CSV scanner golden proof
+# before/after binaries, golden <scenario> 5000 (sequential path) all three CSV scenarios:
+17f95925cec162c66933d5e935566b6f6fec5f8ef56872b98b00fb97ebf59fff  /data/tmp/golden_before_h96vo_csv_read_no_na_filter.txt
+17f95925cec162c66933d5e935566b6f6fec5f8ef56872b98b00fb97ebf59fff  /data/tmp/golden_before_h96vo_csv_read_options.txt
+17f95925cec162c66933d5e935566b6f6fec5f8ef56872b98b00fb97ebf59fff  /data/tmp/golden_before_h96vo_csv_read.txt
+17f95925cec162c66933d5e935566b6f6fec5f8ef56872b98b00fb97ebf59fff  /data/tmp/golden_after_h96vo_csv_read_no_na_filter.txt
+17f95925cec162c66933d5e935566b6f6fec5f8ef56872b98b00fb97ebf59fff  /data/tmp/golden_after_h96vo_csv_read_options.txt
+17f95925cec162c66933d5e935566b6f6fec5f8ef56872b98b00fb97ebf59fff  /data/tmp/golden_after_h96vo_csv_read.txt
+# golden csv_read 200000 (parallel row-block path), before and after:
+b069ea419894f6deb6d1509fc62d637302f98615cc3dfead105c87b189d422fa  perf_profile golden csv_read 200000 (both binaries)

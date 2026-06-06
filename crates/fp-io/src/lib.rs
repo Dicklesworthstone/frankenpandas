@@ -695,6 +695,132 @@ fn parse_f64_csv_number(field: &[u8]) -> Option<f64> {
     }
 }
 
+/// Exact powers of ten for the fused decimal fast path. Every entry up to
+/// 10^18 is exactly representable in f64, so dividing an exact mantissa by an
+/// entry is a single correctly-rounded operation.
+const FUSED_DECIMAL_POW10: [f64; 19] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18,
+];
+
+/// One CSV field admitted by the fused scanner/parser.
+struct FusedNumericField {
+    /// `Some` when the field is a plain optionally-signed integer; mirrors the
+    /// `parse_i64_ascii` route of `push_csv_default_numeric_field`.
+    int_value: Option<i64>,
+    /// The field value as `f64`, bit-identical to `parse_f64_csv_number` on
+    /// the same bytes (including the sign of zero, e.g. `-0` -> -0.0).
+    float_value: f64,
+    /// Index of the terminating delimiter (`,` or `\n`) or `data.len()`.
+    end: usize,
+}
+
+/// Scans one CSV field starting at `start`, fusing delimiter detection with
+/// decimal digit accumulation in a single pass over the bytes.
+///
+/// Admits only `[+-]?digits[.digits]` tokens with at most 18 mantissa digits
+/// (so the `u64` accumulator and the `i64` integer route can never overflow)
+/// and, for fractional values, a mantissa of at most 2^53 (so it is exactly
+/// representable in `f64`). Under those gates the computed value is provably
+/// bit-identical to the fallback parser: the mantissa and the power of ten
+/// are both exact in `f64`, so the single division (or `u64 -> f64`
+/// round-to-nearest-even conversion for integers) yields the correctly
+/// rounded value of the decimal token — the same contract `fast_float2` and
+/// `str::parse::<f64>` guarantee. Anything else (NA tokens, booleans,
+/// whitespace, exponents, overlong or malformed numbers, quotes, CR) returns
+/// `None` and must take the existing per-field fallback route.
+#[inline]
+fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumericField> {
+    let mut pos = start;
+    let mut negative = false;
+    match data.get(pos) {
+        Some(b'-') => {
+            negative = true;
+            pos += 1;
+        }
+        Some(b'+') => pos += 1,
+        _ => {}
+    }
+
+    let mut mantissa: u64 = 0;
+    let mut digits = 0usize;
+    let mut frac_digits = 0usize;
+    let mut seen_dot = false;
+    loop {
+        match data.get(pos) {
+            Some(&byte @ b'0'..=b'9') => {
+                if digits == 18 {
+                    return None;
+                }
+                mantissa = mantissa * 10 + u64::from(byte - b'0');
+                digits += 1;
+                frac_digits += usize::from(seen_dot);
+                pos += 1;
+            }
+            Some(b'.') if !seen_dot => {
+                seen_dot = true;
+                pos += 1;
+            }
+            Some(b',' | b'\n') | None => break,
+            Some(_) => return None,
+        }
+    }
+
+    if digits == 0 || (seen_dot && frac_digits == 0) {
+        return None;
+    }
+
+    if seen_dot {
+        if mantissa > (1u64 << 53) {
+            return None;
+        }
+        let magnitude = mantissa as f64 / FUSED_DECIMAL_POW10[frac_digits];
+        Some(FusedNumericField {
+            int_value: None,
+            float_value: if negative { -magnitude } else { magnitude },
+            end: pos,
+        })
+    } else {
+        // digits <= 18 => mantissa < 10^18 < i64::MAX, so the cast is exact.
+        let int_magnitude = mantissa as i64;
+        let float_magnitude = mantissa as f64;
+        Some(FusedNumericField {
+            int_value: Some(if negative {
+                -int_magnitude
+            } else {
+                int_magnitude
+            }),
+            float_value: if negative {
+                -float_magnitude
+            } else {
+                float_magnitude
+            },
+            end: pos,
+        })
+    }
+}
+
+/// Pushes a fused numeric field with the exact dtype/promotion semantics of
+/// `push_csv_default_numeric_field`: integers keep an Int64 column while any
+/// fractional value promotes it to Float64; Float64 columns always take the
+/// `f64` form of the token (which is how the fallback parses them too).
+#[inline]
+fn push_fused_numeric_csv_field(values: &mut CsvTypedColumnValues, field: &FusedNumericField) {
+    match values {
+        CsvTypedColumnValues::Int64(out) => {
+            if let Some(value) = field.int_value {
+                out.push(value);
+            } else {
+                let mut promoted = Vec::with_capacity(out.capacity());
+                promoted.extend(out.iter().copied().map(|value| value as f64));
+                promoted.push(field.float_value);
+                *values = CsvTypedColumnValues::Float64(promoted);
+            }
+        }
+        CsvTypedColumnValues::Float64(out) => out.push(field.float_value),
+    }
+}
+
 fn push_csv_default_numeric_field(values: &mut CsvTypedColumnValues, field: &[u8]) -> bool {
     if is_pandas_default_na_bytes(field) {
         return false;
@@ -809,51 +935,57 @@ fn parse_simple_numeric_csv_chunk(
         .collect();
     let mut row_count: i64 = 0;
     let mut column_idx = 0usize;
-    let mut field_start = 0usize;
+    let mut pos = 0usize;
 
-    for (idx, byte) in data.iter().copied().enumerate() {
-        match byte {
-            b'"' => return None,
-            b'\r' if data.get(idx + 1).copied() != Some(b'\n') => return None,
-            b',' | b'\n' => {
-                if column_idx >= header_count {
-                    return None;
-                }
-                let field = &data[field_start..idx];
-                if !push_csv_default_numeric_field(&mut typed_columns[column_idx], field) {
-                    return None;
-                }
-
-                if byte == b',' {
-                    column_idx += 1;
-                    if column_idx >= header_count {
-                        return None;
-                    }
-                } else {
-                    if column_idx + 1 != header_count {
-                        return None;
-                    }
-                    row_count += 1;
-                    column_idx = 0;
-                }
-                field_start = idx + 1;
-            }
-            _ => {}
-        }
-    }
-
-    if field_start < data.len() {
+    while pos < data.len() {
         if column_idx >= header_count {
             return None;
         }
-        let field = &data[field_start..];
-        if !push_csv_default_numeric_field(&mut typed_columns[column_idx], field)
-            || column_idx + 1 != header_count
-        {
-            return None;
+        let field_end = if let Some(field) = fuse_scan_numeric_csv_field(data, pos) {
+            push_fused_numeric_csv_field(&mut typed_columns[column_idx], &field);
+            field.end
+        } else {
+            // Fallback: locate the delimiter with the original abort rules
+            // (quote or bare CR anywhere rejects the whole chunk) and route
+            // the raw field through the general numeric field parser.
+            let mut idx = pos;
+            let end = loop {
+                match data.get(idx) {
+                    None | Some(b',' | b'\n') => break idx,
+                    Some(b'"') => return None,
+                    Some(b'\r') if data.get(idx + 1).copied() != Some(b'\n') => return None,
+                    Some(_) => idx += 1,
+                }
+            };
+            if !push_csv_default_numeric_field(&mut typed_columns[column_idx], &data[pos..end]) {
+                return None;
+            }
+            end
+        };
+
+        match data.get(field_end).copied() {
+            Some(b',') => {
+                column_idx += 1;
+                if column_idx >= header_count {
+                    return None;
+                }
+            }
+            // A newline or end-of-data both terminate the row.
+            Some(b'\n') | None => {
+                if column_idx + 1 != header_count {
+                    return None;
+                }
+                row_count += 1;
+                column_idx = 0;
+            }
+            // Unreachable: both field routes stop only at `,`/`\n`/EOF.
+            Some(_) => return None,
         }
-        row_count += 1;
-    } else if column_idx != 0 {
+        pos = field_end + 1;
+    }
+
+    // A chunk that ends mid-row (e.g. trailing comma) is malformed.
+    if column_idx != 0 {
         return None;
     }
 
@@ -982,63 +1114,10 @@ fn try_read_csv_str_simple_typed_numeric(
         return Ok(Some(frame));
     }
 
-    let row_hint = input.len() / (header_count * 8).max(1);
-    let mut typed_columns: Vec<CsvTypedColumnValues> = (0..header_count)
-        .map(|_| CsvTypedColumnValues::Int64(Vec::with_capacity(row_hint)))
-        .collect();
-    let mut row_count: i64 = 0;
-    let mut column_idx = 0usize;
-    let mut field_start = 0usize;
-
-    for (idx, byte) in data.iter().copied().enumerate() {
-        match byte {
-            b'"' => return Ok(None),
-            b'\r' if data.get(idx + 1).copied() != Some(b'\n') => return Ok(None),
-            b',' | b'\n' => {
-                if column_idx >= header_count {
-                    return Ok(None);
-                }
-                let field = &data[field_start..idx];
-                if !push_csv_default_numeric_field(&mut typed_columns[column_idx], field) {
-                    return Ok(None);
-                }
-
-                if byte == b',' {
-                    column_idx += 1;
-                    if column_idx >= header_count {
-                        return Ok(None);
-                    }
-                } else {
-                    if column_idx + 1 != header_count {
-                        return Ok(None);
-                    }
-                    row_count += 1;
-                    column_idx = 0;
-                }
-                field_start = idx + 1;
-            }
-            _ => {}
-        }
-    }
-
-    if field_start < data.len() {
-        if column_idx >= header_count {
-            return Ok(None);
-        }
-        let field = &data[field_start..];
-        if !push_csv_default_numeric_field(&mut typed_columns[column_idx], field)
-            || column_idx + 1 != header_count
-        {
-            return Ok(None);
-        }
-        row_count += 1;
-    } else if column_idx != 0 {
+    let Some((typed_columns, row_count)) = parse_simple_numeric_csv_chunk(data, header_count)
+    else {
         return Ok(None);
-    }
-
-    if row_count == 0 {
-        return Ok(None);
-    }
+    };
 
     build_typed_numeric_csv_frame(headers, typed_columns, row_count).map(Some)
 }
@@ -28383,5 +28462,137 @@ mod tests {
         let r_col = frame.column("r").expect("column r must exist");
         assert_eq!(r_col.dtype(), crate::DType::Float64);
         assert!(r_col.values()[0].is_missing());
+    }
+}
+
+#[cfg(test)]
+mod fused_numeric_csv_field_tests {
+    use super::{
+        CsvTypedColumnValues, fuse_scan_numeric_csv_field, push_csv_default_numeric_field,
+        push_fused_numeric_csv_field,
+    };
+
+    fn assert_same_columns(base: &CsvTypedColumnValues, fused: &CsvTypedColumnValues, token: &str) {
+        match (base, fused) {
+            (CsvTypedColumnValues::Int64(lhs), CsvTypedColumnValues::Int64(rhs)) => {
+                assert_eq!(lhs, rhs, "Int64 mismatch for token {token:?}");
+            }
+            (CsvTypedColumnValues::Float64(lhs), CsvTypedColumnValues::Float64(rhs)) => {
+                let lhs_bits: Vec<u64> = lhs.iter().map(|value| value.to_bits()).collect();
+                let rhs_bits: Vec<u64> = rhs.iter().map(|value| value.to_bits()).collect();
+                assert_eq!(
+                    lhs_bits, rhs_bits,
+                    "Float64 bit mismatch for token {token:?}"
+                );
+            }
+            _ => panic!("column dtype diverged for token {token:?}"),
+        }
+    }
+
+    /// Every token the fused scanner admits must produce bit-identical column
+    /// state to the `push_csv_default_numeric_field` fallback, for both a
+    /// fresh Int64 column and a Float64 column, under every terminator.
+    #[test]
+    fn fused_field_matches_fallback_parser() {
+        let tokens = [
+            "0",
+            "-0",
+            "+7",
+            "007",
+            "5",
+            "-5",
+            "123456789",
+            "999999999999999999",
+            "-999999999999999999",
+            "9007199254740993",
+            "1234567890123456789",
+            "0.1",
+            "-0.1",
+            "+0.5",
+            ".5",
+            "-.5",
+            "00.5",
+            "5.",
+            "12.34",
+            "123456.7",
+            "0.30000000000000004",
+            "9007199254740993.0",
+            "1e5",
+            "1E5",
+            "1.5e-3",
+            "inf",
+            "-inf",
+            "nan",
+            "NaN",
+            "",
+            " 5",
+            "5 ",
+            "true",
+            "false",
+            "TRUE",
+            "1.2.3",
+            "--5",
+            "+-5",
+            "1-2",
+            "#N/A",
+            "NULL",
+            "abc",
+        ];
+
+        for token in tokens {
+            for suffix in ["", ",", "\n", ",9\n"] {
+                let data = format!("{token}{suffix}");
+                let Some(field) = fuse_scan_numeric_csv_field(data.as_bytes(), 0) else {
+                    // Rejected tokens take the unchanged fallback route;
+                    // nothing further to prove.
+                    continue;
+                };
+                assert_eq!(
+                    field.end,
+                    token.len(),
+                    "fused scanner must stop at the delimiter for token {token:?}"
+                );
+
+                // The fallback must accept every token the fused scanner
+                // admits (the fused grammar is a strict subset).
+                let mut base_int = CsvTypedColumnValues::Int64(Vec::new());
+                assert!(
+                    push_csv_default_numeric_field(&mut base_int, token.as_bytes()),
+                    "fallback rejected fused-admitted token {token:?}"
+                );
+                let mut fused_int = CsvTypedColumnValues::Int64(Vec::new());
+                push_fused_numeric_csv_field(&mut fused_int, &field);
+                assert_same_columns(&base_int, &fused_int, token);
+
+                let mut base_float = CsvTypedColumnValues::Float64(Vec::new());
+                assert!(
+                    push_csv_default_numeric_field(&mut base_float, token.as_bytes()),
+                    "fallback Float64 rejected fused-admitted token {token:?}"
+                );
+                let mut fused_float = CsvTypedColumnValues::Float64(Vec::new());
+                push_fused_numeric_csv_field(&mut fused_float, &field);
+                assert_same_columns(&base_float, &fused_float, token);
+            }
+        }
+    }
+
+    /// The sign of zero must survive the fused route on Float64 columns:
+    /// `-0` parses to -0.0 via `parse_f64_csv_number`, and the fused field
+    /// must carry the same bits.
+    #[test]
+    fn fused_field_preserves_negative_zero_bits() {
+        let field = fuse_scan_numeric_csv_field(b"-0,", 0).expect("fused scanner must admit -0");
+        assert_eq!(field.int_value, Some(0));
+        assert_eq!(field.float_value.to_bits(), (-0.0f64).to_bits());
+
+        let mut float_column = CsvTypedColumnValues::Float64(Vec::new());
+        push_fused_numeric_csv_field(&mut float_column, &field);
+        match float_column {
+            CsvTypedColumnValues::Float64(values) => {
+                assert_eq!(values.len(), 1);
+                assert_eq!(values[0].to_bits(), (-0.0f64).to_bits());
+            }
+            CsvTypedColumnValues::Int64(_) => panic!("expected Float64 column"),
+        }
     }
 }
