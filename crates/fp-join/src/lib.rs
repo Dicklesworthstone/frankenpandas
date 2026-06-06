@@ -1607,6 +1607,11 @@ fn build_dense_i64_inner_output_column(
             }
         }
         FusedInt64Side::Right => {
+            let positioned_values = plan
+                .positions
+                .iter()
+                .map(|&right_pos| spec.values[right_pos])
+                .collect::<Vec<_>>();
             for &v in plan.left_keys {
                 if v < plan.min || v > plan.max {
                     continue;
@@ -1615,9 +1620,9 @@ fn build_dense_i64_inner_output_column(
                 if bucket + 1 >= plan.offsets.len() {
                     continue;
                 }
-                for &right_pos in &plan.positions[plan.offsets[bucket]..plan.offsets[bucket + 1]] {
-                    out.push(spec.values[right_pos]);
-                }
+                out.extend_from_slice(
+                    &positioned_values[plan.offsets[bucket]..plan.offsets[bucket + 1]],
+                );
             }
         }
     }

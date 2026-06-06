@@ -1,0 +1,140 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 228  of event 'cycles:P'
+# Event count (approx.): 1387933546
+#
+# Overhead  Command       Shared Object     Symbol
+# ........  ............  ................  ................................................................................................................................................................
+#
+    16.96%  perf_profile  [unknown]         [k] 0xffffffff85341fc5
+            |
+            ---0xffffffff853437b1
+               0xffffffff853438f4
+               0xffffffff853439e9
+               0xffffffff853442bf
+               0xffffffff853a3963
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               std::sys::backtrace::__rust_begin_short_backtrace::<fp_join::build_dense_i64_inner_output_data::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<i64>>
+
+    16.77%  perf_profile  [unknown]         [k] 0xffffffff8621b2b7
+            |
+            |--13.71%--__memmove_avx_unaligned_erms
+            |
+             --2.87%--std::sys::backtrace::__rust_begin_short_backtrace::<fp_join::build_dense_i64_inner_output_data::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<i64>>
+
+    16.04%  perf_profile  [unknown]         [k] 0xffffffff85452a61
+            |
+             --16.04%--0xffffffff8539b7d0
+                       0xffffffff8539c06e
+                       0xffffffff8539c594
+                       0xffffffff8539cb30
+                       0xffffffff8539cd76
+                       0xffffffff8539cea1
+                       0xffffffff853c9742
+                       0xffffffff853cb02c
+                       0xffffffff853cc7f5
+                       0xffffffff853cc961
+                       0xffffffff853ceac8
+                       0xffffffff853aa42b
+                       0xffffffff84f24dad
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __munmap
+                       core::ptr::drop_in_place::<fp_columnar::Column>
+
+    14.88%  perf_profile  [unknown]         [k] 0xffffffff8517f6f0
+            |
+            ---0xffffffff8545936c
+               0xffffffff853435d8
+               0xffffffff853fc79e
+               0xffffffff853adcca
+               0xffffffff853ae78e
+               0xffffffff853c9794
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __munmap
+               core::ptr::drop_in_place::<fp_columnar::Column>
+
+     9.22%  perf_profile  perf_profile      [.] std::sys::backtrace::__rust_begin_short_backtrace::<fp_join::build_dense_i64_inner_output_data::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<i64>>
+            |
+            |--3.47%--0xffffffff8621b2b7
+            |          0xffffffff853dc6c9
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fp_join::build_dense_i64_inner_output_data::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<i64>>
+            |
+            |--2.88%--0xffffffff854578cd
+            |          0xffffffff85458faf
+            |          0xffffffff853a33ec
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fp_join::build_dense_i64_inner_output_data::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<i64>>
+            |
+             --2.87%--0xffffffff85452c93
+                       0xffffffff85458f9e
+                       0xffffffff853a33ec
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fp_join::build_dense_i64_inner_output_data::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<i64>>
+
+     6.57%  perf_profile  libc.so.6         [.] __memmove_avx_unaligned_erms
+            |
+            |--3.30%--0xffffffff8621b2b7
+            |          0xffffffff853dc6c9
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          __memmove_avx_unaligned_erms
+            |
+             --2.90%--0xffffffff854049f5
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       __memmove_avx_unaligned_erms
+
+     2.97%  perf_profile  [unknown]         [k] 0xffffffff853a4e56
