@@ -1,0 +1,32 @@
+{
+  "bead": "br-frankenpandas-7wxoc",
+  "lever": "fused dense-i64 LEFT merge builder (build_single_key_dense_i64_left_merge_output): compact matched plan (left_pos, bucket_start, run_len; usize::MAX sentinel for unmatched) replaces the two Vec<Option<usize>> position vectors (~627MB intermediate on 19.6M rows) + per-column reindex walks; lanes built with the proven inner-builder machinery (muis1 tapes, 6bsw3 row-chunked split_at_mut fill, 3ad4n RLE left lanes) + ONE shared word-fill validity mask cloned per nullable right lane",
+  "date": "2026-06-07",
+  "scenario": "perf_profile left_join 100000, card 512, 50% key overlap (9.8M output rows), 3 iters",
+  "baseline_commit": "875f5fb3",
+  "profile_evidence": "re-profile post-lt5qx: dense_int64_left_positions 30.8% (24.4% in Option<usize> push — vecs WERE with_capacity'd, the cost is writing+dropping the 627MB intermediate itself) + reindex_by_positions 34.5% (the per-column walks over those vectors); bead's realloc-growth hypothesis was wrong, the representation was the problem",
+  "paired_hyperfine_left_join": {
+    "before_s": {"mean": 1.485, "sigma": 0.063, "runs": 8},
+    "after_ms": {"mean": 84.2, "sigma": 2.7, "runs": 8},
+    "speedup": "17.65x +/- 0.95 (load ~27-32; alternating per-iter pairs agree: 502-545 -> 28.5-32.2 ms/iter, 3 consistent pairs)"
+  },
+  "isomorphism": {
+    "ordering_preserved": "yes - plan is the same left probe order; matched runs replay the same CSR bucket ranges (right rows in first-seen bucket order, identical to dense_int64_left_positions)",
+    "dtype_semantics": "right lanes keep dtype Int64 with Null(NullKind::Null) at unmatched rows == reindex_by_positions missing semantics (LazyNullableInt64); left lanes repeat left values run_len times == take_positions; NO Float64 promotion (matches the replaced path, pinned by golden)",
+    "routing": "same dense-span accept gate (span <= 4*rows+1024) as dense_int64_left_positions; non-i64/nullable columns, empty sides, multi-key, sort, indicator, validate all fall through to the unchanged position-vector path; all-left-matched joins still route to the fused inner builder first",
+    "floating_point": "n/a - i64 only",
+    "golden_sha256": {
+      "left_join_5000": "745e5a467cb832077473c38f724f7082cb0ddbf178e92d74d6f462ac73322095 (before == after)",
+      "outer_join_5000": "d774e320e0fa750b37c62a62c38aee2c905b97c0cf2fad0a3d0e78cf9919c266 (before == after)",
+      "inner_join_5000": "be7d17114e5a2a88607bdc65228751789e208ebbd9ac2f5d0c616cdf64e641f1 (before == after)"
+    },
+    "sink_check": "sink=29447040 identical before/after (9815680 rows x 3 iters)"
+  },
+  "supporting_additions": "ValidityMask::from_words (doc-hidden ctor, debug-asserts tail bits zero) + from_i64_values_with_validity made doc-hidden pub + set_validity_bit_range word-fill helper",
+  "test_gates": {
+    "fp-columnar --lib --tests": "373 passed, 0 failed",
+    "fp-join --lib --tests": "102 passed, 0 failed",
+    "fp-frame --lib": "2820 passed, 0 failed",
+    "fp-conformance proptests matching 'join'": "12 passed, 0 failed"
+  }
+}

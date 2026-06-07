@@ -117,6 +117,21 @@ impl ValidityMask {
         Self { words, len }
     }
 
+    /// Build a mask from pre-packed validity words (LSB-first within each
+    /// word, bit `i` of word `i / 64` = row `i` valid). Bits at positions
+    /// `>= len` must be zero. Public (hidden) for typed builders that compute
+    /// validity in bulk (br-frankenpandas-7wxoc).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_words(words: Vec<u64>, len: usize) -> Self {
+        debug_assert_eq!(words.len(), len.div_ceil(64));
+        debug_assert!(
+            len % 64 == 0 || words.last().is_none_or(|w| w >> (len % 64) == 0),
+            "validity bits beyond len must be zero"
+        );
+        Self { words, len }
+    }
+
     #[must_use]
     pub fn all_invalid(len: usize) -> Self {
         let word_count = len.div_ceil(64);
@@ -2057,8 +2072,10 @@ impl Column {
     /// Nullable Int64 counterpart of `from_f64_values_with_validity`
     /// (br-frankenpandas-lt5qx): invalid slots materialize
     /// `Scalar::Null(NullKind::Null)` (= `missing_for_dtype(Int64)`), valid
-    /// slots `Scalar::Int64(data[i])`.
-    fn from_i64_values_with_validity(data: Vec<i64>, validity: ValidityMask) -> Self {
+    /// slots `Scalar::Int64(data[i])`. Public (hidden) for fp-join's fused
+    /// dense left-merge builder (br-frankenpandas-7wxoc).
+    #[doc(hidden)]
+    pub fn from_i64_values_with_validity(data: Vec<i64>, validity: ValidityMask) -> Self {
         debug_assert_eq!(data.len(), validity.len());
         if validity.all() {
             return Self::from_i64_values(data);
