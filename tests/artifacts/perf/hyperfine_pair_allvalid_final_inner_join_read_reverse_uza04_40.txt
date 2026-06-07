@@ -1,0 +1,11 @@
+Benchmark 1: after_inner_join_read_100000x3
+  Time (mean ± σ):     368.4 ms ±  15.1 ms    [User: 281.0 ms, System: 1078.4 ms]
+  Range (min … max):   347.8 ms … 443.7 ms    40 runs
+
+Benchmark 2: before_inner_join_read_100000x3
+  Time (mean ± σ):     372.5 ms ±  12.7 ms    [User: 273.9 ms, System: 1075.2 ms]
+  Range (min … max):   345.1 ms … 416.0 ms    40 runs
+
+Summary
+  after_inner_join_read_100000x3 ran
+    1.01 ± 0.05 times faster than before_inner_join_read_100000x3

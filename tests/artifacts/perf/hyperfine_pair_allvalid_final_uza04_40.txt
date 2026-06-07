@@ -1,0 +1,31 @@
+Benchmark 1: before_inner_join_100000x3
+  Time (mean ± σ):      52.3 ms ±   5.7 ms    [User: 18.8 ms, System: 33.0 ms]
+  Range (min … max):    42.2 ms …  62.2 ms    20 runs
+
+Benchmark 2: after_inner_join_100000x3
+  Time (mean ± σ):      37.6 ms ±   3.1 ms    [User: 14.7 ms, System: 22.5 ms]
+  Range (min … max):    33.2 ms …  46.3 ms    20 runs
+
+Benchmark 3: before_join_1to1_100000x20
+  Time (mean ± σ):      40.5 ms ±   8.4 ms    [User: 18.9 ms, System: 21.2 ms]
+  Range (min … max):    31.9 ms …  60.9 ms    20 runs
+
+Benchmark 4: after_join_1to1_100000x20
+  Time (mean ± σ):      38.0 ms ±   2.8 ms    [User: 18.8 ms, System: 18.9 ms]
+  Range (min … max):    34.1 ms …  45.1 ms    20 runs
+
+Benchmark 5: before_inner_join_read_100000x3
+  Time (mean ± σ):     370.0 ms ±  16.9 ms    [User: 285.6 ms, System: 1071.1 ms]
+  Range (min … max):   329.6 ms … 407.8 ms    20 runs
+
+Benchmark 6: after_inner_join_read_100000x3
+  Time (mean ± σ):     389.1 ms ±  62.6 ms    [User: 287.9 ms, System: 1082.4 ms]
+  Range (min … max):   354.5 ms … 627.5 ms    20 runs
+
+Summary
+  after_inner_join_100000x3 ran
+    1.01 ± 0.11 times faster than after_join_1to1_100000x20
+    1.08 ± 0.24 times faster than before_join_1to1_100000x20
+    1.39 ± 0.19 times faster than before_inner_join_100000x3
+    9.85 ± 0.93 times faster than before_inner_join_read_100000x3
+   10.36 ± 1.88 times faster than after_inner_join_read_100000x3

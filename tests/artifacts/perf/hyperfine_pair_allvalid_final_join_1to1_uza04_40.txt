@@ -1,0 +1,11 @@
+Benchmark 1: before_join_1to1_100000x20
+  Time (mean ± σ):      36.8 ms ±   3.1 ms    [User: 17.2 ms, System: 19.4 ms]
+  Range (min … max):    32.0 ms …  44.0 ms    40 runs
+
+Benchmark 2: after_join_1to1_100000x20
+  Time (mean ± σ):      34.7 ms ±   2.5 ms    [User: 15.2 ms, System: 19.3 ms]
+  Range (min … max):    29.6 ms …  41.1 ms    40 runs
+
+Summary
+  after_join_1to1_100000x20 ran
+    1.06 ± 0.12 times faster than before_join_1to1_100000x20

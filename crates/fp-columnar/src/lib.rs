@@ -74,15 +74,62 @@ pub struct ValidityMask {
 }
 
 impl ValidityMask {
+    fn is_all_valid_sentinel(&self) -> bool {
+        self.len > 0 && self.words.is_empty()
+    }
+
+    fn materialized_all_valid_words(len: usize) -> Vec<u64> {
+        let word_count = len.div_ceil(64);
+        let mut words = vec![u64::MAX; word_count];
+        let remainder = len % 64;
+        if remainder > 0
+            && let Some(last) = words.last_mut()
+        {
+            *last = (1_u64 << remainder) - 1;
+        }
+        words
+    }
+
+    fn words_are_all_valid(words: &[u64], len: usize) -> bool {
+        if len == 0 {
+            return words.is_empty();
+        }
+        let word_count = len.div_ceil(64);
+        if words.len() != word_count {
+            return false;
+        }
+        let full_words = len / 64;
+        if words.iter().take(full_words).any(|&word| word != u64::MAX) {
+            return false;
+        }
+        let remainder = len % 64;
+        if remainder == 0 {
+            return true;
+        }
+        words.get(full_words).copied() == Some((1_u64 << remainder) - 1)
+    }
+
+    fn materialize_if_all_valid_sentinel(&mut self) {
+        if self.is_all_valid_sentinel() {
+            self.words = Self::materialized_all_valid_words(self.len);
+        }
+    }
+
     #[must_use]
     pub fn from_values(values: &[Scalar]) -> Self {
         let len = values.len();
         let word_count = len.div_ceil(64);
         let mut words = vec![0_u64; word_count];
+        let mut all_valid = true;
         for (idx, value) in values.iter().enumerate() {
             if !value.is_missing() {
                 words[idx / 64] |= 1_u64 << (idx % 64);
+            } else {
+                all_valid = false;
             }
+        }
+        if all_valid {
+            return Self::all_valid(len);
         }
         Self { words, len }
     }
@@ -97,24 +144,26 @@ impl ValidityMask {
         let len = data.len();
         let word_count = len.div_ceil(64);
         let mut words = vec![0_u64; word_count];
+        let mut all_valid = true;
         for (idx, &v) in data.iter().enumerate() {
             if !v.is_nan() {
                 words[idx / 64] |= 1_u64 << (idx % 64);
+            } else {
+                all_valid = false;
             }
+        }
+        if all_valid {
+            return Self::all_valid(len);
         }
         Self { words, len }
     }
 
     #[must_use]
     pub fn all_valid(len: usize) -> Self {
-        let word_count = len.div_ceil(64);
-        let mut words = vec![u64::MAX; word_count];
-        let remainder = len % 64;
-        if remainder > 0 && !words.is_empty() {
-            let last = words.len() - 1;
-            words[last] = (1_u64 << remainder) - 1;
+        Self {
+            words: Vec::new(),
+            len,
         }
-        Self { words, len }
     }
 
     /// Build a mask from pre-packed validity words (LSB-first within each
@@ -129,6 +178,9 @@ impl ValidityMask {
             len.is_multiple_of(64) || words.last().is_none_or(|w| w >> (len % 64) == 0),
             "validity bits beyond len must be zero"
         );
+        if Self::words_are_all_valid(&words, len) {
+            return Self::all_valid(len);
+        }
         Self { words, len }
     }
 
@@ -146,12 +198,21 @@ impl ValidityMask {
         if idx >= self.len {
             return false;
         }
+        if self.is_all_valid_sentinel() {
+            return true;
+        }
         (self.words[idx / 64] >> (idx % 64)) & 1 == 1
     }
 
     pub fn set(&mut self, idx: usize, value: bool) {
         if idx >= self.len {
             return;
+        }
+        if self.is_all_valid_sentinel() {
+            if value {
+                return;
+            }
+            self.materialize_if_all_valid_sentinel();
         }
         if value {
             self.words[idx / 64] |= 1_u64 << (idx % 64);
@@ -162,6 +223,9 @@ impl ValidityMask {
 
     #[must_use]
     pub fn count_valid(&self) -> usize {
+        if self.is_all_valid_sentinel() {
+            return self.len;
+        }
         let full_words = self.len / 64;
         let mut count: u32 = self.words[..full_words]
             .iter()
@@ -188,6 +252,18 @@ impl ValidityMask {
     #[must_use]
     pub fn and_mask(&self, other: &Self) -> Self {
         let len = self.len.min(other.len);
+        if len == 0 {
+            return Self::all_invalid(0);
+        }
+        if self.is_all_valid_sentinel() && other.is_all_valid_sentinel() {
+            return Self::all_valid(len);
+        }
+        if self.is_all_valid_sentinel() {
+            return other.slice(0, len);
+        }
+        if other.is_all_valid_sentinel() {
+            return self.slice(0, len);
+        }
         let word_count = len.div_ceil(64);
         let words = self.words[..word_count]
             .iter()
@@ -200,6 +276,12 @@ impl ValidityMask {
     #[must_use]
     pub fn or_mask(&self, other: &Self) -> Self {
         let len = self.len.min(other.len);
+        if len == 0 {
+            return Self::all_invalid(0);
+        }
+        if self.is_all_valid_sentinel() || other.is_all_valid_sentinel() {
+            return Self::all_valid(len);
+        }
         let word_count = len.div_ceil(64);
         let words = self.words[..word_count]
             .iter()
@@ -211,6 +293,9 @@ impl ValidityMask {
 
     #[must_use]
     pub fn not_mask(&self) -> Self {
+        if self.is_all_valid_sentinel() {
+            return Self::all_invalid(self.len);
+        }
         let mut words: Vec<u64> = self.words.iter().map(|w| !w).collect();
         let remainder = self.len % 64;
         if remainder > 0 && !words.is_empty() {
@@ -238,12 +323,18 @@ impl ValidityMask {
     /// Whether any bit is set.
     #[must_use]
     pub fn any(&self) -> bool {
+        if self.is_all_valid_sentinel() {
+            return true;
+        }
         self.count_valid() > 0
     }
 
     /// Whether all bits are set.
     #[must_use]
     pub fn all(&self) -> bool {
+        if self.is_all_valid_sentinel() {
+            return true;
+        }
         self.count_valid() == self.len
     }
 
@@ -253,6 +344,18 @@ impl ValidityMask {
     #[must_use]
     pub fn xor_mask(&self, other: &Self) -> Self {
         let len = self.len.min(other.len);
+        if len == 0 {
+            return Self::all_invalid(0);
+        }
+        if self.is_all_valid_sentinel() && other.is_all_valid_sentinel() {
+            return Self::all_invalid(len);
+        }
+        if self.is_all_valid_sentinel() {
+            return other.slice(0, len).not_mask();
+        }
+        if other.is_all_valid_sentinel() {
+            return self.slice(0, len).not_mask();
+        }
         let word_count = len.div_ceil(64);
         let mut words: Vec<u64> = self.words[..word_count]
             .iter()
@@ -277,6 +380,9 @@ impl ValidityMask {
             return Self::all_invalid(0);
         }
         let effective_len = len.min(self.len - start);
+        if self.is_all_valid_sentinel() {
+            return Self::all_valid(effective_len);
+        }
         let mut out = Self::all_invalid(effective_len);
         for i in 0..effective_len {
             if self.get(start + i) {
@@ -290,6 +396,9 @@ impl ValidityMask {
     #[must_use]
     pub fn concat(&self, other: &Self) -> Self {
         let total = self.len + other.len;
+        if self.all() && other.all() {
+            return Self::all_valid(total);
+        }
         let mut out = Self::all_invalid(total);
         for i in 0..self.len {
             if self.get(i) {
@@ -307,12 +416,18 @@ impl ValidityMask {
     /// Position of the first valid bit.
     #[must_use]
     pub fn first_valid(&self) -> Option<usize> {
+        if self.is_all_valid_sentinel() {
+            return Some(0);
+        }
         (0..self.len).find(|&i| self.get(i))
     }
 
     /// Position of the last valid bit.
     #[must_use]
     pub fn last_valid(&self) -> Option<usize> {
+        if self.is_all_valid_sentinel() {
+            return Some(self.len - 1);
+        }
         (0..self.len).rev().find(|&i| self.get(i))
     }
 }
@@ -348,7 +463,7 @@ impl<'de> Deserialize<'de> for ValidityMask {
                 words[idx / 64] |= 1_u64 << (idx % 64);
             }
         }
-        Ok(Self { words, len })
+        Ok(Self::from_words(words, len))
     }
 }
 
@@ -11567,9 +11682,50 @@ mod tests {
         let mask = ValidityMask::all_valid(100);
         assert_eq!(mask.len(), 100);
         assert_eq!(mask.count_valid(), 100);
+        assert!(
+            mask.words.is_empty(),
+            "all-valid masks store only the logical length"
+        );
         for i in 0..100 {
             assert!(mask.get(i), "bit {i} should be valid");
         }
+    }
+
+    #[test]
+    fn validity_mask_all_valid_sentinel_matches_explicit_words() {
+        for len in [1, 2, 63, 64, 65, 127, 128, 129] {
+            let sentinel = ValidityMask::all_valid(len);
+            let explicit =
+                ValidityMask::from_words(ValidityMask::materialized_all_valid_words(len), len);
+
+            assert_eq!(sentinel, explicit, "len {len}");
+            assert_eq!(
+                sentinel.bits().collect::<Vec<_>>(),
+                explicit.bits().collect::<Vec<_>>(),
+                "len {len}"
+            );
+            assert!(sentinel.all(), "len {len}");
+            assert_eq!(sentinel.count_invalid(), 0, "len {len}");
+        }
+    }
+
+    #[test]
+    fn validity_mask_all_valid_sentinel_materializes_on_clear() {
+        let mut mask = ValidityMask::all_valid(130);
+        mask.set(64, true);
+        assert!(
+            mask.words.is_empty(),
+            "setting a valid bit preserves the sentinel"
+        );
+
+        mask.set(64, false);
+        assert!(!mask.words.is_empty(), "clearing a bit materializes words");
+        assert_eq!(mask.len(), 130);
+        assert_eq!(mask.count_valid(), 129);
+        assert!(!mask.get(64));
+        assert!(mask.get(63));
+        assert!(mask.get(65));
+        assert_eq!(mask.bits().filter(|valid| *valid).count(), 129);
     }
 
     #[test]
@@ -11630,6 +11786,39 @@ mod tests {
         assert!(not_a.get(2));
         assert!(not_a.get(3));
         assert_eq!(not_a.count_valid(), 2);
+    }
+
+    #[test]
+    fn validity_mask_sentinel_mask_algebra_matches_explicit_bitmap() {
+        let all = ValidityMask::all_valid(5);
+        let nullable = ValidityMask::from_values(&[
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(3),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Int64(5),
+        ]);
+
+        assert_eq!(all.and_mask(&nullable), nullable);
+        assert_eq!(nullable.and_mask(&all), nullable);
+        assert_eq!(all.or_mask(&nullable), all);
+        assert_eq!(nullable.or_mask(&all), all);
+        assert_eq!(
+            all.xor_mask(&nullable).bits().collect::<Vec<_>>(),
+            vec![false, true, false, true, false]
+        );
+        assert_eq!(
+            all.not_mask().bits().collect::<Vec<_>>(),
+            vec![false, false, false, false, false]
+        );
+        assert_eq!(
+            all.slice(1, 3).bits().collect::<Vec<_>>(),
+            vec![true, true, true]
+        );
+        assert_eq!(
+            all.concat(&ValidityMask::all_valid(2)),
+            ValidityMask::all_valid(7)
+        );
     }
 
     #[test]
