@@ -328,6 +328,21 @@ fn run_golden(scenario: &str, n: usize) {
             let out = lowered.str().startswith("prefix_0").expect("startswith");
             return print!("{}", golden_dump_series(&out));
         }
+        "str_sort" => {
+            // Plain sort over an Eager Utf8 column (control: as_utf8_contiguous
+            // returns None, so this exercises the unchanged Scalar path).
+            let s = build_str_series(n);
+            let out = s.sort_values(true).expect("sort");
+            return print!("{}", golden_dump_series(&out));
+        }
+        "str_sort_chain" => {
+            // lower -> sort_values: the sort reads the contiguous buffer
+            // (br-frankenpandas-vecff) instead of materializing 1M Scalars.
+            let s = build_str_series(n);
+            let lowered = s.str().lower().expect("lower");
+            let out = lowered.sort_values(true).expect("sort");
+            return print!("{}", golden_dump_series(&out));
+        }
         "series_add" => {
             let (left, right) = build_series_pair(n);
             let out = left.add(&right).expect("series add");
@@ -520,6 +535,21 @@ fn main() {
             for _ in 0..iters {
                 let lowered = s.str().lower().expect("lower");
                 let out = lowered.str().startswith("prefix_0").expect("startswith");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_sort" => {
+            let s = build_str_series(n);
+            for _ in 0..iters {
+                let out = s.sort_values(true).expect("sort");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_sort_chain" => {
+            let s = build_str_series(n);
+            for _ in 0..iters {
+                let lowered = s.str().lower().expect("lower");
+                let out = lowered.sort_values(true).expect("sort");
                 sink = sink.wrapping_add(out.len());
             }
         }

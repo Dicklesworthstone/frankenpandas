@@ -8367,6 +8367,22 @@ impl Column {
         if self.dtype != DType::Utf8 || !self.validity.all() {
             return None;
         }
+        // Contiguous fast path (br-frankenpandas-vecff): when the column
+        // carries the LazyContiguousUtf8 backing (output of a string op),
+        // slice each row's &str straight from the byte buffer instead of
+        // forcing the whole Vec<Scalar> to materialize just to read it.
+        // Bit-identical: the same &str values in the same order; argsort /
+        // group keys only ever borrow them.
+        if let Some((bytes, offsets)) = self.as_utf8_contiguous() {
+            let mut strs = Vec::with_capacity(offsets.len() - 1);
+            for w in offsets.windows(2) {
+                strs.push(
+                    std::str::from_utf8(&bytes[w[0]..w[1]])
+                        .expect("contiguous utf8 buffer is valid by construction"),
+                );
+            }
+            return Some(strs);
+        }
         let mut strs = Vec::with_capacity(self.len());
         for v in self.values.iter() {
             match v {
