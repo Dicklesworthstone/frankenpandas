@@ -1270,7 +1270,11 @@ enum CsvParseCacheMode {
 struct CsvParseCacheEntry {
     mode: CsvParseCacheMode,
     input: Arc<str>,
-    frame: DataFrame,
+    // Arc so the cache critical section only bumps a refcount; the O(data)
+    // DataFrame deep-clone happens OUTSIDE the global lock (concurrency
+    // audit 2026-06-07: the under-lock clone serialized every concurrent
+    // read_csv — including cache MISSES — behind one reader's deep clone).
+    frame: Arc<DataFrame>,
 }
 
 static CSV_PARSE_CACHE: OnceLock<Mutex<VecDeque<CsvParseCacheEntry>>> = OnceLock::new();
@@ -1294,25 +1298,33 @@ fn csv_parse_cache_lookup(mode: CsvParseCacheMode, input: &str) -> Option<DataFr
         return None;
     }
 
-    let mut cache = csv_parse_cache().lock().ok()?;
-    let pos = cache
-        .iter()
-        .position(|entry| csv_parse_cache_entry_matches(entry, mode, input))?;
-
-    if pos == 0 {
-        return cache.front().map(|entry| entry.frame.clone());
-    }
-
-    let entry = cache.remove(pos)?;
-    let frame = entry.frame.clone();
-    cache.push_front(entry);
-    Some(frame)
+    // Hold the lock only for the lookup + LRU bump (Arc refcount ops); the
+    // deep clone for the caller happens after release.
+    let shared: Arc<DataFrame> = {
+        let mut cache = csv_parse_cache().lock().ok()?;
+        let pos = cache
+            .iter()
+            .position(|entry| csv_parse_cache_entry_matches(entry, mode, input))?;
+        if pos == 0 {
+            Arc::clone(&cache.front()?.frame)
+        } else {
+            let entry = cache.remove(pos)?;
+            let frame = Arc::clone(&entry.frame);
+            cache.push_front(entry);
+            frame
+        }
+    };
+    Some((*shared).clone())
 }
 
 fn csv_parse_cache_store(mode: CsvParseCacheMode, input: &str, frame: &DataFrame) {
     if input.len() > CSV_PARSE_CACHE_MAX_INPUT_BYTES {
         return;
     }
+
+    // Deep-clone into the Arc BEFORE taking the lock (see lookup).
+    let shared = Arc::new(frame.clone());
+    let owned_input = Arc::<str>::from(input);
 
     let Ok(mut cache) = csv_parse_cache().lock() else {
         return;
@@ -1327,8 +1339,8 @@ fn csv_parse_cache_store(mode: CsvParseCacheMode, input: &str, frame: &DataFrame
 
     cache.push_front(CsvParseCacheEntry {
         mode,
-        input: Arc::<str>::from(input),
-        frame: frame.clone(),
+        input: owned_input,
+        frame: shared,
     });
 
     while cache.len() > CSV_PARSE_CACHE_MAX_ENTRIES {
