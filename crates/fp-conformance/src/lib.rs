@@ -14001,7 +14001,8 @@ fn execute_dataframe_merge_asof_fixture_operation(
 
     let merged = fp_join::merge_asof_with_options(&left, &right, on, direction, options)
         .map_err(|err| err.to_string())?;
-    DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order).map_err(|err| err.to_string())
+    DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+        .map_err(|err| err.to_string())
 }
 
 fn execute_dataframe_merge_ordered_fixture_operation(
@@ -14027,7 +14028,8 @@ fn execute_dataframe_merge_ordered_fixture_operation(
         fixture.merge_fill_method.as_deref(),
     )
     .map_err(|err| err.to_string())?;
-    DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order).map_err(|err| err.to_string())
+    DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+        .map_err(|err| err.to_string())
 }
 
 fn validate_cross_merge_configuration(
@@ -17062,7 +17064,8 @@ fn execute_dataframe_merge_fixture_operation(
         },
     )
     .map_err(|err| err.to_string())?;
-    DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order).map_err(|err| err.to_string())
+    DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+        .map_err(|err| err.to_string())
 }
 
 fn dataframe_with_index_as_columns(
@@ -24112,10 +24115,15 @@ pub fn build_failure_surface_entries(reports: &[PacketParityReport]) -> Vec<Fail
     let mut entries: Vec<_> = reports
         .iter()
         .flat_map(|report| {
+            // Fallback must be a legal path component on every platform:
+            // this value becomes a directory name under artifacts/conformance/
+            // and Windows (NTFS) rejects angle brackets, aborting `git
+            // checkout` (issue #9). Use a plain ASCII token here, with
+            // sanitize_artifact_path_component as a second line of defense.
             let packet_id = report
                 .packet_id
                 .clone()
-                .unwrap_or_else(|| "<unknown>".to_owned());
+                .unwrap_or_else(|| "unknown".to_owned());
             report
                 .results
                 .iter()
@@ -24180,10 +24188,15 @@ pub fn build_case_evidence_entries(reports: &[PacketParityReport]) -> Vec<CaseEv
     let mut entries: Vec<_> = reports
         .iter()
         .flat_map(|report| {
+            // Fallback must be a legal path component on every platform:
+            // this value becomes a directory name under artifacts/conformance/
+            // and Windows (NTFS) rejects angle brackets, aborting `git
+            // checkout` (issue #9). Use a plain ASCII token here, with
+            // sanitize_artifact_path_component as a second line of defense.
             let packet_id = report
                 .packet_id
                 .clone()
-                .unwrap_or_else(|| "<unknown>".to_owned());
+                .unwrap_or_else(|| "unknown".to_owned());
             report
                 .results
                 .iter()
@@ -24265,6 +24278,31 @@ fn sanitize_failure_surface_artifact_name(label: &str) -> String {
     }
 }
 
+/// Sanitize a single path component (a packet id or case id) so it is a legal
+/// file/directory name on every supported platform — most importantly Windows
+/// (NTFS), which rejects the characters `< > : " / \ | ? *` and trailing dots
+/// or spaces. A committed `artifacts/conformance/<unknown>/...` path (emitted
+/// when a report carried no `packet_id`) made `git checkout` abort with
+/// "invalid path" on `windows-latest` (issue #9), so every component that
+/// feeds an on-disk artifact path is routed through this.
+fn sanitize_artifact_path_component(component: &str) -> String {
+    let sanitized: String = component
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if (c as u32) < 0x20 => '_',
+            c => c,
+        })
+        .collect();
+    // NTFS also forbids names ending in '.' or ' '.
+    let trimmed = sanitized.trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        "unknown".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 pub fn write_failure_surface_jsonl(
     config: &HarnessConfig,
     artifact_name: &str,
@@ -24310,8 +24348,11 @@ pub fn write_case_evidence_jsonl(
         let output_path = config
             .repo_root
             .join("artifacts/conformance")
-            .join(&packet_id)
-            .join(format!("{case_id}.jsonl"));
+            .join(sanitize_artifact_path_component(&packet_id))
+            .join(format!(
+                "{}.jsonl",
+                sanitize_artifact_path_component(&case_id)
+            ));
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -24470,11 +24511,12 @@ mod tests {
         enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, generate_raptorq_sidecar,
         run_ci_pipeline, run_differential_by_id, run_differential_suite, run_e2e_suite,
         run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
-        run_packets_grouped, run_raptorq_decode_recovery_drill, run_smoke, verify_all_sidecars_ci,
-        verify_packet_sidecar_integrity, write_case_evidence_jsonl,
-        write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
-        write_differential_validation_log, write_failure_surface_jsonl,
-        write_fault_injection_validation_report, write_packet_artifacts,
+        run_packets_grouped, run_raptorq_decode_recovery_drill, run_smoke,
+        sanitize_artifact_path_component, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
+        write_case_evidence_jsonl, write_compat_closure_e2e_scenario_report,
+        write_compat_closure_final_evidence_pack, write_differential_validation_log,
+        write_failure_surface_jsonl, write_fault_injection_validation_report,
+        write_packet_artifacts,
     };
 
     fn phase2c_artifact_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -26965,6 +27007,80 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
 
         let aggregated = build_case_evidence_entries(&[report]);
         assert_eq!(aggregated.len(), 2);
+    }
+
+    #[test]
+    fn sanitize_artifact_path_component_rejects_windows_illegal_chars() {
+        // Every character NTFS forbids in a name must be scrubbed so a
+        // committed artifact path can never abort `git checkout` on Windows
+        // (issue #9). Legal alphanumeric/dash/underscore tokens pass through.
+        assert_eq!(sanitize_artifact_path_component("FP-P2C-001"), "FP-P2C-001");
+        assert_eq!(sanitize_artifact_path_component("<unknown>"), "_unknown_");
+        assert_eq!(
+            sanitize_artifact_path_component("a:b\"c/d\\e|f?g*h<i>j"),
+            "a_b_c_d_e_f_g_h_i_j"
+        );
+        // Empty / fully-illegal / trailing-dot inputs collapse to a safe token.
+        assert_eq!(sanitize_artifact_path_component(""), "unknown");
+        assert_eq!(sanitize_artifact_path_component("trailing."), "trailing");
+        for component in ["FP-P2C-001", "<unknown>", "a:b", "name."] {
+            let out = sanitize_artifact_path_component(component);
+            assert!(
+                !out.chars()
+                    .any(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')),
+                "sanitized component still contains an NTFS-illegal char: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn case_evidence_jsonl_uses_windows_legal_path_when_packet_id_missing() {
+        // A report with no packet_id previously serialized to
+        // artifacts/conformance/<unknown>/..., whose angle brackets are
+        // illegal on NTFS and break `git checkout` (issue #9). The path must
+        // now be Windows-legal.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.repo_root = tmp.path().to_path_buf();
+
+        let report = PacketParityReport {
+            suite: "phase2c_packets:orphan".to_owned(),
+            packet_id: None,
+            oracle_present: true,
+            fixture_count: 1,
+            passed: 0,
+            failed: 1,
+            results: vec![CaseResult {
+                packet_id: String::new(),
+                case_id: "case_a".to_owned(),
+                mode: RuntimeMode::Strict,
+                operation: FixtureOperation::SeriesAdd,
+                status: CaseStatus::Fail,
+                mismatch: Some(
+                    "[Value/Critical] value mismatch at idx=1: actual=Int64(2), expected=Int64(3)"
+                        .to_owned(),
+                ),
+                mismatch_class: Some("value_critical".to_owned()),
+                replay_key: "orphan/case_a/strict".to_owned(),
+                trace_id: "orphan:case_a:strict".to_owned(),
+                elapsed_us: 7,
+                evidence_records: 1,
+            }],
+        };
+
+        let paths = write_case_evidence_jsonl(&cfg, std::slice::from_ref(&report)).expect("write");
+        assert_eq!(paths.len(), 1);
+        let path = &paths[0];
+        assert!(
+            path.ends_with("artifacts/conformance/unknown/case_a.jsonl"),
+            "unexpected path: {}",
+            path.display()
+        );
+        assert!(
+            !path.to_string_lossy().contains('<') && !path.to_string_lossy().contains('>'),
+            "artifact path contains NTFS-illegal angle brackets: {}",
+            path.display()
+        );
     }
 
     #[test]
