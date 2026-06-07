@@ -4206,7 +4206,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 Scalar::Bool(v) => {
                     fp_index::IndexLabel::Utf8(if v { "True" } else { "False" }.to_string())
                 }
-                Scalar::Null(_) => fp_index::IndexLabel::Utf8("<null>".to_owned()),
+                // Typed null label (br-frankenpandas-8m6ay): pandas
+                // read_csv(index_col=...) keeps a real nan index entry for an
+                // empty cell. Kind-preserving bijection.
+                Scalar::Null(kind) => fp_index::IndexLabel::Null(kind),
                 Scalar::Timedelta64(v) => {
                     if v == Timedelta::NAT {
                         fp_index::IndexLabel::Utf8("<NaT>".to_owned())
