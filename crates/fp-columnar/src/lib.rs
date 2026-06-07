@@ -2014,6 +2014,61 @@ impl Column {
         }
     }
 
+    /// Null-introducing positional reindex with Float64 promotion
+    /// (br-frankenpandas-1bvcl): gather an all-valid Int64/Float64 column by
+    /// `Option<usize>` positions into a nullable Float64 column without the
+    /// per-row `Scalar` clone + `cast_scalar_owned` + `Column::new`
+    /// revalidation. `None` (or out-of-range) slots take the established
+    /// aligned-binary gap convention — 0.0 datum + invalid bit — which
+    /// materializes `Scalar::Null(NullKind::NaN)`, exactly what the eager
+    /// path's `missing_for_dtype(Float64)` cast produces; matched Int64 slots
+    /// use `v as f64`, the same conversion as the `cast_scalar_owned`
+    /// Int64->Float64 arm. Returns `None` for any other source (nullable,
+    /// non-numeric), where the caller's `Scalar` path is the one that must
+    /// reason about missingness.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn reindex_promote_float64_by_optional_positions(
+        &self,
+        positions: &[Option<usize>],
+    ) -> Option<Self> {
+        enum TypedSource<'a> {
+            Int64(&'a [i64]),
+            Float64(&'a [f64]),
+        }
+        let source = if let Some(slice) = self.as_i64_slice() {
+            TypedSource::Int64(slice)
+        } else if let Some(slice) = self.as_f64_slice() {
+            TypedSource::Float64(slice)
+        } else {
+            return None;
+        };
+
+        let n = positions.len();
+        let len = self.len();
+        let mut data = Vec::with_capacity(n);
+        let mut words = vec![0_u64; n.div_ceil(64)];
+        for (out_idx, slot) in positions.iter().enumerate() {
+            match slot {
+                Some(idx) if *idx < len => {
+                    let value = match source {
+                        TypedSource::Int64(slice) => slice[*idx] as f64,
+                        TypedSource::Float64(slice) => slice[*idx],
+                    };
+                    data.push(value);
+                    // All-valid sources carry no NaN (from_f64_values marks
+                    // NaN invalid), so every matched slot is valid.
+                    words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                }
+                _ => data.push(0.0),
+            }
+        }
+        Some(Self::from_f64_values_with_validity(
+            data,
+            ValidityMask { words, len: n },
+        ))
+    }
+
     /// Borrow the column's contiguous `f64` buffer when this is an all-valid
     /// `Float64` column, enabling typed/SIMD reductions without the per-element
     /// `Scalar` match. Returns `None` for any other dtype or when the column

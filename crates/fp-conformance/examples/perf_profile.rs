@@ -160,9 +160,23 @@ fn build_join_frame(
     key_cardinality: usize,
     multiplier: i64,
 ) -> DataFrame {
+    build_join_frame_offset(value_name, n, key_cardinality, multiplier, 0)
+}
+
+/// `build_join_frame` with the key domain shifted by `key_offset`, so two
+/// frames with the same cardinality and a half-cardinality offset share ~50%
+/// of their keys — the partial-overlap shape left/right/outer joins need to
+/// exercise their unmatched-row (null-introducing) paths.
+fn build_join_frame_offset(
+    value_name: &str,
+    n: usize,
+    key_cardinality: usize,
+    multiplier: i64,
+    key_offset: i64,
+) -> DataFrame {
     let cardinality = key_cardinality.max(1);
     let keys: Vec<Scalar> = (0..n)
-        .map(|row| Scalar::Int64((row % cardinality) as i64))
+        .map(|row| Scalar::Int64((row % cardinality) as i64 + key_offset))
         .collect();
     let values: Vec<Scalar> = (0..n)
         .map(|row| Scalar::Int64(((row as i64 * multiplier + 11) % 10_007).abs()))
@@ -241,6 +255,20 @@ fn run_golden(scenario: &str, n: usize) {
             let left = build_join_frame("left_value", n, n, 7);
             let right = build_join_frame("right_value", n, n, 13);
             let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+            DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
+                .expect("join golden frame")
+        }
+        "left_join" => {
+            let left = build_join_frame("left_value", n, 512, 7);
+            let right = build_join_frame_offset("right_value", n, 512, 13, 256);
+            let out = merge_dataframes(&left, &right, "id", JoinType::Left).expect("join");
+            DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
+                .expect("join golden frame")
+        }
+        "outer_join" => {
+            let left = build_join_frame("left_value", n, 512, 7);
+            let right = build_join_frame_offset("right_value", n, 512, 13, 256);
+            let out = merge_dataframes(&left, &right, "id", JoinType::Outer).expect("join");
             DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
                 .expect("join golden frame")
         }
@@ -367,6 +395,27 @@ fn main() {
             let right = build_join_frame("right_value", n, 512, 13);
             for _ in 0..iters {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+                sink = sink.wrapping_add(out.index.len());
+            }
+        }
+        "left_join" => {
+            // 50% key overlap (right keys shifted by half the cardinality):
+            // half the left rows match (fanout output), half are unmatched
+            // (null-introduced right values -> Float64 promotion path).
+            let left = build_join_frame("left_value", n, 512, 7);
+            let right = build_join_frame_offset("right_value", n, 512, 13, 256);
+            for _ in 0..iters {
+                let out = merge_dataframes(&left, &right, "id", JoinType::Left).expect("join");
+                sink = sink.wrapping_add(out.index.len());
+            }
+        }
+        "outer_join" => {
+            // 50% key overlap: matched fanout rows plus unmatched rows from
+            // BOTH sides (null-introduced on each side).
+            let left = build_join_frame("left_value", n, 512, 7);
+            let right = build_join_frame_offset("right_value", n, 512, 13, 256);
+            for _ in 0..iters {
+                let out = merge_dataframes(&left, &right, "id", JoinType::Outer).expect("join");
                 sink = sink.wrapping_add(out.index.len());
             }
         }

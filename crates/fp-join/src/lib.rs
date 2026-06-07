@@ -319,6 +319,14 @@ fn reindex_outer_join_column(
         return Ok(column.reindex_by_positions(positions)?);
     }
 
+    // Typed Float64-promote gather (br-frankenpandas-1bvcl): all-valid
+    // Int64/Float64 sources skip the per-row Scalar clone + cast +
+    // Column::new revalidation below — bit-identical (see the method's
+    // isomorphism notes in fp-columnar).
+    if let Some(column) = column.reindex_promote_float64_by_optional_positions(positions) {
+        return Ok(column);
+    }
+
     let values = positions
         .iter()
         .map(|slot| match slot {

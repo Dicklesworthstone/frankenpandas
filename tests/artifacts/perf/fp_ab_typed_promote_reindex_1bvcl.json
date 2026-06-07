@@ -1,0 +1,34 @@
+{
+  "bead": "br-frankenpandas-1bvcl",
+  "lever": "Column::reindex_promote_float64_by_optional_positions (fp-columnar): typed null-introducing positional gather for all-valid Int64/Float64 sources, replacing per-row values().get().cloned() + cast_scalar_owned + Column::new in fp-join reindex_outer_join_column",
+  "date": "2026-06-07",
+  "scenario": "NEW perf_profile outer_join / left_join: 100000 rows, card 512, 50% key overlap (right keys offset by 256), 2 iters",
+  "baseline_commit": "cd74a895",
+  "profile_evidence": "perf record on outer_join: reindex_outer_join_column iterator chain 18.8% self+children + ~10% _int_free_chunk (Scalar vec churn); outer was ~5.3x worse per output row than inner, left ~2.6x",
+  "paired_hyperfine_outer_join": {
+    "before_s": {"mean": 3.454, "sigma": 0.122, "runs": 8},
+    "after_s": {"mean": 1.548, "sigma": 0.050, "runs": 8},
+    "speedup": "2.23x +/- 0.11",
+    "caveat": "host load ~37-51 during measurement (concurrent workloads); alternating same-load per-iter runs agree: before 1712-1807 -> after 778-805 ms/iter (3 consistent pairs, sink identical)"
+  },
+  "left_join_check": "parity (820-1952ms noise band overlaps both binaries; left join routes through its own dense builder, not reindex_outer_join_column) — no regression",
+  "mechanism": "eager path materializes the typed source column to Vec<Scalar> (values()), clones a 32B Scalar per row, casts each through cast_scalar_owned, collects a new Vec<Scalar>, and Column::new re-runs validity scans; typed path gathers as_i64_slice/as_f64_slice -> Vec<f64> + validity words -> from_f64_values_with_validity (lazy nullable Float64)",
+  "isomorphism": {
+    "ordering_preserved": "yes - same positions walk",
+    "floating_point": "Int64->Float64 is `v as f64`, the exact cast_scalar_owned Int64->Float64 arm; Float64 source is identity",
+    "missing_slots": "0.0 datum + invalid bit materializes Scalar::Null(NullKind::NaN) == missing_for_dtype(Float64) from the eager path (established aligned_binary_f64 gap convention); all-valid sources carry no NaN so every matched slot is valid",
+    "fallbacks": "nullable/non-numeric sources return None -> unchanged Scalar path; no-missing positions still take reindex_by_positions; non-Int64/Float64 dtypes early-return as before",
+    "golden_sha256": {
+      "left_join_5000": "745e5a467cb832077473c38f724f7082cb0ddbf178e92d74d6f462ac73322095 (before == after)",
+      "outer_join_5000": "d774e320e0fa750b37c62a62c38aee2c905b97c0cf2fad0a3d0e78cf9919c266 (before == after)",
+      "inner_join_5000": "be7d17114e5a2a88607bdc65228751789e208ebbd9ac2f5d0c616cdf64e641f1 (before == after)"
+    },
+    "sink_check": "outer sink=19731200, left sink=19631360 identical before/after"
+  },
+  "test_gates": {
+    "fp-columnar --lib --tests": "373 passed, 0 failed",
+    "fp-join --lib --tests": "102 passed, 0 failed",
+    "fp-conformance proptests matching 'join'": "12 passed, 0 failed"
+  },
+  "harness_addition": "perf_profile gains left_join/outer_join scenarios + goldens (50% overlap via build_join_frame_offset) — left/outer joins previously had NO bench coverage"
+}
