@@ -1,0 +1,35 @@
+{
+  "bead": "br-frankenpandas-dxqpm",
+  "lever": "typed Int64 IndexLabels storage: lazy Arc<Vec<i64>> backing in fp-index IndexLabels (mirrors the int64_unit_range lazy precedent) + typed i64 label gather in fp-frame take_rows_by_positions_unchecked",
+  "date": "2026-06-06",
+  "scenario": "filter_bool 100000 rows x 10 cols, 200 iters (perf_profile example, release-perf)",
+  "baseline_commit": "895167af",
+  "paired_hyperfine_process": {
+    "before_ms": {"mean": 288.4, "sigma": 43.9, "runs": 12},
+    "after_ms": {"mean": 204.6, "sigma": 9.2, "runs": 12},
+    "speedup": "1.41x +/- 0.22 (interleaved, same-session binaries)"
+  },
+  "pure_op_per_iter_ms": {
+    "before": [1.115, 1.302, 1.240],
+    "after": [0.949, 0.952, 1.032],
+    "speedup": "~1.25x op-level (index-side cost ~eliminated; column side already typed)"
+  },
+  "mechanism": "per-row 32B IndexLabel enum clone -> i64 gather loop; rename_index deep Vec<IndexLabel> clone -> O(1) Arc clone; element-walking Vec<IndexLabel> drop (String drop glue) -> single Vec<i64> free; labels materialize lazily only when labels() is asked for",
+  "heuristic": "uncached typed view computed only when positions.len()*4 >= len (avoids O(n) scan for narrow takes like head(5) on huge frames); cached view always used",
+  "isomorphism": {
+    "ordering_preserved": "yes - gather order is positions order, identical to enum-clone loop",
+    "tie_breaking": "n/a - no comparisons introduced",
+    "floating_point": "n/a - i64 only",
+    "rng": "n/a",
+    "label_values": "identical - lazy materialization maps i64 -> IndexLabel::Int64, same values byte-for-byte",
+    "golden_sha256": {
+      "filter_bool_5000": "eeeba6308a221e0209f4b29930d0e6f27115bff38885379d061e2a36114616d7 (before == after)",
+      "sort_single_5000": "0d34cbf3261960c869ee85a7a91641c038e9e2f7c253ca2dec701075da028493 (before == after)"
+    }
+  },
+  "test_gates": {
+    "fp-index + fp-frame --lib --tests": "2817 passed; 3 failed = pre-existing on clean main (arr72 Debug-golden drift, filed br-frankenpandas-5gns6)",
+    "fp-io + fp-join --lib --tests": "green (578 + 101 passed; one global-csv-parse-cache test flaked once under parallel ordering, passes 5/5 isolated-suite and 2/2 combined reruns with lever; passes on main full-suite 2/2)",
+    "concat_bench example": "pre-existing compile breakage on main (private column_order()), unrelated"
+  }
+}

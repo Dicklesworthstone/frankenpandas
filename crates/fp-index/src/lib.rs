@@ -78,7 +78,7 @@ use std::{
     collections::HashMap,
     fmt,
     sync::{
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering as AtomicOrdering},
     },
 };
@@ -330,6 +330,13 @@ impl Int64UnitRangeLabels {
 struct IndexLabels {
     materialized: OnceLock<Vec<IndexLabel>>,
     int64_unit_range: Option<Int64UnitRangeLabels>,
+    /// Lazy typed Int64 backing (br-frankenpandas-dxqpm). `Some(values)` once
+    /// computed means every label is `IndexLabel::Int64` and `values` is the
+    /// raw `i64` view; `None` once computed means the labels are not all
+    /// Int64. Pre-seeded by typed constructors so gathers/clones/drops of
+    /// Int64-labelled indexes stay on contiguous `i64` storage instead of the
+    /// 32 B enum representation.
+    int64_typed: OnceLock<Option<Arc<Vec<i64>>>>,
 }
 
 impl IndexLabels {
@@ -339,6 +346,7 @@ impl IndexLabels {
         Self {
             materialized,
             int64_unit_range: None,
+            int64_typed: OnceLock::new(),
         }
     }
 
@@ -346,22 +354,47 @@ impl IndexLabels {
         Some(Self {
             materialized: OnceLock::new(),
             int64_unit_range: Some(Int64UnitRangeLabels::new(start, len)?),
+            int64_typed: OnceLock::new(),
         })
+    }
+
+    fn new_int64_values(values: Arc<Vec<i64>>) -> Self {
+        let int64_typed = OnceLock::new();
+        let _ = int64_typed.set(Some(values));
+        Self {
+            materialized: OnceLock::new(),
+            int64_unit_range: None,
+            int64_typed,
+        }
     }
 
     fn as_slice(&self) -> &[IndexLabel] {
         self.materialized
             .get_or_init(|| {
-                self.int64_unit_range
-                    .expect("lazy index labels require a backing range")
-                    .materialize()
+                if let Some(range) = self.int64_unit_range {
+                    return range.materialize();
+                }
+                let values = self
+                    .int64_typed
+                    .get()
+                    .and_then(Option::as_ref)
+                    .expect("lazy index labels require a typed or range backing");
+                values.iter().copied().map(IndexLabel::Int64).collect()
             })
             .as_slice()
     }
 
     fn len(&self) -> usize {
-        self.int64_unit_range
-            .map_or_else(|| self.as_slice().len(), |range| range.len)
+        if let Some(range) = self.int64_unit_range {
+            return range.len;
+        }
+        if let Some(labels) = self.materialized.get() {
+            return labels.len();
+        }
+        if let Some(Some(values)) = self.int64_typed.get() {
+            return values.len();
+        }
+        self.as_slice().len()
     }
 
     fn is_empty(&self) -> bool {
@@ -371,17 +404,64 @@ impl IndexLabels {
     fn int64_unit_range(&self) -> Option<Int64UnitRangeLabels> {
         self.int64_unit_range
     }
+
+    /// The raw `i64` view of an all-Int64 label vector, computing and caching
+    /// it on first request. `None` means at least one label is not Int64.
+    fn int64_view(&self) -> Option<Arc<Vec<i64>>> {
+        self.int64_typed
+            .get_or_init(|| {
+                if let Some(range) = self.int64_unit_range {
+                    let mut values = Vec::with_capacity(range.len);
+                    for offset in 0..range.len {
+                        let offset =
+                            i64::try_from(offset).expect("validated Int64 unit range length");
+                        values.push(
+                            range
+                                .start
+                                .checked_add(offset)
+                                .expect("validated Int64 unit range end"),
+                        );
+                    }
+                    return Some(Arc::new(values));
+                }
+                let labels = self.materialized.get()?;
+                let mut values = Vec::with_capacity(labels.len());
+                for label in labels {
+                    match label {
+                        IndexLabel::Int64(value) => values.push(*value),
+                        _ => return None,
+                    }
+                }
+                Some(Arc::new(values))
+            })
+            .clone()
+    }
+
+    /// The cached `i64` view if it has already been computed (never computes).
+    /// Outer `None` = not yet computed; `Some(None)` = known non-Int64.
+    fn cached_int64_view(&self) -> Option<Option<Arc<Vec<i64>>>> {
+        self.int64_typed.get().cloned()
+    }
 }
 
 impl Clone for IndexLabels {
     fn clone(&self) -> Self {
+        let int64_typed = OnceLock::new();
+        if let Some(view) = self.int64_typed.get() {
+            let _ = int64_typed.set(view.clone());
+        }
         let materialized = OnceLock::new();
-        if let Some(labels) = self.materialized.get() {
+        // A unit-range or typed Int64 backing can regenerate the label vector
+        // on demand, so skip the O(n) Vec<IndexLabel> deep clone in that case.
+        let has_lazy_backing = self.int64_unit_range.is_some()
+            || matches!(int64_typed.get(), Some(Some(_)));
+        if !has_lazy_backing && let Some(labels) = self.materialized.get() {
             let _ = materialized.set(labels.clone());
         }
         Self {
             materialized,
             int64_unit_range: self.int64_unit_range,
+            int64_typed,
         }
     }
 }
@@ -566,7 +646,40 @@ impl Index {
 
     #[must_use]
     pub fn from_i64(values: Vec<i64>) -> Self {
-        Self::new(values.into_iter().map(IndexLabel::from).collect())
+        Self::from_i64_values(values)
+    }
+
+    /// Construct an index over Int64 labels backed by a contiguous `Vec<i64>`
+    /// (br-frankenpandas-dxqpm). Label materialization into `IndexLabel`s is
+    /// deferred until a caller asks for `labels()`; clones of the index share
+    /// the typed backing instead of deep-copying the enum vector.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_i64_values(values: Vec<i64>) -> Self {
+        Self {
+            labels: IndexLabels::new_int64_values(Arc::new(values)),
+            name: None,
+            label_identity: next_index_label_identity(),
+            duplicate_cache: OnceLock::new(),
+            sort_order_cache: OnceLock::new(),
+            semantic_fingerprint_cache: OnceLock::new(),
+        }
+    }
+
+    /// Raw `i64` view of an all-Int64 label vector, computing and caching it
+    /// on first request. `None` means at least one label is not Int64.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn int64_label_values(&self) -> Option<Arc<Vec<i64>>> {
+        self.labels.int64_view()
+    }
+
+    /// The cached `i64` label view if already computed (never computes).
+    /// Outer `None` = not yet computed; `Some(None)` = known non-Int64.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn cached_int64_label_values(&self) -> Option<Option<Arc<Vec<i64>>>> {
+        self.labels.cached_int64_view()
     }
 
     #[must_use]
