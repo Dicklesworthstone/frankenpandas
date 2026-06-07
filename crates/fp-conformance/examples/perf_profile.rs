@@ -120,6 +120,44 @@ fn build_str_key_frame(n: usize, key_cardinality: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, column_order).expect("str key frame")
 }
 
+/// Like `build_str_key_frame` but keys genuinely repeat (cardinality bounds the
+/// distinct keys), so each group holds many rows — exercising multi-element
+/// mean/min/max/count accumulation for the bit-identicality goldens. Row order
+/// is deterministic but not sorted; values vary within a group.
+fn build_str_key_frame_repeated(n: usize, cardinality: usize) -> DataFrame {
+    let cardinality = cardinality.max(1);
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let index = Index::new(labels);
+
+    let mut bytes = Vec::with_capacity(n * 12);
+    let mut offsets = Vec::with_capacity(n + 1);
+    offsets.push(0);
+    let mut key = String::with_capacity(16);
+    for row in 0..n {
+        let mixed = (row as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .rotate_left(17)
+            ^ (row as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        let key_id = mixed % cardinality as u64;
+        key.clear();
+        write!(&mut key, "key_{key_id:04x}").expect("writing to a String cannot fail");
+        bytes.extend_from_slice(key.as_bytes());
+        offsets.push(bytes.len());
+    }
+
+    let values: Vec<f64> = (0..n)
+        .map(|row| ((row as u64).wrapping_mul(37) % 10_003) as f64 * 0.25)
+        .collect();
+    let mut columns = BTreeMap::new();
+    columns.insert(
+        "k".to_string(),
+        Column::from_utf8_contiguous(bytes, offsets),
+    );
+    columns.insert("v".to_string(), Column::from_f64_values(values));
+    let column_order = vec!["k".to_string(), "v".to_string()];
+    DataFrame::new_with_column_order(index, columns, column_order).expect("str key repeated frame")
+}
+
 fn build_numeric_frame(n: usize, cols: usize) -> DataFrame {
     let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
     let index = Index::new(labels);
@@ -295,6 +333,26 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("str groupby")
             .sum()
             .expect("str groupby sum"),
+        "str_groupby_mean" => build_str_key_frame_repeated(n, 64)
+            .groupby(&["k"])
+            .expect("str groupby")
+            .mean()
+            .expect("str groupby mean"),
+        "str_groupby_count" => build_str_key_frame_repeated(n, 64)
+            .groupby(&["k"])
+            .expect("str groupby")
+            .count()
+            .expect("str groupby count"),
+        "str_groupby_min" => build_str_key_frame_repeated(n, 64)
+            .groupby(&["k"])
+            .expect("str groupby")
+            .min()
+            .expect("str groupby min"),
+        "str_groupby_max" => build_str_key_frame_repeated(n, 64)
+            .groupby(&["k"])
+            .expect("str groupby")
+            .max()
+            .expect("str groupby max"),
         "filter_bool" => {
             let frame = build_numeric_frame(n, 10);
             let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
@@ -483,6 +541,50 @@ fn main() {
                     .expect("str groupby")
                     .sum()
                     .expect("str groupby sum");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_groupby_mean" => {
+            let frame = build_str_key_frame(n, 4096);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("str groupby")
+                    .mean()
+                    .expect("str groupby mean");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_groupby_count" => {
+            let frame = build_str_key_frame(n, 4096);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("str groupby")
+                    .count()
+                    .expect("str groupby count");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_groupby_min" => {
+            let frame = build_str_key_frame(n, 4096);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("str groupby")
+                    .min()
+                    .expect("str groupby min");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_groupby_max" => {
+            let frame = build_str_key_frame(n, 4096);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("str groupby")
+                    .max()
+                    .expect("str groupby max");
                 sink = sink.wrapping_add(out.len());
             }
         }
