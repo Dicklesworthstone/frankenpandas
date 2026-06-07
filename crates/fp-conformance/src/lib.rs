@@ -8453,11 +8453,13 @@ pub fn fuzz_groupby_sum_bytes(input: &[u8]) -> Result<(), String> {
             }
 
             if options.dropna
-                && global
-                    .index()
-                    .labels()
-                    .iter()
-                    .any(|label| matches!(label, IndexLabel::Utf8(text) if text == "<null>"))
+                && global.index().labels().iter().any(|label| {
+                    // Typed null labels replaced the '<null>' string for
+                    // groupby null groups (br-frankenpandas-8m6ay); match
+                    // both so the invariant survives either representation.
+                    matches!(label, IndexLabel::Null(_))
+                        || matches!(label, IndexLabel::Utf8(text) if text == "<null>")
+                })
             {
                 return Err(format!(
                     "dropna=true emitted a null group label: result={global:?}"

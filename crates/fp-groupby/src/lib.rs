@@ -395,9 +395,14 @@ fn emit_groupby_result<'a>(
             Scalar::Int64(v) => IndexLabel::Int64(*v),
             Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
             Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            Scalar::Null(NullKind::NaN)
-            | Scalar::Null(NullKind::NaT)
-            | Scalar::Null(NullKind::Null) => IndexLabel::Utf8("<null>".to_owned()),
+            // Typed null group label (br-frankenpandas-8m6ay): pandas
+            // groupby(dropna=False) keeps ONE collapsed null group labeled
+            // nan (None and nan merge — UNLIKE value_counts' kind-distinct
+            // buckets); NaT keys keep the NaT label. Verified pandas 2.2.3.
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN) | Scalar::Null(NullKind::Null) => {
+                IndexLabel::Null(NullKind::NaN)
+            }
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
@@ -559,9 +564,14 @@ fn groupby_sum_timedelta64(
             Scalar::Int64(v) => IndexLabel::Int64(*v),
             Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
             Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            Scalar::Null(NullKind::NaN)
-            | Scalar::Null(NullKind::NaT)
-            | Scalar::Null(NullKind::Null) => IndexLabel::Utf8("<null>".to_owned()),
+            // Typed null group label (br-frankenpandas-8m6ay): pandas
+            // groupby(dropna=False) keeps ONE collapsed null group labeled
+            // nan (None and nan merge — UNLIKE value_counts' kind-distinct
+            // buckets); NaT keys keep the NaT label. Verified pandas 2.2.3.
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN) | Scalar::Null(NullKind::Null) => {
+                IndexLabel::Null(NullKind::NaN)
+            }
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
@@ -638,9 +648,14 @@ fn groupby_sum_utf8(
             Scalar::Int64(v) => IndexLabel::Int64(*v),
             Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
             Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            Scalar::Null(NullKind::NaN)
-            | Scalar::Null(NullKind::NaT)
-            | Scalar::Null(NullKind::Null) => IndexLabel::Utf8("<null>".to_owned()),
+            // Typed null group label (br-frankenpandas-8m6ay): pandas
+            // groupby(dropna=False) keeps ONE collapsed null group labeled
+            // nan (None and nan merge — UNLIKE value_counts' kind-distinct
+            // buckets); NaT keys keep the NaT label. Verified pandas 2.2.3.
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN) | Scalar::Null(NullKind::Null) => {
+                IndexLabel::Null(NullKind::NaN)
+            }
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
@@ -731,9 +746,14 @@ fn groupby_sum_int64(
             Scalar::Int64(v) => IndexLabel::Int64(*v),
             Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
             Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            Scalar::Null(NullKind::NaN)
-            | Scalar::Null(NullKind::NaT)
-            | Scalar::Null(NullKind::Null) => IndexLabel::Utf8("<null>".to_owned()),
+            // Typed null group label (br-frankenpandas-8m6ay): pandas
+            // groupby(dropna=False) keeps ONE collapsed null group labeled
+            // nan (None and nan merge — UNLIKE value_counts' kind-distinct
+            // buckets); NaT keys keep the NaT label. Verified pandas 2.2.3.
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN) | Scalar::Null(NullKind::Null) => {
+                IndexLabel::Null(NullKind::NaN)
+            }
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
@@ -1591,9 +1611,10 @@ pub fn groupby_agg(
             Scalar::Int64(v) => IndexLabel::Int64(*v),
             Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
             Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            Scalar::Null(NullKind::NaN | NullKind::NaT | NullKind::Null) => {
-                IndexLabel::Utf8("<null>".to_owned())
-            }
+            // Typed null group label (br-frankenpandas-8m6ay): collapsed nan
+            // group, NaT preserved — see the sum/mean/concat/count maps above.
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
@@ -2797,7 +2818,13 @@ mod tests {
         )
         .expect("groupby");
 
-        assert_eq!(out.index().labels(), &[10_i64.into(), "<null>".into()]);
+        // Verified pandas 2.2.3 (br-frankenpandas-8m6ay): the dropna=False
+        // null group is labeled nan (None collapses into the nan group) and
+        // sorts last: groupby([None, 10, 10]).sum() -> {10: 5, nan: 1}.
+        assert_eq!(
+            out.index().labels(),
+            &[10_i64.into(), IndexLabel::Null(NullKind::NaN)]
+        );
         assert_eq!(out.values(), &[Scalar::Int64(5), Scalar::Int64(1)]);
     }
 
