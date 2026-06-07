@@ -54,7 +54,7 @@
 //! - **fp-index** uses [`Column`] internally for some MultiIndex
 //!   level storage.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use fp_types::{
     DType, Interval, IntervalClosed, NullKind, Scalar, SparseDType, Timedelta, Timestamp,
@@ -1028,13 +1028,23 @@ enum ScalarValues {
         data: OnceLock<Vec<i64>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Repeat-run backing where the per-run values and run lengths are stored
+    /// separately so multiple dense-join output lanes can share one immutable
+    /// run-length descriptor.
+    LazyRepeatValuesInt64 {
+        run_values: Vec<i64>,
+        run_lens: Arc<[usize]>,
+        total_len: usize,
+        data: OnceLock<Vec<i64>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Repeated-slice backing for all-valid Int64 columns whose values arrive
     /// as slices of one shared tape (e.g. dense join right lanes). Each
     /// segment is `(start, len)` into `data`, and segment order is the
     /// observable row order.
     LazyRepeatedSlicesInt64 {
         data: Vec<i64>,
-        segments: Vec<(usize, usize)>,
+        segments: Arc<[(usize, usize)]>,
         total_len: usize,
         expanded: OnceLock<Vec<i64>>,
         values: OnceLock<Vec<Scalar>>,
@@ -1106,9 +1116,33 @@ impl ScalarValues {
         }
     }
 
+    fn lazy_repeat_values_int64(
+        run_values: Vec<i64>,
+        run_lens: Arc<[usize]>,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(run_values.len(), run_lens.len());
+        debug_assert_eq!(run_lens.iter().sum::<usize>(), total_len);
+        Self::LazyRepeatValuesInt64 {
+            run_values,
+            run_lens,
+            total_len,
+            data: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
     fn lazy_repeated_slices_int64(
         data: Vec<i64>,
         segments: Vec<(usize, usize)>,
+        total_len: usize,
+    ) -> Self {
+        Self::lazy_repeated_slices_int64_shared(data, Arc::from(segments), total_len)
+    }
+
+    fn lazy_repeated_slices_int64_shared(
+        data: Vec<i64>,
+        segments: Arc<[(usize, usize)]>,
         total_len: usize,
     ) -> Self {
         debug_assert_eq!(
@@ -1127,6 +1161,76 @@ impl ScalarValues {
             expanded: OnceLock::new(),
             values: OnceLock::new(),
         }
+    }
+
+    fn expand_repeat_values_i64(
+        run_values: &[i64],
+        run_lens: &[usize],
+        total_len: usize,
+    ) -> Vec<i64> {
+        const PARALLEL_MIN_VALUES: usize = 1 << 18;
+        const PARALLEL_MAX_CHUNKS: usize = 16;
+
+        debug_assert_eq!(run_values.len(), run_lens.len());
+        let thread_count = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(PARALLEL_MAX_CHUNKS);
+        if total_len < PARALLEL_MIN_VALUES || thread_count < 2 || run_values.is_empty() {
+            let mut out = Vec::with_capacity(total_len);
+            for (&value, &run_len) in run_values.iter().zip(run_lens.iter()) {
+                out.resize(out.len() + run_len, value);
+            }
+            return out;
+        }
+
+        let target = total_len.div_ceil(thread_count).max(1);
+        let mut boundaries = vec![(0usize, 0usize)];
+        let mut cumulative = 0usize;
+        let mut next_target = target;
+        for (run_idx, &run_len) in run_lens.iter().enumerate() {
+            cumulative += run_len;
+            if cumulative >= next_target && run_idx + 1 < run_lens.len() {
+                boundaries.push((run_idx + 1, cumulative));
+                next_target = cumulative.saturating_add(target);
+            }
+        }
+        debug_assert_eq!(cumulative, total_len);
+        boundaries.push((run_lens.len(), total_len));
+
+        let mut out = vec![0i64; total_len];
+        let mut chunk_slices = Vec::with_capacity(boundaries.len() - 1);
+        let mut rest: &mut [i64] = out.as_mut_slice();
+        let mut prev = 0usize;
+        for window in boundaries.windows(2) {
+            let (chunk_slice, tail) = rest.split_at_mut(window[1].1 - prev);
+            prev = window[1].1;
+            rest = tail;
+            chunk_slices.push(chunk_slice);
+        }
+
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(chunk_slices.len());
+            for (chunk_idx, chunk_slice) in chunk_slices.into_iter().enumerate() {
+                let (run_start, _) = boundaries[chunk_idx];
+                let (run_end, _) = boundaries[chunk_idx + 1];
+                let run_values = &run_values[run_start..run_end];
+                let run_lens = &run_lens[run_start..run_end];
+                handles.push(scope.spawn(move || {
+                    let mut cursor = 0usize;
+                    for (&value, &run_len) in run_values.iter().zip(run_lens.iter()) {
+                        chunk_slice[cursor..cursor + run_len].fill(value);
+                        cursor += run_len;
+                    }
+                    debug_assert_eq!(cursor, chunk_slice.len());
+                }));
+            }
+            for handle in handles {
+                handle
+                    .join()
+                    .expect("repeat-value expansion worker must not panic");
+            }
+        });
+        out
     }
 
     fn expand_repeated_slices_i64(
@@ -1282,6 +1386,21 @@ impl ScalarValues {
                 .as_slice(),
             );
         }
+        if let Self::LazyRepeatValuesInt64 {
+            run_values,
+            run_lens,
+            total_len,
+            data,
+            ..
+        } = self
+        {
+            return Some(
+                data.get_or_init(|| {
+                    Self::expand_repeat_values_i64(run_values, run_lens, *total_len)
+                })
+                .as_slice(),
+            );
+        }
         None
     }
 
@@ -1383,6 +1502,21 @@ impl ScalarValues {
                     out
                 })
                 .as_slice(),
+            Self::LazyRepeatValuesInt64 {
+                run_values,
+                run_lens,
+                total_len,
+                values,
+                ..
+            } => values
+                .get_or_init(|| {
+                    let mut out = Vec::with_capacity(*total_len);
+                    for (&value, &run_len) in run_values.iter().zip(run_lens.iter()) {
+                        out.resize(out.len() + run_len, Scalar::Int64(value));
+                    }
+                    out
+                })
+                .as_slice(),
             Self::LazyRepeatedSlicesInt64 {
                 data,
                 segments,
@@ -1410,6 +1544,7 @@ impl ScalarValues {
             Self::LazyContiguousUtf8 { offsets, .. } => offsets.len() - 1,
             Self::LazyNullableInt64 { data, .. } => data.len(),
             Self::LazyRepeatRunsInt64 { total_len, .. } => *total_len,
+            Self::LazyRepeatValuesInt64 { total_len, .. } => *total_len,
             Self::LazyRepeatedSlicesInt64 { total_len, .. } => *total_len,
         }
     }
@@ -1438,12 +1573,24 @@ impl Clone for ScalarValues {
             Self::LazyRepeatRunsInt64 {
                 runs, total_len, ..
             } => Self::lazy_repeat_runs_int64(runs.clone(), *total_len),
+            Self::LazyRepeatValuesInt64 {
+                run_values,
+                run_lens,
+                total_len,
+                ..
+            } => {
+                Self::lazy_repeat_values_int64(run_values.clone(), Arc::clone(run_lens), *total_len)
+            }
             Self::LazyRepeatedSlicesInt64 {
                 data,
                 segments,
                 total_len,
                 ..
-            } => Self::lazy_repeated_slices_int64(data.clone(), segments.clone(), *total_len),
+            } => Self::lazy_repeated_slices_int64_shared(
+                data.clone(),
+                Arc::clone(segments),
+                *total_len,
+            ),
         }
     }
 }
@@ -2350,6 +2497,25 @@ impl Column {
         }
     }
 
+    /// Build an all-valid Int64 column from per-run values plus a shared
+    /// run-length descriptor. Semantically identical to
+    /// [`Column::from_i64_repeat_runs`] over `run_values.zip(run_lens)`, but
+    /// dense join lanes can share `run_lens` across columns.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_i64_repeat_values_run_lengths(
+        run_values: Vec<i64>,
+        run_lens: Arc<[usize]>,
+    ) -> Self {
+        let total_len = run_lens.iter().sum();
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_repeat_values_int64(run_values, run_lens, total_len),
+            validity: ValidityMask::all_valid(total_len),
+            data: None,
+        }
+    }
+
     /// Build an all-valid Int64 column from repeated slices of one shared
     /// tape. Semantically identical to concatenating
     /// `data[start..start+len]` for each segment and calling
@@ -2361,6 +2527,23 @@ impl Column {
         Self {
             dtype: DType::Int64,
             values: ScalarValues::lazy_repeated_slices_int64(data, segments, total_len),
+            validity: ValidityMask::all_valid(total_len),
+            data: None,
+        }
+    }
+
+    /// Shared-descriptor counterpart of [`Column::from_i64_repeated_slices`].
+    /// `total_len` must equal the sum of all segment lengths.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_i64_repeated_slices_shared(
+        data: Vec<i64>,
+        segments: Arc<[(usize, usize)]>,
+        total_len: usize,
+    ) -> Self {
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_repeated_slices_int64_shared(data, segments, total_len),
             validity: ValidityMask::all_valid(total_len),
             data: None,
         }

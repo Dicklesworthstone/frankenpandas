@@ -1,0 +1,31 @@
+perf_profile: scenario=inner_join n=100000 iters=50
+perf_profile: done 50 iters in 0.168s (3.350 ms/iter), sink=976568000
+perf_profile: scenario=inner_join n=100000 iters=50
+perf_profile: done 50 iters in 0.142s (2.841 ms/iter), sink=976568000
+perf_profile: scenario=inner_join n=100000 iters=50
+perf_profile: done 50 iters in 0.148s (2.958 ms/iter), sink=976568000
+perf_profile: scenario=inner_join n=100000 iters=50
+perf_profile: done 50 iters in 0.145s (2.898 ms/iter), sink=976568000
+perf_profile: scenario=inner_join n=100000 iters=50
+perf_profile: done 50 iters in 0.161s (3.229 ms/iter), sink=976568000
+perf_profile: scenario=inner_join n=100000 iters=50
+perf_profile: done 50 iters in 0.147s (2.941 ms/iter), sink=976568000
+perf_profile: scenario=inner_join n=100000 iters=50
+perf_profile: done 50 iters in 0.148s (2.964 ms/iter), sink=976568000
+perf_profile: scenario=inner_join n=100000 iters=50
+perf_profile: done 50 iters in 0.154s (3.077 ms/iter), sink=976568000
+perf_profile: scenario=inner_join n=100000 iters=50
+perf_profile: done 50 iters in 0.147s (2.937 ms/iter), sink=976568000
+perf_profile: scenario=inner_join n=100000 iters=50
+perf_profile: done 50 iters in 0.125s (2.499 ms/iter), sink=976568000
+
+ Performance counter stats for '/data/projects/.scratch/cargo-target-orangepeak-l4adm-after-20260607T1909Z/release-perf/examples/perf_profile inner_join 100000 50' (10 runs):
+
+         569075207      cycles                                                                  ( +-  2.32% )
+         765937055      instructions                     #    1.35  insn per cycle              ( +-  0.03% )
+          76269835      cache-references                                                        ( +-  1.03% )
+           3690951      cache-misses                     #    4.84% of all cache refs           ( +-  1.66% )
+   <not supported>      LLC-loads
+   <not supported>      LLC-load-misses
+
+           0.15439 +- 0.00372 seconds time elapsed  ( +-  2.41% )

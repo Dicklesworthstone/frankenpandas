@@ -1,0 +1,5 @@
+commit=f9b4d259d327e9d55df34842d1a15e06f24c1a4c
+binary=/data/projects/.scratch/cargo-target-orangepeak-l4adm-baseline-20260607T1857Z/release-perf/examples/perf_profile
+build_log=tests/artifacts/perf/build_perf_profile_baseline_l4adm.txt
+built_by=rch ts1 per build log
+date_utc=2026-06-07T19:00:50Z

@@ -1,0 +1,16 @@
+Benchmark 1: after_inner_join_100000x50
+  Time (mean ± σ):     109.0 ms ±   4.7 ms    [User: 70.7 ms, System: 37.6 ms]
+  Range (min … max):    97.0 ms … 117.9 ms    20 runs
+
+Benchmark 2: after_inner_join_read_100000x10
+  Time (mean ± σ):      1.154 s ±  0.053 s    [User: 0.858 s, System: 3.588 s]
+  Range (min … max):    1.118 s …  1.371 s    20 runs
+
+Benchmark 3: after_join_1to1_100000x100
+  Time (mean ± σ):     103.5 ms ±  21.0 ms    [User: 76.0 ms, System: 24.3 ms]
+  Range (min … max):    74.3 ms … 165.8 ms    20 runs
+
+Summary
+  after_join_1to1_100000x100 ran
+    1.05 ± 0.22 times faster than after_inner_join_100000x50
+   11.15 ± 2.33 times faster than after_inner_join_read_100000x10

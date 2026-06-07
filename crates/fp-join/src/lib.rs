@@ -66,6 +66,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     mem::size_of,
+    sync::Arc,
 };
 
 use bumpalo::{Bump, collections::Vec as BumpVec};
@@ -1602,15 +1603,18 @@ struct DenseI64InnerOutputPlan<'a> {
 
 /// One output lane of the dense i64 inner merge.
 enum DenseI64LaneData {
-    /// Left lane carried as `(value, run_len)` repeat runs — O(matched)
-    /// memory, expanded lazily by `Column::from_i64_repeat_runs` consumers
-    /// (br-frankenpandas-3ad4n).
-    RepeatRuns(Vec<(i64, usize)>),
+    /// Left lane carried as per-run values plus a shared run-length descriptor
+    /// — O(matched) memory, expanded lazily by column consumers
+    /// (br-frankenpandas-3ad4n, br-frankenpandas-l4adm).
+    RepeatRunLengths {
+        values: Vec<i64>,
+        run_lens: Arc<[usize]>,
+    },
     /// Right lane carried as repeated slices of one bucket-order value tape —
     /// O(right + matched) memory until a consumer forces a contiguous view.
     RepeatedSlices {
         data: Vec<i64>,
-        segments: Vec<(usize, usize)>,
+        segments: Arc<[(usize, usize)]>,
     },
     /// Fully materialized contiguous values.
     Full(Vec<i64>),
@@ -1633,9 +1637,9 @@ enum DenseI64LaneData {
 /// muis1 value tapes).
 ///
 /// Bit-identical: the matched list IS the left probe order; expanding a
-/// `RepeatRuns` lane reproduces exactly the values the `Full` fill writes,
-/// and chunks partition the matched list so concatenated output equals the
-/// single-threaded walk byte for byte.
+/// `RepeatRunLengths` lane reproduces exactly the values the `Full` fill
+/// writes, and chunks partition the matched list so concatenated output equals
+/// the single-threaded walk byte for byte.
 fn build_dense_i64_inner_output_data(
     specs: &[FusedInt64OutputColumn<'_>],
     plan: &DenseI64InnerOutputPlan<'_>,
@@ -1671,6 +1675,28 @@ fn build_dense_i64_inner_output_data(
     let use_repeat_runs = plan.output_len >= matched.len().saturating_mul(2);
 
     let use_repeated_slices = use_repeat_runs;
+    let repeat_run_lens: Option<Arc<[usize]>> = if use_repeat_runs {
+        Some(
+            matched
+                .iter()
+                .map(|&(_, _, run_len)| run_len)
+                .collect::<Vec<_>>()
+                .into(),
+        )
+    } else {
+        None
+    };
+    let repeated_segments: Option<Arc<[(usize, usize)]>> = if use_repeated_slices {
+        Some(
+            matched
+                .iter()
+                .map(|&(_, start, run_len)| (start, run_len))
+                .collect::<Vec<_>>()
+                .into(),
+        )
+    } else {
+        None
+    };
 
     let full_specs: Vec<usize> = specs
         .iter()
@@ -1812,12 +1838,17 @@ fn build_dense_i64_inner_output_data(
         .iter()
         .map(|spec| {
             if use_repeat_runs && matches!(spec.side, FusedInt64Side::Left) {
-                DenseI64LaneData::RepeatRuns(
-                    matched
+                DenseI64LaneData::RepeatRunLengths {
+                    values: matched
                         .iter()
-                        .map(|&(left_pos, _, run_len)| (spec.values[left_pos], run_len))
+                        .map(|&(left_pos, _, _)| spec.values[left_pos])
                         .collect(),
-                )
+                    run_lens: Arc::clone(
+                        repeat_run_lens
+                            .as_ref()
+                            .expect("repeat run lengths must exist"),
+                    ),
+                }
             } else if use_repeated_slices && matches!(spec.side, FusedInt64Side::Right) {
                 DenseI64LaneData::RepeatedSlices {
                     data: plan
@@ -1825,10 +1856,11 @@ fn build_dense_i64_inner_output_data(
                         .iter()
                         .map(|&right_pos| spec.values[right_pos])
                         .collect(),
-                    segments: matched
-                        .iter()
-                        .map(|&(_, start, run_len)| (start, run_len))
-                        .collect(),
+                    segments: Arc::clone(
+                        repeated_segments
+                            .as_ref()
+                            .expect("repeated slice segments must exist"),
+                    ),
                 }
             } else {
                 DenseI64LaneData::Full(
@@ -2012,9 +2044,11 @@ fn build_single_key_dense_i64_inner_merge_output(
     let mut column_order = Vec::with_capacity(specs.len());
     for (spec, lane) in specs.into_iter().zip(output_data) {
         let column = match lane {
-            DenseI64LaneData::RepeatRuns(runs) => Column::from_i64_repeat_runs(runs),
+            DenseI64LaneData::RepeatRunLengths { values, run_lens } => {
+                Column::from_i64_repeat_values_run_lengths(values, run_lens)
+            }
             DenseI64LaneData::RepeatedSlices { data, segments } => {
-                Column::from_i64_repeated_slices(data, segments)
+                Column::from_i64_repeated_slices_shared(data, segments, output_len)
             }
             DenseI64LaneData::Full(data) => Column::from_i64_values(data),
         };
@@ -6976,16 +7010,16 @@ mod tests {
 
     fn lane_expanded(lane: &DenseI64LaneData) -> Vec<i64> {
         match lane {
-            DenseI64LaneData::RepeatRuns(runs) => {
+            DenseI64LaneData::RepeatRunLengths { values, run_lens } => {
                 let mut out = Vec::new();
-                for &(value, run_len) in runs {
+                for (&value, &run_len) in values.iter().zip(run_lens.iter()) {
                     out.resize(out.len() + run_len, value);
                 }
                 out
             }
             DenseI64LaneData::RepeatedSlices { data, segments } => {
                 let mut out = Vec::new();
-                for &(start, len) in segments {
+                for &(start, len) in segments.iter() {
                     out.extend_from_slice(&data[start..start + len]);
                 }
                 out
@@ -7029,7 +7063,10 @@ mod tests {
         };
         let actual = build_dense_i64_inner_output_data(&specs, &plan);
 
-        assert!(matches!(actual[0], DenseI64LaneData::RepeatRuns(_)));
+        assert!(matches!(
+            actual[0],
+            DenseI64LaneData::RepeatRunLengths { .. }
+        ));
         assert!(matches!(actual[1], DenseI64LaneData::RepeatedSlices { .. }));
         assert_eq!(lane_expanded(&actual[0]), vec![10, 10, 10, 30, 30, 30]);
         assert_eq!(
@@ -7037,9 +7074,13 @@ mod tests {
             vec![100, 102, 104, 101, 103, 105]
         );
 
-        // The lazy Column built from the runs is indistinguishable from the
-        // eagerly materialized one (values, slice view, length, equality).
-        let lazy = fp_columnar::Column::from_i64_repeat_runs(vec![(10, 3), (30, 3)]);
+        // The lazy Column built from shared run lengths is indistinguishable
+        // from the eagerly materialized one (values, slice view, length,
+        // equality).
+        let lazy = fp_columnar::Column::from_i64_repeat_values_run_lengths(
+            vec![10, 30],
+            std::sync::Arc::from([3usize, 3]),
+        );
         let eager = fp_columnar::Column::from_i64_values(vec![10, 10, 10, 30, 30, 30]);
         assert_eq!(lazy.len(), eager.len());
         assert_eq!(lazy.as_i64_slice(), eager.as_i64_slice());

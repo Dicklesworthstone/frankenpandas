@@ -1,0 +1,708 @@
+  [2m2026-06-07T19:09:26.773202Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ts1 at ubuntu@192.168.1.107 (8 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:27.125062Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenpandas (hash: 6d02bb0a19832847)[0m
+    [2;3mat[0m rch/src/hook.rs:5987 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:27.125121Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6009 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:27.748344Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker ts1...[0m
+    [2;3mat[0m rch/src/hook.rs:6039 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:27.748406Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas -> /data/projects/frankenpandas on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:28.140955Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 392ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:28.141022Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-columnar -> /data/projects/frankenpandas/crates/fp-columnar on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:28.367730Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 226ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:28.367812Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-conformance -> /data/projects/frankenpandas/crates/fp-conformance on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:28.607882Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 240ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:28.607971Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-expr -> /data/projects/frankenpandas/crates/fp-expr on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:28.836961Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 228ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:28.837031Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-frame -> /data/projects/frankenpandas/crates/fp-frame on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:29.082367Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 245ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:29.082463Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-frankentui -> /data/projects/frankenpandas/crates/fp-frankentui on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:29.326109Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 243ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:29.326193Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-groupby -> /data/projects/frankenpandas/crates/fp-groupby on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:29.560658Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 234ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:29.560740Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-index -> /data/projects/frankenpandas/crates/fp-index on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:29.798274Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 237ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:29.798353Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-io -> /data/projects/frankenpandas/crates/fp-io on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:30.030671Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 232ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:30.030777Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-join -> /data/projects/frankenpandas/crates/fp-join on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:30.265936Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 235ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:30.266028Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-python -> /data/projects/frankenpandas/crates/fp-python on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:30.498857Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 232ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:30.498944Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-runtime -> /data/projects/frankenpandas/crates/fp-runtime on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:30.730651Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 231ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:30.730730Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/fp-types -> /data/projects/frankenpandas/crates/fp-types on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:30.978302Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 247ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:30.978382Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenpandas/crates/frankenpandas -> /data/projects/frankenpandas/crates/frankenpandas on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:31.216243Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 237ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:31.216278Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 9442 files, 379676 bytes in 3459ms[0m
+    [2;3mat[0m rch/src/hook.rs:6202 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:31.764973Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo build -p fp-conformance --example perf_profile --profile release-perf[0m
+    [2;3mat[0m rch/src/hook.rs:6240 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:09:31.765029Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.scratch/cargo-target-orangepeak-l4adm-after-20260607T1909Z -> /data/projects/frankenpandas/.rch-target-ts1-job-29872254800116407-1780859367748337867-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+Warning: Identity file /home/ubuntu/.ssh/id_rsa not accessible: No such file or directory.
+warning: /data/projects/frankenpandas/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/frankenpandas/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded lz4_flex v0.11.6
+  Downloaded iana-time-zone v0.1.65
+  Downloaded prost-derive v0.13.5
+  Downloaded hdf5-metno-derive v0.10.0
+  Downloaded phf_codegen v0.13.1
+  Downloaded once_cell v1.21.4
+  Downloaded hashbrown v0.17.0
+  Downloaded getrandom v0.2.17
+  Downloaded getopts v0.2.24
+  Downloaded hdf5-metno-types v0.11.0
+  Downloaded getrandom v0.3.4
+  Downloaded hdf5-metno v0.12.4
+  Downloaded new_debug_unreachable v1.0.6
+  Downloaded proc-macro2 v1.0.106
+  Downloaded itoa v1.0.18
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded proc-macro-error-attr2 v2.0.0
+  Downloaded lock_api v0.4.14
+  Downloaded num-iter v0.1.45
+  Downloaded num v0.4.3
+  Downloaded rawpointer v0.2.1
+  Downloaded bytemuck v1.25.0
+  Downloaded iter-read v1.1.0
+  Downloaded log v0.4.29
+  Downloaded rand_core v0.9.5
+  Downloaded selectors v0.38.0
+  Downloaded bit-set v0.8.0
+  Downloaded ordered-float v2.10.1
+  Downloaded adler2 v2.0.1
+  Downloaded libloading v0.8.9
+  Downloaded stable_deref_trait v1.2.1
+  Downloaded orc-rust v0.8.0
+  Downloaded heck v0.5.0
+  Downloaded rustc-hash v2.1.2
+  Downloaded rustc_version v0.4.1
+  Downloaded web_atoms v0.2.4
+  Downloaded scopeguard v1.2.0
+  Downloaded same-file v1.0.6
+  Downloaded cfg-if v1.0.4
+  Downloaded lz4_flex v0.13.0
+  Downloaded page_size v0.6.0
+  Downloaded num-complex v0.4.6
+  Downloaded oorandom v11.1.5
+  Downloaded thiserror v1.0.69
+  Downloaded zmij v1.0.21
+  Downloaded thrift v0.17.0
+  Downloaded toml_parser v1.1.2+spec-1.1.0
+  Downloaded semver v1.0.28
+  Downloaded zstd-safe v7.2.4
+  Downloaded quick-error v1.2.3
+  Downloaded tinyvec v1.11.0
+  Downloaded arrow-arith v58.3.0
+  Downloaded serde_derive v1.0.228
+  Downloaded tinyvec_macros v0.1.1
+  Downloaded string_cache_codegen v0.6.1
+  Downloaded seq-macro v0.3.6
+  Downloaded scraper v0.27.0
+  Downloaded simdutf8 v0.1.5
+  Downloaded slab v0.4.12
+  Downloaded servo_arc v0.4.3
+  Downloaded thiserror-impl v1.0.69
+  Downloaded sha2 v0.11.0
+  Downloaded phf v0.12.1
+  Downloaded phf_macros v0.13.1
+  Downloaded pin-project-lite v0.2.17
+  Downloaded serde v1.0.228
+  Downloaded unicode-casefold v0.2.0
+  Downloaded snap v1.1.1
+  Downloaded tinytemplate v1.2.1
+  Downloaded unicode-normalization v0.1.25
+  Downloaded tiny-keccak v2.0.2
+  Downloaded lexical-core v1.0.6
+  Downloaded pkg-config v0.3.33
+  Downloaded siphasher v1.0.2
+  Downloaded serde_core v1.0.228
+  Downloaded ciborium-io v0.2.2
+  Downloaded markup5ever v0.39.0
+  Downloaded paste v1.0.15
+  Downloaded dtoa v1.0.11
+  Downloaded rusty-fork v0.3.1
+  Downloaded byteorder v1.5.0
+  Downloaded ciborium-ll v0.2.2
+  Downloaded wait-timeout v0.2.1
+  Downloaded phf_generator v0.13.1
+  Downloaded cpufeatures v0.3.0
+  Downloaded unarray v0.1.4
+  Downloaded cssparser-macros v0.7.0
+  Downloaded phf_shared v0.12.1
+  Downloaded precomputed-hash v0.1.1
+  Downloaded digest v0.11.2
+  Downloaded num-traits v0.2.19
+  Downloaded getrandom v0.4.2
+  Downloaded hybrid-array v0.4.10
+  Downloaded integer-encoding v3.0.4
+  Downloaded rand_chacha v0.9.0
+  Downloaded const-random-macro v0.1.16
+  Downloaded futures-io v0.3.32
+  Downloaded num-integer v0.1.46
+  Downloaded alloca v0.4.0
+  Downloaded phf v0.13.1
+  Downloaded proc-macro-crate v3.5.0
+  Downloaded rand_xorshift v0.4.0
+  Downloaded lexical-parse-integer v1.0.6
+  Downloaded quote v1.0.45
+  Downloaded csv-core v0.1.13
+  Downloaded hdf5-metno-sys v0.11.3
+  Downloaded criterion-plot v0.8.2
+  Downloaded const-random v0.1.18
+  Downloaded block-buffer v0.12.0
+  Downloaded parking_lot v0.12.5
+  Downloaded phf_shared v0.13.1
+  Downloaded atoi v2.0.0
+  Downloaded fnv v1.0.7
+  Downloaded clap v4.6.1
+  Downloaded prost v0.13.5
+  Downloaded clap_lex v1.1.0
+  Downloaded errno v0.3.14
+  Downloaded anstyle v1.0.14
+  Downloaded aho-corasick v1.1.4
+  Downloaded futures-task v0.3.32
+  Downloaded serde_yaml v0.9.34+deprecated
+  Downloaded anes v0.1.6
+  Downloaded arrow-ord v58.3.0
+  Downloaded dtoa-short v0.3.5
+  Downloaded futures-sink v0.3.32
+  Downloaded tokio-macros v2.7.0
+  Downloaded walkdir v2.5.0
+  Downloaded snafu-derive v0.8.9
+  Downloaded twox-hash v2.1.2
+  Downloaded simd-adler32 v0.3.9
+  Downloaded smallvec v1.15.1
+  Downloaded tendril v0.5.0
+  Downloaded ahash v0.8.12
+  Downloaded anyhow v1.0.102
+  Downloaded utf-8 v0.7.6
+  Downloaded zstd v0.13.3
+  Downloaded bitflags v2.11.1
+  Downloaded equivalent v1.0.2
+  Downloaded arrow-json v58.3.0
+  Downloaded ryu v1.0.23
+  Downloaded ciborium v0.2.2
+  Downloaded either v1.15.0
+  Downloaded matrixmultiply v0.3.10
+  Downloaded string_cache v0.9.0
+  Downloaded toml_datetime v1.1.1+spec-1.1.0
+  Downloaded async-trait v0.1.89
+  Downloaded serde_json v1.0.150
+  Downloaded codepage v0.1.2
+  Downloaded crunchy v0.2.4
+  Downloaded ego-tree v0.11.0
+  Downloaded futures-macro v0.3.32
+  Downloaded futures-core v0.3.32
+  Downloaded unicode-ident v1.0.24
+  Downloaded fallible-streaming-iterator v0.1.9
+  Downloaded arrow-data v58.3.0
+  Downloaded bit-vec v0.8.0
+  Downloaded autocfg v1.5.0
+  Downloaded crypto-common v0.2.1
+  Downloaded fast-float2 v0.2.3
+  Downloaded thiserror v2.0.18
+  Downloaded zopfli v0.8.3
+  Downloaded atoi_simd v0.17.0
+  Downloaded proc-macro-error2 v2.0.1
+  Downloaded arrow-csv v58.3.0
+  Downloaded ascii v1.1.0
+  Downloaded cssparser v0.37.0
+  Downloaded toml_edit v0.25.11+spec-1.1.0
+  Downloaded version_check v0.9.5
+  Downloaded lexical-write-integer v1.0.6
+  Downloaded memchr v2.8.0
+  Downloaded foldhash v0.2.0
+  Downloaded flatbuffers v25.12.19
+  Downloaded tempfile v3.27.0
+  Downloaded ndarray v0.17.2
+  Downloaded fastrand v2.4.1
+  Downloaded hashlink v0.11.0
+  Downloaded unsafe-libyaml v0.2.11
+  Downloaded arrow-string v58.3.0
+  Downloaded comfy-table v7.2.2
+  Downloaded arrow-row v58.3.0
+  Downloaded base64 v0.22.1
+  Downloaded zerocopy-derive v0.8.48
+  Downloaded futures v0.3.32
+  Downloaded num-rational v0.4.2
+  Downloaded arrow-select v58.3.0
+  Downloaded futures-channel v0.3.32
+  Downloaded indexmap v2.14.0
+  Downloaded snafu v0.8.9
+  Downloaded bumpalo v3.20.3
+  Downloaded arrow-schema v58.3.0
+  Downloaded shlex v1.3.0
+  Downloaded fallible-iterator v0.3.0
+  Downloaded bytes v1.11.1
+  Downloaded html5ever v0.39.0
+  Downloaded rand v0.9.4
+  Downloaded raptorq v2.0.1
+  Downloaded crc32fast v1.5.0
+  Downloaded typed-path v0.12.3
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded arrow-buffer v58.3.0
+  Downloaded cc v1.2.60
+  Downloaded unicode-segmentation v1.13.2
+  Downloaded lexical-parse-float v1.0.6
+  Downloaded miniz_oxide v0.8.9
+  Downloaded flate2 v1.1.9
+  Downloaded arrow v58.3.0
+  Downloaded parking_lot_core v0.9.12
+  Downloaded num-bigint v0.4.6
+  Downloaded derive_more-impl v2.1.1
+  Downloaded arrow-ipc v58.3.0
+  Downloaded arrow-cast v58.3.0
+  Downloaded winnow v1.0.2
+  Downloaded zip v7.2.0
+  Downloaded serde-pickle v1.2.0
+  Downloaded typenum v1.20.0
+  Downloaded vcpkg v0.2.15
+  Downloaded futures-util v0.3.32
+  Downloaded syn v2.0.117
+  Downloaded unicode-width v0.2.2
+  Downloaded zlib-rs v0.6.3
+  Downloaded half v2.7.1
+  Downloaded ucd v0.1.1
+  Downloaded const-oid v0.10.2
+  Downloaded derive_more v2.1.1
+  Downloaded hashbrown v0.16.1
+  Downloaded lexical-util v1.0.7
+  Downloaded lexical-write-float v1.0.6
+  Downloaded quick-xml v0.39.2
+  Downloaded regex v1.12.3
+  Downloaded zerocopy v0.8.48
+  Downloaded arrow-array v58.3.0
+  Downloaded itertools v0.13.0
+  Downloaded rusqlite v0.40.0
+  Downloaded tokio v1.52.3
+  Downloaded zstd-sys v2.0.16+zstd.1.5.7
+  Downloaded debug_unsafe v0.1.4
+  Downloaded clap_builder v4.6.0
+  Downloaded libm v0.2.16
+  Downloaded calamine v0.35.0
+  Downloaded quick-xml v0.40.1
+  Downloaded criterion v0.8.2
+  Downloaded proptest v1.11.0
+  Downloaded chrono v0.4.44
+  Downloaded regex-syntax v0.8.10
+  Downloaded dta v0.6.0
+  Downloaded rustix v1.1.4
+  Downloaded regex-automata v0.4.14
+  Downloaded thiserror-impl v2.0.18
+  Downloaded chrono-tz v0.10.4
+  Downloaded libc v0.2.185
+  Downloaded parquet v58.3.0
+  Downloaded rust_xlsxwriter v0.95.0
+  Downloaded csv v1.4.0
+  Downloaded encoding_rs v0.8.35
+  Downloaded jobserver v0.1.34
+  Downloaded libsqlite3-sys v0.38.0
+  Downloaded cast v0.3.0
+  Downloaded lzokay-native v0.1.0
+  Downloaded linux-raw-sys v0.12.1
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.185
+   Compiling cfg-if v1.0.4
+   Compiling autocfg v1.5.0
+   Compiling libm v0.2.16
+   Compiling siphasher v1.0.2
+   Compiling hashbrown v0.17.0
+   Compiling zerocopy v0.8.48
+   Compiling memchr v2.8.0
+   Compiling serde_core v1.0.228
+   Compiling pkg-config v0.3.33
+   Compiling getrandom v0.3.4
+   Compiling iana-time-zone v0.1.65
+   Compiling find-msvc-tools v0.1.9
+   Compiling chrono-tz v0.10.4
+   Compiling shlex v1.3.0
+   Compiling once_cell v1.21.4
+   Compiling bytes v1.11.1
+   Compiling itoa v1.0.18
+   Compiling serde v1.0.228
+   Compiling version_check v0.9.5
+   Compiling equivalent v1.0.2
+   Compiling fastrand v2.4.1
+   Compiling smallvec v1.15.1
+   Compiling arrow-schema v58.3.0
+   Compiling bitflags v2.11.1
+   Compiling zmij v1.0.21
+   Compiling regex-syntax v0.8.10
+   Compiling serde_json v1.0.150
+   Compiling parking_lot_core v0.9.12
+   Compiling lexical-util v1.0.7
+   Compiling thiserror v2.0.18
+   Compiling scopeguard v1.2.0
+   Compiling typenum v1.20.0
+   Compiling log v0.4.29
+   Compiling rustc-hash v2.1.2
+   Compiling semver v1.0.28
+   Compiling unicode-width v0.2.2
+   Compiling crc32fast v1.5.0
+   Compiling new_debug_unreachable v1.0.6
+   Compiling simd-adler32 v0.3.9
+   Compiling zstd-safe v7.2.4
+   Compiling const-oid v0.10.2
+   Compiling ryu v1.0.23
+   Compiling bumpalo v3.20.3
+   Compiling twox-hash v2.1.2
+   Compiling cpufeatures v0.3.0
+   Compiling unicode-segmentation v1.13.2
+   Compiling tinyvec_macros v0.1.1
+   Compiling precomputed-hash v0.1.1
+   Compiling adler2 v2.0.1
+   Compiling base64 v0.22.1
+   Compiling byteorder v1.5.0
+   Compiling winnow v1.0.2
+   Compiling zlib-rs v0.6.3
+   Compiling anyhow v1.0.102
+   Compiling num-traits v0.2.19
+   Compiling phf_shared v0.12.1
+   Compiling ahash v0.8.12
+   Compiling phf_shared v0.13.1
+   Compiling aho-corasick v1.1.4
+   Compiling lock_api v0.4.14
+   Compiling libloading v0.8.9
+   Compiling rustc_version v0.4.1
+   Compiling csv-core v0.1.13
+   Compiling matrixmultiply v0.3.10
+   Compiling encoding_rs v0.8.35
+   Compiling thiserror v1.0.69
+   Compiling futures-sink v0.3.32
+   Compiling snap v1.1.1
+   Compiling pin-project-lite v0.2.17
+   Compiling dtoa v1.0.11
+   Compiling indexmap v2.14.0
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling miniz_oxide v0.8.9
+   Compiling tinyvec v1.11.0
+   Compiling comfy-table v7.2.2
+   Compiling lz4_flex v0.13.0
+   Compiling paste v1.0.15
+   Compiling unicode-casefold v0.2.0
+   Compiling either v1.15.0
+   Compiling ucd v0.1.1
+   Compiling vcpkg v0.2.15
+   Compiling futures-core v0.3.32
+   Compiling utf-8 v0.7.6
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling typed-path v0.12.3
+   Compiling getrandom v0.4.2
+   Compiling rustix v1.1.4
+   Compiling slab v0.4.12
+   Compiling rawpointer v0.2.1
+   Compiling simdutf8 v0.1.5
+   Compiling futures-task v0.3.32
+   Compiling phf v0.12.1
+   Compiling phf_generator v0.13.1
+   Compiling hybrid-array v0.4.10
+   Compiling flatbuffers v25.12.19
+   Compiling lexical-parse-float v1.0.6
+   Compiling dtoa-short v0.3.5
+   Compiling futures-io v0.3.32
+   Compiling foldhash v0.2.0
+   Compiling stable_deref_trait v1.2.1
+   Compiling heck v0.5.0
+   Compiling hdf5-metno-types v0.11.0
+   Compiling linux-raw-sys v0.12.1
+   Compiling debug_unsafe v0.1.4
+   Compiling ascii v1.1.0
+   Compiling hdf5-metno v0.12.4
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling integer-encoding v3.0.4
+   Compiling lz4_flex v0.11.6
+   Compiling getopts v0.2.24
+   Compiling fast-float2 v0.2.3
+   Compiling clap_lex v1.1.0
+   Compiling lexical-write-float v1.0.6
+   Compiling itertools v0.13.0
+   Compiling futures-channel v0.3.32
+   Compiling ego-tree v0.11.0
+   Compiling zopfli v0.8.3
+   Compiling tendril v0.5.0
+   Compiling fallible-iterator v0.3.0
+   Compiling ciborium-io v0.2.2
+   Compiling bytemuck v1.25.0
+   Compiling unicode-normalization v0.1.25
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling iter-read v1.1.0
+   Compiling anstyle v1.0.14
+   Compiling seq-macro v0.3.6
+   Compiling phf_codegen v0.13.1
+   Compiling hashbrown v0.16.1
+   Compiling quick-xml v0.40.1
+   Compiling bit-vec v0.8.0
+   Compiling cast v0.3.0
+   Compiling unsafe-libyaml v0.2.11
+   Compiling fnv v1.0.7
+   Compiling same-file v1.0.6
+   Compiling quick-error v1.2.3
+   Compiling unarray v0.1.4
+   Compiling atoi_simd v0.17.0
+   Compiling regex-automata v0.4.14
+   Compiling syn v2.0.117
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling string_cache_codegen v0.6.1
+   Compiling proc-macro-error-attr2 v2.0.0
+   Compiling quick-xml v0.39.2
+   Compiling selectors v0.38.0
+   Compiling codepage v0.1.2
+   Compiling clap_builder v4.6.0
+   Compiling dta v0.6.0
+   Compiling wait-timeout v0.2.1
+   Compiling page_size v0.6.0
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling lexical-core v1.0.6
+   Compiling walkdir v2.5.0
+   Compiling jobserver v0.1.34
+   Compiling servo_arc v0.4.3
+   Compiling rand_core v0.9.5
+   Compiling web_atoms v0.2.4
+   Compiling toml_edit v0.25.11+spec-1.1.0
+   Compiling parking_lot v0.12.5
+   Compiling proc-macro-error2 v2.0.1
+   Compiling bit-set v0.8.0
+   Compiling rand_xorshift v0.4.0
+   Compiling rand v0.9.4
+   Compiling cc v1.2.60
+   Compiling hashlink v0.11.0
+   Compiling string_cache v0.9.0
+   Compiling flate2 v1.1.9
+   Compiling digest v0.11.2
+   Compiling sha2 v0.11.0
+   Compiling proc-macro-crate v3.5.0
+   Compiling zip v7.2.0
+   Compiling num-integer v0.1.46
+   Compiling chrono v0.4.44
+   Compiling num-complex v0.4.6
+   Compiling atoi v2.0.0
+   Compiling ordered-float v2.10.1
+   Compiling csv v1.4.0
+   Compiling num-bigint v0.4.6
+   Compiling num-iter v0.1.45
+   Compiling thrift v0.17.0
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling libsqlite3-sys v0.38.0
+   Compiling alloca v0.4.0
+   Compiling ndarray v0.17.2
+   Compiling criterion-plot v0.8.2
+   Compiling clap v4.6.1
+   Compiling tempfile v3.27.0
+   Compiling rust_xlsxwriter v0.95.0
+   Compiling regex v1.12.3
+   Compiling rusty-fork v0.3.1
+   Compiling hdf5-metno-sys v0.11.3
+   Compiling num-rational v0.4.2
+   Compiling num v0.4.3
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling phf_macros v0.13.1
+   Compiling cssparser-macros v0.7.0
+   Compiling futures-macro v0.3.32
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling snafu-derive v0.8.9
+   Compiling tokio-macros v2.7.0
+   Compiling prost-derive v0.13.5
+   Compiling hdf5-metno-derive v0.10.0
+   Compiling async-trait v0.1.89
+   Compiling tokio v1.52.3
+   Compiling futures-util v0.3.32
+   Compiling phf v0.13.1
+   Compiling derive_more v2.1.1
+   Compiling cssparser v0.37.0
+   Compiling lzokay-native v0.1.0
+   Compiling prost v0.13.5
+   Compiling snafu v0.8.9
+   Compiling markup5ever v0.39.0
+   Compiling html5ever v0.39.0
+   Compiling scraper v0.27.0
+   Compiling fp-types v0.1.0 (/data/projects/frankenpandas/crates/fp-types)
+   Compiling fp-runtime v0.1.0 (/data/projects/frankenpandas/crates/fp-runtime)
+   Compiling serde-pickle v1.2.0
+   Compiling calamine v0.35.0
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling raptorq v2.0.1
+   Compiling tinytemplate v1.2.1
+   Compiling futures v0.3.32
+   Compiling fp-index v0.1.0 (/data/projects/frankenpandas/crates/fp-index)
+   Compiling fp-columnar v0.1.0 (/data/projects/frankenpandas/crates/fp-columnar)
+   Compiling half v2.7.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling arrow-buffer v58.3.0
+   Compiling ciborium-ll v0.2.2
+   Compiling proptest v1.11.0
+   Compiling ciborium v0.2.2
+   Compiling fp-frame v0.1.0 (/data/projects/frankenpandas/crates/fp-frame)
+   Compiling criterion v0.8.2
+   Compiling arrow-data v58.3.0
+   Compiling arrow-array v58.3.0
+   Compiling arrow-select v58.3.0
+   Compiling arrow-row v58.3.0
+   Compiling arrow-arith v58.3.0
+   Compiling zstd v0.13.3
+   Compiling arrow-ord v58.3.0
+   Compiling arrow-ipc v58.3.0
+   Compiling arrow-string v58.3.0
+   Compiling parquet v58.3.0
+   Compiling arrow-cast v58.3.0
+   Compiling fp-groupby v0.1.0 (/data/projects/frankenpandas/crates/fp-groupby)
+   Compiling fp-join v0.1.0 (/data/projects/frankenpandas/crates/fp-join)
+   Compiling fp-expr v0.1.0 (/data/projects/frankenpandas/crates/fp-expr)
+   Compiling arrow-json v58.3.0
+   Compiling arrow-csv v58.3.0
+   Compiling arrow v58.3.0
+   Compiling orc-rust v0.8.0
+   Compiling rusqlite v0.40.0
+   Compiling fp-io v0.1.0 (/data/projects/frankenpandas/crates/fp-io)
+   Compiling fp-conformance v0.1.0 (/data/projects/frankenpandas/crates/fp-conformance)
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 2m 36s
+  [2m2026-06-07T19:12:09.472909Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 157707ms[0m
+    [2;3mat[0m rch/src/hook.rs:6364 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:12:09.473282Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6413 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:12:09.473312Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenpandas on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:2072 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:12:09.673033Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 199ms (1 files, 4179 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2111 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:12:09.673063Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 4179 bytes in 199ms[0m
+    [2;3mat[0m rch/src/hook.rs:6446 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:12:09.673177Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenpandas/.rch-target-ts1-job-29872254800116407-1780859367748337867-0 on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:2072 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:12:22.985912Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 13312ms (2890 files, 47751 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2111 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-07T19:12:22.985948Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 2890 files, 47751 bytes in 13312ms[0m
+    [2;3mat[0m rch/src/hook.rs:6570 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ts1 (176.4s)
