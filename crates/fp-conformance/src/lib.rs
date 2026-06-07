@@ -7117,8 +7117,8 @@ pub fn fuzz_pivot_table_bytes(input: &[u8]) -> Result<(), String> {
     let col_series = frame.get_column("col");
     let val_series = frame.get_column("val");
 
-    let mut expected_rows = Vec::new();
-    let mut expected_cols = Vec::new();
+    let mut expected_row_pairs: Vec<(String, Scalar)> = Vec::new();
+    let mut expected_col_pairs: Vec<(String, Scalar)> = Vec::new();
     let mut seen_rows = BTreeSet::new();
     let mut seen_cols = BTreeSet::new();
     let mut numeric_counts = BTreeMap::<(String, String), usize>::new();
@@ -7128,7 +7128,7 @@ pub fn fuzz_pivot_table_bytes(input: &[u8]) -> Result<(), String> {
             continue;
         };
         if seen_rows.insert(row_key.clone()) {
-            expected_rows.push(row_key);
+            expected_row_pairs.push((row_key, value.clone()));
         }
     }
     for value in col_series.values() {
@@ -7136,9 +7136,17 @@ pub fn fuzz_pivot_table_bytes(input: &[u8]) -> Result<(), String> {
             continue;
         };
         if seen_cols.insert(col_key.clone()) {
-            expected_cols.push(col_key);
+            expected_col_pairs.push((col_key, value.clone()));
         }
     }
+    // pandas pivot_table sorts both axes (sort=True default); FP matches as
+    // of br-frankenpandas-s3x7k. Sort the independently collected keys with
+    // the SAME typed comparator production uses (ascending, nulls last,
+    // stable first-seen ties) instead of pinning the old first-seen order.
+    expected_row_pairs.sort_by(|a, b| fp_frame::pivot_axis_scalar_cmp(&a.1, &b.1));
+    expected_col_pairs.sort_by(|a, b| fp_frame::pivot_axis_scalar_cmp(&a.1, &b.1));
+    let expected_rows: Vec<String> = expected_row_pairs.into_iter().map(|(k, _)| k).collect();
+    let expected_cols: Vec<String> = expected_col_pairs.into_iter().map(|(k, _)| k).collect();
     for idx in 0..frame.index().len() {
         let Some(row_key) = fuzz_pivot_key_name(&row_series.values()[idx]) else {
             continue;
