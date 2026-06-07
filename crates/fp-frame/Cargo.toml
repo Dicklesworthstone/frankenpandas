@@ -27,6 +27,7 @@ fp-index = { path = "../fp-index" }
 fp-runtime = { path = "../fp-runtime" }
 fp-types = { path = "../fp-types" }
 regex = { workspace = true }
+rustc-hash = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

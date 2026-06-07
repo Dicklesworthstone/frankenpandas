@@ -1268,6 +1268,7 @@ dependencies = [
  "fp-runtime",
  "fp-types",
  "regex",
+ "rustc-hash",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
