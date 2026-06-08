@@ -12526,9 +12526,88 @@ impl MultiIndex {
     /// Missing target tuples contribute a single `-1` entry and their target
     /// position is recorded in the returned `missing` vector.
     #[must_use]
+    /// Dictionary-encode every level of `self` and `target` into integer codes
+    /// (consistent across both) and pack each row's tuple into one mixed-radix
+    /// `u64` key (br-frankenpandas-mipack). Lets get_indexer hash an integer per
+    /// row instead of allocating a `Vec<IndexLabel>` (and cloning Utf8 Strings)
+    /// per row. Returns `None` when there are no levels, the level counts
+    /// differ, or the combined code space overflows `u64` (caller keeps the
+    /// `Vec<IndexLabel>`-key path). Bijective on tuple identity, so the source
+    /// map and target lookups match exactly the same rows.
+    fn factorize_packed_keys(&self, target: &Self) -> Option<(Vec<u64>, Vec<u64>)> {
+        let nlev = self.nlevels();
+        if nlev == 0 || nlev != target.nlevels() {
+            return None;
+        }
+        let n = self.len();
+        let m = target.len();
+        let mut src = vec![0u64; n];
+        let mut tgt = vec![0u64; m];
+        let mut combined: u128 = 1;
+        for level in 0..nlev {
+            let mut codes: FxHashMap<&IndexLabel, u64> = FxHashMap::default();
+            let mut next = 0u64;
+            // Source first so its codes are dense and lookups stay consistent;
+            // target-only values get fresh codes that no source key can match.
+            let s_level = &self.levels[level];
+            let t_level = &target.levels[level];
+            let s_codes: Vec<u64> = (0..n)
+                .map(|row| {
+                    *codes.entry(&s_level[row]).or_insert_with(|| {
+                        let c = next;
+                        next += 1;
+                        c
+                    })
+                })
+                .collect();
+            let t_codes: Vec<u64> = (0..m)
+                .map(|row| {
+                    *codes.entry(&t_level[row]).or_insert_with(|| {
+                        let c = next;
+                        next += 1;
+                        c
+                    })
+                })
+                .collect();
+            // Mixed-radix: shift existing partial keys up by this level's radix
+            // (= its distinct-value count) and add the new codes.
+            let radix = next;
+            for (dst, &c) in src.iter_mut().zip(&s_codes) {
+                *dst = dst.checked_mul(radix)?.checked_add(c)?;
+            }
+            for (dst, &c) in tgt.iter_mut().zip(&t_codes) {
+                *dst = dst.checked_mul(radix)?.checked_add(c)?;
+            }
+            combined = combined.checked_mul(radix as u128)?;
+            if combined > u64::MAX as u128 {
+                return None;
+            }
+        }
+        Some((src, tgt))
+    }
+
     pub fn get_indexer_non_unique(&self, target: &Self) -> (Vec<isize>, Vec<usize>) {
         if self.nlevels() != target.nlevels() {
             return (vec![-1; target.len()], (0..target.len()).collect());
+        }
+
+        if let Some((src_keys, tgt_keys)) = self.factorize_packed_keys(target) {
+            let mut positions =
+                FxHashMap::<u64, Vec<usize>>::with_capacity_and_hasher(self.len(), Default::default());
+            for (row, &key) in src_keys.iter().enumerate() {
+                positions.entry(key).or_default().push(row);
+            }
+            let mut indexer = Vec::new();
+            let mut missing = Vec::new();
+            for (target_row, &key) in tgt_keys.iter().enumerate() {
+                if let Some(matches) = positions.get(&key) {
+                    indexer.extend(matches.iter().map(|&pos| pos as isize));
+                } else {
+                    indexer.push(-1);
+                    missing.push(target_row);
+                }
+            }
+            return (indexer, missing);
         }
 
         let mut positions = FxHashMap::<Vec<IndexLabel>, Vec<usize>>::with_capacity_and_hasher(
@@ -12575,6 +12654,22 @@ impl MultiIndex {
         }
         if self.nlevels() != target.nlevels() {
             return Ok(vec![-1; target.len()]);
+        }
+
+        if let Some((src_keys, tgt_keys)) = self.factorize_packed_keys(target) {
+            let mut positions = FxHashMap::<u64, isize>::with_capacity_and_hasher(
+                self.len(),
+                Default::default(),
+            );
+            for (row, &key) in src_keys.iter().enumerate() {
+                positions
+                    .entry(key)
+                    .or_insert(isize::try_from(row).unwrap_or(isize::MAX));
+            }
+            return Ok(tgt_keys
+                .iter()
+                .map(|key| positions.get(key).copied().unwrap_or(-1))
+                .collect());
         }
 
         let mut positions = FxHashMap::<Vec<IndexLabel>, isize>::with_capacity_and_hasher(
@@ -16981,6 +17076,55 @@ mod tests {
         let (indexer, missing) = source.get_indexer_non_unique(&target);
         assert_eq!(indexer, vec![0, 3, -1, 1, 0, 3]);
         assert_eq!(missing, vec![1]);
+    }
+
+    #[test]
+    fn multi_index_get_indexer_packed_matches_vec_reference_mipack() {
+        // The packed-u64-key path must equal an independent Vec<IndexLabel>-key
+        // reference (mixed Utf8+Int64 levels, duplicate source, target-only
+        // values exercising fresh per-level codes and the mixed-radix packing).
+        let mk = |spec: &[(&str, i64)]| {
+            MultiIndex::from_tuples(
+                spec.iter()
+                    .map(|(s, i)| vec![IndexLabel::Utf8((*s).to_string()), IndexLabel::Int64(*i)])
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let source = mk(&[("a", 1), ("a", 2), ("b", 1), ("a", 1), ("c", 5), ("b", 2)]);
+        let target = mk(&[("b", 1), ("z", 9), ("a", 1), ("a", 2), ("c", 5), ("q", 0), ("b", 2)]);
+        let src_rows = source.to_list();
+        let tgt_rows = target.to_list();
+
+        let mut pos: std::collections::HashMap<Vec<IndexLabel>, Vec<usize>> = Default::default();
+        for (r, key) in src_rows.iter().enumerate() {
+            pos.entry(key.clone()).or_default().push(r);
+        }
+        let mut ref_ix = Vec::new();
+        let mut ref_miss = Vec::new();
+        for (tr, key) in tgt_rows.iter().enumerate() {
+            if let Some(m) = pos.get(key) {
+                ref_ix.extend(m.iter().map(|&p| p as isize));
+            } else {
+                ref_ix.push(-1);
+                ref_miss.push(tr);
+            }
+        }
+        let (ix, miss) = source.get_indexer_non_unique(&target);
+        assert_eq!(ix, ref_ix, "non_unique indexer");
+        assert_eq!(miss, ref_miss, "non_unique missing");
+
+        let usrc = mk(&[("a", 1), ("a", 2), ("b", 1), ("c", 5), ("b", 2)]);
+        let urows = usrc.to_list();
+        let mut upos: std::collections::HashMap<Vec<IndexLabel>, isize> = Default::default();
+        for (r, key) in urows.iter().enumerate() {
+            upos.entry(key.clone()).or_insert(r as isize);
+        }
+        let ref_u: Vec<isize> = tgt_rows
+            .iter()
+            .map(|k| upos.get(k).copied().unwrap_or(-1))
+            .collect();
+        assert_eq!(usrc.get_indexer(&target).unwrap(), ref_u, "unique indexer");
     }
 
     #[test]
