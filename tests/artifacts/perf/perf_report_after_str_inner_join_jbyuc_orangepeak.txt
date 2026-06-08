@@ -1,0 +1,226 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 112  of event 'cycles:P'
+# Event count (approx.): 288193262
+#
+# Overhead  Command       Shared Object     Symbol                                        IPC   [IPC Coverage]
+# ........  ............  ................  ............................................  ....................
+#
+    32.62%  perf_profile  [unknown]         [k] 0xffffffff84c01192                        -      -
+            |
+            |--14.19%--0xffffffff853a557b
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          perf_profile::build_str_join_frame
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+            |--10.43%--perf_profile::build_str_join_frame
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --8.00%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       perf_profile::build_str_join_frame
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+    23.20%  perf_profile  perf_profile      [.] perf_profile::build_str_join_frame        -      -
+            |
+            |--15.55%--perf_profile::build_str_join_frame
+            |          perf_profile::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          std::rt::lang_start::<()>::{closure#0}
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |
+             --7.50%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       perf_profile::build_str_join_frame
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+    16.63%  perf_profile  libc.so.6         [.] __memmove_avx_unaligned_erms              -      -
+            |
+            ---__memmove_avx_unaligned_erms
+               fp_join::build_single_key_inner_merge_output
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     8.70%  perf_profile  [unknown]         [k] 0xffffffff857c02ab                        -      -
+            |
+            ---0xffffffff86223c8e
+               perf_profile::build_str_join_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     7.59%  perf_profile  [unknown]         [k] 0xffffffff853d7d8d                        -      -
+            |
+            ---0xffffffff853d7d2a
+               0xffffffff853d8f99
+               0xffffffff853d9102
+               0xffffffff853da487
+               0xffffffff853dc432
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               perf_profile::build_str_join_frame
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     7.48%  perf_profile  [unknown]         [k] 0xffffffff85137e19                        -      -
+            |
+            ---0xffffffff8515376f
+               0xffffffff85157b17
+               0xffffffff85137e25
+               0xffffffff851524f6
+               0xffffffff85139003
+               0xffffffff85139f5d
+               0xffffffff84fc4bc8
+               0xffffffff86227724
+               0xffffffff84c00f0b
+               __memcmp_avx2_movbe
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>
+               <fp_columnar::Column>::as_strictly_increasing_utf8_contiguous
+               fp_join::merge_single_key_inner_unsorted
+               fp_join::merge_dataframes_on_with_options
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.82%  perf_profile  [unknown]         [k] 0xffffffff8621b2b7                        -      -
+     0.31%  perf_profile  perf_profile      [.] fp_join::merge_single_key_inner_unsorted  -      -
+     0.29%  perf_profile  [unknown]         [k] 0xffffffff84d04109                        -      -
+     0.27%  perf_profile  [unknown]         [k] 0xffffffff8545296c                        -      -
+     0.26%  perf_profile  [unknown]         [k] 0xffffffff8569eb59                        -      -
+     0.26%  perf_profile  perf_profile      [.] <fp_columnar::Column>::take_positions     -      -
+     0.25%  perf_profile  [unknown]         [k] 0xffffffff8622811f                        -      -
+     0.24%  perf_profile  [unknown]         [k] 0xffffffff8582f997                        -      -
+     0.23%  perf_profile  [unknown]         [k] 0xffffffff853ce4d5                        -      -
+     0.23%  perf_profile  libc.so.6         [.] __memcmp_avx2_movbe                       -      -
+     0.21%  perf_profile  [unknown]         [k] 0xffffffff853433ad                        -      -
+     0.19%  perf_profile  [unknown]         [k] 0xffffffff853a514a                        -      -
+     0.17%  perf_profile  [unknown]         [k] 0xffffffff8507e72a                        -      -
+     0.01%  perf_profile  [unknown]         [k] 0xffffffff84f8c9d1                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8620c894                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff850875bf                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff853dc5cc                        -      -
+     0.00%  perf_profile  perf_profile      [.] <std::sys::fs::unix::File>::open_c        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84c015d7                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85480d48                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff853b8390                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85452a65                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86228a46                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8541df1b                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8623a4f9                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2c3                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2bc                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d280                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedcb                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b66                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d285                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2cc                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d289                        -      -
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff85300b80                        -      -
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d285                        -      -
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d2bc                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84d0410b                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedcd                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b65                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b7c                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d286                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2d4                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2d7                        -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff862251d0                        -      -
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

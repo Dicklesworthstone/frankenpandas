@@ -28,6 +28,26 @@ use fp_join::{AsofDirection, JoinType, merge_asof, merge_dataframes};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
 
+fn lower_hex_digit(nibble: usize) -> u8 {
+    match nibble {
+        0..=9 => b'0' + nibble as u8,
+        10..=15 => b'a' + (nibble as u8 - 10),
+        _ => b'?',
+    }
+}
+
+fn push_id_lower_hex_8(bytes: &mut Vec<u8>, value: usize) {
+    bytes.extend_from_slice(b"id_");
+
+    let digits = ((usize::BITS - value.leading_zeros()).div_ceil(4)).max(1) as usize;
+    for _ in digits..8 {
+        bytes.push(b'0');
+    }
+    for shift in (0..digits).rev() {
+        bytes.push(lower_hex_digit((value >> (shift * 4)) & 0x0f));
+    }
+}
+
 /// Two Float64 Series whose Int64 indexes overlap but are shifted by one
 /// (left: 0..n, right: 1..=n), so `a + b` exercises the AACE outer-union
 /// alignment path with n-1 matched labels and two unmatched endpoints —
@@ -134,7 +154,9 @@ fn build_transform_frame(n: usize, num_groups: usize, ncols: usize) -> DataFrame
     columns.insert("k".to_string(), Column::from_i64_values(keys));
     for c in 0..ncols {
         let name = format!("v{c}");
-        let vals: Vec<f64> = (0..n).map(|i| (i.wrapping_mul(c + 1) % 9973) as f64 * 0.5).collect();
+        let vals: Vec<f64> = (0..n)
+            .map(|i| (i.wrapping_mul(c + 1) % 9973) as f64 * 0.5)
+            .collect();
         columns.insert(name.clone(), Column::from_f64_values(vals));
         column_order.push(name);
     }
@@ -155,12 +177,8 @@ fn build_str_join_frame(value_name: &str, n: usize, card: usize, key_start: usiz
     let mut bytes = Vec::with_capacity(n * 16);
     let mut offsets = Vec::with_capacity(n + 1);
     offsets.push(0);
-    let mut key = String::with_capacity(24);
     for row in 0..n {
-        key.clear();
-        write!(&mut key, "id_{:08x}", (row % card) + key_start)
-            .expect("writing to a String cannot fail");
-        bytes.extend_from_slice(key.as_bytes());
+        push_id_lower_hex_8(&mut bytes, (row % card) + key_start);
         offsets.push(bytes.len());
     }
     let values: Vec<f64> = (0..n)
@@ -295,9 +313,17 @@ fn build_sortindex_frame(n: usize) -> DataFrame {
     let index = Index::new(labels);
     let mut columns = BTreeMap::new();
     let v0: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64 * 0.1)).collect();
-    let v1: Vec<Scalar> = (0..n).map(|i| Scalar::Int64((i as i64).wrapping_mul(7))).collect();
-    columns.insert("v0".to_string(), fp_columnar::Column::from_values(v0).expect("v0"));
-    columns.insert("v1".to_string(), fp_columnar::Column::from_values(v1).expect("v1"));
+    let v1: Vec<Scalar> = (0..n)
+        .map(|i| Scalar::Int64((i as i64).wrapping_mul(7)))
+        .collect();
+    columns.insert(
+        "v0".to_string(),
+        fp_columnar::Column::from_values(v0).expect("v0"),
+    );
+    columns.insert(
+        "v1".to_string(),
+        fp_columnar::Column::from_values(v1).expect("v1"),
+    );
     let column_order = vec!["v0".to_string(), "v1".to_string()];
     DataFrame::new_with_column_order(index, columns, column_order).expect("sortindex frame")
 }
@@ -340,9 +366,18 @@ fn build_multisort_frame(n: usize) -> DataFrame {
         .collect();
     let v: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64 * 0.25)).collect();
     let mut columns = BTreeMap::new();
-    columns.insert("k0".to_string(), fp_columnar::Column::from_values(k0).expect("k0"));
-    columns.insert("k1".to_string(), fp_columnar::Column::from_values(k1).expect("k1"));
-    columns.insert("v".to_string(), fp_columnar::Column::from_values(v).expect("v"));
+    columns.insert(
+        "k0".to_string(),
+        fp_columnar::Column::from_values(k0).expect("k0"),
+    );
+    columns.insert(
+        "k1".to_string(),
+        fp_columnar::Column::from_values(k1).expect("k1"),
+    );
+    columns.insert(
+        "v".to_string(),
+        fp_columnar::Column::from_values(v).expect("v"),
+    );
     let column_order = vec!["k0".to_string(), "k1".to_string(), "v".to_string()];
     DataFrame::new_with_column_order(index, columns, column_order).expect("multisort frame")
 }
@@ -618,7 +653,9 @@ fn run_golden(scenario: &str, n: usize) {
         "sort_multi" => build_multisort_frame(n)
             .sort_values_multi(&["k0", "k1"], &[true, true], "last")
             .expect("sort multi"),
-        "sort_index" => build_sortindex_frame(n).sort_index(true).expect("sort index"),
+        "sort_index" => build_sortindex_frame(n)
+            .sort_index(true)
+            .expect("sort index"),
         "str_sort" => build_str_key_frame(n, 4096)
             .sort_values("k", true)
             .expect("str sort"),
