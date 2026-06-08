@@ -66,7 +66,7 @@ jobs:
       - name: Install deps
         if: matrix.features == '--all-features'
         run: |
-          libhdf5-dev pkg-config
+          apt-get install -y libhdf5-dev pkg-config
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
