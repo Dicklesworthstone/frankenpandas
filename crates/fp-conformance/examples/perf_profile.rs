@@ -120,6 +120,27 @@ fn build_groupby_frame(n: usize, num_groups: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, column_order).expect("frame")
 }
 
+/// Typed-backed groupby frame for the dense transform benchmark
+/// (br-frankenpandas-8kags): Int64 key (from_i64_values, so as_i64_slice fires)
+/// of bounded cardinality + Float64 value columns (from_f64_values). Mirrors the
+/// shape numeric data takes after a typed read/construction (where the dense
+/// groupby paths apply), unlike build_groupby_frame's Scalar-backed columns.
+fn build_transform_frame(n: usize, num_groups: usize, ncols: usize) -> DataFrame {
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let index = Index::new(labels);
+    let keys: Vec<i64> = (0..n).map(|i| (i % num_groups) as i64).collect();
+    let mut columns = BTreeMap::new();
+    let mut column_order = vec!["k".to_string()];
+    columns.insert("k".to_string(), Column::from_i64_values(keys));
+    for c in 0..ncols {
+        let name = format!("v{c}");
+        let vals: Vec<f64> = (0..n).map(|i| (i.wrapping_mul(c + 1) % 9973) as f64 * 0.5).collect();
+        columns.insert(name.clone(), Column::from_f64_values(vals));
+        column_order.push(name);
+    }
+    DataFrame::new_with_column_order(index, columns, column_order).expect("transform frame")
+}
+
 /// String-keyed frame whose grouping/sort key is stored as one contiguous
 /// Utf8 byte buffer plus offsets. Keys are ~26 bytes, moderately repeated,
 /// and row order is deterministic but not sorted.
@@ -542,6 +563,11 @@ fn run_golden(scenario: &str, n: usize) {
         "drop_duplicates" => build_groupby_frame(n, 100)
             .drop_duplicates(None, DuplicateKeep::First, false)
             .expect("dedup"),
+        "groupby_transform_mean" => build_transform_frame(n, 100, 4)
+            .groupby(&["k"])
+            .expect("groupby")
+            .transform("mean")
+            .expect("transform"),
         "sort_single" => build_numeric_frame(n, 4)
             .sort_values("c0", true)
             .expect("sort"),
@@ -814,6 +840,17 @@ fn main() {
                 let out = frame
                     .drop_duplicates(None, DuplicateKeep::First, false)
                     .expect("dedup");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "groupby_transform_mean" => {
+            let frame = build_transform_frame(n, 100, 4);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("groupby")
+                    .transform("mean")
+                    .expect("transform");
                 sink = sink.wrapping_add(out.len());
             }
         }
