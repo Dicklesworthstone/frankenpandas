@@ -4321,10 +4321,13 @@ impl DatetimeIndex {
     /// Pandas raises KeyError for missing values; this surface mirrors
     /// that with [`IndexError::InvalidArgument`].
     pub fn get_loc(&self, value: i64) -> Result<usize, IndexError> {
+        // Delegate to Index::position, which binary-searches a monotonic
+        // (AscendingDatetime64) index in O(log n) instead of the O(n) linear
+        // scan, and falls back to the same first-match linear scan when unsorted
+        // (br-frankenpandas-idxdup). Bit-identical: a Datetime64(value) needle
+        // matches exactly the labels this scan accepted.
         self.index
-            .labels()
-            .iter()
-            .position(|label| matches!(label, IndexLabel::Datetime64(n) if *n == value))
+            .position(&IndexLabel::Datetime64(value))
             .ok_or_else(|| {
                 IndexError::InvalidArgument(format!("get_loc: {value} not in DatetimeIndex"))
             })
@@ -5569,10 +5572,11 @@ impl TimedeltaIndex {
 
     /// First position of `value`, matching `pd.TimedeltaIndex.get_loc(value)`.
     pub fn get_loc(&self, value: i64) -> Result<usize, IndexError> {
+        // Binary-search a monotonic (AscendingTimedelta64) index via
+        // Index::position; same first-match linear fallback when unsorted
+        // (br-frankenpandas-idxdup).
         self.index
-            .labels()
-            .iter()
-            .position(|label| matches!(label, IndexLabel::Timedelta64(n) if *n == value))
+            .position(&IndexLabel::Timedelta64(value))
             .ok_or_else(|| {
                 IndexError::InvalidArgument(format!("get_loc: {value} not in TimedeltaIndex"))
             })
@@ -13625,6 +13629,25 @@ mod tests {
                 ref_diff.as_slice(),
                 "difference {a:?} \\ {b:?}"
             );
+        }
+    }
+
+    #[test]
+    fn datetime_timedelta_get_loc_binary_search_matches_linear_idxdup() {
+        // get_loc now binary-searches a monotonic typed index; the result must
+        // equal a linear first-match reference for both sorted (binary path) and
+        // unsorted (linear path) value vectors.
+        for nanos in [
+            vec![10_i64, 20, 30, 40, 50], // sorted -> AscendingDatetime64/Timedelta64
+            vec![30_i64, 10, 50, 20, 40], // unsorted -> linear fallback
+        ] {
+            let dt = DatetimeIndex::new(nanos.clone());
+            let td = TimedeltaIndex::new(nanos.clone());
+            for q in [10_i64, 20, 30, 40, 50, 0, 99] {
+                let expected = nanos.iter().position(|n| *n == q);
+                assert_eq!(dt.get_loc(q).ok(), expected, "datetime nanos={nanos:?} q={q}");
+                assert_eq!(td.get_loc(q).ok(), expected, "timedelta nanos={nanos:?} q={q}");
+            }
         }
     }
 
