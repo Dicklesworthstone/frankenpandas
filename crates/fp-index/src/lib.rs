@@ -1033,6 +1033,13 @@ impl Index {
 
     #[must_use]
     pub fn unique(&self) -> Self {
+        // A strictly-ascending index (every recognized SortOrder) is already
+        // all-unique in first-seen order, so unique() is an identity — return an
+        // O(1) Arc-sharing clone instead of hashing every label and rebuilding
+        // the vector (br-frankenpandas-idxdup dedup family).
+        if !matches!(self.sort_order(), SortOrder::Unsorted) {
+            return self.clone();
+        }
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let labels: Vec<IndexLabel> = self
             .labels
@@ -1046,6 +1053,10 @@ impl Index {
     #[must_use]
     pub fn duplicated(&self, keep: DuplicateKeep) -> Vec<bool> {
         let mut result = vec![false; self.labels.len()];
+        // Strictly-ascending => no duplicates under any keep mode; skip hashing.
+        if !matches!(self.sort_order(), SortOrder::Unsorted) {
+            return result;
+        }
         match keep {
             DuplicateKeep::First => {
                 let mut seen = FxHashMap::<&IndexLabel, ()>::default();
@@ -1088,6 +1099,10 @@ impl Index {
     /// Matches `pd.Index.drop_duplicates(keep=...)`.
     #[must_use]
     pub fn drop_duplicates_keep(&self, keep: DuplicateKeep) -> Self {
+        // Strictly-ascending => nothing is dropped; O(1) Arc-sharing clone.
+        if !matches!(self.sort_order(), SortOrder::Unsorted) {
+            return self.clone();
+        }
         let duplicated = self.duplicated(keep);
         let labels = self
             .labels
@@ -13449,6 +13464,50 @@ mod tests {
             let expected = super::detect_duplicates(&labels);
             let got = Index::new(labels.clone()).has_duplicates();
             assert_eq!(got, expected, "mismatch for {labels:?}");
+        }
+    }
+
+    #[test]
+    fn dedup_family_sort_fast_path_matches_reference_idxdup() {
+        // unique / duplicated / drop_duplicates strict-ascending fast paths must
+        // equal an independent first-seen reference for every shape.
+        let cases: Vec<Vec<IndexLabel>> = vec![
+            vec![],
+            vec![7_i64.into()],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()], // sorted unique
+            vec![1_i64.into(), 2_i64.into(), 2_i64.into(), 4_i64.into()], // sorted dup
+            vec![3_i64.into(), 1_i64.into(), 3_i64.into(), 2_i64.into()], // unsorted dup
+            vec![9_i64.into(), 5_i64.into(), 1_i64.into()], // descending
+            vec!["a".into(), "b".into(), "c".into()],       // sorted utf8
+            vec!["b".into(), "a".into(), "b".into()],       // unsorted utf8 dup
+        ];
+        for labels in cases {
+            let idx = Index::new(labels.clone());
+
+            let mut seen = std::collections::HashSet::new();
+            let ref_unique: Vec<IndexLabel> = labels
+                .iter()
+                .filter(|l| seen.insert((*l).clone()))
+                .cloned()
+                .collect();
+            assert_eq!(idx.unique().labels(), ref_unique.as_slice(), "unique {labels:?}");
+
+            let mut seen_f = std::collections::HashSet::new();
+            let ref_dup_first: Vec<bool> = labels
+                .iter()
+                .map(|l| !seen_f.insert(l.clone()))
+                .collect();
+            assert_eq!(
+                idx.duplicated(DuplicateKeep::First),
+                ref_dup_first,
+                "duplicated(First) {labels:?}"
+            );
+
+            assert_eq!(
+                idx.drop_duplicates().labels(),
+                ref_unique.as_slice(),
+                "drop_duplicates {labels:?}"
+            );
         }
     }
 
