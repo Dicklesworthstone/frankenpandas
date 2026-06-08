@@ -1,0 +1,7 @@
+  [2m2026-06-08T18:27:24.620486Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: bash -c 'cargo build -p fp-conformance --example perf_profile --release 2>&1 | tail -1; BIN=/data/tmp/cargo-target/release/examples/perf_profile; for i in 1 2 3 4 5; do $BIN str_inner_join 1000000 1000 2>&1 | grep ms/iter; done'[0m
+    Finished `release` profile [optimized] target(s) in 1m 26s
+perf_profile: done 1000 iters in 0.457s (0.457 ms/iter), sink=100000000
+perf_profile: done 1000 iters in 0.459s (0.459 ms/iter), sink=100000000
+perf_profile: done 1000 iters in 0.442s (0.442 ms/iter), sink=100000000
+perf_profile: done 1000 iters in 0.448s (0.448 ms/iter), sink=100000000
+perf_profile: done 1000 iters in 0.443s (0.443 ms/iter), sink=100000000

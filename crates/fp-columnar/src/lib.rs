@@ -1085,6 +1085,22 @@ enum ScalarValues {
         expanded: OnceLock<Vec<i64>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Zero-copy contiguous row-range VIEW over an `Arc`-shared contiguous-Utf8
+    /// backing (br-frankenpandas-jbyuc.1.1.1). Row `i` (`0..len`) is
+    /// `bytes[offsets[start + i] .. offsets[start + i + 1]]` — the same shared
+    /// `bytes`/`offsets` as the source `LazyContiguousUtf8`, with `start`/`len`
+    /// selecting a contiguous window. `take_positions` returns this in O(1)
+    /// (two `Arc::clone`s) when the requested positions are a contiguous
+    /// ascending range, deferring the per-row byte gather until a consumer
+    /// actually materializes the Scalar view. The byte content is identical to
+    /// the eager gather: same bytes, same order, all-valid.
+    LazyUtf8Slice {
+        bytes: Arc<[u8]>,
+        offsets: Arc<[usize]>,
+        start: usize,
+        len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
 }
 
 impl ScalarValues {
@@ -1149,6 +1165,24 @@ impl ScalarValues {
             offsets,
             strictly_increasing: OnceLock::new(),
             fixed_width: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    /// Build a zero-copy contiguous row-range view over a shared contiguous-Utf8
+    /// backing (br-frankenpandas-jbyuc.1.1.1). Rows `start..start+len` of the
+    /// source become rows `0..len` of the view. Shares `bytes`/`offsets` in
+    /// O(1); the Scalar view materializes on demand.
+    fn lazy_utf8_slice(bytes: Arc<[u8]>, offsets: Arc<[usize]>, start: usize, len: usize) -> Self {
+        debug_assert!(
+            start + len + 1 <= offsets.len(),
+            "view window must lie within the source offsets"
+        );
+        Self::LazyUtf8Slice {
+            bytes,
+            offsets,
+            start,
+            len,
             values: OnceLock::new(),
         }
     }
@@ -1582,6 +1616,27 @@ impl ScalarValues {
                         .collect()
                 })
                 .as_slice(),
+            Self::LazyUtf8Slice {
+                bytes,
+                offsets,
+                start,
+                len,
+                values,
+            } => values
+                .get_or_init(|| {
+                    (0..*len)
+                        .map(|i| {
+                            let lo = offsets[start + i];
+                            let hi = offsets[start + i + 1];
+                            Scalar::Utf8(
+                                std::str::from_utf8(&bytes[lo..hi])
+                                    .expect("contiguous utf8 buffer is valid by construction")
+                                    .to_owned(),
+                            )
+                        })
+                        .collect()
+                })
+                .as_slice(),
         }
     }
 
@@ -1597,6 +1652,7 @@ impl ScalarValues {
             Self::LazyRepeatRunsInt64 { total_len, .. } => *total_len,
             Self::LazyRepeatValuesInt64 { total_len, .. } => *total_len,
             Self::LazyRepeatedSlicesInt64 { total_len, .. } => *total_len,
+            Self::LazyUtf8Slice { len, .. } => *len,
         }
     }
 
@@ -1638,6 +1694,21 @@ fn contiguous_utf8_fixed_width(offsets: &[usize]) -> Option<usize> {
     Some(width)
 }
 
+/// If `positions` is a non-empty contiguous ascending run
+/// (`positions[i] == positions[0] + i`), return its start. Returns `None` for
+/// an empty slice or the first out-of-sequence position — so a non-contiguous
+/// take pays only until the first gap (typically O(1)).
+/// (br-frankenpandas-jbyuc.1.1.1)
+fn contiguous_ascending_start(positions: &[usize]) -> Option<usize> {
+    let first = *positions.first()?;
+    for (i, &pos) in positions.iter().enumerate() {
+        if pos != first + i {
+            return None;
+        }
+    }
+    Some(first)
+}
+
 impl Clone for ScalarValues {
     fn clone(&self) -> Self {
         match self {
@@ -1675,6 +1746,13 @@ impl Clone for ScalarValues {
                 Arc::clone(segments),
                 *total_len,
             ),
+            Self::LazyUtf8Slice {
+                bytes,
+                offsets,
+                start,
+                len,
+                ..
+            } => Self::lazy_utf8_slice(Arc::clone(bytes), Arc::clone(offsets), *start, *len),
         }
     }
 }
@@ -2898,6 +2976,29 @@ impl Column {
         None
     }
 
+    /// Share the `Arc` contiguous-Utf8 backing plus the source-row offset of
+    /// row 0, for an all-valid `LazyContiguousUtf8` (offset 0) or an existing
+    /// `LazyUtf8Slice` view (offset `start`). The two `Arc::clone`s are O(1) and
+    /// let `take_positions` return a contiguous-range view without copying
+    /// (br-frankenpandas-jbyuc.1.1.1).
+    fn utf8_arc_view_source(&self) -> Option<(Arc<[u8]>, Arc<[usize]>, usize)> {
+        if self.dtype != DType::Utf8 || !self.validity.all() {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyContiguousUtf8 { bytes, offsets, .. } => {
+                Some((Arc::clone(bytes), Arc::clone(offsets), 0))
+            }
+            ScalarValues::LazyUtf8Slice {
+                bytes,
+                offsets,
+                start,
+                ..
+            } => Some((Arc::clone(bytes), Arc::clone(offsets), *start)),
+            _ => None,
+        }
+    }
+
     /// Borrow the contiguous Utf8 backing only when its byte spans are already
     /// strictly increasing. The witness is cached on the immutable contiguous
     /// backing so repeated ordered joins do not rescan both key columns.
@@ -3009,6 +3110,37 @@ impl Column {
                 return Self {
                     dtype: self.dtype,
                     values: ScalarValues::lazy_all_valid_int64(data),
+                    validity: ValidityMask::all_valid(n),
+                    data: None,
+                };
+            }
+
+            // Zero-copy contiguous-range view (br-frankenpandas-jbyuc.1.1.1):
+            // when the requested positions are a contiguous ascending range over
+            // an Arc-shared contiguous-Utf8 backing, share the source `bytes`/
+            // `offsets` and defer the per-row byte gather instead of copying.
+            // Bit-identical to the eager gather below: the view materializes
+            // `Scalar::Utf8` of `bytes[off[start+i]..off[start+i+1]]` for
+            // `i in 0..n` — the exact same spans, same order, all-valid mask.
+            //
+            // Gated `n >= 64`: a view keeps the *whole* source buffer alive via
+            // `Arc`, so a tiny contiguous take (head/tail/single-row iloc) would
+            // pin a potentially large buffer to hold a handful of rows. Small
+            // takes fall through to the eager gather (a cheap, independent copy);
+            // only sizeable contiguous ranges — the join-output shape this lever
+            // targets — take the zero-copy view.
+            if n >= 64
+                && let Some((src_bytes, src_offsets, src_start)) = self.utf8_arc_view_source()
+                && let Some(range_start) = contiguous_ascending_start(positions)
+            {
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_utf8_slice(
+                        src_bytes,
+                        src_offsets,
+                        src_start + range_start,
+                        n,
+                    ),
                     validity: ValidityMask::all_valid(n),
                     data: None,
                 };
