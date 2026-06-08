@@ -884,6 +884,23 @@ fn run_golden(scenario: &str, n: usize) {
             let out = s.sort_values(true).expect("sort");
             return print!("{}", golden_dump_series(&out));
         }
+        "str_series_take" => {
+            // Reversed-index take over an Eager (Scalar-backed) Utf8 Series —
+            // isolates Column::take_positions' Scalar-backed-Utf8 gather.
+            let s = build_str_series(n);
+            // Deterministic pseudo-random permutation (Fisher-Yates with an
+            // LCG): a scattered gather order is what stresses the per-row
+            // String-clone allocator, isolating take_positions' Utf8 gather.
+            let mut idx: Vec<i64> = (0..n as i64).collect();
+            let mut state: u64 = 0x243F_6A88_85A3_08D3;
+            for i in (1..n).rev() {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let j = (state >> 33) as usize % (i + 1);
+                idx.swap(i, j);
+            }
+            let out = s.take(&idx).expect("take");
+            return print!("{}", golden_dump_series(&out));
+        }
         "series_sort_index" => {
             let s = build_series_sortindex(n);
             let out = s.sort_index(true).expect("series sort index");
@@ -1376,6 +1393,23 @@ fn main() {
             let s = build_str_series(n);
             for _ in 0..iters {
                 let out = s.sort_values(true).expect("sort");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_series_take" => {
+            let s = build_str_series(n);
+            // Deterministic pseudo-random permutation (Fisher-Yates with an
+            // LCG): a scattered gather order is what stresses the per-row
+            // String-clone allocator, isolating take_positions' Utf8 gather.
+            let mut idx: Vec<i64> = (0..n as i64).collect();
+            let mut state: u64 = 0x243F_6A88_85A3_08D3;
+            for i in (1..n).rev() {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let j = (state >> 33) as usize % (i + 1);
+                idx.swap(i, j);
+            }
+            for _ in 0..iters {
+                let out = s.take(&idx).expect("take");
                 sink = sink.wrapping_add(out.len());
             }
         }

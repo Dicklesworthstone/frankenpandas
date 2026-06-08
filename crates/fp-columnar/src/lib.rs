@@ -3281,6 +3281,37 @@ impl Column {
                 };
             }
 
+            // Scalar-backed all-valid Utf8 gather: a Utf8 column whose values
+            // are eager `Scalar::Utf8` (not a LazyContiguousUtf8 backing) misses
+            // the contiguous branch above and would otherwise clone one `String`
+            // per row (n heap allocs — the malloc-bound hotspot of
+            // Series::sort_values / take / iloc over Scalar-backed text). Gather
+            // the selected spans into ONE fresh bytes buffer + offsets and emit a
+            // lazily-typed contiguous column instead. Bit-identical to the
+            // Scalar-clone path: each output slot materializes `Scalar::Utf8` of
+            // the exact same span bytes in the same order, all-valid mask
+            // (enclosing branch). `as_all_valid_str_vec` borrows the &str spans
+            // without materializing (returns `None` for any non-Utf8 scalar, so
+            // mixed columns fall through to the clone path unchanged).
+            if self.dtype == DType::Utf8
+                && let Some(strs) = self.as_all_valid_str_vec()
+            {
+                let total: usize = positions.iter().map(|&pos| strs[pos].len()).sum();
+                let mut new_bytes = Vec::with_capacity(total);
+                let mut new_offsets = Vec::with_capacity(n + 1);
+                new_offsets.push(0);
+                for &pos in positions {
+                    new_bytes.extend_from_slice(strs[pos].as_bytes());
+                    new_offsets.push(new_bytes.len());
+                }
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_contiguous_utf8(new_bytes, new_offsets),
+                    validity: ValidityMask::all_valid(n),
+                    data: None,
+                };
+            }
+
             let values = self
                 .take_all_valid_primitive_positions(positions)
                 .unwrap_or_else(|| {
