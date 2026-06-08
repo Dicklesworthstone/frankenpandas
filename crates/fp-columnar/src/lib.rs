@@ -1038,9 +1038,16 @@ enum ScalarValues {
     /// construction — only built from `&str` data). String-output ops write
     /// here without a per-row heap `String`; the `Vec<Scalar::Utf8>` view
     /// materializes once on demand.
+    ///
+    /// The byte buffer and offsets are `Arc`-shared (br-frankenpandas-oifvy):
+    /// the backing is immutable after construction (string ops always build a
+    /// fresh buffer, never mutate in place), so `Column::clone` shares the
+    /// `Arc` instead of deep-copying the (often large) byte buffer — O(1)
+    /// instead of O(n), and observationally a deep copy because the data can
+    /// never change underneath a shared reader.
     LazyContiguousUtf8 {
-        bytes: Vec<u8>,
-        offsets: Vec<usize>,
+        bytes: Arc<[u8]>,
+        offsets: Arc<[usize]>,
         strictly_increasing: OnceLock<bool>,
         fixed_width: OnceLock<Option<usize>>,
         values: OnceLock<Vec<Scalar>>,
@@ -1123,6 +1130,18 @@ impl ScalarValues {
     }
 
     fn lazy_contiguous_utf8(bytes: Vec<u8>, offsets: Vec<usize>) -> Self {
+        debug_assert!(!offsets.is_empty(), "offsets must hold n+1 entries");
+        debug_assert_eq!(*offsets.last().expect("non-empty"), bytes.len());
+        Self::lazy_contiguous_utf8_arc(Arc::from(bytes), Arc::from(offsets))
+    }
+
+    /// Construct a `LazyContiguousUtf8` from already-`Arc`-shared buffers,
+    /// sharing them in O(1) instead of re-allocating. Used by `Clone` so two
+    /// contiguous-Utf8 columns can share one immutable byte buffer
+    /// (br-frankenpandas-oifvy). The witness caches start fresh — they are pure
+    /// functions of the (identical) shared buffers, so a clone recomputes the
+    /// same value lazily if asked.
+    fn lazy_contiguous_utf8_arc(bytes: Arc<[u8]>, offsets: Arc<[usize]>) -> Self {
         debug_assert!(!offsets.is_empty(), "offsets must hold n+1 entries");
         debug_assert_eq!(*offsets.last().expect("non-empty"), bytes.len());
         Self::LazyContiguousUtf8 {
@@ -1630,7 +1649,7 @@ impl Clone for ScalarValues {
             }
             Self::LazyAllValidBool { data, .. } => Self::lazy_all_valid_bool(data.clone()),
             Self::LazyContiguousUtf8 { bytes, offsets, .. } => {
-                Self::lazy_contiguous_utf8(bytes.clone(), offsets.clone())
+                Self::lazy_contiguous_utf8_arc(Arc::clone(bytes), Arc::clone(offsets))
             }
             Self::LazyNullableInt64 { data, validity, .. } => {
                 Self::lazy_nullable_int64(data.clone(), validity.clone())
@@ -2874,7 +2893,7 @@ impl Column {
             && self.validity.all()
             && let ScalarValues::LazyContiguousUtf8 { bytes, offsets, .. } = &self.values
         {
-            return Some((bytes.as_slice(), offsets.as_slice()));
+            return Some((bytes.as_ref(), offsets.as_ref()));
         }
         None
     }
@@ -2896,7 +2915,7 @@ impl Column {
             && *strictly_increasing
                 .get_or_init(|| contiguous_utf8_offsets_are_strictly_increasing(bytes, offsets))
         {
-            return Some((bytes.as_slice(), offsets.as_slice()));
+            return Some((bytes.as_ref(), offsets.as_ref()));
         }
         None
     }
@@ -2926,7 +2945,7 @@ impl Column {
                 .get_or_init(|| contiguous_utf8_fixed_width(offsets))
                 .as_ref()
                 .copied()?;
-            return Some((bytes.as_slice(), offsets.as_slice(), width));
+            return Some((bytes.as_ref(), offsets.as_ref(), width));
         }
         None
     }
