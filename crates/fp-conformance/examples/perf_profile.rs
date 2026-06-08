@@ -91,6 +91,35 @@ fn build_groupby_frame(n: usize, num_groups: usize) -> DataFrame {
 /// String-keyed frame whose grouping/sort key is stored as one contiguous
 /// Utf8 byte buffer plus offsets. Keys are ~26 bytes, moderately repeated,
 /// and row order is deterministic but not sorted.
+/// Frame with a contiguous-Utf8 `id` key (cardinality `card`) + one Float64
+/// value column, for string-key inner-join benchmarks. With card == n the keys
+/// are ~unique so the join is ~1:1 (output ~= n), keeping the cost on the
+/// build+probe (br-frankenpandas-i388q) rather than a fanout output.
+fn build_str_join_frame(value_name: &str, n: usize, card: usize, key_start: usize) -> DataFrame {
+    let card = card.max(1);
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let index = Index::new(labels);
+    let mut bytes = Vec::with_capacity(n * 16);
+    let mut offsets = Vec::with_capacity(n + 1);
+    offsets.push(0);
+    let mut key = String::with_capacity(24);
+    for row in 0..n {
+        key.clear();
+        write!(&mut key, "id_{:08x}", (row % card) + key_start)
+            .expect("writing to a String cannot fail");
+        bytes.extend_from_slice(key.as_bytes());
+        offsets.push(bytes.len());
+    }
+    let values: Vec<f64> = (0..n)
+        .map(|row| ((row as u64).wrapping_mul(37) % 10_003) as f64 * 0.25)
+        .collect();
+    let mut columns = BTreeMap::new();
+    columns.insert("id".to_string(), Column::from_utf8_contiguous(bytes, offsets));
+    columns.insert(value_name.to_string(), Column::from_f64_values(values));
+    let column_order = vec!["id".to_string(), value_name.to_string()];
+    DataFrame::new_with_column_order(index, columns, column_order).expect("str join frame")
+}
+
 fn build_str_key_frame(n: usize, key_cardinality: usize) -> DataFrame {
     let cardinality = key_cardinality.max(1);
     let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
@@ -518,6 +547,15 @@ fn run_golden(scenario: &str, n: usize) {
             DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
                 .expect("join golden frame")
         }
+        "str_inner_join" => {
+            // ~1:1 keys, ~10% overlap (right keys offset): build+probe over all n
+            // rows dominates the small matched output (br-frankenpandas-i388q).
+            let left = build_str_join_frame("lv", n, n, 0);
+            let right = build_str_join_frame("rv", n, n, n - n / 10);
+            let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+            DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
+                .expect("join golden frame")
+        }
         "asof_join" => {
             let (left, right) = build_asof_frames(n, 1, 8);
             let out = merge_asof(&left, &right, "on", AsofDirection::Backward).expect("asof");
@@ -866,6 +904,16 @@ fn main() {
             // per-column gather over the ~n^2/card output dominates (j3jnd).
             let left = build_join_frame_f64_wide("lv", n, 512, 6);
             let right = build_join_frame_f64_wide("rv", n, 512, 6);
+            for _ in 0..iters {
+                let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
+                sink = sink.wrapping_add(out.index.len());
+            }
+        }
+        "str_inner_join" => {
+            // ~1:1 keys with ~10% overlap: build+probe over all n rows dominates
+            // the small matched output (br-frankenpandas-i388q).
+            let left = build_str_join_frame("lv", n, n, 0);
+            let right = build_str_join_frame("rv", n, n, n - n / 10);
             for _ in 0..iters {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
                 sink = sink.wrapping_add(out.index.len());

@@ -4395,6 +4395,49 @@ fn hash_int64_inner_positions(
     Some(hash_i64_inner_positions_slices(left, right))
 }
 
+/// Hash build+probe over raw UTF-8 byte spans for all-valid contiguous-Utf8
+/// keys (br-frankenpandas-i388q). Mirrors the generic `JoinKeyComponent` inner
+/// path exactly — right positions pushed ascending per key bucket, left probed
+/// in order — but hashes `&[u8]` spans directly instead of materializing each
+/// key column to `Vec<Scalar>` and cloning every string into a
+/// `JoinKeyComponent::Present(IndexLabel::Utf8)` wrapper. Returns `None` unless
+/// BOTH keys are all-valid contiguous Utf8; null-bearing keys keep the generic
+/// path (which matches null-to-null — a case `as_utf8_contiguous` excludes).
+fn contiguous_utf8_inner_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let (left_bytes, left_offsets) = left_key.as_utf8_contiguous()?;
+    let (right_bytes, right_offsets) = right_key.as_utf8_contiguous()?;
+    let left_n = left_offsets.len() - 1;
+    let right_n = right_offsets.len() - 1;
+    if left_n == 0 || right_n == 0 {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    let mut right_map = FxHashMap::<&[u8], JoinPositionBucket>::with_capacity_and_hasher(
+        right_n,
+        Default::default(),
+    );
+    for pos in 0..right_n {
+        let span = &right_bytes[right_offsets[pos]..right_offsets[pos + 1]];
+        right_map.entry(span).or_default().push(pos);
+    }
+
+    let mut left_positions = Vec::<usize>::with_capacity(left_n.min(right_n));
+    let mut right_positions = Vec::<usize>::with_capacity(left_positions.capacity());
+    for left_pos in 0..left_n {
+        let span = &left_bytes[left_offsets[left_pos]..left_offsets[left_pos + 1]];
+        if let Some(matches) = right_map.get(span) {
+            for &right_pos in matches {
+                left_positions.push(left_pos);
+                right_positions.push(right_pos);
+            }
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
 fn hash_i64_inner_positions_slices(left: &[i64], right: &[i64]) -> (Vec<usize>, Vec<usize>) {
     if right.is_empty() || left.is_empty() {
         return (Vec::new(), Vec::new());
@@ -4569,6 +4612,23 @@ fn merge_single_key_inner_unsorted(
     }
     if let Some((left_positions, right_positions)) =
         hash_int64_inner_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_inner_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            suffixes,
+        );
+    }
+
+    // Byte-span build+probe for all-valid contiguous-Utf8 string keys
+    // (br-frankenpandas-i388q): skips the per-row String clone + Scalar
+    // materialization of the JoinKeyComponent path. Same pairing -> same output.
+    if let Some((left_positions, right_positions)) =
+        contiguous_utf8_inner_positions(left_key_columns[0], right_key_columns[0])
     {
         return build_single_key_inner_merge_output(
             left,
