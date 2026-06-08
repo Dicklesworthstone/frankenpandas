@@ -374,9 +374,30 @@ fn dataframe_corr_cov_constant_and_singlerow_edges_match_pandas() {
     let df = DataFrame::from_dict(
         &["a", "b", "c"],
         vec![
-            ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-            ("b", vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0)]),
-            ("c", vec![Scalar::Float64(5.0), Scalar::Float64(5.0), Scalar::Float64(5.0)]),
+            (
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            ),
+            (
+                "b",
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(6.0),
+                ],
+            ),
+            (
+                "c",
+                vec![
+                    Scalar::Float64(5.0),
+                    Scalar::Float64(5.0),
+                    Scalar::Float64(5.0),
+                ],
+            ),
         ],
     )
     .expect("frame");
@@ -388,13 +409,22 @@ fn dataframe_corr_cov_constant_and_singlerow_edges_match_pandas() {
     assert!((cval("b", 0).unwrap() - 1.0).abs() < 1e-12);
     assert!((cval("a", 1).unwrap() - 1.0).abs() < 1e-12);
     // constant column c: every correlation is NaN, INCLUDING the diagonal.
-    assert!(corr.column("c").unwrap().values()[0].is_missing(), "corr(a,c) must be NaN");
-    assert!(corr.column("c").unwrap().values()[1].is_missing(), "corr(b,c) must be NaN");
+    assert!(
+        corr.column("c").unwrap().values()[0].is_missing(),
+        "corr(a,c) must be NaN"
+    );
+    assert!(
+        corr.column("c").unwrap().values()[1].is_missing(),
+        "corr(b,c) must be NaN"
+    );
     assert!(
         corr.column("c").unwrap().values()[2].is_missing(),
         "corr(c,c) must be NaN for a zero-variance column (pandas), not 1.0"
     );
-    assert!(corr.column("a").unwrap().values()[2].is_missing(), "corr(c,a) must be NaN");
+    assert!(
+        corr.column("a").unwrap().values()[2].is_missing(),
+        "corr(c,a) must be NaN"
+    );
 
     let cov = df.cov().expect("cov");
     let kov = |col: &str, i: usize| cov.column(col).unwrap().values()[i].to_f64().unwrap();
@@ -408,12 +438,21 @@ fn dataframe_corr_cov_constant_and_singlerow_edges_match_pandas() {
     // single-row frame: corr is all NaN.
     let one = DataFrame::from_dict(
         &["a", "b"],
-        vec![("a", vec![Scalar::Float64(1.0)]), ("b", vec![Scalar::Float64(2.0)])],
+        vec![
+            ("a", vec![Scalar::Float64(1.0)]),
+            ("b", vec![Scalar::Float64(2.0)]),
+        ],
     )
     .expect("one-row frame");
     let corr1 = one.corr().expect("corr1");
-    assert!(corr1.column("a").unwrap().values()[0].is_missing(), "single-row corr must be NaN");
-    assert!(corr1.column("b").unwrap().values()[0].is_missing(), "single-row corr must be NaN");
+    assert!(
+        corr1.column("a").unwrap().values()[0].is_missing(),
+        "single-row corr must be NaN"
+    );
+    assert!(
+        corr1.column("b").unwrap().values()[0].is_missing(),
+        "single-row corr must be NaN"
+    );
 }
 
 #[test]
@@ -435,11 +474,21 @@ fn dataframe_corr_cov_pairwise_nan_deletion_matches_pandas() {
         vec![
             (
                 "a",
-                vec![Scalar::Float64(1.0), Scalar::Float64(2.0), n(()), Scalar::Float64(4.0)],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    n(()),
+                    Scalar::Float64(4.0),
+                ],
             ),
             (
                 "b",
-                vec![Scalar::Float64(2.0), n(()), Scalar::Float64(6.0), Scalar::Float64(8.0)],
+                vec![
+                    Scalar::Float64(2.0),
+                    n(()),
+                    Scalar::Float64(6.0),
+                    Scalar::Float64(8.0),
+                ],
             ),
         ],
     )
@@ -466,7 +515,10 @@ fn dataframe_corr_cov_pairwise_nan_deletion_matches_pandas() {
     let corr = df.corr().expect("corr");
     let cval = |col: &str, i: usize| corr.column(col).unwrap().values()[i].to_f64().unwrap();
     assert!((cval("a", 0) - 1.0).abs() < 1e-9);
-    assert!((cval("b", 0) - 1.0).abs() < 1e-9, "pairwise corr(a,b) must be 1.0");
+    assert!(
+        (cval("b", 0) - 1.0).abs() < 1e-9,
+        "pairwise corr(a,b) must be 1.0"
+    );
 }
 
 #[test]
@@ -525,8 +577,16 @@ fn dataframe_corr_spearman_kendall_ties_and_nan_match_pandas() {
             .to_f64()
             .unwrap()
     };
-    assert!((off2("spearman") - (-2.0 / 3.0)).abs() < 1e-9, "spearman heavy ties: got {}", off2("spearman"));
-    assert!((off2("kendall") - (-2.0 / 3.0)).abs() < 1e-9, "kendall heavy ties: got {}", off2("kendall"));
+    assert!(
+        (off2("spearman") - (-2.0 / 3.0)).abs() < 1e-9,
+        "spearman heavy ties: got {}",
+        off2("spearman")
+    );
+    assert!(
+        (off2("kendall") - (-2.0 / 3.0)).abs() < 1e-9,
+        "kendall heavy ties: got {}",
+        off2("kendall")
+    );
 }
 
 #[test]
@@ -548,8 +608,8 @@ fn series_rank_all_methods_na_options_pct_match_pandas() {
         Scalar::Float64(2.0),
         Scalar::Float64(1.0),
     ];
-    let s = Series::new("s", Index::new(labels), Column::from_values(vals).unwrap())
-        .expect("series");
+    let s =
+        Series::new("s", Index::new(labels), Column::from_values(vals).unwrap()).expect("series");
 
     let got = |r: &Series| -> Vec<Option<f64>> {
         r.column()
@@ -570,15 +630,69 @@ fn series_rank_all_methods_na_options_pct_match_pandas() {
     let f = Some;
 
     let cases: &[(&str, bool, &str, bool, Vec<Option<f64>>)] = &[
-        ("average", true, "keep", false, vec![f(5.0), f(2.0), f(2.0), n, f(4.0), f(2.0)]),
-        ("min", true, "keep", false, vec![f(5.0), f(1.0), f(1.0), n, f(4.0), f(1.0)]),
-        ("max", true, "keep", false, vec![f(5.0), f(3.0), f(3.0), n, f(4.0), f(3.0)]),
-        ("first", true, "keep", false, vec![f(5.0), f(1.0), f(2.0), n, f(4.0), f(3.0)]),
-        ("dense", true, "keep", false, vec![f(3.0), f(1.0), f(1.0), n, f(2.0), f(1.0)]),
-        ("min", true, "bottom", false, vec![f(5.0), f(1.0), f(1.0), f(6.0), f(4.0), f(1.0)]),
-        ("min", true, "top", false, vec![f(6.0), f(2.0), f(2.0), f(1.0), f(5.0), f(2.0)]),
-        ("average", true, "keep", true, vec![f(1.0), f(0.4), f(0.4), n, f(0.8), f(0.4)]),
-        ("min", false, "keep", false, vec![f(1.0), f(3.0), f(3.0), n, f(2.0), f(3.0)]),
+        (
+            "average",
+            true,
+            "keep",
+            false,
+            vec![f(5.0), f(2.0), f(2.0), n, f(4.0), f(2.0)],
+        ),
+        (
+            "min",
+            true,
+            "keep",
+            false,
+            vec![f(5.0), f(1.0), f(1.0), n, f(4.0), f(1.0)],
+        ),
+        (
+            "max",
+            true,
+            "keep",
+            false,
+            vec![f(5.0), f(3.0), f(3.0), n, f(4.0), f(3.0)],
+        ),
+        (
+            "first",
+            true,
+            "keep",
+            false,
+            vec![f(5.0), f(1.0), f(2.0), n, f(4.0), f(3.0)],
+        ),
+        (
+            "dense",
+            true,
+            "keep",
+            false,
+            vec![f(3.0), f(1.0), f(1.0), n, f(2.0), f(1.0)],
+        ),
+        (
+            "min",
+            true,
+            "bottom",
+            false,
+            vec![f(5.0), f(1.0), f(1.0), f(6.0), f(4.0), f(1.0)],
+        ),
+        (
+            "min",
+            true,
+            "top",
+            false,
+            vec![f(6.0), f(2.0), f(2.0), f(1.0), f(5.0), f(2.0)],
+        ),
+        (
+            "average",
+            true,
+            "keep",
+            true,
+            vec![f(1.0), f(0.4), f(0.4), n, f(0.8), f(0.4)],
+        ),
+        (
+            "min",
+            false,
+            "keep",
+            false,
+            vec![f(1.0), f(3.0), f(3.0), n, f(2.0), f(3.0)],
+        ),
     ];
     for (method, asc, na, pct, want) in cases {
         let r = s.rank_with_pct(method, *asc, na, *pct).expect("rank");
@@ -608,8 +722,8 @@ fn series_quantile_all_interpolations_with_nan_match_pandas() {
         Scalar::Float64(4.0),
         Scalar::Null(NullKind::NaN),
     ];
-    let s = Series::new("s", Index::new(labels), Column::from_values(vals).unwrap())
-        .expect("series");
+    let s =
+        Series::new("s", Index::new(labels), Column::from_values(vals).unwrap()).expect("series");
 
     let qs = [0.1, 0.25, 0.5, 0.75, 0.9];
     let expect: &[(&str, [f64; 5])] = &[
@@ -652,7 +766,11 @@ fn series_mode_and_nlargest_nsmallest_keep_match_pandas() {
     };
     let f = Scalar::Float64;
     let vals_of = |r: &Series| -> Vec<f64> {
-        r.column().values().iter().filter_map(|v| v.to_f64().ok()).collect()
+        r.column()
+            .values()
+            .iter()
+            .filter_map(|v| v.to_f64().ok())
+            .collect()
     };
     let labels_of = |r: &Series| -> Vec<i64> {
         r.index()
@@ -668,18 +786,37 @@ fn series_mode_and_nlargest_nsmallest_keep_match_pandas() {
     // mode(): multimodal -> ascending-sorted modal values [1, 2].
     let m = mk(
         (0..6).collect(),
-        vec![f(2.0), f(2.0), f(1.0), f(1.0), f(3.0), Scalar::Null(NullKind::NaN)],
+        vec![
+            f(2.0),
+            f(2.0),
+            f(1.0),
+            f(1.0),
+            f(3.0),
+            Scalar::Null(NullKind::NaN),
+        ],
     );
     assert_eq!(vals_of(&m.mode().expect("mode")), vec![1.0, 2.0]);
 
     // nlargest/nsmallest keep semantics. t = [5,3,5,1,3,5] at labels 0..5.
-    let t = mk((0..6).collect(), vec![f(5.0), f(3.0), f(5.0), f(1.0), f(3.0), f(5.0)]);
+    let t = mk(
+        (0..6).collect(),
+        vec![f(5.0), f(3.0), f(5.0), f(1.0), f(3.0), f(5.0)],
+    );
     // keep='first': ties resolved by original position -> labels 0,2,5.
-    assert_eq!(labels_of(&t.nlargest_keep(3, "first").expect("nl-first")), vec![0, 2, 5]);
+    assert_eq!(
+        labels_of(&t.nlargest_keep(3, "first").expect("nl-first")),
+        vec![0, 2, 5]
+    );
     // keep='last': ties resolved reverse -> labels 5,2,0.
-    assert_eq!(labels_of(&t.nlargest_keep(3, "last").expect("nl-last")), vec![5, 2, 0]);
+    assert_eq!(
+        labels_of(&t.nlargest_keep(3, "last").expect("nl-last")),
+        vec![5, 2, 0]
+    );
     // nsmallest keep='first': 1 (label 3) then first 3 (label 1).
-    assert_eq!(labels_of(&t.nsmallest_keep(2, "first").expect("ns-first")), vec![3, 1]);
+    assert_eq!(
+        labels_of(&t.nsmallest_keep(2, "first").expect("ns-first")),
+        vec![3, 1]
+    );
 }
 
 #[test]

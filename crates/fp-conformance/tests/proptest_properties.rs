@@ -11379,10 +11379,7 @@ fn arb_coindexed_groupby(max_len: usize) -> impl Strategy<Value = (Series, Serie
             ],
             len,
         );
-        let vals = proptest::collection::vec(
-            (-1_000i64..1_000).prop_map(Scalar::Int64),
-            len,
-        );
+        let vals = proptest::collection::vec((-1_000i64..1_000).prop_map(Scalar::Int64), len);
         (idx, keys, vals).prop_filter_map("coindexed construct", |(i, k, v)| {
             let keys = Series::from_values("k".to_owned(), i.clone(), k).ok()?;
             let values = Series::from_values("v".to_owned(), i, v).ok()?;
