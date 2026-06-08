@@ -13138,6 +13138,25 @@ impl MultiIndex {
     /// Tuple intersection preserving left order and de-duplicating results.
     pub fn intersection(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_same_nlevels(other)?;
+        // Packed-key fast path (br-frankenpandas-misetop): identity-coded u64 per
+        // row instead of to_list() (per-row Vec<IndexLabel> + Utf8 clone) and a
+        // SipHash HashMap<Vec<IndexLabel>>. Keep self rows whose key is in other,
+        // deduped first-seen, then gather those positions. Bijective on tuple
+        // identity ⇒ same kept rows, same order.
+        if let Some((self_keys, other_keys)) = self.factorize_packed_keys(other)
+        {
+            let other_set: FxHashSet<u64> = other_keys.into_iter().collect();
+            let mut seen: FxHashSet<u64> =
+                FxHashSet::with_capacity_and_hasher(self_keys.len(), Default::default());
+            let positions: Vec<usize> = self_keys
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &k)| (other_set.contains(&k) && seen.insert(k)).then_some(i))
+                .collect();
+            return Ok(self
+                .take_existing_positions(&positions)
+                .set_names(self.shared_names(other)));
+        }
         let other_keys: HashMap<Vec<IndexLabel>, ()> = other
             .to_list()
             .into_iter()
@@ -13175,6 +13194,22 @@ impl MultiIndex {
     /// Tuple difference preserving left order and de-duplicating results.
     pub fn difference(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_same_nlevels(other)?;
+        // Packed-key fast path (br-frankenpandas-misetop): keep self rows whose
+        // key is NOT in other, deduped first-seen. See intersection.
+        if let Some((self_keys, other_keys)) = self.factorize_packed_keys(other)
+        {
+            let other_set: FxHashSet<u64> = other_keys.into_iter().collect();
+            let mut seen: FxHashSet<u64> =
+                FxHashSet::with_capacity_and_hasher(self_keys.len(), Default::default());
+            let positions: Vec<usize> = self_keys
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &k)| (!other_set.contains(&k) && seen.insert(k)).then_some(i))
+                .collect();
+            return Ok(self
+                .take_existing_positions(&positions)
+                .set_names(self.shared_names(other)));
+        }
         let other_keys: HashMap<Vec<IndexLabel>, ()> = other
             .to_list()
             .into_iter()
@@ -17207,6 +17242,50 @@ mod tests {
         let (indexer, missing) = source.get_indexer_non_unique(&target);
         assert_eq!(indexer, vec![0, 3, -1, 1, 0, 3]);
         assert_eq!(missing, vec![1]);
+    }
+
+    #[test]
+    fn multi_index_setop_packed_matches_reference_misetop() {
+        // intersection/difference packed path must equal an independent
+        // tuple-set reference (mixed Utf8+Int64 levels, duplicate self rows,
+        // partial overlap, disjoint, and empty other).
+        let mk = |spec: &[(&str, i64)]| {
+            MultiIndex::from_tuples(
+                spec.iter()
+                    .map(|(s, i)| vec![IndexLabel::Utf8((*s).to_string()), IndexLabel::Int64(*i)])
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let cases: Vec<(Vec<(&str, i64)>, Vec<(&str, i64)>)> = vec![
+            (
+                vec![("a", 1), ("b", 2), ("a", 1), ("c", 3), ("b", 2)],
+                vec![("b", 2), ("c", 3), ("z", 9)],
+            ),
+            (vec![("a", 1), ("b", 2)], vec![("x", 7), ("y", 8)]),
+            (vec![("a", 1), ("a", 1), ("b", 2)], vec![("a", 1)]),
+        ];
+        for (sa, sb) in cases {
+            let a = mk(&sa);
+            let b = mk(&sb);
+            let bset: std::collections::HashSet<Vec<IndexLabel>> = b.to_list().into_iter().collect();
+
+            let mut seen = std::collections::HashSet::new();
+            let ref_inter: Vec<Vec<IndexLabel>> = a
+                .to_list()
+                .into_iter()
+                .filter(|t| bset.contains(t) && seen.insert(t.clone()))
+                .collect();
+            assert_eq!(a.intersection(&b).unwrap().to_list(), ref_inter, "inter {sa:?}");
+
+            let mut seen_d = std::collections::HashSet::new();
+            let ref_diff: Vec<Vec<IndexLabel>> = a
+                .to_list()
+                .into_iter()
+                .filter(|t| !bset.contains(t) && seen_d.insert(t.clone()))
+                .collect();
+            assert_eq!(a.difference(&b).unwrap().to_list(), ref_diff, "diff {sa:?}");
+        }
     }
 
     #[test]
