@@ -2806,6 +2806,33 @@ impl Column {
                 };
             }
 
+            // Contiguous-Utf8 gather (br-frankenpandas-nl1tw): an all-valid
+            // `LazyContiguousUtf8` column gathers its selected byte spans into one
+            // fresh `bytes` buffer + `offsets`, keeping the output lazily typed —
+            // no per-row `String` heap clone and no lazy Scalar re-materialization.
+            // Bit-identical to the Scalar-clone path: each output slot materializes
+            // `Scalar::Utf8` of the exact same span bytes in the same order, with an
+            // all-valid mask (the source is all-valid by the enclosing branch).
+            if let Some((bytes, offsets)) = self.as_utf8_contiguous() {
+                let total: usize = positions
+                    .iter()
+                    .map(|&pos| offsets[pos + 1] - offsets[pos])
+                    .sum();
+                let mut new_bytes = Vec::with_capacity(total);
+                let mut new_offsets = Vec::with_capacity(n + 1);
+                new_offsets.push(0);
+                for &pos in positions {
+                    new_bytes.extend_from_slice(&bytes[offsets[pos]..offsets[pos + 1]]);
+                    new_offsets.push(new_bytes.len());
+                }
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_contiguous_utf8(new_bytes, new_offsets),
+                    validity: ValidityMask::all_valid(n),
+                    data: None,
+                };
+            }
+
             let values = self
                 .take_all_valid_primitive_positions(positions)
                 .unwrap_or_else(|| {

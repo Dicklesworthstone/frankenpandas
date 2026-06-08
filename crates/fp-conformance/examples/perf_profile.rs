@@ -125,6 +125,37 @@ fn build_str_key_frame(n: usize, key_cardinality: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, column_order).expect("str key frame")
 }
 
+/// Frame of `ncols` independent all-valid contiguous-Utf8 columns (~24-byte
+/// values, deterministic) and an Int64 index — a text-heavy DataFrame whose
+/// `iloc_bool`/`sort`/`take` cost is dominated by Utf8 column gather, isolating
+/// `Column::take_positions`' contiguous-Utf8 path (br-frankenpandas-nl1tw).
+fn build_str_multi_frame(n: usize, ncols: usize) -> DataFrame {
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let index = Index::new(labels);
+    let mut columns = BTreeMap::new();
+    let mut column_order = Vec::with_capacity(ncols);
+    for c in 0..ncols {
+        let mut bytes = Vec::with_capacity(n * 24);
+        let mut offsets = Vec::with_capacity(n + 1);
+        offsets.push(0);
+        let mut key = String::with_capacity(32);
+        for row in 0..n {
+            let mixed = (row as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left(17 + c as u32)
+                ^ (row as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            key.clear();
+            write!(&mut key, "col{c}_val_{mixed:016x}").expect("writing to a String cannot fail");
+            bytes.extend_from_slice(key.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let name = format!("s{c}");
+        columns.insert(name.clone(), Column::from_utf8_contiguous(bytes, offsets));
+        column_order.push(name);
+    }
+    DataFrame::new_with_column_order(index, columns, column_order).expect("str multi frame")
+}
+
 /// Like `build_str_key_frame` but keys genuinely repeat (cardinality bounds the
 /// distinct keys), so each group holds many rows — exercising multi-element
 /// mean/min/max/count accumulation for the bit-identicality goldens. Row order
@@ -392,6 +423,13 @@ fn run_golden(scenario: &str, n: usize) {
             let frame = build_numeric_frame(n, 10);
             let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
             frame.iloc_bool(&mask).expect("filter")
+        }
+        "str_filter" => {
+            // Filter a text-heavy frame (4 contiguous-Utf8 columns): exercises
+            // Column::take_positions' Utf8 gather (br-frankenpandas-nl1tw).
+            let frame = build_str_multi_frame(n, 4);
+            let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+            frame.iloc_bool(&mask).expect("str filter")
         }
         "df_corr" => build_corr_frame(n, 64).corr().expect("corr"),
         "df_cov" => build_corr_frame(n, 64).cov().expect("cov"),
@@ -694,6 +732,14 @@ fn main() {
             let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
             for _ in 0..iters {
                 let out = frame.iloc_bool(&mask).expect("filter");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_filter" => {
+            let frame = build_str_multi_frame(n, 4);
+            let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+            for _ in 0..iters {
+                let out = frame.iloc_bool(&mask).expect("str filter");
                 sink = sink.wrapping_add(out.len());
             }
         }
