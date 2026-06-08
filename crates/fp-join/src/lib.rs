@@ -1080,6 +1080,12 @@ fn utf8_span_lower_bound(bytes: &[u8], offsets: &[usize], needle: &[u8]) -> usiz
     lo
 }
 
+fn ordered_unique_utf8_fixed_width(left_key: &Column, right_key: &Column) -> Option<usize> {
+    let (_, _, left_width) = left_key.as_fixed_width_strictly_increasing_utf8_contiguous()?;
+    let (_, _, right_width) = right_key.as_fixed_width_strictly_increasing_utf8_contiguous()?;
+    (left_width == right_width && left_width > 0).then_some(left_width)
+}
+
 /// Hash-free ordered merge for all-valid, strictly increasing contiguous-Utf8
 /// keys. This is the string-key analogue of
 /// [`ordered_unique_int64_inner_positions`]: each side is unique and already in
@@ -1095,6 +1101,7 @@ fn ordered_unique_utf8_inner_positions(
     let (right_bytes, right_offsets) = strictly_increasing_utf8_key_spans(right_key)?;
     let left_n = left_offsets.len() - 1;
     let right_n = right_offsets.len() - 1;
+    let fixed_width = ordered_unique_utf8_fixed_width(left_key, right_key);
 
     if left_n == 0 || right_n == 0 {
         return Some((Vec::new(), Vec::new()));
@@ -1121,6 +1128,7 @@ fn ordered_unique_utf8_inner_positions(
     } else {
         right_n
     };
+    let mut fixed_width_bulk_attempted = false;
 
     while left_idx < left_n && right_idx < right_n {
         let left_span = utf8_span(left_bytes, left_offsets, left_idx);
@@ -1128,6 +1136,31 @@ fn ordered_unique_utf8_inner_positions(
 
         match left_span.cmp(right_span) {
             Ordering::Equal => {
+                if let Some(width) = fixed_width
+                    && !fixed_width_bulk_attempted
+                {
+                    fixed_width_bulk_attempted = true;
+                    let run_len = left_n.saturating_sub(left_idx).min(right_n - right_idx);
+                    if run_len > 1
+                        && let Some(byte_len) = run_len.checked_mul(width)
+                    {
+                        let left_start = left_offsets[left_idx];
+                        let right_start = right_offsets[right_idx];
+                        let left_end = left_start + byte_len;
+                        let right_end = right_start + byte_len;
+                        if left_end <= left_bytes.len()
+                            && right_end <= right_bytes.len()
+                            && left_bytes[left_start..left_end]
+                                == right_bytes[right_start..right_end]
+                        {
+                            left_positions.extend(left_idx..left_idx + run_len);
+                            right_positions.extend(right_idx..right_idx + run_len);
+                            left_idx += run_len;
+                            right_idx += run_len;
+                            continue;
+                        }
+                    }
+                }
                 left_positions.push(left_idx);
                 right_positions.push(right_idx);
                 left_idx += 1;
@@ -9334,6 +9367,28 @@ mod tests {
                 .expect("ordered disjoint utf8 positions");
         assert!(left_positions.is_empty());
         assert!(right_positions.is_empty());
+    }
+
+    #[test]
+    fn ordered_unique_utf8_bulk_fixed_width_window_jbyuc11() {
+        let left = contiguous_utf8_column(&["k000", "k001", "k002", "k003", "k004"]);
+        let right = contiguous_utf8_column(&["k002", "k003", "k004", "k005"]);
+
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+        assert_eq!(left_positions, vec![2, 3, 4]);
+        assert_eq!(right_positions, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn ordered_unique_utf8_fixed_width_gap_falls_back_jbyuc11() {
+        let left = contiguous_utf8_column(&["k000", "k001", "k003", "k004"]);
+        let right = contiguous_utf8_column(&["k001", "k002", "k004"]);
+
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+        assert_eq!(left_positions, vec![1, 3]);
+        assert_eq!(right_positions, vec![0, 2]);
     }
 
     #[test]

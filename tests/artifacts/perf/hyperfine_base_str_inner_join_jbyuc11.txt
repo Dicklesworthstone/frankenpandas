@@ -1,0 +1,7 @@
+  [2m2026-06-08T14:08:17.174306Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: hyperfine --warmup 3 --runs 10 --export-json tests/artifacts/perf/hyperfine_base_str_inner_join_jbyuc11.json '/data/projects/.scratch/cargo-target-orangepeak-jbyuc11-base-20260608T1006/release-perf/examples/perf_profile str_inner_join 1000000 10'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-jbyuc11-base-20260608T1006/release-perf/examples/perf_profile str_inner_join 1000000 10
+  Time (mean ± σ):     103.9 ms ±   5.4 ms    [User: 51.2 ms, System: 52.4 ms]
+  Range (min … max):    97.8 ms … 113.5 ms    10 runs
+ 

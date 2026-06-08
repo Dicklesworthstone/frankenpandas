@@ -848,7 +848,11 @@ fn apply_f64_slices(op: ArithmeticOp, a: &[f64], b: &[f64]) -> Vec<f64> {
         ArithmeticOp::Sub => a.iter().zip(b).map(|(x, y)| x - y).collect(),
         ArithmeticOp::Mul => a.iter().zip(b).map(|(x, y)| x * y).collect(),
         ArithmeticOp::Div => a.iter().zip(b).map(|(x, y)| x / y).collect(),
-        ArithmeticOp::Mod => a.iter().zip(b).map(|(x, y)| python_mod_f64(*x, *y)).collect(),
+        ArithmeticOp::Mod => a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| python_mod_f64(*x, *y))
+            .collect(),
         ArithmeticOp::Pow => a.iter().zip(b).map(|(x, y)| x.powf(*y)).collect(),
         ArithmeticOp::FloorDiv => a
             .iter()
@@ -1038,6 +1042,7 @@ enum ScalarValues {
         bytes: Vec<u8>,
         offsets: Vec<usize>,
         strictly_increasing: OnceLock<bool>,
+        fixed_width: OnceLock<Option<usize>>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Run-length backing for all-valid Int64 columns whose values arrive as
@@ -1124,6 +1129,7 @@ impl ScalarValues {
             bytes,
             offsets,
             strictly_increasing: OnceLock::new(),
+            fixed_width: OnceLock::new(),
             values: OnceLock::new(),
         }
     }
@@ -1597,6 +1603,20 @@ fn contiguous_utf8_offsets_are_strictly_increasing(bytes: &[u8], offsets: &[usiz
         previous = current;
     }
     true
+}
+
+fn contiguous_utf8_fixed_width(offsets: &[usize]) -> Option<usize> {
+    let n = offsets.len().checked_sub(1)?;
+    if n == 0 {
+        return Some(0);
+    }
+    let width = offsets[1].checked_sub(offsets[0])?;
+    for pos in 1..n {
+        if offsets[pos + 1].checked_sub(offsets[pos])? != width {
+            return None;
+        }
+    }
+    Some(width)
 }
 
 impl Clone for ScalarValues {
@@ -2864,6 +2884,36 @@ impl Column {
                 .get_or_init(|| contiguous_utf8_offsets_are_strictly_increasing(bytes, offsets))
         {
             return Some((bytes.as_slice(), offsets.as_slice()));
+        }
+        None
+    }
+
+    /// Borrow a strict contiguous-Utf8 backing and its fixed row byte width.
+    ///
+    /// The fixed-width witness is cached next to the strict-increasing witness:
+    /// ordered string joins can then detect a long equal byte window once and
+    /// emit a whole range of 1:1 matches without per-row byte-span comparisons.
+    #[must_use]
+    pub fn as_fixed_width_strictly_increasing_utf8_contiguous(
+        &self,
+    ) -> Option<(&[u8], &[usize], usize)> {
+        if self.dtype == DType::Utf8
+            && self.validity.all()
+            && let ScalarValues::LazyContiguousUtf8 {
+                bytes,
+                offsets,
+                strictly_increasing,
+                fixed_width,
+                ..
+            } = &self.values
+            && *strictly_increasing
+                .get_or_init(|| contiguous_utf8_offsets_are_strictly_increasing(bytes, offsets))
+        {
+            let width = fixed_width
+                .get_or_init(|| contiguous_utf8_fixed_width(offsets))
+                .as_ref()
+                .copied()?;
+            return Some((bytes.as_slice(), offsets.as_slice(), width));
         }
         None
     }
@@ -12709,8 +12759,19 @@ mod tests {
         // (NaN/inf/-0.0/zero divisor/negative base). Compared via raw bits so
         // NaN payloads must also match.
         let vals = [
-            0.0_f64, -0.0, 1.0, -1.0, 2.5, -3.0, 4.0, 0.5,
-            f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e300, -1e-300,
+            0.0_f64,
+            -0.0,
+            1.0,
+            -1.0,
+            2.5,
+            -3.0,
+            4.0,
+            0.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1e300,
+            -1e-300,
         ];
         let a: Vec<f64> = vals.to_vec();
         for op in [
@@ -12723,7 +12784,9 @@ mod tests {
             ArithmeticOp::FloorDiv,
         ] {
             for shift in 0..vals.len() {
-                let b: Vec<f64> = (0..vals.len()).map(|i| vals[(i + shift) % vals.len()]).collect();
+                let b: Vec<f64> = (0..vals.len())
+                    .map(|i| vals[(i + shift) % vals.len()])
+                    .collect();
                 let got = super::apply_f64_slices(op, &a, &b);
                 let apply = super::binary_f64_apply(op);
                 let expected: Vec<f64> = a.iter().zip(&b).map(|(x, y)| apply(*x, *y)).collect();
