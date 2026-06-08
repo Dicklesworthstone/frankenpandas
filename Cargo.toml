@@ -38,7 +38,7 @@ arrow = { version = "58.3.0", default-features = false, features = ["prettyprint
 bumpalo = { version = "3.20.3", features = ["collections"] }
 bytes = "1.11.1"
 calamine = "0.35.0"
-chrono = { version = "0.4.44", default-features = false, features = ["std"] }
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 chrono-tz = "0.10.4"
 csv = "1.4.0"
 dta = "0.6.0"
@@ -52,7 +52,7 @@ pyo3 = { version = "0.28", features = ["extension-module"] }
 quick-xml = "0.40.1"
 regex = "1.12.3"
 rust_xlsxwriter = "0.95.0"
-rusqlite = { version = "0.40.0", features = ["bundled", "column_decltype"] }
+rusqlite = { version = "0.40.1", features = ["bundled", "column_decltype"] }
 ryu = "1.0.23"
 scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive"] }
