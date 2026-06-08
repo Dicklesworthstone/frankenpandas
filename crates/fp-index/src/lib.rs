@@ -348,7 +348,12 @@ impl Int64UnitRangeLabels {
 }
 
 struct IndexLabels {
-    materialized: OnceLock<Vec<IndexLabel>>,
+    /// Shared immutable label vector (br-frankenpandas-idxclone). Behind `Arc`
+    /// so cloning an `Index` is an O(1) refcount bump instead of an O(n)
+    /// `Vec<IndexLabel>` deep copy — the dominant cost of same-index binary ops
+    /// (`a + b` re-uses the operand index). Set once, never mutated, so sharing
+    /// is observationally identical to a private copy.
+    materialized: OnceLock<Arc<Vec<IndexLabel>>>,
     int64_unit_range: Option<Int64UnitRangeLabels>,
     /// Lazy typed Int64 backing (br-frankenpandas-dxqpm). `Some(values)` once
     /// computed means every label is `IndexLabel::Int64` and `values` is the
@@ -362,7 +367,7 @@ struct IndexLabels {
 impl IndexLabels {
     fn new(labels: Vec<IndexLabel>) -> Self {
         let materialized = OnceLock::new();
-        let _ = materialized.set(labels);
+        let _ = materialized.set(Arc::new(labels));
         Self {
             materialized,
             int64_unit_range: None,
@@ -392,14 +397,14 @@ impl IndexLabels {
         self.materialized
             .get_or_init(|| {
                 if let Some(range) = self.int64_unit_range {
-                    return range.materialize();
+                    return Arc::new(range.materialize());
                 }
                 let values = self
                     .int64_typed
                     .get()
                     .and_then(Option::as_ref)
                     .expect("lazy index labels require a typed or range backing");
-                values.iter().copied().map(IndexLabel::Int64).collect()
+                Arc::new(values.iter().copied().map(IndexLabel::Int64).collect())
             })
             .as_slice()
     }
@@ -446,7 +451,7 @@ impl IndexLabels {
                 }
                 let labels = self.materialized.get()?;
                 let mut values = Vec::with_capacity(labels.len());
-                for label in labels {
+                for label in labels.iter() {
                     match label {
                         IndexLabel::Int64(value) => values.push(*value),
                         _ => return None,
