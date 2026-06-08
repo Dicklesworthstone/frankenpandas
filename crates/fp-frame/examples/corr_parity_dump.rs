@@ -10,7 +10,6 @@ use std::io::Write;
 use fp_frame::DataFrame;
 use fp_columnar::Column;
 use fp_index::{Index, IndexLabel};
-use fp_types::Scalar;
 use std::collections::BTreeMap;
 
 fn splitmix_unit(i: usize, c: usize) -> f64 {
@@ -52,6 +51,7 @@ fn main() {
     let corr = df.corr().expect("corr");
     // corr is m x m; extract row-major by the same column order.
     let mut fp = Vec::<f64>::with_capacity(m * m);
+    #[allow(clippy::needless_range_loop)]
     for ri in 0..m {
         let col = corr.column(&order[ri]).expect("corr col");
         let vals = col.values();

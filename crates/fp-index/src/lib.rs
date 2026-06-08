@@ -17257,6 +17257,7 @@ mod tests {
             )
             .unwrap()
         };
+        #[allow(clippy::type_complexity)]
         let cases: Vec<(Vec<(&str, i64)>, Vec<(&str, i64)>)> = vec![
             (
                 vec![("a", 1), ("b", 2), ("a", 1), ("c", 3), ("b", 2)],
