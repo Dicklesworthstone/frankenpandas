@@ -1006,11 +1006,11 @@ fn vectorized_binary_i64(
 enum ScalarValues {
     Eager(Vec<Scalar>),
     LazyAllValidInt64 {
-        data: Vec<i64>,
+        data: Arc<[i64]>,
         values: OnceLock<Vec<Scalar>>,
     },
     LazyAllValidFloat64 {
-        data: Vec<f64>,
+        data: Arc<[f64]>,
         values: OnceLock<Vec<Scalar>>,
     },
     LazyNullableFloat64 {
@@ -1029,7 +1029,7 @@ enum ScalarValues {
         values: OnceLock<Vec<Scalar>>,
     },
     LazyAllValidBool {
-        data: Vec<bool>,
+        data: Arc<[bool]>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Contiguous backing for all-valid Utf8 columns
@@ -1109,6 +1109,13 @@ impl ScalarValues {
     }
 
     fn lazy_all_valid_int64(data: Vec<i64>) -> Self {
+        Self::lazy_all_valid_int64_arc(Arc::from(data))
+    }
+
+    /// Share an existing `Arc` i64 buffer in O(1) (used by `Clone`).
+    /// (br-frankenpandas-tin7r: immutable typed buffers clone by Arc, the
+    /// numeric mirror of the utf8 oifvy lever.)
+    fn lazy_all_valid_int64_arc(data: Arc<[i64]>) -> Self {
         Self::LazyAllValidInt64 {
             data,
             values: OnceLock::new(),
@@ -1116,6 +1123,11 @@ impl ScalarValues {
     }
 
     fn lazy_all_valid_float64(data: Vec<f64>) -> Self {
+        Self::lazy_all_valid_float64_arc(Arc::from(data))
+    }
+
+    /// Share an existing `Arc` f64 buffer in O(1) (used by `Clone`).
+    fn lazy_all_valid_float64_arc(data: Arc<[f64]>) -> Self {
         Self::LazyAllValidFloat64 {
             data,
             values: OnceLock::new(),
@@ -1139,6 +1151,11 @@ impl ScalarValues {
     }
 
     fn lazy_all_valid_bool(data: Vec<bool>) -> Self {
+        Self::lazy_all_valid_bool_arc(Arc::from(data))
+    }
+
+    /// Share an existing `Arc` bool buffer in O(1) (used by `Clone`).
+    fn lazy_all_valid_bool_arc(data: Arc<[bool]>) -> Self {
         Self::LazyAllValidBool {
             data,
             values: OnceLock::new(),
@@ -1713,12 +1730,14 @@ impl Clone for ScalarValues {
     fn clone(&self) -> Self {
         match self {
             Self::Eager(values) => Self::Eager(values.clone()),
-            Self::LazyAllValidInt64 { data, .. } => Self::lazy_all_valid_int64(data.clone()),
-            Self::LazyAllValidFloat64 { data, .. } => Self::lazy_all_valid_float64(data.clone()),
+            Self::LazyAllValidInt64 { data, .. } => Self::lazy_all_valid_int64_arc(Arc::clone(data)),
+            Self::LazyAllValidFloat64 { data, .. } => {
+                Self::lazy_all_valid_float64_arc(Arc::clone(data))
+            }
             Self::LazyNullableFloat64 { data, validity, .. } => {
                 Self::lazy_nullable_float64(data.clone(), validity.clone())
             }
-            Self::LazyAllValidBool { data, .. } => Self::lazy_all_valid_bool(data.clone()),
+            Self::LazyAllValidBool { data, .. } => Self::lazy_all_valid_bool_arc(Arc::clone(data)),
             Self::LazyContiguousUtf8 { bytes, offsets, .. } => {
                 Self::lazy_contiguous_utf8_arc(Arc::clone(bytes), Arc::clone(offsets))
             }
@@ -2914,7 +2933,7 @@ impl Column {
                 return Some(data.as_slice());
             }
             if let ScalarValues::LazyAllValidFloat64 { data, .. } = &self.values {
-                return Some(data.as_slice());
+                return Some(data.as_ref());
             }
         }
         None
@@ -2929,7 +2948,7 @@ impl Column {
                 return Some(data.as_slice());
             }
             if let ScalarValues::LazyAllValidInt64 { data, .. } = &self.values {
-                return Some(data.as_slice());
+                return Some(data.as_ref());
             }
             if let Some(data) = self.values.repeat_runs_i64_data() {
                 return Some(data);
@@ -3060,7 +3079,7 @@ impl Column {
                 return Some(data.as_slice());
             }
             if let ScalarValues::LazyAllValidBool { data, .. } = &self.values {
-                return Some(data.as_slice());
+                return Some(data.as_ref());
             }
         }
         None
@@ -4352,7 +4371,7 @@ impl Column {
 
         match &self.values {
             ScalarValues::LazyAllValidFloat64 { data, .. } if data.len() == self.validity.len() => {
-                Some(data.as_slice())
+                Some(data.as_ref())
             }
             ScalarValues::LazyNullableFloat64 { data, .. } if data.len() == self.validity.len() => {
                 Some(data.as_slice())

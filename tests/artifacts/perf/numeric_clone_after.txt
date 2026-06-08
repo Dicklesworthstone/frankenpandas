@@ -1,0 +1,8 @@
+  Downloaded thiserror v2.0.18
+  Downloaded thiserror-impl v2.0.18
+   Compiling thiserror v2.0.18
+   Compiling thiserror-impl v2.0.18
+GOLDEN i64 orig=83029da415f22628 clone=83029da415f22628 ok
+GOLDEN f64 orig=7674bc6dd8d01457 clone=7674bc6dd8d01457 ok
+TIMING i64_clone n=2000000 iters=500 total=0.013ms per_clone=0.0000ms acc=1000000000
+TIMING f64_clone n=2000000 iters=500 total=0.013ms per_clone=0.0000ms acc=1000000000

@@ -1,0 +1,4 @@
+GOLDEN i64 orig=83029da415f22628 clone=83029da415f22628 ok
+GOLDEN f64 orig=7674bc6dd8d01457 clone=7674bc6dd8d01457 ok
+TIMING i64_clone n=2000000 iters=500 total=395.656ms per_clone=0.7913ms acc=1000000000
+TIMING f64_clone n=2000000 iters=500 total=380.209ms per_clone=0.7604ms acc=1000000000

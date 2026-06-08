@@ -1,0 +1,13 @@
+br-frankenpandas-tin7r — Arc-share LazyAllValid Int64/Float64/Bool (O(1) clone)
+
+Golden: FNV-1a-64 over materialized values of original vs a clone.
+  i64: orig=83029da415f22628 clone=83029da415f22628  (clone==original)
+  f64: orig=7674bc6dd8d01457 clone=7674bc6dd8d01457  (clone==original)
+  Identical under BOTH baseline (Vec deep copy) and after (Arc share) builds.
+
+Same-command A/B, Column::clone of a 2,000,000-element column, 500 iters:
+  baseline (Vec): i64 0.7913 ms/clone, f64 0.7604 ms/clone
+  after    (Arc): i64 0.000026 ms/clone, f64 0.000026 ms/clone
+  ~30,000x.
+
+Validation: fp-columnar 380 tests pass / 0 failed; fp-frame 2829 tests pass / 0 failed.
