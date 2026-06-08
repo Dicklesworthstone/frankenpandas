@@ -2282,7 +2282,7 @@ pub fn radix_argsort_multi_u64(keys_by_col: &[Vec<u64>]) -> Vec<usize> {
 /// stable `sort_by` on the (equal-prefix-stripped) suffix, so ties keep
 /// their original order at every level, matching the stable comparison
 /// sort bit-for-bit in both directions.
-fn utf8_msd_argsort(strs: &[&str], ascending: bool) -> Vec<usize> {
+pub fn utf8_msd_argsort(strs: &[&str], ascending: bool) -> Vec<usize> {
     let n = strs.len();
     let mut idx: Vec<usize> = (0..n).collect();
     if n > 1 {
