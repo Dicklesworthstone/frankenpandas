@@ -12534,6 +12534,45 @@ impl MultiIndex {
     /// differ, or the combined code space overflows `u64` (caller keeps the
     /// `Vec<IndexLabel>`-key path). Bijective on tuple identity, so the source
     /// map and target lookups match exactly the same rows.
+    /// Pack each row's tuple into one mixed-radix `u64` whose ascending order
+    /// equals the lexicographic `row_cmp` order (br-frankenpandas-misort): per
+    /// level, distinct values are ranked by `IndexLabel::Ord` and the rank codes
+    /// are packed most-significant-first. So sorting these `u64` keys reproduces
+    /// the level-by-level tuple sort while comparing integers instead of
+    /// (Utf8) tuples. Returns `None` when there are no levels or the combined
+    /// code space overflows `u64` (caller keeps the tuple-comparison sort).
+    fn sorted_packed_keys(&self) -> Option<Vec<u64>> {
+        let nlev = self.nlevels();
+        if nlev == 0 {
+            return None;
+        }
+        let n = self.len();
+        let mut keys = vec![0u64; n];
+        let mut combined: u128 = 1;
+        for level in 0..nlev {
+            let col = &self.levels[level];
+            // Dedup to DISTINCT values first (O(n) hash), then sort only those
+            // (O(d log d)); sorting all n refs would cost as much as the tuple
+            // sort we are replacing.
+            let mut sorted: Vec<&IndexLabel> = col.iter().collect::<FxHashSet<_>>().into_iter().collect();
+            sorted.sort_unstable();
+            let radix = sorted.len() as u64;
+            let mut rank: FxHashMap<&IndexLabel, u64> =
+                FxHashMap::with_capacity_and_hasher(sorted.len(), Default::default());
+            for (r, value) in sorted.iter().enumerate() {
+                rank.insert(*value, r as u64);
+            }
+            for (dst, value) in keys.iter_mut().zip(col.iter()) {
+                *dst = dst.checked_mul(radix)?.checked_add(rank[value])?;
+            }
+            combined = combined.checked_mul(radix as u128)?;
+            if combined > u64::MAX as u128 {
+                return None;
+            }
+        }
+        Some(keys)
+    }
+
     fn factorize_packed_keys(&self, target: &Self) -> Option<(Vec<u64>, Vec<u64>)> {
         let nlev = self.nlevels();
         if nlev == 0 || nlev != target.nlevels() {
@@ -12888,6 +12927,16 @@ impl MultiIndex {
     #[must_use]
     pub fn argsort(&self) -> Vec<usize> {
         let mut order: Vec<usize> = (0..self.len()).collect();
+        // Packed-key fast path: sort on one u64 per row (ascending u64 order ==
+        // lexicographic row_cmp order) instead of comparing (Utf8) tuples. The
+        // `.then(left.cmp(right))` original-position tiebreak is preserved, so
+        // the permutation is identical to the tuple-comparison sort.
+        if let Some(keys) = self.sorted_packed_keys() {
+            order.sort_by(|&left, &right| {
+                keys[left].cmp(&keys[right]).then_with(|| left.cmp(&right))
+            });
+            return order;
+        }
         order.sort_by(|&left, &right| self.row_cmp(left, right).then_with(|| left.cmp(&right)));
         order
     }
@@ -17076,6 +17125,37 @@ mod tests {
         let (indexer, missing) = source.get_indexer_non_unique(&target);
         assert_eq!(indexer, vec![0, 3, -1, 1, 0, 3]);
         assert_eq!(missing, vec![1]);
+    }
+
+    #[test]
+    fn multi_index_argsort_packed_matches_tuple_sort_misort() {
+        // The sorted-packed-key argsort must equal the level-by-level tuple
+        // comparison sort (stable, original-position tiebreak) for mixed
+        // Utf8+Int64 levels with duplicate tuples and shuffled order.
+        let n = 600usize;
+        let mut state: u64 = 0x1234_5678_9abc_def1;
+        let mut l0 = Vec::with_capacity(n);
+        let mut l1 = Vec::with_capacity(n);
+        for _ in 0..n {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let a = (state >> 33) % 7; // low cardinality -> duplicate tuples
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let b = (state >> 33) % 5;
+            l0.push(IndexLabel::Utf8(format!("g{a}")));
+            l1.push(IndexLabel::Int64(b as i64));
+        }
+        let mi = MultiIndex::from_arrays(vec![l0, l1]).unwrap();
+
+        // Independent reference: stable sort by lexicographic tuple, ties by pos.
+        let rows = mi.to_list();
+        let mut want: Vec<usize> = (0..n).collect();
+        want.sort_by(|&a, &b| rows[a].cmp(&rows[b]).then(a.cmp(&b)));
+
+        assert_eq!(mi.argsort(), want, "argsort");
+        assert_eq!(mi.sort_values().to_list(), mi.take_existing_positions(&want).to_list());
+        // min/max derive from argsort and must match the reference ends.
+        assert_eq!(mi.min(), Some(rows[want[0]].clone()));
+        assert_eq!(mi.max(), Some(rows[want[n - 1]].clone()));
     }
 
     #[test]
