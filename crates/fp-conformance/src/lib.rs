@@ -24496,7 +24496,7 @@ mod tests {
     use fp_runtime::RuntimeMode;
 
     use super::{
-        ArtifactId, AsupersyncCodecEvidence, CaseEvidenceEntry, CaseResult, CaseStatus, CiGate,
+        ArtifactId, CaseEvidenceEntry, CaseResult, CaseStatus, CiGate,
         CiGateResult, CiPipelineConfig, CiPipelineResult, ComparisonCategory, DecodeProofArtifact,
         DecodeProofStatus, DifferentialResult, DriftLevel, DriftRecord, E2eConfig, FailureDigest,
         FailureForensicsReport, FailureSurfaceEntry, FaultInjectionClassification,
