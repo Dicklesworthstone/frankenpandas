@@ -1013,6 +1013,18 @@ enum ScalarValues {
         data: Arc<[f64]>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Zero-copy contiguous row-range view over an `Arc`-shared all-valid
+    /// Float64 backing (br-frankenpandas-jbyuc.1.1.1.1). Row `i` is
+    /// `data[start + i]`; `take_positions` returns this in O(1) when a large
+    /// requested position list is a contiguous ascending range. Floating-point
+    /// bits are not transformed, so `-0.0`, infinities, and all finite payloads
+    /// materialize exactly as the copied gather would.
+    LazyAllValidFloat64Slice {
+        data: Arc<[f64]>,
+        start: usize,
+        len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyNullableFloat64 {
         data: Vec<f64>,
         validity: ValidityMask,
@@ -1132,6 +1144,19 @@ impl ScalarValues {
     fn lazy_all_valid_float64_arc(data: Arc<[f64]>) -> Self {
         Self::LazyAllValidFloat64 {
             data,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_all_valid_float64_slice(data: Arc<[f64]>, start: usize, len: usize) -> Self {
+        debug_assert!(
+            start.checked_add(len).is_some_and(|end| end <= data.len()),
+            "Float64 view window must lie within source data"
+        );
+        Self::LazyAllValidFloat64Slice {
+            data,
+            start,
+            len,
             values: OnceLock::new(),
         }
     }
@@ -1534,6 +1559,20 @@ impl ScalarValues {
             Self::LazyAllValidFloat64 { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
                 .as_slice(),
+            Self::LazyAllValidFloat64Slice {
+                data,
+                start,
+                len,
+                values,
+            } => values
+                .get_or_init(|| {
+                    data[*start..*start + *len]
+                        .iter()
+                        .copied()
+                        .map(Scalar::Float64)
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyNullableFloat64 {
                 data,
                 validity,
@@ -1664,6 +1703,7 @@ impl ScalarValues {
             Self::Eager(values) => values.len(),
             Self::LazyAllValidInt64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
+            Self::LazyAllValidFloat64Slice { len, .. } => *len,
             Self::LazyNullableFloat64 { data, .. } => data.len(),
             Self::LazyAllValidBool { data, .. } => data.len(),
             Self::LazyContiguousUtf8 { offsets, .. } => offsets.len() - 1,
@@ -1732,10 +1772,15 @@ impl Clone for ScalarValues {
     fn clone(&self) -> Self {
         match self {
             Self::Eager(values) => Self::Eager(values.clone()),
-            Self::LazyAllValidInt64 { data, .. } => Self::lazy_all_valid_int64_arc(Arc::clone(data)),
+            Self::LazyAllValidInt64 { data, .. } => {
+                Self::lazy_all_valid_int64_arc(Arc::clone(data))
+            }
             Self::LazyAllValidFloat64 { data, .. } => {
                 Self::lazy_all_valid_float64_arc(Arc::clone(data))
             }
+            Self::LazyAllValidFloat64Slice {
+                data, start, len, ..
+            } => Self::lazy_all_valid_float64_slice(Arc::clone(data), *start, *len),
             Self::LazyNullableFloat64 { data, validity, .. } => {
                 Self::lazy_nullable_float64(data.clone(), validity.clone())
             }
@@ -2558,9 +2603,7 @@ impl Column {
         }
 
         match (&self.data, self.dtype) {
-            (Some(ColumnData::Bool(data)), DType::Bool)
-                if data.len() == self.values.len() =>
-            {
+            (Some(ColumnData::Bool(data)), DType::Bool) if data.len() == self.values.len() => {
                 // Carry the contiguous bool buffer through the clone as a lazy
                 // all-valid backing (mirrors the Float64 arm) so `as_bool_slice`
                 // stays available on the clone — otherwise every bool dense fast
@@ -2571,9 +2614,7 @@ impl Column {
                 // view is preserved.
                 Some(ScalarValues::lazy_all_valid_bool(data.clone()))
             }
-            (Some(ColumnData::Int64(data)), DType::Int64)
-                if data.len() == self.values.len() =>
-            {
+            (Some(ColumnData::Int64(data)), DType::Int64) if data.len() == self.values.len() => {
                 // Carry the contiguous i64 buffer through the clone as a lazy
                 // all-valid backing (mirrors the Float64 arm) so `as_i64_slice`
                 // stays available on the clone. Previously the clone eagerly
@@ -2937,6 +2978,13 @@ impl Column {
             if let ScalarValues::LazyAllValidFloat64 { data, .. } = &self.values {
                 return Some(data.as_ref());
             }
+            if let ScalarValues::LazyAllValidFloat64Slice {
+                data, start, len, ..
+            } = &self.values
+            {
+                let end = start.checked_add(*len)?;
+                return data.get(*start..end);
+            }
         }
         None
     }
@@ -3016,6 +3064,19 @@ impl Column {
                 start,
                 ..
             } => Some((Arc::clone(bytes), Arc::clone(offsets), *start)),
+            _ => None,
+        }
+    }
+
+    fn float64_arc_view_source(&self) -> Option<(Arc<[f64]>, usize)> {
+        if self.dtype != DType::Float64 || !self.validity.all() {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyAllValidFloat64 { data, .. } => Some((Arc::clone(data), 0)),
+            ScalarValues::LazyAllValidFloat64Slice { data, start, .. } => {
+                Some((Arc::clone(data), *start))
+            }
             _ => None,
         }
     }
@@ -3113,6 +3174,32 @@ impl Column {
     pub fn take_positions(&self, positions: &[usize]) -> Self {
         let n = positions.len();
         if self.validity.all() {
+            // Zero-copy contiguous-range Float64 view
+            // (br-frankenpandas-jbyuc.1.1.1.1): ordered unique joins gather
+            // all-valid Float64 payload columns by sizeable unit-stride row
+            // ranges after the key column is already a LazyUtf8Slice. Share the
+            // source `Arc<[f64]>` and defer Scalar materialization instead of
+            // copying the range into a new Vec<f64>. Bit-identical to the copy
+            // gather: output row `i` reads `data[start + positions[0] + i]`,
+            // same order, same all-valid mask, same raw f64 bits. The `n >= 64`
+            // gate mirrors LazyUtf8Slice so small head/tail/iloc takes do not
+            // pin a large source buffer for a tiny result.
+            if n >= 64
+                && let Some((src_data, src_start)) = self.float64_arc_view_source()
+                && let Some(range_start) = contiguous_ascending_start(positions)
+                && let Some(view_start) = src_start.checked_add(range_start)
+                && view_start
+                    .checked_add(n)
+                    .is_some_and(|end| end <= src_data.len())
+            {
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_all_valid_float64_slice(src_data, view_start, n),
+                    validity: ValidityMask::all_valid(n),
+                    data: None,
+                };
+            }
+
             if let Some(data) = self.take_cached_all_valid_float64_positions(positions) {
                 return Self {
                     dtype: self.dtype,
@@ -12044,6 +12131,87 @@ mod tests {
             assert!(values.get().is_some());
         }
         assert_eq!(gathered.validity(), expected.validity());
+    }
+
+    #[test]
+    fn float64_take_positions_contiguous_range_returns_slice_view() {
+        let data: Vec<f64> = (0..160)
+            .map(|i| match i {
+                40 => -0.0,
+                41 => f64::INFINITY,
+                42 => f64::from_bits(1),
+                _ => i as f64 + 0.5,
+            })
+            .collect();
+        let expected_bits: Vec<u64> = data[32..112].iter().map(|value| value.to_bits()).collect();
+        let column = Column::from_f64_values(data);
+        let positions: Vec<usize> = (32..112).collect();
+
+        let gathered = column.take_positions(&positions);
+
+        assert!(
+            matches!(
+                &gathered.values,
+                ScalarValues::LazyAllValidFloat64Slice { .. }
+            ),
+            "large contiguous Float64 takes should share the source buffer"
+        );
+        if let ScalarValues::LazyAllValidFloat64Slice {
+            start, len, values, ..
+        } = &gathered.values
+        {
+            assert_eq!((*start, *len), (32, 80));
+            assert!(values.get().is_none());
+        }
+        assert_eq!(
+            gathered.as_f64_slice().map(|values| {
+                values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            }),
+            Some(expected_bits)
+        );
+
+        let expected = Column::from_f64_values(
+            column.as_f64_slice().expect("source stays typed")[32..112].to_vec(),
+        );
+        assert_eq!(gathered.values(), expected.values());
+        assert_eq!(gathered.validity(), expected.validity());
+        if let ScalarValues::LazyAllValidFloat64Slice { values, .. } = &gathered.values {
+            assert!(values.get().is_some());
+        }
+    }
+
+    #[test]
+    fn float64_take_positions_contiguous_range_slices_existing_slice_view() {
+        let data: Vec<f64> = (0..192).map(|i| (i as f64).mul_add(0.25, -7.0)).collect();
+        let column = Column::from_f64_values(data);
+        let first_positions: Vec<usize> = (20..128).collect();
+        let first = column.take_positions(&first_positions);
+        let second_positions: Vec<usize> = (10..74).collect();
+
+        let second = first.take_positions(&second_positions);
+
+        assert!(
+            matches!(
+                &second.values,
+                ScalarValues::LazyAllValidFloat64Slice { .. }
+            ),
+            "nested contiguous Float64 take should remain a slice view"
+        );
+        if let ScalarValues::LazyAllValidFloat64Slice {
+            start, len, values, ..
+        } = &second.values
+        {
+            assert_eq!((*start, *len), (30, 64));
+            assert!(values.get().is_none());
+        }
+        let expected = Column::from_f64_values(
+            column.as_f64_slice().expect("source stays typed")[30..94].to_vec(),
+        );
+        assert_eq!(second.as_f64_slice(), expected.as_f64_slice());
+        assert_eq!(second.values(), expected.values());
     }
 
     #[test]

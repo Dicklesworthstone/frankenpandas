@@ -8,8 +8,7 @@
 //! (cf. the 8.7x groupby win from preserving typed backing across clone).
 //! Golden proves a clone observes byte-identical values to the original.
 
-use std::hint::black_box;
-use std::time::Instant;
+use std::{hint::black_box, time::Instant};
 
 use fp_columnar::Column;
 

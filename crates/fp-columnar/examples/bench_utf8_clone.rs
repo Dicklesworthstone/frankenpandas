@@ -13,8 +13,7 @@
 //! The golden proves the shared clone yields byte-identical observable values
 //! to the original (and to the pre-Arc deep-copy path).
 
-use std::hint::black_box;
-use std::time::Instant;
+use std::{hint::black_box, time::Instant};
 
 use fp_columnar::Column;
 
