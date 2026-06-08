@@ -12199,17 +12199,22 @@ mod tests {
     use fp_index::{Index, IndexLabel};
     use fp_types::{DType, NullKind, Scalar};
 
+    #[cfg(feature = "hdf5")]
     use super::{
-        CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions, HdfReadOptions, HdfWriteOptions,
+        HdfReadOptions, HdfWriteOptions, read_hdf, read_hdf_key, read_hdf_with_options, write_hdf,
+        write_hdf_key, write_hdf_with_options,
+    };
+    use super::{
+        CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions,
         HtmlReadOptions, HtmlWriteOptions, IoError, JsonOrient, LatexWriteOptions,
         MarkdownWriteOptions, PickleProtocol, PickleWriteOptions, StataWriteOptions,
         XmlReadOptions, XmlWriteOptions, format_pandas_float, read_csv_str,
-        read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_hdf, read_hdf_key,
-        read_hdf_with_options, read_html, read_html_str, read_html_str_with_options, read_json_str,
+        read_csv_with_index_cols, read_excel_bytes, read_feather_bytes,
+        read_html, read_html_str, read_html_str_with_options, read_json_str,
         read_orc, read_orc_bytes, read_parquet_bytes, read_pickle, read_pickle_bytes, read_stata,
         read_stata_bytes, read_xml, read_xml_str, read_xml_str_with_options, write_csv_string,
-        write_csv_string_with_options, write_excel_bytes, write_hdf, write_hdf_key,
-        write_hdf_with_options, write_html, write_html_string, write_html_string_with_options,
+        write_csv_string_with_options, write_excel_bytes,
+        write_html, write_html_string, write_html_string_with_options,
         write_json_string, write_jsonl_string, write_latex, write_latex_string,
         write_latex_string_with_options, write_latex_with_options, write_markdown,
         write_markdown_string, write_markdown_string_with_options, write_markdown_with_options,
@@ -13112,6 +13117,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "hdf5")]
     #[test]
     fn series_hdf5_extension_aliases_roundtrip_to_single_column_frame() {
         use super::SeriesIoExt;
@@ -13237,6 +13243,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "hdf5")]
     #[test]
     fn hdf5_path_roundtrip_preserves_snapshot_frame() {
         let source = make_table_format_dataframe();
@@ -13255,6 +13262,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "hdf5")]
     #[test]
     fn hdf5_custom_key_and_extension_aliases_roundtrip() {
         use super::DataFrameIoExt;
@@ -13308,6 +13316,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "hdf5")]
     #[test]
     fn hdf5_row_multiindex_roundtrip_restores_logical_row_axis() {
         let frame = make_row_multiindex_test_dataframe();
@@ -13338,6 +13347,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "hdf5")]
     #[test]
     fn hdf5_reader_rejects_invalid_keys_and_missing_payloads() {
         let frame = make_test_dataframe();
