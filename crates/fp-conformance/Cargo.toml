@@ -18,15 +18,15 @@ asupersync = ["fp-runtime/asupersync"]
 
 [dependencies]
 chrono = { workspace = true }
-fp-columnar = { path = "../fp-columnar", version = "0.1.0" }
-fp-expr = { path = "../fp-expr", version = "0.1.0" }
-fp-frame = { path = "../fp-frame", version = "0.1.0" }
-fp-groupby = { path = "../fp-groupby", version = "0.1.0" }
-fp-index = { path = "../fp-index", version = "0.1.0" }
-fp-io = { path = "../fp-io", version = "0.1.0" }
-fp-join = { path = "../fp-join", version = "0.1.0" }
-fp-runtime = { path = "../fp-runtime", version = "0.1.0" }
-fp-types = { path = "../fp-types", version = "0.1.0" }
+fp-columnar = { path = "../fp-columnar", version = "0.1.1" }
+fp-expr = { path = "../fp-expr", version = "0.1.1" }
+fp-frame = { path = "../fp-frame", version = "0.1.1" }
+fp-groupby = { path = "../fp-groupby", version = "0.1.1" }
+fp-index = { path = "../fp-index", version = "0.1.1" }
+fp-io = { path = "../fp-io", version = "0.1.1" }
+fp-join = { path = "../fp-join", version = "0.1.1" }
+fp-runtime = { path = "../fp-runtime", version = "0.1.1" }
+fp-types = { path = "../fp-types", version = "0.1.1" }
 raptorq = { version = "2.0.1", features = ["serde_support"] }
 # rusqlite: referenced directly by fuzz_read_sql_bytes (pub fn, br-gpxk)
 # for an in-memory SQLite harness. Already indirectly pulled via fp-io.
@@ -40,10 +40,10 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false }
-fp-columnar = { path = "../fp-columnar", version = "0.1.0" }
-fp-index = { path = "../fp-index", version = "0.1.0" }
-fp-io = { path = "../fp-io", version = "0.1.0" }
-fp-join = { path = "../fp-join", version = "0.1.0" }
+fp-columnar = { path = "../fp-columnar", version = "0.1.1" }
+fp-index = { path = "../fp-index", version = "0.1.1" }
+fp-io = { path = "../fp-io", version = "0.1.1" }
+fp-join = { path = "../fp-join", version = "0.1.1" }
 proptest = "1.11.0"
 tempfile = "3.27.0"
 
