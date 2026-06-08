@@ -202,6 +202,16 @@ enum SortOrder {
     AscendingDatetime64,
 }
 
+/// Which set operation a two-pointer sorted merge should emit
+/// (br-frankenpandas-idxdup). Both inputs are strictly ascending and unique.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetMergeKind {
+    /// Keep `self` labels that also appear in `other`.
+    Intersection,
+    /// Keep `self` labels that do NOT appear in `other`.
+    Difference,
+}
+
 /// Detect the sort order of the label slice.
 fn detect_sort_order(labels: &[IndexLabel]) -> SortOrder {
     if labels.len() <= 1 {
@@ -1118,6 +1128,15 @@ impl Index {
 
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Self {
+        // Both strictly ascending (every SortOrder::Ascending* is globally
+        // IndexLabel::Ord-sorted and unique) => a two-pointer merge yields the
+        // same self-ordered, deduplicated intersection without building either
+        // FxHashMap (br-frankenpandas-idxdup set ops).
+        if let Some(labels) = self.sorted_merge_set_op(other, SetMergeKind::Intersection) {
+            let mut result = Self::new(labels);
+            result.name = self.shared_name(other);
+            return result;
+        }
         let other_set = other.position_map_first_ref();
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let labels: Vec<IndexLabel> = self
@@ -1129,6 +1148,48 @@ impl Index {
         let mut result = Self::new(labels);
         result.name = self.shared_name(other);
         result
+    }
+
+    /// Hash-free two-pointer set merge for two strictly-ascending (hence
+    /// `IndexLabel::Ord`-sorted and unique) indexes; returns `None` when either
+    /// side is unsorted so the caller keeps its FxHashMap path. Emits labels in
+    /// `self`'s order, which equals the sorted order on the fast path — exactly
+    /// what the hash path's `self`-iteration-order filter produces.
+    fn sorted_merge_set_op(&self, other: &Self, kind: SetMergeKind) -> Option<Vec<IndexLabel>> {
+        if matches!(self.sort_order(), SortOrder::Unsorted)
+            || matches!(other.sort_order(), SortOrder::Unsorted)
+        {
+            return None;
+        }
+        let a = self.labels();
+        let b = other.labels();
+        let mut labels = Vec::with_capacity(a.len().min(b.len()));
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < a.len() {
+            if j >= b.len() {
+                if kind == SetMergeKind::Difference {
+                    labels.extend_from_slice(&a[i..]);
+                }
+                break;
+            }
+            match a[i].cmp(&b[j]) {
+                std::cmp::Ordering::Less => {
+                    if kind == SetMergeKind::Difference {
+                        labels.push(a[i].clone());
+                    }
+                    i += 1;
+                }
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    if kind == SetMergeKind::Intersection {
+                        labels.push(a[i].clone());
+                    }
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        Some(labels)
     }
 
     #[must_use]
@@ -1147,6 +1208,11 @@ impl Index {
 
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
+        // Two-pointer merge when both sides are strictly ascending (see
+        // intersection / sorted_merge_set_op).
+        if let Some(labels) = self.sorted_merge_set_op(other, SetMergeKind::Difference) {
+            return self.propagate_name(Self::new(labels));
+        }
         let other_set = other.position_map_first_ref();
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let labels: Vec<IndexLabel> = self
@@ -13507,6 +13573,57 @@ mod tests {
                 idx.drop_duplicates().labels(),
                 ref_unique.as_slice(),
                 "drop_duplicates {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sorted_merge_set_ops_match_reference_idxdup() {
+        // intersection / difference must equal the self-ordered, deduped
+        // FxHashMap reference whether the two-pointer fast path fires (both
+        // strictly ascending) or the hash path runs (any side unsorted).
+        let s = |v: &[i64]| v.iter().map(|x| IndexLabel::Int64(*x)).collect::<Vec<_>>();
+        let pairs: Vec<(Vec<IndexLabel>, Vec<IndexLabel>)> = vec![
+            (s(&[1, 2, 3, 5]), s(&[2, 3, 4])),       // both sorted, overlap
+            (s(&[1, 2, 3]), s(&[4, 5, 6])),          // both sorted, disjoint
+            (s(&[1, 2, 3]), s(&[1, 2, 3])),          // identical
+            (s(&[1, 2, 3]), vec![]),                 // empty other
+            (vec![], s(&[1, 2, 3])),                 // empty self
+            (s(&[3, 1, 2]), s(&[2, 3])),             // self unsorted -> hash path
+            (s(&[1, 2, 3]), s(&[3, 1])),             // other unsorted -> hash path
+            (vec!["a".into(), "c".into(), "e".into()], vec!["b".into(), "c".into()]), // utf8 sorted
+            (
+                vec![1_i64.into(), 2_i64.into()],
+                vec!["a".into(), "b".into()],
+            ), // mixed-type sorted, disjoint by Ord variant
+        ];
+        for (a, b) in pairs {
+            let ia = Index::new(a.clone());
+            let ib = Index::new(b.clone());
+            let bset: std::collections::HashSet<IndexLabel> = b.iter().cloned().collect();
+
+            let mut seen = std::collections::HashSet::new();
+            let ref_inter: Vec<IndexLabel> = a
+                .iter()
+                .filter(|l| bset.contains(*l) && seen.insert((*l).clone()))
+                .cloned()
+                .collect();
+            assert_eq!(
+                ia.intersection(&ib).labels(),
+                ref_inter.as_slice(),
+                "intersection {a:?} ∩ {b:?}"
+            );
+
+            let mut seen_d = std::collections::HashSet::new();
+            let ref_diff: Vec<IndexLabel> = a
+                .iter()
+                .filter(|l| !bset.contains(*l) && seen_d.insert((*l).clone()))
+                .cloned()
+                .collect();
+            assert_eq!(
+                ia.difference(&ib).labels(),
+                ref_diff.as_slice(),
+                "difference {a:?} \\ {b:?}"
             );
         }
     }
