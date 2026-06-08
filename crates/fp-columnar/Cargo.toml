@@ -13,7 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-fp-types = { path = "../fp-types", version = "0.1.0" }
+fp-types = { path = "../fp-types", version = "0.1.1" }
 rustc-hash = "2"
 serde = { workspace = true }
 thiserror = { workspace = true }
