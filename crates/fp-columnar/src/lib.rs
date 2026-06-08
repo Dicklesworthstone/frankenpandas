@@ -2316,19 +2316,32 @@ impl Column {
         }
 
         match (&self.data, self.dtype) {
-            (Some(ColumnData::Bool(data)), DType::Bool | DType::BoolNullable)
+            (Some(ColumnData::Bool(data)), DType::Bool)
                 if data.len() == self.values.len() =>
             {
-                Some(ScalarValues::from_vec(
-                    data.iter().copied().map(Scalar::Bool).collect(),
-                ))
+                // Carry the contiguous bool buffer through the clone as a lazy
+                // all-valid backing (mirrors the Float64 arm) so `as_bool_slice`
+                // stays available on the clone — otherwise every bool dense fast
+                // path (filter masks, duplicated, isin) bails after a clone. The
+                // Scalar view materializes identically (`map(Scalar::Bool)`) on
+                // demand. BoolNullable is excluded: an all-valid clone of a
+                // nullable-bool column must stay Eager so its dtype-tagged Scalar
+                // view is preserved.
+                Some(ScalarValues::lazy_all_valid_bool(data.clone()))
             }
-            (Some(ColumnData::Int64(data)), DType::Int64 | DType::Int64Nullable)
+            (Some(ColumnData::Int64(data)), DType::Int64)
                 if data.len() == self.values.len() =>
             {
-                Some(ScalarValues::from_vec(
-                    data.iter().copied().map(Scalar::Int64).collect(),
-                ))
+                // Carry the contiguous i64 buffer through the clone as a lazy
+                // all-valid backing (mirrors the Float64 arm) so `as_i64_slice`
+                // stays available on the clone. Previously the clone eagerly
+                // materialized `Vec<Scalar::Int64>`, which both cost a full
+                // Scalar build AND dropped slice availability — so cloned Int64
+                // columns silently missed every dense/direct-address fast path
+                // (groupby, value_counts, dedup, joins). Bit-identical Scalar
+                // view (`map(Scalar::Int64)`) materializes on demand.
+                // Int64Nullable is excluded to preserve its dtype-tagged view.
+                Some(ScalarValues::lazy_all_valid_int64(data.clone()))
             }
             (Some(ColumnData::Float64(data)), DType::Float64)
                 if data.len() == self.values.len() =>

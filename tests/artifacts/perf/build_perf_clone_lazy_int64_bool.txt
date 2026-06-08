@@ -1,0 +1,38 @@
+Lever: Column::clone preserves typed all-valid Int64/Bool lazy backing
+File: crates/fp-columnar/src/lib.rs  (clone_dense_values_from_cache)
+
+ROOT CAUSE
+  Column::clone() -> clone_dense_values_from_cache():
+    - Float64 arm built ScalarValues::lazy_all_valid_float64(data) -> as_f64_slice OK on clone.
+    - Int64  arm built ScalarValues::from_vec(map(Scalar::Int64)) -> EAGER Vec<Scalar>:
+        * full per-row Scalar materialization on every clone, AND
+        * as_i64_slice() returns None on the clone (it only reads ColumnData::Int64
+          or ScalarValues::LazyAllValidInt64).
+    - Bool arm: same eager pattern; as_bool_slice() lost on clone.
+  => Cloned Int64 key/value columns silently MISS every dense / direct-address
+     fast path (groupby build_groups, value_counts, factorize, dedup, joins).
+     The vs_pandas bench clones the frame, so groupby ran the slow ScalarKey
+     hashing build_groups instead of the dense direct-address path.
+
+FIX
+  Int64 arm -> ScalarValues::lazy_all_valid_int64(data.clone())   (mirror Float64)
+  Bool  arm -> ScalarValues::lazy_all_valid_bool(data.clone())
+  (Int64Nullable/BoolNullable fall through to self.values.clone(); precedent =
+   Float64 arm which is non-nullable only.)
+
+ISOMORPHISM
+  LazyAllValidInt64/Bool materialize the Scalar view via the identical
+  data.iter().copied().map(Scalar::Int64|Bool) used by the old eager clone,
+  so the observable Scalar sequence is bit-identical; only laziness +
+  contiguous-slice availability change. Validated:
+    - fp-columnar lib: 377 passed / 0 failed
+    - fp-frame    lib: 2823 passed / 0 failed (incl. *_golden_basic bit goldens:
+                       value_counts_golden_basic, unique_golden_basic, var_golden_basic ...)
+
+BENCH (vs_pandas bench_runner, p50, min of 3 runs; pandas 2.2.3 baseline)
+  op                     n        before     after   speedup   after/pandas
+  groupby/sum        100000      8.078ms   0.926ms    8.72x      1.09x
+  groupby/mean       100000      8.091ms   0.965ms    8.38x      1.07x
+  groupby/sum         10000      0.843ms   0.119ms    7.08x      0.54x
+  groupby/mean        10000      0.844ms   0.123ms    6.86x      0.57x
+  (all other ops within +/-10% measurement noise; untouched paths)
