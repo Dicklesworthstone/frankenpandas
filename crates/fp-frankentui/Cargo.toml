@@ -13,8 +13,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-fp-conformance = { path = "../fp-conformance", version = "0.1.0" }
-fp-runtime = { path = "../fp-runtime", version = "0.1.0" }
+fp-conformance = { path = "../fp-conformance", version = "0.1.1" }
+fp-runtime = { path = "../fp-runtime", version = "0.1.1" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
