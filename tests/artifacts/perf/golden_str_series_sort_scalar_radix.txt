@@ -1,0 +1,4 @@
+str_series_sort golden (n=5000) — bit-identical before/after Scalar-backed Utf8 radix routing
+baseline: 637c2c8b0680315b5af8f21c7a55b907f686fe8300a77059adbe5e3f924bbc23
+after:    637c2c8b0680315b5af8f21c7a55b907f686fe8300a77059adbe5e3f924bbc23
+A/B (min-of-5, 20 iters @200k): before 120.2ms/iter -> after 58.2ms/iter = 2.07x
