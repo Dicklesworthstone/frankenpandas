@@ -1076,6 +1076,24 @@ fn strictly_increasing_utf8_key_spans(column: &Column) -> Option<(&[u8], &[usize
     Some((bytes, offsets))
 }
 
+fn utf8_span<'a>(bytes: &'a [u8], offsets: &[usize], pos: usize) -> &'a [u8] {
+    &bytes[offsets[pos]..offsets[pos + 1]]
+}
+
+fn utf8_span_lower_bound(bytes: &[u8], offsets: &[usize], needle: &[u8]) -> usize {
+    let mut lo = 0usize;
+    let mut hi = offsets.len() - 1;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if utf8_span(bytes, offsets, mid) < needle {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 /// Hash-free ordered merge for all-valid, strictly increasing contiguous-Utf8
 /// keys. This is the string-key analogue of
 /// [`ordered_unique_int64_inner_positions`]: each side is unique and already in
@@ -1092,14 +1110,35 @@ fn ordered_unique_utf8_inner_positions(
     let left_n = left_offsets.len() - 1;
     let right_n = right_offsets.len() - 1;
 
+    if left_n == 0 || right_n == 0 {
+        return Some((Vec::new(), Vec::new()));
+    }
+
     let mut left_positions = Vec::<usize>::with_capacity(left_n.min(right_n));
     let mut right_positions = Vec::<usize>::with_capacity(left_positions.capacity());
-    let mut left_idx = 0usize;
-    let mut right_idx = 0usize;
+
+    let first_left = utf8_span(left_bytes, left_offsets, 0);
+    let last_left = utf8_span(left_bytes, left_offsets, left_n - 1);
+    let first_right = utf8_span(right_bytes, right_offsets, 0);
+    let last_right = utf8_span(right_bytes, right_offsets, right_n - 1);
+    if last_left < first_right || last_right < first_left {
+        return Some((left_positions, right_positions));
+    }
+
+    let mut left_idx = utf8_span_lower_bound(left_bytes, left_offsets, first_right);
+    let mut right_idx = if left_idx < left_n {
+        utf8_span_lower_bound(
+            right_bytes,
+            right_offsets,
+            utf8_span(left_bytes, left_offsets, left_idx),
+        )
+    } else {
+        right_n
+    };
 
     while left_idx < left_n && right_idx < right_n {
-        let left_span = &left_bytes[left_offsets[left_idx]..left_offsets[left_idx + 1]];
-        let right_span = &right_bytes[right_offsets[right_idx]..right_offsets[right_idx + 1]];
+        let left_span = utf8_span(left_bytes, left_offsets, left_idx);
+        let right_span = utf8_span(right_bytes, right_offsets, right_idx);
 
         match left_span.cmp(right_span) {
             Ordering::Equal => {
@@ -6424,7 +6463,8 @@ mod tests {
         DataFrameMergeExt, DenseI64InnerOutputPlan, DenseI64LaneData, FusedInt64OutputColumn,
         FusedInt64Side, JoinExecutionOptions, JoinType, build_dense_i64_inner_output_data,
         join_series, join_series_with_options, join_series_with_trace,
-        ordered_unique_utf8_inner_positions,
+        ordered_unique_utf8_inner_positions, strictly_increasing_utf8_key_spans,
+        utf8_span_lower_bound,
     };
 
     fn contiguous_utf8_column(values: &[&str]) -> Column {
@@ -9285,6 +9325,29 @@ mod tests {
             merged.columns.get("rv").unwrap().values(),
             &[Scalar::Int64(20), Scalar::Int64(22)]
         );
+    }
+
+    #[test]
+    fn ordered_unique_utf8_seek_bound_preserves_late_overlap_lr52z() {
+        let left = contiguous_utf8_column(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]);
+        let right = contiguous_utf8_column(&["h", "i", "j", "k"]);
+        let (left_bytes, left_offsets) =
+            strictly_increasing_utf8_key_spans(&left).expect("sorted left");
+
+        assert_eq!(utf8_span_lower_bound(left_bytes, left_offsets, b"h"), 7);
+
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+        assert_eq!(left_positions, vec![7, 8, 9]);
+        assert_eq!(right_positions, vec![0, 1, 2]);
+
+        let disjoint_left = contiguous_utf8_column(&["a", "b"]);
+        let disjoint_right = contiguous_utf8_column(&["c", "d"]);
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&disjoint_left, &disjoint_right)
+                .expect("ordered disjoint utf8 positions");
+        assert!(left_positions.is_empty());
+        assert!(right_positions.is_empty());
     }
 
     #[test]

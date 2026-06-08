@@ -1,0 +1,140 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 146  of event 'cycles:P'
+# Event count (approx.): 1425013979
+#
+# Children      Self  Symbol                                                                                                                Shared Object         IPC   [IPC Coverage]
+# ........  ........  ....................................................................................................................  ....................  ....................
+#
+    99.96%     0.00%  [.] _start                                                                                                            perf_profile          -      -
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--82.27%--fp_join::merge_dataframes_on_with_options
+               |          |
+               |          |--80.85%--fp_join::merge_single_key_inner_unsorted
+               |          |          |
+               |          |          |--49.24%--__memcmp_avx2_movbe
+               |          |          |
+               |          |          |--19.85%--fp_join::strictly_increasing_utf8_key_spans
+               |          |          |
+               |          |           --8.46%--fp_join::build_single_key_inner_merge_output
+               |          |                     |
+               |          |                     |--5.69%--<fp_columnar::Column>::take_positions
+               |          |                     |
+               |          |                      --2.78%--__memmove_avx_unaligned_erms
+               |          |
+               |           --1.43%--__memcmp_avx2_movbe
+               |
+               |--11.57%--perf_profile::build_str_join_frame
+               |          |
+               |          |--6.15%--core::fmt::write
+               |          |          |
+               |          |           --2.45%--<usize as core::fmt::LowerHex>::fmt
+               |          |
+               |           --3.55%--0xffffffff84c00bb7
+               |                     |
+               |                      --3.45%--0xffffffff86228130
+               |                                0xffffffff86228a43
+               |                                |
+               |                                 --3.45%--0xffffffff8622884d
+               |                                           0xffffffff85123fb6
+               |
+               |--4.18%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+               |          |
+               |          |--2.77%--core::ptr::drop_in_place::<fp_index::Index>
+               |          |          |
+               |          |           --1.38%--__munmap
+               |          |                     0xffffffff84c0012b
+               |          |                     0xffffffff86220551
+               |          |                     0xffffffff84f24dad
+               |          |                     0xffffffff853aa42b
+               |          |                     0xffffffff853ceac8
+               |          |                     0xffffffff853cc961
+               |          |                     0xffffffff853cc7f5
+               |          |                     0xffffffff853cb02c
+               |          |                     0xffffffff853c9794
+               |          |                     0xffffffff853ae78e
+               |          |                     0xffffffff853adcca
+               |          |                     0xffffffff853fc79e
+               |          |                     0xffffffff853435e0
+               |          |                     0xffffffff853db06b
+               |          |                     0xffffffff853d43b0
+               |          |                     0xffffffff853d3d35
+               |          |                     0xffffffff853d2980
+               |          |
+               |           --1.40%--core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               |                     core::ptr::drop_in_place::<fp_columnar::Column>
+               |                     __munmap
+               |                     0xffffffff84c0012b
+               |                     0xffffffff86220551
+               |                     0xffffffff84f24dad
+               |                     0xffffffff853aa42b
+               |                     0xffffffff853ceac8
+               |                     0xffffffff853cc961
+               |                     0xffffffff853cc7f5
+               |                     0xffffffff853cb02c
+               |                     0xffffffff853c9794
+               |                     0xffffffff853ae78e
+               |                     0xffffffff853adcca
+               |                     0xffffffff853fc79e
+               |                     0xffffffff853435e0
+               |                     0xffffffff853daf7f
+               |
+                --1.89%--__memmove_avx_unaligned_erms
+                          |
+                           --1.89%--0xffffffff84c01199
+
+    99.96%     0.00%  [.] __libc_start_main@@GLIBC_2.34                                                                                     libc.so.6             -      -
+            |
+            ---__libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<()>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               perf_profile::main
+               |
+               |--82.27%--fp_join::merge_dataframes_on_with_options
+               |          |
+               |          |--80.85%--fp_join::merge_single_key_inner_unsorted
+               |          |          |
+               |          |          |--49.24%--__memcmp_avx2_movbe
+               |          |          |
+               |          |          |--19.85%--fp_join::strictly_increasing_utf8_key_spans
+               |          |          |
+               |          |           --8.46%--fp_join::build_single_key_inner_merge_output
+               |          |                     |
+               |          |                     |--5.69%--<fp_columnar::Column>::take_positions
+               |          |                     |
+               |          |                      --2.78%--__memmove_avx_unaligned_erms
+               |          |
+               |           --1.43%--__memcmp_avx2_movbe
+               |
+               |--11.57%--perf_profile::build_str_join_frame
+               |          |
+               |          |--6.15%--core::fmt::write
+               |          |          |
+               |          |           --2.45%--<usize as core::fmt::LowerHex>::fmt
+               |          |
+               |           --3.55%--0xffffffff84c00bb7
+               |                     |
+               |                      --3.45%--0xffffffff86228130
+               |                                0xffffffff86228a43
+               |                                |
+               |                                 --3.45%--0xffffffff8622884d
+               |                                           0xffffffff85123fb6
+               |
+               |--4.18%--core::ptr::drop_in_place::<fp_frame::DataFrame>
+               |          |
+               |          |--2.77%--core::ptr::drop_in_place::<fp_index::Index>
+               |          |          |
+               |          |           --1.38%--__munmap
