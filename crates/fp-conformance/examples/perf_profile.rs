@@ -145,6 +145,28 @@ fn build_groupby_frame(n: usize, num_groups: usize) -> DataFrame {
 /// of bounded cardinality + Float64 value columns (from_f64_values). Mirrors the
 /// shape numeric data takes after a typed read/construction (where the dense
 /// groupby paths apply), unlike build_groupby_frame's Scalar-backed columns.
+/// (value Series, key Series) for a SeriesGroupBy cum* benchmark
+/// (br-frankenpandas-gbcum): all-valid Float64 values + bounded Int64 keys, so
+/// the dense-gid typed cum path applies.
+fn build_groupby_cum_pair(n: usize, num_groups: usize) -> (Series, Series) {
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let keys: Vec<i64> = (0..n).map(|i| (i % num_groups) as i64).collect();
+    let vals: Vec<f64> = (0..n).map(|i| (i.wrapping_mul(37) % 9973) as f64 * 0.25).collect();
+    let value = Series::new(
+        "v".to_string(),
+        Index::new(labels.clone()),
+        Column::from_f64_values(vals),
+    )
+    .expect("value series");
+    let key = Series::new(
+        "k".to_string(),
+        Index::new(labels),
+        Column::from_i64_values(keys),
+    )
+    .expect("key series");
+    (value, key)
+}
+
 fn build_transform_frame(n: usize, num_groups: usize, ncols: usize) -> DataFrame {
     let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
     let index = Index::new(labels);
@@ -598,6 +620,15 @@ fn run_golden(scenario: &str, n: usize) {
         "drop_duplicates" => build_groupby_frame(n, 100)
             .drop_duplicates(None, DuplicateKeep::First, false)
             .expect("dedup"),
+        "groupby_cumsum" => {
+            let (value, key) = build_groupby_cum_pair(n, 100);
+            let out = value
+                .groupby(&key)
+                .expect("groupby")
+                .cumsum()
+                .expect("cumsum");
+            return print!("{}", golden_dump_series(&out));
+        }
         "groupby_transform_mean" => build_transform_frame(n, 100, 4)
             .groupby(&["k"])
             .expect("groupby")
@@ -948,6 +979,17 @@ fn main() {
                     .expect("groupby")
                     .transform("std")
                     .expect("transform");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "groupby_cumsum" => {
+            let (value, key) = build_groupby_cum_pair(n, 100);
+            for _ in 0..iters {
+                let out = value
+                    .groupby(&key)
+                    .expect("groupby")
+                    .cumsum()
+                    .expect("cumsum");
                 sink = sink.wrapping_add(out.len());
             }
         }
