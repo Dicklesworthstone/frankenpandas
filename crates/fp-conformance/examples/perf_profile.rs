@@ -588,6 +588,30 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("groupby")
             .transform("prod")
             .expect("transform"),
+        "groupby_transform_var" => build_transform_frame(n, 100, 4)
+            .groupby(&["k"])
+            .expect("groupby")
+            .transform("var")
+            .expect("transform"),
+        "groupby_transform_std" => build_transform_frame(n, 100, 4)
+            .groupby(&["k"])
+            .expect("groupby")
+            .transform("std")
+            .expect("transform"),
+        "groupby_transform_sum" => build_transform_frame(n, 100, 4)
+            .groupby(&["k"])
+            .expect("groupby")
+            .transform("sum")
+            .expect("transform"),
+        // card ~3n/4 ⇒ a MIX of size-1 groups (var = Null(NaN)) and size-2 groups
+        // (finite var): exercises the validity-mask path
+        // (from_f64_values_with_validity) — size-1 rows masked to Null within an
+        // otherwise-Float64 column, alongside valid var rows.
+        "groupby_transform_var_mixed" => build_transform_frame(n, n * 3 / 4, 1)
+            .groupby(&["k"])
+            .expect("groupby")
+            .transform("var")
+            .expect("transform"),
         "sort_single" => build_numeric_frame(n, 4)
             .sort_values("c0", true)
             .expect("sort"),
@@ -870,6 +894,17 @@ fn main() {
                     .groupby(&["k"])
                     .expect("groupby")
                     .transform("median")
+                    .expect("transform");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "groupby_transform_std" => {
+            let frame = build_transform_frame(n, 100, 4);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("groupby")
+                    .transform("std")
                     .expect("transform");
                 sink = sink.wrapping_add(out.len());
             }
