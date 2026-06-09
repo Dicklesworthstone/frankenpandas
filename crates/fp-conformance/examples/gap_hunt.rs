@@ -136,6 +136,10 @@ fn main() {
         print!("{}", golden_dump(&fnull.clip(Some(100.0), Some(500.0)).unwrap()));
         print!("{}", golden_dump(&f.clip(Some(7.0), Some(3.0)).unwrap()));
         print!("{}", golden_dump(&fnull.clip(None, Some(400.0)).unwrap()));
+        // fillna: nullable filled with a finite constant; all-valid is a no-op.
+        print!("{}", golden_dump(&fnull.fillna(&Scalar::Float64(0.0)).unwrap()));
+        print!("{}", golden_dump(&fnull.fillna(&Scalar::Float64(-1.5)).unwrap()));
+        print!("{}", golden_dump(&f.fillna(&Scalar::Float64(9.0)).unwrap()));
         return;
     }
     let n: usize = args

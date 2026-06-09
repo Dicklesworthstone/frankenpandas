@@ -7415,6 +7415,30 @@ impl Column {
         }
 
         let cast_fill = cast_scalar(fill_value, self.dtype)?;
+
+        // Typed Float64 fast path (br-frankenpandas-e8vzt): fill every missing
+        // slot with the finite f64 fill into an all-valid typed buffer, skipping
+        // the per-element Scalar clone, the Vec<Scalar>, and the Self::new
+        // revalidation. Bit-identical: a present slot (validity set AND datum not
+        // NaN — a valid-bit NaN is missing per Scalar::is_missing) keeps its f64;
+        // a missing slot takes `fv`; every result is finite, so the column is
+        // all-valid exactly as Self::new would derive from the Float64 scalars.
+        if self.dtype == DType::Float64
+            && let Scalar::Float64(fv) = &cast_fill
+            && fv.is_finite()
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let mut out = Vec::with_capacity(data.len());
+            for (i, &d) in data.iter().enumerate() {
+                if validity.get(i) && !d.is_nan() {
+                    out.push(d);
+                } else {
+                    out.push(*fv);
+                }
+            }
+            return Ok(Self::from_f64_values(out));
+        }
+
         let values = self
             .values
             .iter()
