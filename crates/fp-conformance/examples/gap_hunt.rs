@@ -109,6 +109,10 @@ fn main() {
         print!("{}", golden_dump(&fnull.ffill(Some(2)).unwrap()));
         print!("{}", golden_dump(&fnull.bfill(None).unwrap()));
         print!("{}", golden_dump(&fnull.bfill(Some(2)).unwrap()));
+        // corrwith: all-valid self over nullable other (pairs dropped), and
+        // nullable self over nullable other.
+        print!("{}", golden_dump(&f.corrwith(&other_null).unwrap().to_frame(Some("c")).unwrap()));
+        print!("{}", golden_dump(&fnull.corrwith(&other_null).unwrap().to_frame(Some("c")).unwrap()));
         return;
     }
     let n: usize = args
