@@ -2264,6 +2264,7 @@ fn dense_inner_matched_runs(plan: &DenseI64InnerOutputPlan<'_>) -> Vec<(usize, u
 ///   * a Right column becomes a repeated-slices lane over the bucket-ordered
 ///     value tape (`values` gathered by `positions`, one scattered pass) with
 ///     the shared `segments` descriptor.
+///
 /// Both materialize, only when a consumer reads them, to exactly the values
 /// `take_position_selection_typed` would produce on the flat `(left_positions,
 /// right_positions)` vectors — same values, same row order (matched-run probe
@@ -2281,8 +2282,10 @@ fn build_dense_inner_f64_column(
 ) -> Column {
     match side {
         FusedInt64Side::Left => {
-            let run_values: Vec<f64> =
-                matched.iter().map(|&(left_pos, _, _)| values[left_pos]).collect();
+            let run_values: Vec<f64> = matched
+                .iter()
+                .map(|&(left_pos, _, _)| values[left_pos])
+                .collect();
             Column::from_f64_repeat_values_run_lengths(run_values, Arc::clone(run_lens))
         }
         FusedInt64Side::Right => {
@@ -2360,7 +2363,11 @@ fn build_dense_inner_f64_columns(
         }
         let mut all: Vec<(usize, Column)> = Vec::new();
         for handle in handles {
-            all.extend(handle.join().expect("f64 inner-merge column worker panicked"));
+            all.extend(
+                handle
+                    .join()
+                    .expect("f64 inner-merge column worker panicked"),
+            );
         }
         all
     });
@@ -2372,7 +2379,12 @@ fn build_dense_inner_f64_columns(
     specs
         .into_iter()
         .zip(built)
-        .map(|(s, column)| (s.name, column.expect("every f64 column index is built once")))
+        .map(|(s, column)| {
+            (
+                s.name,
+                column.expect("every f64 column index is built once"),
+            )
+        })
         .collect()
 }
 
@@ -2630,7 +2642,6 @@ fn build_single_key_dense_i64_inner_merge_output(
         column_order,
     }))
 }
-
 
 /// Fused dense-i64 LEFT merge builder (br-frankenpandas-7wxoc).
 ///
@@ -2955,8 +2966,10 @@ fn build_single_key_dense_i64_left_merge_output(
                 // Lazy nullable repeated-slices over the bucket-order tape
                 // (br-frankenpandas-yiqv5): O(matched) descriptor, no O(output)
                 // materialization.
-                let tape: Vec<i64> =
-                    positions.iter().map(|&right_pos| spec.values[right_pos]).collect();
+                let tape: Vec<i64> = positions
+                    .iter()
+                    .map(|&right_pos| spec.values[right_pos])
+                    .collect();
                 Column::from_i64_nullable_repeated_slices_shared(
                     tape,
                     Arc::clone(&right_segments),
@@ -3300,8 +3313,10 @@ fn build_single_key_dense_i64_right_merge_output(
                 // (br-frankenpandas-yiqv5). When no left row is missing the
                 // segments carry no `usize::MAX` sentinel, so the ctor yields an
                 // all-valid mask — identical to the prior `from_i64_values`.
-                let tape: Vec<i64> =
-                    positions.iter().map(|&left_pos| spec.values[left_pos]).collect();
+                let tape: Vec<i64> = positions
+                    .iter()
+                    .map(|&left_pos| spec.values[left_pos])
+                    .collect();
                 Column::from_i64_nullable_repeated_slices_shared(
                     tape,
                     Arc::clone(&left_segments),
@@ -3563,12 +3578,24 @@ fn build_single_key_dense_i64_outer_merge_output(
     // Left broadcast run values (one per run): i64 (preserved) or f64 (promoted).
     let left_run_values_i64 = |idx: usize| -> Vec<i64> {
         plan.iter()
-            .map(|&(lp, _, _)| if lp != NONE_POS { spec_values[idx][lp] } else { 0 })
+            .map(|&(lp, _, _)| {
+                if lp != NONE_POS {
+                    spec_values[idx][lp]
+                } else {
+                    0
+                }
+            })
             .collect()
     };
     let left_run_values_f64 = |idx: usize| -> Vec<f64> {
         plan.iter()
-            .map(|&(lp, _, _)| if lp != NONE_POS { spec_values[idx][lp] as f64 } else { 0.0 })
+            .map(|&(lp, _, _)| {
+                if lp != NONE_POS {
+                    spec_values[idx][lp] as f64
+                } else {
+                    0.0
+                }
+            })
             .collect()
     };
 
@@ -3591,34 +3618,30 @@ fn build_single_key_dense_i64_outer_merge_output(
                     Column::from_i64_values(data)
                 }
             }
-            OuterLaneKind::Lane(side) => {
-                match (side, promoted(*side)) {
-                    (FusedInt64Side::Left, false) => Column::from_i64_repeat_values_run_lengths(
-                        left_run_values_i64(idx),
+            OuterLaneKind::Lane(side) => match (side, promoted(*side)) {
+                (FusedInt64Side::Left, false) => Column::from_i64_repeat_values_run_lengths(
+                    left_run_values_i64(idx),
+                    Arc::clone(&run_lens),
+                ),
+                (FusedInt64Side::Left, true) => {
+                    Column::from_f64_nullable_repeat_values_run_lengths(
+                        left_run_values_f64(idx),
+                        Arc::clone(&left_run_valid),
                         Arc::clone(&run_lens),
-                    ),
-                    (FusedInt64Side::Left, true) => {
-                        Column::from_f64_nullable_repeat_values_run_lengths(
-                            left_run_values_f64(idx),
-                            Arc::clone(&left_run_valid),
-                            Arc::clone(&run_lens),
-                            output_len,
-                        )
-                    }
-                    (FusedInt64Side::Right, false) => Column::from_i64_repeated_slices_shared(
-                        tape_i64(idx),
-                        Arc::clone(&right_segments),
                         output_len,
-                    ),
-                    (FusedInt64Side::Right, true) => {
-                        Column::from_f64_nullable_repeated_slices_shared(
-                            tape_f64(idx),
-                            Arc::clone(&right_segments),
-                            output_len,
-                        )
-                    }
+                    )
                 }
-            }
+                (FusedInt64Side::Right, false) => Column::from_i64_repeated_slices_shared(
+                    tape_i64(idx),
+                    Arc::clone(&right_segments),
+                    output_len,
+                ),
+                (FusedInt64Side::Right, true) => Column::from_f64_nullable_repeated_slices_shared(
+                    tape_f64(idx),
+                    Arc::clone(&right_segments),
+                    output_len,
+                ),
+            },
         };
         debug_assert_eq!(column.len(), output_len);
         insert_merged_output_column(&mut columns, &mut column_order, name, column)?;
