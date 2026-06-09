@@ -193,6 +193,11 @@ fn main() {
         print!("{}", golden_dump(&fnull.skew().unwrap().to_frame(Some("sk")).unwrap()));
         print!("{}", golden_dump(&f.kurtosis_agg().unwrap().to_frame(Some("ku")).unwrap()));
         print!("{}", golden_dump(&fnull.kurtosis_agg().unwrap().to_frame(Some("ku")).unwrap()));
+        // mode: repeated-value frame (period-9973 dups at n=20000 -> real modes)
+        // all-valid and nullable; plus an all-distinct frame (every value a mode).
+        print!("{}", golden_dump(&dup.mode().unwrap()));
+        print!("{}", golden_dump(&dupn.mode().unwrap()));
+        print!("{}", golden_dump(&f.mode().unwrap()));
         return;
     }
     let n: usize = args
@@ -304,6 +309,15 @@ fn main() {
     // Fifth-wave probes: DataFrame column reductions (each -> a per-column Series).
     time_it("var", 1, 20, || {
         let _ = f.var().unwrap();
+    });
+    time_it("mode", 1, 10, || {
+        let _ = f.mode().unwrap();
+    });
+    time_it("sem", 1, 20, || {
+        let _ = f.sem_agg().unwrap();
+    });
+    time_it("prod", 1, 20, || {
+        let _ = f.prod().unwrap();
     });
     time_it("std", 1, 20, || {
         let _ = f.std().unwrap();
