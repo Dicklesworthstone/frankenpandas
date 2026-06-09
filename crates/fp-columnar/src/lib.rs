@@ -4023,6 +4023,23 @@ impl Column {
         total_len: usize,
     ) -> Self {
         let validity = Self::nullable_repeated_slices_validity(&segments, total_len);
+        Self::from_f64_nullable_repeated_slices_shared_with_sparse_validity(
+            data, segments, validity, total_len,
+        )
+    }
+
+    /// Variant of [`Column::from_f64_nullable_repeated_slices_shared`] for
+    /// callers that already computed the sparse null-run witness while building
+    /// the segment descriptor.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_f64_nullable_repeated_slices_shared_with_sparse_validity(
+        data: Vec<f64>,
+        segments: Arc<[(usize, usize)]>,
+        validity: ValidityMask,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(validity.len(), total_len);
         Self {
             dtype: DType::Float64,
             values: ScalarValues::lazy_nullable_repeated_slices_float64(data, segments, total_len),
@@ -4045,6 +4062,23 @@ impl Column {
         total_len: usize,
     ) -> Self {
         let validity = Self::nullable_repeat_values_validity(&run_valid, &run_lens, total_len);
+        Self::from_f64_nullable_repeat_values_run_lengths_with_sparse_validity(
+            run_values, run_valid, run_lens, validity, total_len,
+        )
+    }
+
+    /// Variant of [`Column::from_f64_nullable_repeat_values_run_lengths`] for
+    /// dense-join builders that already carry the sparse null-run witness.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_f64_nullable_repeat_values_run_lengths_with_sparse_validity(
+        run_values: Vec<f64>,
+        run_valid: Arc<[bool]>,
+        run_lens: Arc<[usize]>,
+        validity: ValidityMask,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(validity.len(), total_len);
         Self {
             dtype: DType::Float64,
             values: ScalarValues::lazy_nullable_repeat_values_float64(
@@ -21245,6 +21279,33 @@ mod tests {
     }
 
     #[test]
+    fn nullable_repeated_slices_accept_precomputed_sparse_validity() {
+        let segments: Arc<[(usize, usize)]> =
+            Arc::from(vec![(0, 1), (usize::MAX, 1), (usize::MAX, 1), (1, 1)]);
+        let validity = ValidityMask::from_invalid_ranges(Arc::from(vec![(1, 2)]), 4);
+        let column = Column::from_f64_nullable_repeated_slices_shared_with_sparse_validity(
+            vec![4.0, -2.0],
+            segments,
+            validity,
+            4,
+        );
+
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Float64(4.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(-2.0),
+            ]
+        );
+        assert_eq!(
+            column.validity.invalid_ranges.as_deref(),
+            Some(&[(1, 2)][..])
+        );
+    }
+
+    #[test]
     fn nullable_repeat_values_store_sparse_invalid_ranges() {
         let run_valid: Arc<[bool]> = Arc::from(vec![true, false, true]);
         let run_lens: Arc<[usize]> = Arc::from(vec![2, 3, 1]);
@@ -21271,6 +21332,34 @@ mod tests {
                 Scalar::Null(NullKind::NaN),
                 Scalar::Float64(-9.0),
             ]
+        );
+    }
+
+    #[test]
+    fn nullable_repeat_values_accept_precomputed_sparse_validity() {
+        let run_valid: Arc<[bool]> = Arc::from(vec![true, false, true]);
+        let run_lens: Arc<[usize]> = Arc::from(vec![1, 2, 1]);
+        let validity = ValidityMask::from_invalid_ranges(Arc::from(vec![(1, 2)]), 4);
+        let column = Column::from_f64_nullable_repeat_values_run_lengths_with_sparse_validity(
+            vec![8.0, 0.0, -4.0],
+            run_valid,
+            run_lens,
+            validity,
+            4,
+        );
+
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Float64(8.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(-4.0),
+            ]
+        );
+        assert_eq!(
+            column.validity.invalid_ranges.as_deref(),
+            Some(&[(1, 2)][..])
         );
     }
 }

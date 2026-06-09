@@ -70,7 +70,7 @@ use std::{
 };
 
 use bumpalo::{Bump, collections::Vec as BumpVec};
-use fp_columnar::{Column, ColumnError, Utf8LowerHexSequence};
+use fp_columnar::{Column, ColumnError, Utf8LowerHexSequence, ValidityMask};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexLabel};
 use fp_types::{DType, NullKind, Scalar, TypeError};
@@ -3494,8 +3494,22 @@ fn build_single_key_dense_i64_outer_merge_output(
 
     // Bucket walk -> compact plan + closed-form key runs + output length.
     const NONE_POS: usize = usize::MAX;
+    let push_invalid_range = |ranges: &mut Vec<(usize, usize)>, start: usize, len: usize| {
+        if len == 0 {
+            return;
+        }
+        if let Some((last_start, last_len)) = ranges.last_mut()
+            && last_start.checked_add(*last_len) == Some(start)
+        {
+            *last_len += len;
+            return;
+        }
+        ranges.push((start, len));
+    };
     let mut plan = Vec::<(usize, usize, usize)>::new();
     let mut key_runs = Vec::<(i64, usize)>::new();
+    let mut left_invalid_ranges = Vec::<(usize, usize)>::new();
+    let mut right_invalid_ranges = Vec::<(usize, usize)>::new();
     let mut output_len = 0usize;
     let mut has_left_missing = false; // right-only buckets exist
     let mut has_right_missing = false; // left-only rows exist
@@ -3515,6 +3529,7 @@ fn build_single_key_dense_i64_outer_merge_output(
             }
             (true, false) => {
                 has_right_missing = true;
+                push_invalid_range(&mut right_invalid_ranges, output_len, ll);
                 for &lp in &left_positions_csr[left_offsets[bucket]..left_offsets[bucket + 1]] {
                     plan.push((lp, NONE_POS, 1));
                 }
@@ -3522,6 +3537,7 @@ fn build_single_key_dense_i64_outer_merge_output(
             }
             (false, true) => {
                 has_left_missing = true;
+                push_invalid_range(&mut left_invalid_ranges, output_len, rl);
                 plan.push((NONE_POS, right_offsets[bucket], rl));
                 rl
             }
@@ -3547,6 +3563,10 @@ fn build_single_key_dense_i64_outer_merge_output(
     let left_run_valid: Arc<[bool]> = plan.iter().map(|&(lp, _, _)| lp != NONE_POS).collect();
     let right_segments: Arc<[(usize, usize)]> =
         plan.iter().map(|&(_, rs, run_len)| (rs, run_len)).collect();
+    let left_sparse_validity =
+        ValidityMask::from_invalid_ranges(Arc::from(left_invalid_ranges), output_len);
+    let right_sparse_validity =
+        ValidityMask::from_invalid_ranges(Arc::from(right_invalid_ranges), output_len);
 
     // Promoted (nullable Float64) when that side has missing rows, preserved
     // (all-valid Int64) otherwise.
@@ -3617,10 +3637,11 @@ fn build_single_key_dense_i64_outer_merge_output(
                     Arc::clone(&run_lens),
                 ),
                 (FusedInt64Side::Left, true) => {
-                    Column::from_f64_nullable_repeat_values_run_lengths(
+                    Column::from_f64_nullable_repeat_values_run_lengths_with_sparse_validity(
                         left_run_values_f64(idx),
                         Arc::clone(&left_run_valid),
                         Arc::clone(&run_lens),
+                        left_sparse_validity.clone(),
                         output_len,
                     )
                 }
@@ -3629,11 +3650,14 @@ fn build_single_key_dense_i64_outer_merge_output(
                     Arc::clone(&right_segments),
                     output_len,
                 ),
-                (FusedInt64Side::Right, true) => Column::from_f64_nullable_repeated_slices_shared(
-                    tape_f64(idx),
-                    Arc::clone(&right_segments),
-                    output_len,
-                ),
+                (FusedInt64Side::Right, true) => {
+                    Column::from_f64_nullable_repeated_slices_shared_with_sparse_validity(
+                        tape_f64(idx),
+                        Arc::clone(&right_segments),
+                        right_sparse_validity.clone(),
+                        output_len,
+                    )
+                }
             },
         };
         debug_assert_eq!(column.len(), output_len);
