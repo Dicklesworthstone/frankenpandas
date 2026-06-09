@@ -3410,6 +3410,7 @@ fn build_single_key_dense_i64_outer_merge_output(
     let mut spec_names = Vec::<String>::new();
     let mut spec_kinds = Vec::<OuterLaneKind>::new();
     let mut spec_values = Vec::<&[i64]>::new();
+    let mut spec_sources = Vec::<Arc<[i64]>>::new();
     for name in left.column_names() {
         let col = left
             .columns()
@@ -3418,10 +3419,12 @@ fn build_single_key_dense_i64_outer_merge_output(
         let Some(values) = col.as_i64_slice() else {
             return Ok(None);
         };
+        let source = col.as_i64_arc().unwrap_or_else(|| Arc::from(values));
         if name.as_str() == key_name {
             spec_names.push(name.clone());
             spec_kinds.push(OuterLaneKind::SharedKey);
             spec_values.push(values);
+            spec_sources.push(Arc::clone(&source));
             continue;
         }
         let out_name = if right_col_names.contains(name) {
@@ -3432,6 +3435,7 @@ fn build_single_key_dense_i64_outer_merge_output(
         spec_names.push(out_name);
         spec_kinds.push(OuterLaneKind::Lane(FusedInt64Side::Left));
         spec_values.push(values);
+        spec_sources.push(source);
     }
     for name in right.column_names() {
         let col = right
@@ -3441,6 +3445,7 @@ fn build_single_key_dense_i64_outer_merge_output(
         let Some(values) = col.as_i64_slice() else {
             return Ok(None);
         };
+        let source = col.as_i64_arc().unwrap_or_else(|| Arc::from(values));
         if name.as_str() == key_name {
             continue;
         }
@@ -3452,6 +3457,7 @@ fn build_single_key_dense_i64_outer_merge_output(
         spec_names.push(out_name);
         spec_kinds.push(OuterLaneKind::Lane(FusedInt64Side::Right));
         spec_values.push(values);
+        spec_sources.push(source);
     }
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
 
@@ -3491,6 +3497,7 @@ fn build_single_key_dense_i64_outer_merge_output(
     };
     let (left_offsets, left_positions_csr) = build_csr(left_keys);
     let (right_offsets, right_positions_csr) = build_csr(right_keys);
+    let right_positions_csr: Arc<[usize]> = Arc::from(right_positions_csr);
 
     // Bucket walk -> compact plan + closed-form key runs + output length.
     const NONE_POS: usize = usize::MAX;
@@ -3561,6 +3568,11 @@ fn build_single_key_dense_i64_outer_merge_output(
     // word-filled masks.
     let run_lens: Arc<[usize]> = plan.iter().map(|&(_, _, run_len)| run_len).collect();
     let left_run_valid: Arc<[bool]> = plan.iter().map(|&(lp, _, _)| lp != NONE_POS).collect();
+    let left_run_positions: Option<Arc<[usize]>> = has_left_missing.then(|| {
+        plan.iter()
+            .map(|&(lp, _, _)| if lp == NONE_POS { 0 } else { lp })
+            .collect()
+    });
     let right_segments: Arc<[(usize, usize)]> =
         plan.iter().map(|&(_, rs, run_len)| (rs, run_len)).collect();
     let left_sparse_validity =
@@ -3582,12 +3594,6 @@ fn build_single_key_dense_i64_outer_merge_output(
             .map(|&pos| spec_values[idx][pos])
             .collect()
     };
-    let tape_f64 = |idx: usize| -> Vec<f64> {
-        right_positions_csr
-            .iter()
-            .map(|&pos| spec_values[idx][pos] as f64)
-            .collect()
-    };
     // Left broadcast run values (one per run): i64 (preserved) or f64 (promoted).
     let left_run_values_i64 = |idx: usize| -> Vec<i64> {
         plan.iter()
@@ -3600,18 +3606,6 @@ fn build_single_key_dense_i64_outer_merge_output(
             })
             .collect()
     };
-    let left_run_values_f64 = |idx: usize| -> Vec<f64> {
-        plan.iter()
-            .map(|&(lp, _, _)| {
-                if lp != NONE_POS {
-                    spec_values[idx][lp] as f64
-                } else {
-                    0.0
-                }
-            })
-            .collect()
-    };
-
     // Assemble columns in spec order, each a lazy lane.
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
     let mut columns = std::collections::BTreeMap::new();
@@ -3637,8 +3631,13 @@ fn build_single_key_dense_i64_outer_merge_output(
                     Arc::clone(&run_lens),
                 ),
                 (FusedInt64Side::Left, true) => {
-                    Column::from_f64_nullable_repeat_values_run_lengths_with_sparse_validity(
-                        left_run_values_f64(idx),
+                    Column::from_i64_nullable_repeat_positions_as_f64_with_sparse_validity(
+                        Arc::clone(&spec_sources[idx]),
+                        Arc::clone(
+                            left_run_positions
+                                .as_ref()
+                                .expect("left positions exist when left side is promoted"),
+                        ),
                         Arc::clone(&left_run_valid),
                         Arc::clone(&run_lens),
                         left_sparse_validity.clone(),
@@ -3651,8 +3650,9 @@ fn build_single_key_dense_i64_outer_merge_output(
                     output_len,
                 ),
                 (FusedInt64Side::Right, true) => {
-                    Column::from_f64_nullable_repeated_slices_shared_with_sparse_validity(
-                        tape_f64(idx),
+                    Column::from_i64_nullable_repeated_positions_as_f64_with_sparse_validity(
+                        Arc::clone(&spec_sources[idx]),
+                        Arc::clone(&right_positions_csr),
                         Arc::clone(&right_segments),
                         right_sparse_validity.clone(),
                         output_len,

@@ -1358,6 +1358,27 @@ enum ScalarValues {
         total_len: usize,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Source-position backed sibling of `LazyNullableRepeatedSlicesFloat64`.
+    /// This carries an all-valid Int64 source plus a bucket-order position tape
+    /// and casts `i64 -> f64` only if a consumer materializes the Scalar view.
+    LazyNullableRepeatedPositionsI64AsFloat64 {
+        source: Arc<[i64]>,
+        positions: Arc<[usize]>,
+        segments: Arc<[(usize, usize)]>,
+        total_len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
+    /// Source-position backed sibling of `LazyNullableRepeatValuesFloat64`.
+    /// Each valid run reads `source[run_positions[k]] as f64` lazily; invalid
+    /// runs materialize `Null(NaN)` under the same validity mask.
+    LazyNullableRepeatPositionsI64AsFloat64 {
+        source: Arc<[i64]>,
+        run_positions: Arc<[usize]>,
+        run_valid: Arc<[bool]>,
+        run_lens: Arc<[usize]>,
+        total_len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Zero-copy contiguous row-range VIEW over an `Arc`-shared contiguous-Utf8
     /// backing (br-frankenpandas-jbyuc.1.1.1). Row `i` (`0..len`) is
     /// `bytes[offsets[start + i] .. offsets[start + i + 1]]` — the same shared
@@ -1769,6 +1790,58 @@ impl ScalarValues {
         debug_assert_eq!(run_lens.iter().sum::<usize>(), total_len);
         Self::LazyNullableRepeatValuesFloat64 {
             run_values,
+            run_valid,
+            run_lens,
+            total_len,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_repeated_positions_i64_as_float64(
+        source: Arc<[i64]>,
+        positions: Arc<[usize]>,
+        segments: Arc<[(usize, usize)]>,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(
+            segments.iter().map(|&(_, len)| len).sum::<usize>(),
+            total_len
+        );
+        debug_assert!(segments.iter().all(|&(start, len)| {
+            start == usize::MAX
+                || start
+                    .checked_add(len)
+                    .is_some_and(|end| end <= positions.len())
+        }));
+        debug_assert!(positions.iter().all(|&pos| pos < source.len()));
+        Self::LazyNullableRepeatedPositionsI64AsFloat64 {
+            source,
+            positions,
+            segments,
+            total_len,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_repeat_positions_i64_as_float64(
+        source: Arc<[i64]>,
+        run_positions: Arc<[usize]>,
+        run_valid: Arc<[bool]>,
+        run_lens: Arc<[usize]>,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(run_positions.len(), run_lens.len());
+        debug_assert_eq!(run_valid.len(), run_lens.len());
+        debug_assert_eq!(run_lens.iter().sum::<usize>(), total_len);
+        debug_assert!(
+            run_positions
+                .iter()
+                .zip(run_valid.iter())
+                .all(|(&pos, &valid)| !valid || pos < source.len())
+        );
+        Self::LazyNullableRepeatPositionsI64AsFloat64 {
+            source,
+            run_positions,
             run_valid,
             run_lens,
             total_len,
@@ -2365,6 +2438,54 @@ impl ScalarValues {
                     out
                 })
                 .as_slice(),
+            Self::LazyNullableRepeatedPositionsI64AsFloat64 {
+                source,
+                positions,
+                segments,
+                total_len,
+                values,
+            } => values
+                .get_or_init(|| {
+                    let mut out = Vec::with_capacity(*total_len);
+                    for &(start, len) in segments.iter() {
+                        if start == usize::MAX {
+                            out.resize(out.len() + len, Scalar::Null(NullKind::NaN));
+                        } else {
+                            for &source_pos in &positions[start..start + len] {
+                                out.push(Scalar::Float64(source[source_pos] as f64));
+                            }
+                        }
+                    }
+                    out
+                })
+                .as_slice(),
+            Self::LazyNullableRepeatPositionsI64AsFloat64 {
+                source,
+                run_positions,
+                run_valid,
+                run_lens,
+                total_len,
+                values,
+            } => values
+                .get_or_init(|| {
+                    let mut out = Vec::with_capacity(*total_len);
+                    for ((&source_pos, &valid), &run_len) in run_positions
+                        .iter()
+                        .zip(run_valid.iter())
+                        .zip(run_lens.iter())
+                    {
+                        if valid {
+                            out.resize(
+                                out.len() + run_len,
+                                Scalar::Float64(source[source_pos] as f64),
+                            );
+                        } else {
+                            out.resize(out.len() + run_len, Scalar::Null(NullKind::NaN));
+                        }
+                    }
+                    out
+                })
+                .as_slice(),
             Self::LazyUtf8Slice {
                 bytes,
                 offsets,
@@ -2411,6 +2532,8 @@ impl ScalarValues {
             Self::LazyNullableRepeatedSlicesInt64 { total_len, .. } => *total_len,
             Self::LazyNullableRepeatedSlicesFloat64 { total_len, .. } => *total_len,
             Self::LazyNullableRepeatValuesFloat64 { total_len, .. } => *total_len,
+            Self::LazyNullableRepeatedPositionsI64AsFloat64 { total_len, .. } => *total_len,
+            Self::LazyNullableRepeatPositionsI64AsFloat64 { total_len, .. } => *total_len,
             Self::LazyUtf8Slice { len, .. } => *len,
         }
     }
@@ -2681,6 +2804,32 @@ impl Clone for ScalarValues {
                 ..
             } => Self::lazy_nullable_repeat_values_float64(
                 run_values.clone(),
+                Arc::clone(run_valid),
+                Arc::clone(run_lens),
+                *total_len,
+            ),
+            Self::LazyNullableRepeatedPositionsI64AsFloat64 {
+                source,
+                positions,
+                segments,
+                total_len,
+                ..
+            } => Self::lazy_nullable_repeated_positions_i64_as_float64(
+                Arc::clone(source),
+                Arc::clone(positions),
+                Arc::clone(segments),
+                *total_len,
+            ),
+            Self::LazyNullableRepeatPositionsI64AsFloat64 {
+                source,
+                run_positions,
+                run_valid,
+                run_lens,
+                total_len,
+                ..
+            } => Self::lazy_nullable_repeat_positions_i64_as_float64(
+                Arc::clone(source),
+                Arc::clone(run_positions),
                 Arc::clone(run_valid),
                 Arc::clone(run_lens),
                 *total_len,
@@ -4089,6 +4238,60 @@ impl Column {
         }
     }
 
+    /// Source-position backed variant of
+    /// [`Column::from_f64_nullable_repeated_slices_shared_with_sparse_validity`]
+    /// for promoted Int64 lanes. Non-null output rows read
+    /// `source[positions[k]] as f64` lazily, matching the eager bucket-order tape
+    /// conversion without constructing that `Vec<f64>` in the merge hot path.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_i64_nullable_repeated_positions_as_f64_with_sparse_validity(
+        source: Arc<[i64]>,
+        positions: Arc<[usize]>,
+        segments: Arc<[(usize, usize)]>,
+        validity: ValidityMask,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(validity.len(), total_len);
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_nullable_repeated_positions_i64_as_float64(
+                source, positions, segments, total_len,
+            ),
+            validity,
+            data: None,
+        }
+    }
+
+    /// Source-position backed variant of
+    /// [`Column::from_f64_nullable_repeat_values_run_lengths_with_sparse_validity`]
+    /// for promoted Int64 left lanes. Valid runs read one source row lazily and
+    /// repeat the cast Float64 value; invalid runs materialize `Null(NaN)`.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_i64_nullable_repeat_positions_as_f64_with_sparse_validity(
+        source: Arc<[i64]>,
+        run_positions: Arc<[usize]>,
+        run_valid: Arc<[bool]>,
+        run_lens: Arc<[usize]>,
+        validity: ValidityMask,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(validity.len(), total_len);
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_nullable_repeat_positions_i64_as_float64(
+                source,
+                run_positions,
+                run_valid,
+                run_lens,
+                total_len,
+            ),
+            validity,
+            data: None,
+        }
+    }
+
     /// Build an all-valid Float64 column from already-typed contiguous values.
     ///
     /// This is the typed ingestion counterpart to `Column::new(DType::Float64,
@@ -4326,6 +4529,21 @@ impl Column {
             if let Some(data) = self.values.repeated_slices_i64_data() {
                 return Some(data);
             }
+        }
+        None
+    }
+
+    /// Return an Arc-backed all-valid Int64 buffer for lazy descriptor builders.
+    /// Existing Arc-backed columns share in O(1); legacy cached `Vec<i64>`
+    /// columns are copied once into immutable Arc storage.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn as_i64_arc(&self) -> Option<Arc<[i64]>> {
+        if self.dtype == DType::Int64 && self.validity.all() {
+            if let ScalarValues::LazyAllValidInt64 { data, .. } = &self.values {
+                return Some(Arc::clone(data));
+            }
+            return self.as_i64_slice().map(Arc::from);
         }
         None
     }
@@ -21360,6 +21578,66 @@ mod tests {
         assert_eq!(
             column.validity.invalid_ranges.as_deref(),
             Some(&[(1, 2)][..])
+        );
+    }
+
+    #[test]
+    fn nullable_repeated_positions_i64_as_f64_matches_tape_materialization_uza0461() {
+        let source: Arc<[i64]> = Arc::from(vec![10, 20, 30, 40]);
+        let positions: Arc<[usize]> = Arc::from(vec![2, 0, 3]);
+        let segments: Arc<[(usize, usize)]> = Arc::from(vec![(0, 2), (usize::MAX, 1), (2, 1)]);
+        let validity = ValidityMask::from_invalid_ranges(Arc::from(vec![(2, 1)]), 4);
+        let column = Column::from_i64_nullable_repeated_positions_as_f64_with_sparse_validity(
+            source, positions, segments, validity, 4,
+        );
+
+        assert_eq!(column.dtype(), DType::Float64);
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Float64(30.0),
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(40.0),
+            ]
+        );
+        assert_eq!(
+            column.validity.invalid_ranges.as_deref(),
+            Some(&[(2, 1)][..])
+        );
+    }
+
+    #[test]
+    fn nullable_repeat_positions_i64_as_f64_matches_run_values_uza0461() {
+        let source: Arc<[i64]> = Arc::from(vec![7, -3, 11]);
+        let run_positions: Arc<[usize]> = Arc::from(vec![0, 0, 2]);
+        let run_valid: Arc<[bool]> = Arc::from(vec![true, false, true]);
+        let run_lens: Arc<[usize]> = Arc::from(vec![2, 3, 1]);
+        let validity = ValidityMask::from_invalid_ranges(Arc::from(vec![(2, 3)]), 6);
+        let column = Column::from_i64_nullable_repeat_positions_as_f64_with_sparse_validity(
+            source,
+            run_positions,
+            run_valid,
+            run_lens,
+            validity,
+            6,
+        );
+
+        assert_eq!(column.dtype(), DType::Float64);
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(11.0),
+            ]
+        );
+        assert_eq!(
+            column.validity.invalid_ranges.as_deref(),
+            Some(&[(2, 3)][..])
         );
     }
 }
