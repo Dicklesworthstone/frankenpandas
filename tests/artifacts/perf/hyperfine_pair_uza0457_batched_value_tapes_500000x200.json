@@ -1,0 +1,56 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-orangepeak-uza0457-base/release-perf/examples/perf_profile outer_join 500000 200",
+      "mean": 3.0367069286600006,
+      "stddev": 0.12456668662932528,
+      "median": 3.04613516166,
+      "user": 2.913696266666667,
+      "system": 0.09176562666666666,
+      "min": 2.87622119616,
+      "max": 3.19095738016,
+      "times": [
+        3.00446092416,
+        3.19095738016,
+        3.08780939916,
+        3.14063360416,
+        2.92015906816,
+        2.87622119616
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/cargo-target-orangepeak-uza0457-after/release-perf/examples/perf_profile outer_join 500000 200",
+      "mean": 2.9504623629933335,
+      "stddev": 0.12022089030554371,
+      "median": 2.9745891226600003,
+      "user": 2.8251651,
+      "system": 0.09388979333333332,
+      "min": 2.79396300816,
+      "max": 3.12068407216,
+      "times": [
+        3.00497123216,
+        2.83397762016,
+        2.99797416916,
+        3.12068407216,
+        2.79396300816,
+        2.9512040761600002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
