@@ -1,0 +1,46 @@
+br-frankenpandas-73cu1 — Typed Float64 fast path for DataFrame frame-vs-frame arithmetic
+=========================================================================================
+
+eydcr fourth-wave op. A widened gap_hunt probe found frame-vs-frame add 59ms, sub
+60ms, mul 61ms, div 67ms (isin 53ms next). add/sub/mul/div_df all route through
+binary_df_op, which ALREADY skips align for same-shape frames (b0cab) but still ran
+a per-element Scalar to_f64 loop + Column::from_values revalidation.
+
+LEVER (one, serves all four ops): inside the same-shape branch, when both columns
+are contiguous Float64, apply `op` straight over the f64 + validity slices into a
+typed output (from_f64_values_with_validity), skipping the per-element Scalar
+to_f64 and the from_values revalidation.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-4; loaded):
+  add_df:  59  ->  7.2  = 8.2x
+  sub_df:  60  ->  7.3  = 8.2x
+  mul_df:  61  ->  7.4  = 8.2x
+  div_df:  67  ->  7.6  = 8.8x
+
+SCORE: 8.2-8.8x >> 2.0 PASS.
+
+ISOMORPHISM (CRUX — the "Ok" predicate is to_f64, NOT is_missing):
+  - Scalar::to_f64 returns Ok for a Float64 (INCLUDING Float64(NaN)) and Err only
+    for Null. The materialized slot is Float64 iff validity is set OR the datum is
+    NaN, so a value is "Ok" iff `validity.get(i) || data[i].is_nan()` — note this
+    differs from the is_missing predicate used by clip/fillna/where (those treat a
+    valid-bit NaN as missing; here it is Ok and feeds op as NaN).
+  - Both Ok: `op(ld[i], rd[i])` with the datum as operand. A finite result is a
+    present Float64; a NaN result (e.g. 0.0/0.0, or a NaN operand propagating) is
+    materialized as the missing Float64(NaN) — cleared validity bit + NaN datum —
+    exactly what Column::from_values does to Scalar::Float64(NaN).
+  - Either Err: Null(NaN) — cleared bit + non-NaN datum (out left 0.0).
+  - Gated to both-Float64 contiguous columns inside the existing same-shape branch
+    (which already requires identical index + columns + !has_duplicates, so no
+    duplicate-label alignment hazard); Int64 / mixed / non-contiguous columns keep
+    the Scalar arm, and unequal-shape frames keep the align path.
+  - Golden sha256 (gap_hunt golden: full elementwise family + add/sub/mul over a
+    nullable other (missing propagation), div-by-self (0/0 -> Float64(NaN) at row
+    0), and nullable+nullable add, n=5000 x4) UNCHANGED before/after:
+      f83f2582bbfa8adb4418447bea47dc89def3a4b28874ffb02efada4fac01aa40
+
+GATES (rch):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2830 passed
+  cargo test   -p fp-conformance: 0 failures

@@ -154,6 +154,13 @@ fn main() {
         print!("{}", golden_dump(&f.mask(&cond, Some(&Scalar::Float64(-1.0))).unwrap()));
         print!("{}", golden_dump(&fnull.where_cond(&cond, Some(&Scalar::Float64(7.0))).unwrap()));
         print!("{}", golden_dump(&f.where_cond(&cond, None).unwrap()));
+        // frame-vs-frame arithmetic: missing propagation (nullable other) and a
+        // NaN op result (div by self: 0.0/0.0 at row 0 -> Float64(NaN)).
+        print!("{}", golden_dump(&f.add_df(&other_null).unwrap()));
+        print!("{}", golden_dump(&f.sub_df(&other_null).unwrap()));
+        print!("{}", golden_dump(&f.mul_df(&other_null).unwrap()));
+        print!("{}", golden_dump(&f.div_df(&f).unwrap()));
+        print!("{}", golden_dump(&fnull.add_df(&other_null).unwrap()));
         return;
     }
     let n: usize = args
@@ -247,5 +254,19 @@ fn main() {
     });
     time_it("mul_scalar(2)", 1, 20, || {
         let _ = f.mul_scalar(2.0).unwrap();
+    });
+    // Fourth-wave probes: frame-vs-frame arithmetic (same shape, align skipped
+    // already, but still a per-element Scalar to_f64 loop).
+    time_it("add_df(frame)", 1, 20, || {
+        let _ = f.add_df(&other).unwrap();
+    });
+    time_it("sub_df(frame)", 1, 20, || {
+        let _ = f.sub_df(&other).unwrap();
+    });
+    time_it("mul_df(frame)", 1, 20, || {
+        let _ = f.mul_df(&other).unwrap();
+    });
+    time_it("div_df(frame)", 1, 20, || {
+        let _ = f.div_df(&other).unwrap();
     });
 }
