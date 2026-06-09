@@ -1,0 +1,13 @@
+parallel MSD byte-radix top-level fan-out (qdrp7)
+Parallel-path goldens bit-identical @50000 (n>=PAR_MIN=1<<15) before==after:
+  str_groupby_sum 67296313 var cdb40a9d median 71637838 str_sort 3302a598 str_series_sort 2250e1e8
+A/B min-of-5 @500k: str_sort 96.83->66.52=1.46x, str_series_sort 162.07->113.92=1.42x,
+  str_groupby_sum 171.38->131.38=1.30x, str_groupby_first 148.45->128.33=1.16x.
+Tests: fp-columnar 385 + new parallel_msd_radix_matches_serial_reference_qdrp7 (n=40k) + fp-frame 2830 green.
+Lever: utf8_msd_argsort_bytes descends shared-prefix single-child levels serially, then at the first
+fan-out (>=2 non-empty byte-buckets) sorts the independent DISJOINT idx/aux sub-ranges concurrently
+(thread::scope + split_at_mut, round-robin to available_parallelism workers, each a serial sort_range
+at depth+1). Bit-identical: identical per-depth counting scatter + per-bucket serial sort; only the
+order of independent disjoint-range buckets changes. Gated n>=1<<15. Benefits str_sort/str_series_sort
+AND str_groupby (sort-based grouping radix). Amdahl-limited at 500k (16-way fan-out + serial prefix);
+FOLLOW-UP for higher: nested per-bucket parallelism at larger n / skip-ahead common-prefix descent.

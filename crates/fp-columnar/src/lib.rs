@@ -2562,11 +2562,162 @@ pub fn utf8_msd_argsort(strs: &[&str], ascending: bool) -> Vec<usize> {
 pub fn utf8_msd_argsort_bytes(spans: &[&[u8]], ascending: bool) -> Vec<usize> {
     let n = spans.len();
     let mut idx: Vec<usize> = (0..n).collect();
-    if n > 1 {
-        let mut aux: Vec<usize> = vec![0; n];
+    if n <= 1 {
+        return idx;
+    }
+    let mut aux: Vec<usize> = vec![0; n];
+    const PAR_MIN: usize = 1 << 15;
+    let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    if n >= PAR_MIN && workers >= 2 {
+        utf8_msd_sort_range_par(spans, &mut idx, &mut aux, 0, ascending, workers);
+    } else {
         utf8_msd_sort_range(spans, &mut idx, &mut aux, 0, n, 0, ascending);
     }
     idx
+}
+
+/// Parallel front-end for [`utf8_msd_sort_range`] (br-frankenpandas-qdrp7).
+/// Descends single-child levels (shared key prefixes) serially, then at the
+/// first byte where the bucket fans out into >= 2 non-empty sub-buckets, sorts
+/// those independent, DISJOINT `idx`/`aux` sub-ranges concurrently (each a
+/// serial `utf8_msd_sort_range` at `depth+1`). Bit-identical to the serial sort:
+/// the per-depth counting scatter is identical (same bucket order, same stable
+/// placement) and each sub-bucket is sorted by the same routine — only the order
+/// in which independent sub-buckets are processed changes, and they write to
+/// disjoint output ranges.
+fn utf8_msd_sort_range_par(
+    spans: &[&[u8]],
+    idx: &mut [usize],
+    aux: &mut [usize],
+    depth: usize,
+    ascending: bool,
+    workers: usize,
+) {
+    const CUTOFF: usize = 48;
+    const MAX_DEPTH: usize = 1024;
+    const PAR_MIN: usize = 1 << 15;
+    let n = idx.len();
+    if n <= CUTOFF || depth >= MAX_DEPTH || n < PAR_MIN {
+        utf8_msd_sort_range(spans, idx, aux, 0, n, depth, ascending);
+        return;
+    }
+    // Counting scatter at `depth` (identical to utf8_msd_sort_range).
+    let key = |b: &[u8]| -> usize {
+        if depth < b.len() {
+            if ascending {
+                b[depth] as usize + 1
+            } else {
+                255 - b[depth] as usize
+            }
+        } else if ascending {
+            0
+        } else {
+            256
+        }
+    };
+    let mut counts = [0usize; 258];
+    for &i in idx.iter() {
+        counts[key(spans[i]) + 1] += 1;
+    }
+    for k in 1..258 {
+        counts[k] += counts[k - 1];
+    }
+    let mut offsets = counts;
+    for &i in idx.iter() {
+        let k = key(spans[i]);
+        aux[offsets[k]] = i;
+        offsets[k] += 1;
+    }
+    idx.copy_from_slice(aux);
+    // `counts[k]..counts[k+1]` is bucket k. The EOS bucket (fully-equal at this
+    // depth) is left as-is. Collect the non-trivial byte buckets.
+    let eos_bucket = if ascending { 0 } else { 256 };
+    let mut buckets: Vec<(usize, usize)> = Vec::new();
+    for k in 0..257 {
+        if k == eos_bucket {
+            continue;
+        }
+        let lo = counts[k];
+        let hi = counts[k + 1];
+        if hi - lo > 1 {
+            buckets.push((lo, hi));
+        }
+    }
+    if buckets.len() <= 1 {
+        // Single shared-prefix child: keep descending in parallel mode.
+        if let Some(&(lo, hi)) = buckets.first() {
+            utf8_msd_sort_range_par(
+                spans,
+                &mut idx[lo..hi],
+                &mut aux[lo..hi],
+                depth + 1,
+                ascending,
+                workers,
+            );
+        }
+        return;
+    }
+    // Fan-out: carve `idx`/`aux` into per-bucket disjoint sub-slices (segments
+    // between consecutive bucket bounds, including any gaps such as the EOS
+    // bucket which we keep but never sort), then distribute the non-trivial
+    // segments across workers by cumulative size.
+    let mut bounds: Vec<usize> = Vec::with_capacity(buckets.len() * 2 + 2);
+    bounds.push(0);
+    for &(lo, hi) in &buckets {
+        if *bounds.last().expect("non-empty") != lo {
+            bounds.push(lo);
+        }
+        bounds.push(hi);
+    }
+    if *bounds.last().expect("non-empty") != n {
+        bounds.push(n);
+    }
+    // Split into contiguous segments matching `bounds`.
+    let mut seg_idx: Vec<&mut [usize]> = Vec::with_capacity(bounds.len() - 1);
+    let mut seg_aux: Vec<&mut [usize]> = Vec::with_capacity(bounds.len() - 1);
+    let mut rem_idx: &mut [usize] = idx;
+    let mut rem_aux: &mut [usize] = aux;
+    let mut prev = 0usize;
+    for &b in &bounds[1..] {
+        let take = b - prev;
+        prev = b;
+        let (a, rest_i) = rem_idx.split_at_mut(take);
+        rem_idx = rest_i;
+        let (c, rest_a) = rem_aux.split_at_mut(take);
+        rem_aux = rest_a;
+        seg_idx.push(a);
+        seg_aux.push(c);
+    }
+    // Work items: (segment, length) for segments that are a non-trivial bucket.
+    let sortable: std::collections::HashSet<(usize, usize)> = buckets.iter().copied().collect();
+    let mut items: Vec<(&mut [usize], &mut [usize])> = Vec::new();
+    let mut seg_start = 0usize;
+    for (si, (si_slice, sa_slice)) in seg_idx.into_iter().zip(seg_aux).enumerate() {
+        let len = bounds[si + 1] - bounds[si];
+        let span_range = (seg_start, seg_start + len);
+        seg_start += len;
+        if sortable.contains(&span_range) {
+            items.push((si_slice, sa_slice));
+        }
+    }
+    // Distribute items round-robin into worker groups (buckets are ~uniform for
+    // hex/fixed-width keys, so round-robin balances well).
+    let wc = workers.min(items.len()).max(1);
+    let mut groups: Vec<Vec<(&mut [usize], &mut [usize])>> =
+        (0..wc).map(|_| Vec::new()).collect();
+    for (i, item) in items.into_iter().enumerate() {
+        groups[i % wc].push(item);
+    }
+    std::thread::scope(|scope| {
+        for group in groups {
+            scope.spawn(move || {
+                for (si, sa) in group {
+                    let len = si.len();
+                    utf8_msd_sort_range(spans, si, sa, 0, len, depth + 1, ascending);
+                }
+            });
+        }
+    });
 }
 
 fn utf8_msd_sort_range(
@@ -15911,6 +16062,33 @@ mod tests {
                     .values()
                     .to_vec();
                 assert_eq!(got, want, "ascending={ascending}");
+            }
+        }
+
+        #[test]
+        fn parallel_msd_radix_matches_serial_reference_qdrp7() {
+            // n above PAR_MIN (1<<15) exercises the parallel fan-out path.
+            // Common "key_" prefix forces serial descent before the fan-out
+            // (the bench shape). Compare to a stable byte-lexicographic sort.
+            let n = 40_000usize;
+            let strings: Vec<String> = (0..n)
+                .map(|i| {
+                    let mixed = (i as u64)
+                        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        .rotate_left(17)
+                        ^ (i as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    format!("key_{mixed:016x}_{:04}", i % 97)
+                })
+                .collect();
+            let spans: Vec<&[u8]> = strings.iter().map(|s| s.as_bytes()).collect();
+            for ascending in [true, false] {
+                let got = crate::utf8_msd_argsort_bytes(&spans, ascending);
+                let mut want: Vec<usize> = (0..n).collect();
+                want.sort_by(|&a, &b| {
+                    let ord = spans[a].cmp(spans[b]);
+                    if ascending { ord } else { ord.reverse() }
+                });
+                assert_eq!(got, want, "parallel radix != stable byte sort (asc={ascending})");
             }
         }
 
