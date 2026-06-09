@@ -4885,21 +4885,29 @@ impl Column {
         self.take_positions(&positions)
     }
 
-    fn arithmetic_progression_positions(positions: &[usize]) -> Option<(usize, usize)> {
+    fn bounded_arithmetic_progression_positions(
+        positions: &[usize],
+        source_len: usize,
+    ) -> Option<(usize, usize)> {
         match positions {
             [] => None,
-            [start] => Some((*start, 1)),
+            [start] if *start < source_len => Some((*start, 1)),
+            [_] => None,
             [start, second, rest @ ..] => {
                 let step = second.checked_sub(*start)?;
                 if step == 0 {
                     return None;
                 }
-                let mut prev = *second;
+                let last = start.checked_add(step.checked_mul(positions.len() - 1)?)?;
+                if last >= source_len {
+                    return None;
+                }
+                let mut expected = *second;
                 for &pos in rest {
-                    if pos.checked_sub(prev)? != step {
+                    expected += step;
+                    if pos != expected {
                         return None;
                     }
-                    prev = pos;
                 }
                 Some((*start, step))
             }
@@ -4913,7 +4921,6 @@ impl Column {
             return None;
         }
 
-        let (start, step) = Self::arithmetic_progression_positions(positions)?;
         let data = match &self.values {
             ScalarValues::LazyAllValidFloat64 { data, .. } => Arc::clone(data),
             _ => match &self.data {
@@ -4922,10 +4929,7 @@ impl Column {
             },
         };
 
-        let last = start.checked_add(step.checked_mul(positions.len().saturating_sub(1))?)?;
-        if last >= data.len() {
-            return None;
-        }
+        let (start, step) = Self::bounded_arithmetic_progression_positions(positions, data.len())?;
 
         Some(Self {
             dtype: self.dtype,
@@ -13954,15 +13958,15 @@ mod tests {
 
     #[test]
     fn float64_take_positions_regular_stride_defers_contiguous_gather() {
-        let data: Vec<f64> = (0..2048)
+        let data: Vec<f64> = (0..4096)
             .map(|i| match i {
                 4 => -0.0,
-                6 => f64::INFINITY,
+                19 => f64::INFINITY,
                 _ => i as f64 * 0.25,
             })
             .collect();
         let column = Column::from_f64_values(data.clone());
-        let positions: Vec<usize> = (0..1024).map(|i| i * 2).collect();
+        let positions: Vec<usize> = (0..1024).map(|i| 3 + i * 4).collect();
 
         let gathered = column.take_positions(&positions);
 
@@ -13979,7 +13983,7 @@ mod tests {
             ..
         } = &gathered.values
         {
-            assert_eq!((*start, *step, *len), (0, 2, positions.len()));
+            assert_eq!((*start, *step, *len), (3, 4, positions.len()));
             assert!(expanded.get().is_none());
             assert!(values.get().is_none());
         }
@@ -14007,6 +14011,30 @@ mod tests {
         .expect("validated materialization");
         assert_eq!(gathered.values(), expected.values());
         assert_eq!(gathered.validity(), expected.validity());
+    }
+
+    #[test]
+    fn bounded_arithmetic_progression_positions_rejects_non_affine_or_oob() {
+        assert_eq!(
+            Column::bounded_arithmetic_progression_positions(&[3, 7, 11, 15], 16),
+            Some((3, 4))
+        );
+        assert_eq!(
+            Column::bounded_arithmetic_progression_positions(&[3, 7, 12], 16),
+            None
+        );
+        assert_eq!(
+            Column::bounded_arithmetic_progression_positions(&[3, 3, 3], 16),
+            None
+        );
+        assert_eq!(
+            Column::bounded_arithmetic_progression_positions(&[3, 7, 11, 15], 15),
+            None
+        );
+        assert_eq!(
+            Column::bounded_arithmetic_progression_positions(&[usize::MAX - 1, usize::MAX], 8),
+            None
+        );
     }
 
     #[test]
