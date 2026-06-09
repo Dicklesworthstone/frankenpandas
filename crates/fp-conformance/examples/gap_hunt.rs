@@ -140,6 +140,13 @@ fn main() {
         print!("{}", golden_dump(&fnull.fillna(&Scalar::Float64(0.0)).unwrap()));
         print!("{}", golden_dump(&fnull.fillna(&Scalar::Float64(-1.5)).unwrap()));
         print!("{}", golden_dump(&f.fillna(&Scalar::Float64(9.0)).unwrap()));
+        // frame-vs-frame comparison: all-valid vs nullable (result has nulls),
+        // and all-valid vs all-valid (all-valid Bool result).
+        print!("{}", golden_dump(&f.gt(&other_null).unwrap()));
+        print!("{}", golden_dump(&f.lt(&other_null).unwrap()));
+        print!("{}", golden_dump(&f.eq(&other_null).unwrap()));
+        print!("{}", golden_dump(&f.ge(&f).unwrap()));
+        print!("{}", golden_dump(&fnull.ne(&other_null).unwrap()));
         return;
     }
     let n: usize = args
@@ -212,7 +219,26 @@ fn main() {
     time_it("rank(average)", 1, 10, || {
         let _ = f.rank("average", true, "keep").unwrap();
     });
-    time_it("astype(Int64)", 1, 20, || {
-        let _ = f.astype(fp_types::DType::Int64).unwrap();
+    // Third-wave probes: comparison / where / mask / isin / scalar arithmetic.
+    let cond = f.gt(&other).unwrap();
+    time_it("gt(frame)", 1, 20, || {
+        let _ = f.gt(&other).unwrap();
+    });
+    time_it("where_cond", 1, 20, || {
+        let _ = f.where_cond(&cond, Some(&Scalar::Float64(0.0))).unwrap();
+    });
+    time_it("mask", 1, 20, || {
+        let _ = f.mask(&cond, Some(&Scalar::Float64(0.0))).unwrap();
+    });
+    time_it("isin", 1, 20, || {
+        let _ = f
+            .isin(&[Scalar::Float64(1.0), Scalar::Float64(2.5), Scalar::Float64(100.0)])
+            .unwrap();
+    });
+    time_it("add_scalar(1)", 1, 20, || {
+        let _ = f.add_scalar(1.0).unwrap();
+    });
+    time_it("mul_scalar(2)", 1, 20, || {
+        let _ = f.mul_scalar(2.0).unwrap();
     });
 }
