@@ -3074,8 +3074,7 @@ fn utf8_msd_sort_range_par(
     // Distribute items round-robin into worker groups (buckets are ~uniform for
     // hex/fixed-width keys, so round-robin balances well).
     let wc = workers.min(items.len()).max(1);
-    let mut groups: Vec<Vec<(&mut [usize], &mut [usize])>> =
-        (0..wc).map(|_| Vec::new()).collect();
+    let mut groups: Vec<Vec<(&mut [usize], &mut [usize])>> = (0..wc).map(|_| Vec::new()).collect();
     for (i, item) in items.into_iter().enumerate() {
         groups[i % wc].push(item);
     }
@@ -16654,7 +16653,10 @@ mod tests {
                     let ord = spans[a].cmp(spans[b]);
                     if ascending { ord } else { ord.reverse() }
                 });
-                assert_eq!(got, want, "parallel radix != stable byte sort (asc={ascending})");
+                assert_eq!(
+                    got, want,
+                    "parallel radix != stable byte sort (asc={ascending})"
+                );
             }
         }
 
