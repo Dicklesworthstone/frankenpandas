@@ -1,0 +1,33 @@
+br-frankenpandas-zf96l — Int64 dense direct-address for DataFrame.nunique
+=========================================================================
+
+Int64 vein (gt 154x, diff 49x, clip 35x prior). DataFrame.nunique_with_dropna's
+per-column closure had a Float64 FxHashMap branch (zl16n) but an Int64 column fell
+to the ScalarKey SipHash HashMap (i64.nunique measured 40ms @ 200000 x 8 cols),
+even though Series::nunique already had a dense direct-address path.
+
+LEVER (one): add the same hash-free dense seen-bit distinct count
+(i64_dense_histogram_range) for an all-valid bounded-range Int64 column — skipping
+the col.values() materialization + ScalarKey SipHash.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-4; loaded):
+  DataFrame.nunique [Int64]:  40  ->  1.56  = 25.6x
+
+SCORE: 25.6x >> 2.0 PASS.
+
+ISOMORPHISM:
+  - All-valid Int64 (as_i64_slice Some) + bounded range -> count distinct via a
+    dense seen-bit table indexed by (v - min); all-valid means no missing, so
+    dropna is moot and the count equals the ScalarKey HashMap's distinct count
+    (which keys all-valid Int64 by ScalarKey::Int64(v) = distinct i64 values).
+  - Unbounded Int64 / nullable Int64 / Float64 keep their existing paths
+    (i64_dense_histogram_range None, or as_i64_slice None for nullable).
+  - Golden sha256 (gap_hunt golden: full family + Int64 frame compare/diff/clip +
+    Int64 nunique over int_frame(5000,4)) UNCHANGED:
+      1e05b791da716cdc7e56407df9fdf36015c5edb4fe7823fa659f4096e1f333da
+
+GATES (rch):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2831 passed
+  cargo test   -p fp-conformance: 0 failures

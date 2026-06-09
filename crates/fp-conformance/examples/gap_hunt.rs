@@ -228,6 +228,8 @@ fn main() {
         print!("{}", golden_dump(&fi.clip(Some(-1000.5), Some(1000.0)).unwrap()));
         print!("{}", golden_dump(&fi.clip(Some(500.0), Some(-500.0)).unwrap()));
         print!("{}", golden_dump(&fi.clip(None, Some(800.0)).unwrap()));
+        // Int64 nunique: dense direct-address distinct count (bounded all-valid).
+        print!("{}", golden_dump(&fi.nunique().unwrap().to_frame(Some("nu")).unwrap()));
         return;
     }
     let n: usize = args
