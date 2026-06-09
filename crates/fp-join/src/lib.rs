@@ -1119,6 +1119,76 @@ fn ordered_utf8_lower_hex_overlap_len(
     Some(left_n.saturating_sub(left_idx).min(right_n - right_idx))
 }
 
+fn lower_hex_prefix<'a>(
+    bytes: &'a [u8],
+    offsets: &[usize],
+    cert: Utf8LowerHexSequence,
+) -> Option<&'a [u8]> {
+    let first_start = *offsets.first()?;
+    let first_end = *offsets.get(1)?;
+    if first_start > first_end || first_end > bytes.len() {
+        return None;
+    }
+    let prefix_end = first_start.checked_add(cert.prefix_len())?;
+    (prefix_end <= first_end).then(|| &bytes[first_start..prefix_end])
+}
+
+fn lower_hex_overlap_plan_from_certificates(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<InnerPositionPlan> {
+    let (left_bytes, left_offsets, left_cert) = left_key.as_lower_hex_sequence_utf8_contiguous()?;
+    let (right_bytes, right_offsets, right_cert) =
+        right_key.as_lower_hex_sequence_utf8_contiguous()?;
+    if !left_cert.same_shape(right_cert) {
+        return None;
+    }
+    let left_prefix = lower_hex_prefix(left_bytes, left_offsets, left_cert)?;
+    let right_prefix = lower_hex_prefix(right_bytes, right_offsets, right_cert)?;
+    if left_prefix != right_prefix {
+        return None;
+    }
+
+    let left_n = u64::try_from(left_offsets.len().checked_sub(1)?).ok()?;
+    let right_n = u64::try_from(right_offsets.len().checked_sub(1)?).ok()?;
+    if left_n == 0 || right_n == 0 {
+        return Some(InnerPositionPlan::Gather {
+            left_positions: Vec::new(),
+            right_positions: Vec::new(),
+        });
+    }
+
+    let left_start_value = left_cert.start();
+    let right_start_value = right_cert.start();
+    let left_end_value = left_start_value.checked_add(left_n)?;
+    let right_end_value = right_start_value.checked_add(right_n)?;
+    let overlap_start = left_start_value.max(right_start_value);
+    let overlap_end = left_end_value.min(right_end_value);
+    if overlap_start >= overlap_end {
+        return Some(InnerPositionPlan::Gather {
+            left_positions: Vec::new(),
+            right_positions: Vec::new(),
+        });
+    }
+
+    let len = usize::try_from(overlap_end.checked_sub(overlap_start)?).ok()?;
+    let left_start = usize::try_from(overlap_start.checked_sub(left_start_value)?).ok()?;
+    let right_start = usize::try_from(overlap_start.checked_sub(right_start_value)?).ok()?;
+    let left_len = usize::try_from(left_n).ok()?;
+    let right_len = usize::try_from(right_n).ok()?;
+    let left_end = left_start.checked_add(len)?;
+    let right_end = right_start.checked_add(len)?;
+    if left_end > left_len || right_end > right_len {
+        return None;
+    }
+
+    Some(InnerPositionPlan::ContiguousRanges {
+        left_start,
+        right_start,
+        len,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InnerPositionPlan {
     Gather {
@@ -1163,6 +1233,10 @@ fn ordered_unique_utf8_inner_position_plan(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<InnerPositionPlan> {
+    if let Some(plan) = lower_hex_overlap_plan_from_certificates(left_key, right_key) {
+        return Some(plan);
+    }
+
     let (left_bytes, left_offsets) = strictly_increasing_utf8_key_spans(left_key)?;
     let (right_bytes, right_offsets) = strictly_increasing_utf8_key_spans(right_key)?;
     let left_n = left_offsets.len() - 1;
@@ -6817,9 +6891,9 @@ mod tests {
         FusedInt64Side, InnerPositionPlan, JoinExecutionOptions, JoinType, PositionSelection,
         build_dense_i64_inner_output_data, build_single_key_inner_contiguous_no_overlap_output,
         join_series, join_series_with_options, join_series_with_trace,
-        ordered_unique_utf8_inner_position_plan, ordered_unique_utf8_inner_positions,
-        ordered_utf8_lower_hex_overlap_len, strictly_increasing_utf8_key_spans,
-        utf8_span_lower_bound,
+        lower_hex_overlap_plan_from_certificates, ordered_unique_utf8_inner_position_plan,
+        ordered_unique_utf8_inner_positions, ordered_utf8_lower_hex_overlap_len,
+        strictly_increasing_utf8_key_spans, utf8_span_lower_bound,
     };
 
     fn contiguous_utf8_column(values: &[&str]) -> Column {
@@ -9750,6 +9824,14 @@ mod tests {
             ordered_utf8_lower_hex_overlap_len(left_cert, right_cert, 2, 4, 0, 3),
             Some(2)
         );
+        assert_eq!(
+            lower_hex_overlap_plan_from_certificates(&left, &right),
+            Some(InnerPositionPlan::ContiguousRanges {
+                left_start: 2,
+                right_start: 0,
+                len: 2
+            })
+        );
         let plan =
             ordered_unique_utf8_inner_position_plan(&left, &right).expect("ordered utf8 plan");
         assert_eq!(
@@ -9760,6 +9842,39 @@ mod tests {
                 len: 2
             }
         );
+    }
+
+    #[test]
+    fn ordered_unique_utf8_lower_hex_arithmetic_empty_overlap_jbyuc1111111111() {
+        let left = contiguous_utf8_column(&["id_00000001", "id_00000002", "id_00000003"]);
+        let right = contiguous_utf8_column(&["id_00000008", "id_00000009"]);
+
+        assert_eq!(
+            lower_hex_overlap_plan_from_certificates(&left, &right),
+            Some(InnerPositionPlan::Gather {
+                left_positions: Vec::new(),
+                right_positions: Vec::new(),
+            })
+        );
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+        assert!(left_positions.is_empty());
+        assert!(right_positions.is_empty());
+    }
+
+    #[test]
+    fn ordered_unique_utf8_lower_hex_prefix_mismatch_falls_back_jbyuc1111111111() {
+        let left = contiguous_utf8_column(&["aa_00000001", "aa_00000002", "aa_00000003"]);
+        let right = contiguous_utf8_column(&["bb_00000001", "bb_00000002", "bb_00000003"]);
+
+        assert!(
+            lower_hex_overlap_plan_from_certificates(&left, &right).is_none(),
+            "matching lower-hex counters with different prefixes must not use arithmetic overlap"
+        );
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+        assert!(left_positions.is_empty());
+        assert!(right_positions.is_empty());
     }
 
     #[test]
