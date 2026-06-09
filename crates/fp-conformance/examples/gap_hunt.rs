@@ -222,6 +222,12 @@ fn main() {
         print!("{}", golden_dump(&fi.diff(1).unwrap()));
         print!("{}", golden_dump(&fi.diff(3).unwrap()));
         print!("{}", golden_dump(&fi.diff(-2).unwrap()));
+        // Int64 clip: integer bounds (preserves Int64), fractional bound (-> Float64),
+        // reversed-bound swap (GH2747), one-sided.
+        print!("{}", golden_dump(&fi.clip(Some(-1000.0), Some(1000.0)).unwrap()));
+        print!("{}", golden_dump(&fi.clip(Some(-1000.5), Some(1000.0)).unwrap()));
+        print!("{}", golden_dump(&fi.clip(Some(500.0), Some(-500.0)).unwrap()));
+        print!("{}", golden_dump(&fi.clip(None, Some(800.0)).unwrap()));
         return;
     }
     let n: usize = args
