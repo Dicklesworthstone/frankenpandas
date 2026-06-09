@@ -131,6 +131,11 @@ fn main() {
             print!("{}", golden_dump(&dup.drop_duplicates(None, keep, false).unwrap()));
             print!("{}", golden_dump(&dupn.drop_duplicates(None, keep, false).unwrap()));
         }
+        // clip: two-sided, nullable, reversed-bound swap (GH2747), one-sided.
+        print!("{}", golden_dump(&f.clip(Some(0.0), Some(1000.0)).unwrap()));
+        print!("{}", golden_dump(&fnull.clip(Some(100.0), Some(500.0)).unwrap()));
+        print!("{}", golden_dump(&f.clip(Some(7.0), Some(3.0)).unwrap()));
+        print!("{}", golden_dump(&fnull.clip(None, Some(400.0)).unwrap()));
         return;
     }
     let n: usize = args
@@ -180,5 +185,30 @@ fn main() {
     });
     time_it("interpolate(nulls)", 1, 20, || {
         let _ = fnull.interpolate().unwrap();
+    });
+    // Second-wave probes: more un-benched elementwise / scan ops.
+    time_it("clip(0,1000)", 1, 20, || {
+        let _ = f.clip(Some(0.0), Some(1000.0)).unwrap();
+    });
+    time_it("round(2)", 1, 20, || {
+        let _ = f.round(2).unwrap();
+    });
+    time_it("abs", 1, 20, || {
+        let _ = f.abs().unwrap();
+    });
+    time_it("cummax", 1, 20, || {
+        let _ = f.cummax().unwrap();
+    });
+    time_it("cummin", 1, 20, || {
+        let _ = f.cummin().unwrap();
+    });
+    time_it("cumprod", 1, 20, || {
+        let _ = f.cumprod().unwrap();
+    });
+    time_it("rank(average)", 1, 10, || {
+        let _ = f.rank("average", true, "keep").unwrap();
+    });
+    time_it("astype(Int64)", 1, 20, || {
+        let _ = f.astype(fp_types::DType::Int64).unwrap();
     });
 }
