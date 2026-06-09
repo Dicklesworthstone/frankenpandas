@@ -3866,6 +3866,29 @@ fn build_single_key_dense_i64_outer_all_matched_merge_output(
         return Ok(None);
     };
 
+    if left_keys.is_empty() != right_keys.is_empty() {
+        return Ok(None);
+    }
+    let dense_domain = if left_keys.is_empty() {
+        None
+    } else {
+        let min_max = |keys: &[i64]| {
+            let mut min_key = keys[0];
+            let mut max_key = keys[0];
+            for &key in &keys[1..] {
+                min_key = min_key.min(key);
+                max_key = max_key.max(key);
+            }
+            (min_key, max_key)
+        };
+        let (left_min_key, left_max_key) = min_max(left_keys);
+        let (right_min_key, right_max_key) = min_max(right_keys);
+        if left_min_key != right_min_key || left_max_key != right_max_key {
+            return Ok(None);
+        }
+        Some((left_min_key, left_max_key))
+    };
+
     let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
     let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
     let left_key_name_set: HashSet<&str> = left_on.iter().copied().collect();
@@ -3947,12 +3970,7 @@ fn build_single_key_dense_i64_outer_all_matched_merge_output(
         }));
     }
 
-    let mut min_key = left_keys[0];
-    let mut max_key = left_keys[0];
-    for &key in left_keys.iter().chain(right_keys.iter()) {
-        min_key = min_key.min(key);
-        max_key = max_key.max(key);
-    }
+    let (min_key, max_key) = dense_domain.expect("empty dense outer case returned above");
 
     let span = i128::from(max_key)
         .checked_sub(i128::from(min_key))
