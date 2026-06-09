@@ -1,0 +1,8 @@
+Series.isin string byte-span FxHash membership + typed Bool output (vcstr)
+Golden bit-identical: str_isin sha256 60294a5469f04d3e before==after.
+A/B min-of-5 @200k (card 1000, 500 needles): 8.872 -> 3.016 ms/iter = 2.94x.
+Tests: fp-frame 2830 (incl 23 isin) green.
+Lever: isin on all-valid contiguous-Utf8 probes FxHashMap<&[u8]> of string-needle bytes (no Scalar
+materialize / IsinIndex SipHash) and emits typed Bool (from_bool_values, 1B vs 32B Vec<Scalar::Bool>) —
+isin is output-bound at large n. Bit-identical: non-null string matches iff bytes == a string needle
+(non-string needles never match a string value; all-valid => no null to match a null/NaN needle).

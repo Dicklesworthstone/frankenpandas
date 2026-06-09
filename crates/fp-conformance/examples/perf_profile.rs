@@ -1049,6 +1049,16 @@ fn run_golden(scenario: &str, n: usize) {
             let out = s.mode().expect("mode");
             return print!("{}", golden_dump_series(&out));
         }
+        "str_isin" => {
+            // Series.isin over contiguous-Utf8 vs ~500 string needles — byte-span
+            // FxHash membership + typed Bool output (vcstr).
+            let s = build_str_vc_series(n, 1000);
+            let needles: Vec<Scalar> = (0..500u64)
+                .map(|id| Scalar::Utf8(format!("val_{id:06x}")))
+                .collect();
+            let out = s.isin(&needles).expect("isin");
+            return print!("{}", golden_dump_series(&out));
+        }
         "reindex_str" => {
             // Reindex an all-valid Utf8 Series to ~50% missing labels — exercises
             // Column::reindex_by_positions' null-introducing Utf8 gather (cmxjz).
@@ -1653,6 +1663,16 @@ fn main() {
             let s = build_str_vc_series(n, 1000);
             for _ in 0..iters {
                 let out = s.mode().expect("mode");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_isin" => {
+            let s = build_str_vc_series(n, 1000);
+            let needles: Vec<Scalar> = (0..500u64)
+                .map(|id| Scalar::Utf8(format!("val_{id:06x}")))
+                .collect();
+            for _ in 0..iters {
+                let out = s.isin(&needles).expect("isin");
                 sink = sink.wrapping_add(out.len());
             }
         }
