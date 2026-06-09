@@ -40,6 +40,7 @@ vectorized/certificate execution.
 
 ## Bench
 
+- Same-command current run: baseline `1.023 s +/- 0.056 s`; after `652.0 ms +/- 17.5 ms`, about `1.57x`.
 - Paired A/B: baseline `1.416 s +/- 0.157 s`; after `657.3 ms +/- 18.7 ms`; after ran `2.15x +/- 0.25` faster.
 - Reversed A/B: after `637.6 ms +/- 7.7 ms`; baseline `1.015 s +/- 0.032 s`; after ran `1.59x +/- 0.05` faster.
 - Score: Impact 4 x Confidence 4 / Effort 2 = 8.0. Keep.
@@ -49,18 +50,20 @@ vectorized/certificate execution.
 After profile removed `utf8_span_lower_bound` from the visible hot list.
 Top residuals shifted to output materialization and metadata:
 
-- `build_single_key_inner_merge_output_with_selections`: `11.18%`.
-- `BTreeMap<String, Column>::insert`: `5.19%`.
-- `perf_profile::build_str_join_frame`: `4.67%`.
-- `merge_single_key_inner_unsorted`: `3.84%`.
-- `collect_join_key_columns`: `2.75%`.
-- `Column::take_contiguous_range`: `2.63%`.
+- `build_single_key_inner_merge_output_with_selections`: `11.22%`.
+- `__memmove_avx_unaligned_erms`: `7.28%`.
+- `BTreeMap<String, Column>::insert`: `4.78%`.
+- `__memcmp_avx2_movbe`: `4.33%`.
+- `malloc`: `4.04%`.
+- `perf_profile::build_str_join_frame`: `3.81%`.
+- `merge_single_key_inner_unsorted`: `3.80%`.
+- `Column::take_contiguous_range`: `2.24%`.
 
 ## Validation
 
 - `cargo test -p fp-join ordered_unique_utf8_lower_hex --lib -- --nocapture`.
 - `cargo test -p fp-join ordered_utf8_contiguous_no_overlap_output_fast_path_jbyuc111111111 --lib -- --nocapture`.
-- `rustfmt --edition 2024 --check crates/fp-join/src/lib.rs`.
+- `cargo fmt -p fp-join -- --check`.
 - `cargo check -p fp-join --all-targets`.
 - `cargo clippy -p fp-join --all-targets -- -D warnings`.
 - `ubs crates/fp-join/src/lib.rs`: completed. Reported broad pre-existing file-wide inventory/false positives outside the new helper; no unsafe blocks.

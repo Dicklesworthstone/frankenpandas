@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-jbyuc1111111111-after/release-perf/examples/perf_profile str_inner_join 1000000 1000000
+  Time (mean ± σ):     652.0 ms ±  17.5 ms    [User: 577.9 ms, System: 71.9 ms]
+  Range (min … max):   624.6 ms … 690.3 ms    10 runs
+ 

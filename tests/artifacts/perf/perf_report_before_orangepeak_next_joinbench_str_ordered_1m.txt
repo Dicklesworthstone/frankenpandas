@@ -1,0 +1,633 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 57  of event 'cpu-clock'
+# Event count (approx.): 575757570
+#
+# Overhead  Command     Shared Object     Symbol                                                                                                                                                                                                                                                                                                                    
+# ........  ..........  ................  ..........................................................................................................................................................................................................................................................................................................................
+#
+    42.11%  join-bench  join-bench        [.] <fp_types::Scalar>::to_f64
+            |
+            ---<fp_types::Scalar>::to_f64
+               |          
+               |--22.81%--join_bench::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               |          __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+               |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               |          std::rt::lang_start_internal::{closure#0} (inlined)
+               |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main_impl (inlined)
+               |          _start
+               |          
+                --19.30%--std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                          __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+                          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+                          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+                          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                          std::rt::lang_start_internal::{closure#0} (inlined)
+                          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+                          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main_impl (inlined)
+                          _start
+
+    29.82%  join-bench  join-bench        [.] join_bench::main
+            |
+            ---join_bench::main
+               |          
+               |--28.07%--std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               |          __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+               |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               |          std::rt::lang_start_internal::{closure#0} (inlined)
+               |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main_impl (inlined)
+               |          _start
+               |          
+                --1.75%--and_then_or_clear<core::slice::iter::Iter<fp_types::Scalar>, &fp_types::Scalar, fn(&mut core::slice::iter::Iter<fp_types::Scalar>) -> core::option::Option<&fp_types::Scalar>> (inlined)
+                          next<core::slice::iter::Iter<fp_types::Scalar>, core::slice::iter::Iter<fp_types::Scalar>> (inlined)
+                          join_bench::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                          __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+                          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+                          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+                          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                          std::rt::lang_start_internal::{closure#0} (inlined)
+                          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+                          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main_impl (inlined)
+                          _start
+
+     7.02%  join-bench  join-bench        [.] core::ptr::drop_in_place::<fp_columnar::Column>
+            |
+            ---core::ptr::drop_in_place::<fp_columnar::Column>
+               |          
+               |--5.26%--drop_in_place<[fp_types::Scalar]> (inlined)
+               |          drop<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               |          drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+               |          assume_init_drop<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+               |          drop<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+               |          drop_in_place<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>>> (inlined)
+               |          drop_in_place<fp_columnar::ScalarValues> (inlined)
+               |          drop_in_place<fp_columnar::Column> (inlined)
+               |          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               |          drop<fp_columnar::Column> (inlined)
+               |          drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+               |          drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> (inlined)
+               |          drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               |          drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               |          drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               |          drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               |          drop_in_place<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               |          core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+               |          join_bench::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               |          __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+               |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               |          std::rt::lang_start_internal::{closure#0} (inlined)
+               |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main_impl (inlined)
+               |          _start
+               |          
+                --1.75%--drop<fp_types::Scalar, alloc::alloc::Global> (inlined)
+                          drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+                          assume_init_drop<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+                          drop<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+                          drop_in_place<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>>> (inlined)
+                          drop_in_place<fp_columnar::ScalarValues> (inlined)
+                          drop_in_place<fp_columnar::Column> (inlined)
+                          core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                          drop<fp_columnar::Column> (inlined)
+                          drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+                          drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> (inlined)
+                          drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+                          drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+                          drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+                          drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+                          drop_in_place<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+                          core::ptr::drop_in_place::<fp_join::MergedDataFrame>
+                          join_bench::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                          __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+                          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+                          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+                          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                          std::rt::lang_start_internal::{closure#0} (inlined)
+                          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+                          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main_impl (inlined)
+                          _start
+
+     5.26%  join-bench  join-bench        [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |          
+            |--3.51%--write<fp_types::Scalar> (inlined)
+            |          {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> (inlined)
+            |          {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> (inlined)
+            |          {closure#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> (inlined)
+            |          {closure#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> (inlined)
+            |          fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> (inlined)
+            |          fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> (inlined)
+            |          fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> (inlined)
+            |          for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> (inlined)
+            |          extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> (inlined)
+            |          spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> (inlined)
+            |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> (inlined)
+            |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> (inlined)
+            |          from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> (inlined)
+            |          collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+            |          {closure#2} (inlined)
+            |          {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#6}::as_slice::{closure_env#2}> (inlined)
+            |          {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#6}::as_slice::{closure_env#2}>, !> (inlined)
+            |          {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#6}::as_slice::{closure_env#2}>, !>> (inlined)
+            |          <std::sys::sync::once::futex::Once>::call
+            |          <std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#2}>::{closure#0}, !>
+            |          initialize<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#6}::as_slice::{closure_env#2}>, !> (inlined)
+            |          <fp_columnar::ScalarValues>::as_slice
+            |          get_or_init<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#6}::as_slice::{closure_env#2}> (inlined)
+            |          as_slice (inlined)
+            |          join_bench::main
+            |          values (inlined)
+            |          join_bench::main
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+            |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+            |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+            |          std::rt::lang_start_internal::{closure#0} (inlined)
+            |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+            |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+            |          std::rt::lang_start_internal
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main_impl (inlined)
+            |          _start
+            |          
+             --1.75%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+                       {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> (inlined)
+                       {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> (inlined)
+                       {closure#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> (inlined)
+                       {closure#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> (inlined)
+                       fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> (inlined)
+                       fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> (inlined)
+                       fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> (inlined)
+                       for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> (inlined)
+                       extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> (inlined)
+                       spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> (inlined)
+                       from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> (inlined)
+                       from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> (inlined)
+                       from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> (inlined)
+                       collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+                       {closure#2} (inlined)
+                       {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#6}::as_slice::{closure_env#2}> (inlined)
+                       {closure#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#6}::as_slice::{closure_env#2}>, !> (inlined)
+                       {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#6}::as_slice::{closure_env#2}>, !>> (inlined)
+                       <std::sys::sync::once::futex::Once>::call
+                       <std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fp_types::Scalar>>>::get_or_init<<fp_columnar::ScalarValues>::as_slice::{closure#2}>::{closure#0}, !>
+                       initialize<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#6}::as_slice::{closure_env#2}>, !> (inlined)
+                       <fp_columnar::ScalarValues>::as_slice
+                       get_or_init<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#6}::as_slice::{closure_env#2}> (inlined)
+                       as_slice (inlined)
+                       join_bench::main
+                       values (inlined)
+                       join_bench::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                       __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+                       std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                       <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+                       std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                       std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+                       std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                       std::rt::lang_start_internal::{closure#0} (inlined)
+                       std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                       std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+                       std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main_impl (inlined)
+                       _start
+
+     3.51%  join-bench  join-bench        [.] join_bench::build_ordered_utf8_frame
+            |
+            ---join_bench::build_ordered_utf8_frame
+               |          
+               |--1.75%--spec_next<usize> (inlined)
+               |          next<usize> (inlined)
+               |          push_id_lower_hex_8 (inlined)
+               |          build_ordered_utf8_frame (inlined)
+               |          join_bench::main
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               |          __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+               |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               |          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               |          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               |          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               |          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               |          std::rt::lang_start_internal::{closure#0} (inlined)
+               |          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               |          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               |          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               |          std::rt::lang_start_internal
+               |          main
+               |          __libc_start_call_main
+               |          __libc_start_main_impl (inlined)
+               |          _start
+               |          
+                --1.75%--push_mut<u8, alloc::alloc::Global> (inlined)
+                          push<u8, alloc::alloc::Global> (inlined)
+                          push_id_lower_hex_8 (inlined)
+                          build_ordered_utf8_frame (inlined)
+                          join_bench::main
+                          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+                          __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+                          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+                          <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+                          std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                          std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+                          std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+                          std::rt::lang_start_internal::{closure#0} (inlined)
+                          std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                          std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+                          std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+                          std::rt::lang_start_internal
+                          main
+                          __libc_start_call_main
+                          __libc_start_main_impl (inlined)
+                          _start
+
+     1.75%  join-bench  join-bench        [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |
+            ---<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               chaining_ge<u8> (inlined)
+               __chaining_ge<u8> (inlined)
+               ge<u8> (inlined)
+               ge<[u8], [u8]> (inlined)
+               contiguous_utf8_offsets_are_strictly_increasing (inlined)
+               {closure#0} (inlined)
+               {closure#0}<bool, fp_columnar::{impl#18}::as_strictly_increasing_utf8_contiguous::{closure_env#0}> (inlined)
+               {closure#0}<bool, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<bool, fp_columnar::{impl#18}::as_strictly_increasing_utf8_contiguous::{closure_env#0}>, !> (inlined)
+               {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<bool, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<bool, fp_columnar::{impl#18}::as_strictly_increasing_utf8_contiguous::{closure_env#0}>, !>> (inlined)
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+               initialize<bool, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<bool, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#0}>, !> (inlined)
+               <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               get_or_init<bool, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#0}> (inlined)
+               as_lower_hex_sequence_utf8_contiguous (inlined)
+               lower_hex_overlap_plan_from_certificates (inlined)
+               ordered_unique_utf8_inner_position_plan (inlined)
+               merge_single_key_inner_unsorted (inlined)
+               fp_join::merge_dataframes_on_with_options
+               join_bench::merge_once
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               merge_once (inlined)
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     1.75%  join-bench  join-bench        [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |
+            ---<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               contiguous_utf8_fixed_width (inlined)
+               {closure#1} (inlined)
+               {closure#0}<core::option::Option<usize>, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#1}> (inlined)
+               {closure#0}<core::option::Option<usize>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<core::option::Option<usize>, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#1}>, !> (inlined)
+               {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<core::option::Option<usize>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<core::option::Option<usize>, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#1}>, !>> (inlined)
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+               initialize<core::option::Option<usize>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<core::option::Option<usize>, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#1}>, !> (inlined)
+               <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               get_or_init<core::option::Option<usize>, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#1}> (inlined)
+               as_lower_hex_sequence_utf8_contiguous (inlined)
+               fp_join::merge_single_key_inner_unsorted
+               ordered_unique_utf8_inner_position_plan (inlined)
+               merge_single_key_inner_unsorted (inlined)
+               fp_join::merge_dataframes_on_with_options
+               join_bench::merge_once
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               merge_once (inlined)
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     1.75%  join-bench  libc.so.6         [.] __memcmp_avx2_movbe
+            |
+            ---__memcmp_avx2_movbe
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               eq<u8, u8> (inlined)
+               ne<[u8], [u8]> (inlined)
+               ne<[u8], [u8]> (inlined)
+               contiguous_utf8_lower_hex_sequence (inlined)
+               {closure#2} (inlined)
+               {closure#0}<core::option::Option<fp_columnar::Utf8LowerHexSequence>, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#2}> (inlined)
+               {closure#0}<core::option::Option<fp_columnar::Utf8LowerHexSequence>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<core::option::Option<fp_columnar::Utf8LowerHexSequence>, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#2}>, !> (inlined)
+               {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<core::option::Option<fp_columnar::Utf8LowerHexSequence>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<core::option::Option<fp_columnar::Utf8LowerHexSequence>, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#2}>, !>> (inlined)
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>
+               initialize<core::option::Option<fp_columnar::Utf8LowerHexSequence>, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<core::option::Option<fp_columnar::Utf8LowerHexSequence>, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#2}>, !> (inlined)
+               <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               get_or_init<core::option::Option<fp_columnar::Utf8LowerHexSequence>, fp_columnar::{impl#18}::as_lower_hex_sequence_utf8_contiguous::{closure_env#2}> (inlined)
+               as_lower_hex_sequence_utf8_contiguous (inlined)
+               lower_hex_overlap_plan_from_certificates (inlined)
+               ordered_unique_utf8_inner_position_plan (inlined)
+               merge_single_key_inner_unsorted (inlined)
+               fp_join::merge_dataframes_on_with_options
+               join_bench::merge_once
+               merge_dataframes_on (inlined)
+               merge_dataframes (inlined)
+               merge_once (inlined)
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     1.75%  join-bench  [unknown]         [k] 0xffffffff8539b7d0
+            |
+            ---0xffffffff8539b7d0
+               0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI_munmap (inlined)
+               _int_free_chunk
+               core::ptr::drop_in_place::<fp_columnar::Column>
+               drop_in_place<alloc::sync::Arc<[u8], alloc::alloc::Global>> (inlined)
+               drop_in_place<fp_columnar::ScalarValues> (inlined)
+               drop_in_place<fp_columnar::Column> (inlined)
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               drop<fp_columnar::Column> (inlined)
+               drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+               drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     1.75%  join-bench  [unknown]         [k] 0xffffffff853d8d81
+            |
+            ---0xffffffff853d8d81
+               0xffffffff853da487
+               0xffffffff853dc432
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541af59
+               0xffffffff853d0781
+               0xffffffff853adc13
+               0xffffffff853adf82
+               0xffffffff8539b8ec
+               0xffffffff8539c06e
+               0xffffffff8539c594
+               0xffffffff8539cb30
+               0xffffffff8539cd76
+               0xffffffff8539cea1
+               0xffffffff853c9742
+               0xffffffff853cb02c
+               0xffffffff853cc7f5
+               0xffffffff853cc961
+               0xffffffff853ceac8
+               0xffffffff853aa42b
+               0xffffffff84f24dad
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __GI_munmap (inlined)
+               _int_free_chunk
+               <std::alloc::System as core::alloc::global::GlobalAlloc>::dealloc (inlined)
+               __rustc::__rdl_dealloc (inlined)
+               dealloc_nonnull (inlined)
+               deallocate_impl_runtime (inlined)
+               deallocate_impl (inlined)
+               deallocate (inlined)
+               deallocate<alloc::alloc::Global> (inlined)
+               deallocate<&alloc::alloc::Global> (inlined)
+               drop<f64, &alloc::alloc::Global> (inlined)
+               drop_in_place<alloc::raw_vec::RawVec<f64, &alloc::alloc::Global>> (inlined)
+               drop_in_place<alloc::vec::Vec<f64, &alloc::alloc::Global>> (inlined)
+               from<f64, alloc::alloc::Global> (inlined)
+               lazy_all_valid_float64 (inlined)
+               from_f64_values (inlined)
+               join_bench::build_ordered_utf8_frame
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     1.75%  join-bench  [unknown]         [k] 0xffffffff8621b2b7
+            |
+            ---0xffffffff8621b2b7
+               0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::ScalarValues>::lazy_contiguous_utf8
+               from<usize, alloc::alloc::Global> (inlined)
+               lazy_contiguous_utf8 (inlined)
+               join_bench::build_ordered_utf8_frame
+               build_ordered_utf8_frame (inlined)
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+     1.75%  join-bench  [unknown]         [k] 0xffffffff86239c41
+            |
+            ---0xffffffff86239c41
+               0xffffffff853d7f19
+               0xffffffff853d8f99
+               0xffffffff853d9102
+               0xffffffff853da487
+               0xffffffff853dc432
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::ScalarValues>::lazy_contiguous_utf8
+               from<u8, alloc::alloc::Global> (inlined)
+               lazy_contiguous_utf8 (inlined)
+               join_bench::build_ordered_utf8_frame
+               build_ordered_utf8_frame (inlined)
+               join_bench::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               __rust_begin_short_backtrace<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> (inlined)
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once (inlined)
+               std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> (inlined)
+               std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> (inlined)
+               std::rt::lang_start_internal::{closure#0} (inlined)
+               std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> (inlined)
+               std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> (inlined)
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main_impl (inlined)
+               _start
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

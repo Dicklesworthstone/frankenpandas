@@ -1,5 +1,5 @@
 ℹ Preparing shadow workspace for 1 specified file(s)
-ℹ Scanning shadow workspace at /data/tmp/tmp.Lyz1mcjhVg/files_scan
+ℹ Scanning shadow workspace at /data/tmp/tmp.Saz0zc5euj/files_scan
 
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗              ║
@@ -35,12 +35,10 @@
 ║                     “We see bugs before you do.”                             ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
-UBS Meta-Runner v5.3.2  2026-06-09 01:16:07
+UBS Meta-Runner v5.3.2  2026-06-09 01:20:38
 Project: /data/projects/.scratch/frankenpandas-orangepeak-next-20260609
 Format:  text
 Detected: rust
-Scanning rust...
-Finished rust (43s)
 
 ──────── rust ────────
 
@@ -78,7 +76,7 @@ Finished rust (43s)
                                                                       
 
 Project:  /data/projects/.scratch/frankenpandas-orangepeak-next-20260609
-Started:  2026-06-09 01:16:07
+Started:  2026-06-09 01:20:38
 Files:    1 source files (rs)
 
 ✓ ast-grep available (ast-grep) - full AST analysis enabled
@@ -101,15 +99,15 @@ Panic-prone and debug macros frequently leak into production and cause crashes
   ⚠ Warning (3042 found)
     Potential panics via unwrap/expect
     Prefer `?` or match to propagate/handle errors
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:7389 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L7389)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:7389 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L7389)
               DataFrame::from_dict(
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:7390 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L7390)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:7390 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L7390)
                   &["id", "val_a"],
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:7391 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L7391)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:7391 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L7391)
                   vec![
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:7392 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L7392)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:7392 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L7392)
                       (
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:7393 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L7393)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:7393 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L7393)
                           "id",
 
 • panic!/unreachable!/todo!/unimplemented!
@@ -191,29 +189,29 @@ Iterator misuse often leads to unnecessary allocations or slow paths
 • clone() occurrences & clone() in loops
   ℹ Info (97 found)
     clone() usages - audit for necessity
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:391 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L391)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:391 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L391)
                               out_labels.push(label.clone());
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:399 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L399)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:399 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L399)
                           out_labels.push(label.clone());
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:410 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L410)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:410 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L410)
                               out_labels.push(label.clone());
   ⚠ Warning (76 found)
     clone() inside loops - potential perf hit
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:391 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L391)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:391 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L391)
       out_labels.push(label.clone());
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:399 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L399)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:399 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L399)
       out_labels.push(label.clone());
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:410 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L410)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:410 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L410)
       out_labels.push(label.clone());
 
 • collect::<Vec<_>>() then for
   ℹ Info (78 found)
     collect::<Vec<_>>() usage - consider streaming
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:358 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L358)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:358 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L358)
           let mut rows = out_labels
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:359 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L359)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:359 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L359)
               .drain(..)
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:360 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L360)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:360 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L360)
               .zip(left_positions.iter().copied())
 
 • nth(0) → next()
@@ -259,11 +257,11 @@ Security misconfigurations can lead to credential leaks, command injection, and 
   🔥 CRITICAL (4 found)
     Secret, signature, or token compared with ==/!=
     Use subtle::ConstantTimeEq, ring::constant_time::verify_slices_are_equal, crypto_memcmp, or a reviewed constant-time helper for bearer tokens, HMACs, CSRF values, reset secrets, API keys, and signatures
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:958 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L958)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:958 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L958)
       || left_key.dtype() != DType::Int64
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:959 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L959)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:959 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L959)
       || right_key.dtype() != DType::Int64
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:3084 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L3084)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:3084 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L3084)
       let has_left_missing = plan.iter().any(|&(_, start, _)| start == UNMATCHED);
 
 • JWT decode, validation bypass, or missing claim binding
@@ -278,7 +276,7 @@ Security misconfigurations can lead to credential leaks, command injection, and 
   ⚠ Warning (1 found)
     Path join/push with untrusted-looking segment
     Reject absolute paths and '..' components; canonicalize and verify the result stays under the intended root
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:856 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L856)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:856 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L856)
       out_row_keys.push(key.clone());
 
 • Archive entry paths joined into extraction destination
@@ -464,11 +462,11 @@ Panics in destructors or UB hints can crash/abort in subtle ways; these can slip
   ⚠ Warning (297 found)
     Direct indexing/slicing may panic
     Use get()/get_mut(), checked ranges, or prior bounds checks when indexes can come from input
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:368 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L368)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:368 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L368)
               left_positions[idx] = left_pos;
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:369 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L369)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:369 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L369)
               right_positions[idx] = right_pos;
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:762 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L762)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:762 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L762)
                   parts.push(scalar_to_key_component(&column.values()[row]));
 
 • panic!/unwrap/expect inside Drop
@@ -484,11 +482,11 @@ Panics in destructors or UB hints can crash/abort in subtle ways; these can slip
   ℹ Info (48 found)
     `as` casts present (possible truncation/sign bugs)
     Prefer TryFrom/TryInto for correctness or document invariants
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:2000 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L2000)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:2000 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L2000)
               let bucket = (v - plan.min) as usize;
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:2334 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L2334)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:2334 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L2334)
           let range = span as usize;
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:2338 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L2338)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:2338 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L2338)
               offsets[(v - min) as usize + 1] += 1;
 
 • len()/count() narrowed via `as`
@@ -524,11 +522,11 @@ Some perf pitfalls become DoS risks on large inputs or hot paths; these often ev
   ⚠ Warning (14 found)
     String allocation inside loop
     Consider preallocating buffers, using write!, or restructuring to reduce allocations
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:746 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L746)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:746 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L746)
       JoinError::Frame(FrameError::CompatibilityRejected(format!(
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:869 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L869)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:869 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L869)
       left: Some("_x".to_owned()),
-      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:870 (https://github.com/Dicklesworthstone/frankenpandas/blob/b2c0c0976e44f6bfc968f50efe7a4bec88f3b895/crates/fp-join/src/lib.rs#L870)
+      /data/projects/.scratch/frankenpandas-orangepeak-next-20260609/crates/fp-join/src/lib.rs:870 (https://github.com/Dicklesworthstone/frankenpandas/blob/c2aacc4a9bf8d9416665790bef2f57a27d52f0ac/crates/fp-join/src/lib.rs#L870)
       right: Some("_y".to_owned()),
 
 ═══════════════════════════════════════════════════════════════════════════
@@ -549,7 +547,7 @@ Priority Actions:
   ℹ Consider INFO suggestions
   Code quality improvements and best practices
 
-Scan completed at: 2026-06-09 01:16:50
+Scan completed at: 2026-06-09 01:21:17
 
 Tip: Run with -v/--verbose for more code samples per finding.
 Add to CI: ./ubs --ci --fail-on-warning . > rust-bug-scan.txt

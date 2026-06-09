@@ -2,7 +2,9 @@
 
 use std::time::Instant;
 
+use fp_columnar::Column;
 use fp_frame::DataFrame;
+use fp_index::Index;
 use fp_join::{
     JoinType, MergeExecutionOptions, MergeValidateMode, MergedDataFrame, merge_dataframes,
     merge_dataframes_on_with_options,
@@ -100,6 +102,57 @@ fn build_ordered_unique_frame(
     Ok(frame)
 }
 
+fn lower_hex_digit(nibble: usize) -> u8 {
+    match nibble {
+        0..=9 => b'0' + nibble as u8,
+        10..=15 => b'a' + (nibble as u8 - 10),
+        _ => b'?',
+    }
+}
+
+fn push_id_lower_hex_8(bytes: &mut Vec<u8>, value: usize) {
+    bytes.extend_from_slice(b"id_");
+    let digits = ((usize::BITS - value.leading_zeros()).div_ceil(4)).max(1) as usize;
+    for _ in digits..8 {
+        bytes.push(b'0');
+    }
+    for shift in (0..digits).rev() {
+        bytes.push(lower_hex_digit((value >> (shift * 4)) & 0x0f));
+    }
+}
+
+fn build_ordered_utf8_frame(
+    value_name: &str,
+    rows: usize,
+    key_start: usize,
+    multiplier: u64,
+) -> Result<DataFrame, Box<dyn std::error::Error>> {
+    let index = Index::new_known_unique_int64_unit_range(0, rows);
+    let mut bytes = Vec::with_capacity(rows * 11);
+    let mut offsets = Vec::with_capacity(rows + 1);
+    offsets.push(0);
+    for row in 0..rows {
+        push_id_lower_hex_8(&mut bytes, key_start + row);
+        offsets.push(bytes.len());
+    }
+    let values = (0..rows)
+        .map(|row| ((row as u64).wrapping_mul(multiplier) % 10_003) as f64 * 0.25)
+        .collect::<Vec<_>>();
+
+    let mut columns = std::collections::BTreeMap::new();
+    columns.insert(
+        "id".to_string(),
+        Column::from_utf8_contiguous(bytes, offsets),
+    );
+    columns.insert(value_name.to_string(), Column::from_f64_values(values));
+    let column_order = vec!["id".to_string(), value_name.to_string()];
+    Ok(DataFrame::new_with_column_order(
+        index,
+        columns,
+        column_order,
+    )?)
+}
+
 fn build_wide_sparse_frame(
     value_name: &str,
     rows: usize,
@@ -179,6 +232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let join_type = parse_join_type(JoinType::Inner);
     let ordered_unique = has_flag("ordered-unique");
     let wide_sparse = has_flag("wide-sparse");
+    let str_ordered = has_flag("str-ordered");
     let force_generic = has_flag("force-generic");
     let golden = has_flag("golden");
 
@@ -191,6 +245,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (
             build_ordered_unique_frame("left_value", rows, 7, false)?,
             build_ordered_unique_frame("right_value", right_rows, 13, true)?,
+        )
+    } else if str_ordered {
+        (
+            build_ordered_utf8_frame("left_value", rows, 0, 37)?,
+            build_ordered_utf8_frame(
+                "right_value",
+                right_rows,
+                rows.saturating_sub(rows / 10),
+                53,
+            )?,
         )
     } else {
         (
@@ -260,7 +324,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!(
-        "join_bench join_type={join_name} rows={rows} right_rows={right_rows} key_cardinality={key_cardinality} ordered_unique={ordered_unique} wide_sparse={wide_sparse} stride={stride} force_generic={force_generic} warmup={warmup} iters={iters} output_rows={output_rows} mean_ms={mean_ms:.3} p50_ms={p50_ms:.3} p95_ms={p95_ms:.3} p99_ms={p99_ms:.3} checksum={checksum:.3}"
+        "join_bench join_type={join_name} rows={rows} right_rows={right_rows} key_cardinality={key_cardinality} ordered_unique={ordered_unique} str_ordered={str_ordered} wide_sparse={wide_sparse} stride={stride} force_generic={force_generic} warmup={warmup} iters={iters} output_rows={output_rows} mean_ms={mean_ms:.3} p50_ms={p50_ms:.3} p95_ms={p95_ms:.3} p99_ms={p99_ms:.3} checksum={checksum:.3}"
     );
 
     Ok(())

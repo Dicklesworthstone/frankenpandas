@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-next-join-bench/release-perf/join-bench --str-ordered --rows 1000000 --right-rows 1000000 --join-type inner --warmup 3 --iters 20
+  Time (mean ± σ):     124.0 ms ±   3.1 ms    [User: 75.9 ms, System: 47.2 ms]
+  Range (min … max):   118.6 ms … 127.5 ms    10 runs
+ 
