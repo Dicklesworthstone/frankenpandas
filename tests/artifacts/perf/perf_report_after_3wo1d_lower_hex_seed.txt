@@ -1,0 +1,2040 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 79  of event 'cycles:P'
+# Event count (approx.): 285228758
+#
+# Children      Self  Command     Shared Object         Symbol                                                                                                     
+# ........  ........  ..........  ....................  ...........................................................................................................
+#
+    48.72%     7.47%  join-bench  libc.so.6             [.] __memmove_avx_unaligned_erms
+            |          
+            |--45.73%--__memmove_avx_unaligned_erms
+            |          |          
+            |          |--26.76%--0xffffffff84c00bb7
+            |          |          0xffffffff8622811f
+            |          |          |          
+            |          |          |--25.27%--0xffffffff84feb96b
+            |          |          |          |          
+            |          |          |          |--23.77%--0xffffffff853a5627
+            |          |          |          |          0xffffffff853a53ad
+            |          |          |          |          |          
+            |          |          |          |          |--19.32%--0xffffffff853a4de7
+            |          |          |          |          |          |          
+            |          |          |          |          |          |--7.43%--0xffffffff853a37ea
+            |          |          |          |          |          |          |          
+            |          |          |          |          |          |          |--5.94%--0xffffffff853a33d2
+            |          |          |          |          |          |          |          0xffffffff8541df1b
+            |          |          |          |          |          |          |          0xffffffff8541a9e8
+            |          |          |          |          |          |          |          0xffffffff853dda90
+            |          |          |          |          |          |          |          |          
+            |          |          |          |          |          |          |          |--2.99%--0xffffffff853dc6c9
+            |          |          |          |          |          |          |          |          0xffffffff8621b2b7
+            |          |          |          |          |          |          |          |          
+            |          |          |          |          |          |          |           --2.96%--0xffffffff853dc432
+            |          |          |          |          |          |          |                     0xffffffff853da487
+            |          |          |          |          |          |          |                     0xffffffff853d9102
+            |          |          |          |          |          |          |                     0xffffffff853d8f99
+            |          |          |          |          |          |          |                     0xffffffff853d7d2a
+            |          |          |          |          |          |          |          
+            |          |          |          |          |          |           --1.49%--0xffffffff85404a01
+            |          |          |          |          |          |          
+            |          |          |          |          |          |--2.99%--0xffffffff853a3963
+            |          |          |          |          |          |          0xffffffff853442bf
+            |          |          |          |          |          |          0xffffffff853439e9
+            |          |          |          |          |          |          0xffffffff853438f4
+            |          |          |          |          |          |          0xffffffff853437ad
+            |          |          |          |          |          |          0xffffffff85342072
+            |          |          |          |          |          |          |          
+            |          |          |          |          |          |          |--1.49%--0xffffffff85341645
+            |          |          |          |          |          |          |          
+            |          |          |          |          |          |           --1.49%--0xffffffff85341641
+            |          |          |          |          |          |          
+            |          |          |          |          |          |--2.95%--0xffffffff853a3957
+            |          |          |          |          |          |          |          
+            |          |          |          |          |          |          |--1.49%--0xffffffff853bb5d6
+            |          |          |          |          |          |          |          0xffffffff853b9650
+            |          |          |          |          |          |          |          0xffffffff85452e38
+            |          |          |          |          |          |          |          0xffffffff85452a61
+            |          |          |          |          |          |          |          0xffffffff8517f738
+            |          |          |          |          |          |          |          
+            |          |          |          |          |          |           --1.46%--0xffffffff853bb652
+            |          |          |          |          |          |          
+            |          |          |          |          |          |--1.49%--0xffffffff853a31d0
+            |          |          |          |          |          |          
+            |          |          |          |          |          |--1.49%--0xffffffff853442c0
+            |          |          |          |          |          |          
+            |          |          |          |          |          |--1.48%--0xffffffff853bb566
+            |          |          |          |          |          |          
+            |          |          |          |          |           --1.48%--0xffffffff853a3795
+            |          |          |          |          |          
+            |          |          |          |          |--1.49%--0xffffffff84d0410b
+            |          |          |          |          |          
+            |          |          |          |          |--1.49%--0xffffffff853a4c5e
+            |          |          |          |          |          0xffffffff853b8390
+            |          |          |          |          |          0xffffffff853b8120
+            |          |          |          |          |          
+            |          |          |          |           --1.47%--0xffffffff853a4c22
+            |          |          |          |          
+            |          |          |           --1.49%--0xffffffff853a5723
+            |          |          |                     0xffffffff854555af
+            |          |          |          
+            |          |           --1.49%--0xffffffff84feb92c
+            |          |                     0xffffffff85392d40
+            |          |                     0xffffffff861f662b
+            |          |          
+            |           --10.42%--0xffffffff84c00b90
+            |          
+             --2.99%--<fp_columnar::Column>::from_lower_hex_sequence_utf8
+                       |          
+                        --1.49%--0xffffffff84c00bb7
+                                  0xffffffff8622811f
+                                  0xffffffff84feb808
+
+    46.01%    32.39%  join-bench  join-bench            [.] <fp_columnar::Column>::from_lower_hex_sequence_utf8
+            |          
+            |--38.97%--<fp_columnar::Column>::from_lower_hex_sequence_utf8
+            |          |          
+            |          |--10.55%--0xffffffff84c00bb7
+            |          |          0xffffffff8622811f
+            |          |          |          
+            |          |          |--9.06%--0xffffffff84feb96b
+            |          |          |          0xffffffff853a5627
+            |          |          |          |          
+            |          |          |          |--7.57%--0xffffffff853a53ad
+            |          |          |          |          0xffffffff853a4de7
+            |          |          |          |          |          
+            |          |          |          |          |--5.95%--0xffffffff853a37ea
+            |          |          |          |          |          |          
+            |          |          |          |          |          |--2.98%--0xffffffff853a3437
+            |          |          |          |          |          |          |          
+            |          |          |          |          |          |           --1.49%--0xffffffff85404a1a
+            |          |          |          |          |          |                     0xffffffff857c0296
+            |          |          |          |          |          |          
+            |          |          |          |          |           --2.97%--0xffffffff853a33d2
+            |          |          |          |          |                     0xffffffff8541df1b
+            |          |          |          |          |                     0xffffffff8541a9e8
+            |          |          |          |          |                     0xffffffff853dda90
+            |          |          |          |          |                     |          
+            |          |          |          |          |                     |--1.49%--0xffffffff853dc432
+            |          |          |          |          |                     |          0xffffffff853da487
+            |          |          |          |          |                     |          0xffffffff853d9102
+            |          |          |          |          |                     |          0xffffffff853d8dd8
+            |          |          |          |          |                     |          
+            |          |          |          |          |                      --1.48%--0xffffffff853d95a7
+            |          |          |          |          |          
+            |          |          |          |           --1.62%--0xffffffff853a3957
+            |          |          |          |                     0xffffffff853bb5a2
+            |          |          |          |          
+            |          |          |           --1.49%--0xffffffff853a501b
+            |          |          |          
+            |          |           --1.49%--0xffffffff84feb808
+            |          |          
+            |          |--1.49%--0xffffffff84c01199
+            |          |          
+            |          |--1.49%--0xffffffff84c00b90
+            |          |          
+            |           --1.49%--__munmap
+            |                     0xffffffff84c0012b
+            |                     0xffffffff86220551
+            |                     0xffffffff84f24dad
+            |                     0xffffffff853aa42b
+            |                     0xffffffff853ceac8
+            |                     0xffffffff853cc961
+            |                     0xffffffff853cc7f5
+            |                     0xffffffff853cb02c
+            |                     0xffffffff853c9742
+            |                     0xffffffff8539cea1
+            |                     0xffffffff8539cd76
+            |                     0xffffffff8539cb30
+            |                     0xffffffff8539c594
+            |                     0xffffffff8539c06e
+            |                     0xffffffff8539b7d0
+            |          
+             --7.03%--__memmove_avx_unaligned_erms
+                       |          
+                        --2.96%--0xffffffff84c00bb7
+                                  0xffffffff8622811f
+                                  0xffffffff84feb96b
+                                  0xffffffff853a5627
+                                  0xffffffff853a53ad
+                                  |          
+                                  |--1.49%--0xffffffff853a4c5e
+                                  |          0xffffffff853b8390
+                                  |          0xffffffff853b8120
+                                  |          
+                                   --1.47%--0xffffffff853a4c22
+
+    43.50%     0.00%  join-bench  [unknown]             [.] 0xffffffff84c00bb7
+            |
+            ---0xffffffff84c00bb7
+               |          
+                --43.50%--0xffffffff8622811f
+                          |          
+                          |--40.51%--0xffffffff84feb96b
+                          |          |          
+                          |          |--39.02%--0xffffffff853a5627
+                          |          |          |          
+                          |          |          |--37.53%--0xffffffff853a53ad
+                          |          |          |          |          
+                          |          |          |          |--32.86%--0xffffffff853a4de7
+                          |          |          |          |          |          
+                          |          |          |          |          |--16.37%--0xffffffff853a37ea
+                          |          |          |          |          |          |          
+                          |          |          |          |          |          |--10.41%--0xffffffff853a33d2
+                          |          |          |          |          |          |          0xffffffff8541df1b
+                          |          |          |          |          |          |          |          
+                          |          |          |          |          |          |          |--8.91%--0xffffffff8541a9e8
+                          |          |          |          |          |          |          |          0xffffffff853dda90
+                          |          |          |          |          |          |          |          |          
+                          |          |          |          |          |          |          |          |--4.45%--0xffffffff853dc432
+                          |          |          |          |          |          |          |          |          0xffffffff853da487
+                          |          |          |          |          |          |          |          |          0xffffffff853d9102
+                          |          |          |          |          |          |          |          |          |          
+                          |          |          |          |          |          |          |          |          |--2.96%--0xffffffff853d8f99
+                          |          |          |          |          |          |          |          |          |          0xffffffff853d7d2a
+                          |          |          |          |          |          |          |          |          |          
+                          |          |          |          |          |          |          |          |           --1.49%--0xffffffff853d8dd8
+                          |          |          |          |          |          |          |          |          
+                          |          |          |          |          |          |          |          |--2.99%--0xffffffff853dc6c9
+                          |          |          |          |          |          |          |          |          0xffffffff8621b2b7
+                          |          |          |          |          |          |          |          |          
+                          |          |          |          |          |          |          |           --1.48%--0xffffffff853d95a7
+                          |          |          |          |          |          |          |          
+                          |          |          |          |          |          |           --1.49%--0xffffffff8541a780
+                          |          |          |          |          |          |          
+                          |          |          |          |          |          |--2.98%--0xffffffff853a3437
+                          |          |          |          |          |          |          |          
+                          |          |          |          |          |          |           --1.49%--0xffffffff85404a1a
+                          |          |          |          |          |          |                     0xffffffff857c0296
+                          |          |          |          |          |          |          
+                          |          |          |          |          |          |--1.49%--0xffffffff853a33ec
+                          |          |          |          |          |          |          0xffffffff85458fd3
+                          |          |          |          |          |          |          
+                          |          |          |          |          |           --1.49%--0xffffffff85404a01
+                          |          |          |          |          |          
+                          |          |          |          |          |--6.06%--0xffffffff853a3957
+                          |          |          |          |          |          |          
+                          |          |          |          |          |          |--2.99%--0xffffffff853bb5d6
+                          |          |          |          |          |          |          0xffffffff853b9650
+                          |          |          |          |          |          |          |          
+                          |          |          |          |          |          |          |--1.49%--0xffffffff85452e38
+                          |          |          |          |          |          |          |          0xffffffff85452a61
+                          |          |          |          |          |          |          |          0xffffffff8517f738
+                          |          |          |          |          |          |          |          
+                          |          |          |          |          |          |           --1.49%--0xffffffff85452dd0
+                          |          |          |          |          |          |          
+                          |          |          |          |          |          |--1.62%--0xffffffff853bb5a2
+                          |          |          |          |          |          |          
+                          |          |          |          |          |           --1.46%--0xffffffff853bb652
+                          |          |          |          |          |          
+                          |          |          |          |          |--4.48%--0xffffffff853a3963
+                          |          |          |          |          |          0xffffffff853442bf
+                          |          |          |          |          |          0xffffffff853439e9
+                          |          |          |          |          |          0xffffffff853438f4
+                          |          |          |          |          |          0xffffffff853437ad
+                          |          |          |          |          |          |          
+                          |          |          |          |          |          |--2.99%--0xffffffff85342072
+                          |          |          |          |          |          |          |          
+                          |          |          |          |          |          |          |--1.49%--0xffffffff85341645
+                          |          |          |          |          |          |          |          
+                          |          |          |          |          |          |           --1.49%--0xffffffff85341641
+                          |          |          |          |          |          |          
+                          |          |          |          |          |           --1.49%--0xffffffff85342151
+                          |          |          |          |          |          
+                          |          |          |          |          |--1.49%--0xffffffff853a31d0
+                          |          |          |          |          |          
+                          |          |          |          |          |--1.49%--0xffffffff853442c0
+                          |          |          |          |          |          
+                          |          |          |          |          |--1.48%--0xffffffff853bb566
+                          |          |          |          |          |          
+                          |          |          |          |           --1.48%--0xffffffff853a3795
+                          |          |          |          |          
+                          |          |          |          |--1.49%--0xffffffff84d0410b
+                          |          |          |          |          
+                          |          |          |          |--1.49%--0xffffffff853a4c5e
+                          |          |          |          |          0xffffffff853b8390
+                          |          |          |          |          0xffffffff853b8120
+                          |          |          |          |          
+                          |          |          |           --1.47%--0xffffffff853a4c22
+                          |          |          |          
+                          |          |           --1.49%--0xffffffff853a501b
+                          |          |          
+                          |           --1.49%--0xffffffff853a5723
+                          |                     0xffffffff854555af
+                          |          
+                          |--1.49%--0xffffffff84feb808
+                          |          
+                           --1.49%--0xffffffff84feb92c
+                                     0xffffffff85392d40
+                                     0xffffffff861f662b
+
+    43.50%     0.00%  join-bench  [unknown]             [.] 0xffffffff8622811f
+            |
+            ---0xffffffff8622811f
+               |          
+               |--40.51%--0xffffffff84feb96b
+               |          |          
+               |          |--39.02%--0xffffffff853a5627
+               |          |          |          
+               |          |          |--37.53%--0xffffffff853a53ad
+               |          |          |          |          
+               |          |          |          |--32.86%--0xffffffff853a4de7
+               |          |          |          |          |          
+               |          |          |          |          |--16.37%--0xffffffff853a37ea
+               |          |          |          |          |          |          
+               |          |          |          |          |          |--10.41%--0xffffffff853a33d2
+               |          |          |          |          |          |          0xffffffff8541df1b
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |--8.91%--0xffffffff8541a9e8
+               |          |          |          |          |          |          |          0xffffffff853dda90
+               |          |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |          |--4.45%--0xffffffff853dc432
+               |          |          |          |          |          |          |          |          0xffffffff853da487
+               |          |          |          |          |          |          |          |          0xffffffff853d9102
+               |          |          |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |          |          |--2.96%--0xffffffff853d8f99
+               |          |          |          |          |          |          |          |          |          0xffffffff853d7d2a
+               |          |          |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |          |           --1.49%--0xffffffff853d8dd8
+               |          |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |          |--2.99%--0xffffffff853dc6c9
+               |          |          |          |          |          |          |          |          0xffffffff8621b2b7
+               |          |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |           --1.48%--0xffffffff853d95a7
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |           --1.49%--0xffffffff8541a780
+               |          |          |          |          |          |          
+               |          |          |          |          |          |--2.98%--0xffffffff853a3437
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |           --1.49%--0xffffffff85404a1a
+               |          |          |          |          |          |                     0xffffffff857c0296
+               |          |          |          |          |          |          
+               |          |          |          |          |          |--1.49%--0xffffffff853a33ec
+               |          |          |          |          |          |          0xffffffff85458fd3
+               |          |          |          |          |          |          
+               |          |          |          |          |           --1.49%--0xffffffff85404a01
+               |          |          |          |          |          
+               |          |          |          |          |--6.06%--0xffffffff853a3957
+               |          |          |          |          |          |          
+               |          |          |          |          |          |--2.99%--0xffffffff853bb5d6
+               |          |          |          |          |          |          0xffffffff853b9650
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |--1.49%--0xffffffff85452e38
+               |          |          |          |          |          |          |          0xffffffff85452a61
+               |          |          |          |          |          |          |          0xffffffff8517f738
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |           --1.49%--0xffffffff85452dd0
+               |          |          |          |          |          |          
+               |          |          |          |          |          |--1.62%--0xffffffff853bb5a2
+               |          |          |          |          |          |          
+               |          |          |          |          |           --1.46%--0xffffffff853bb652
+               |          |          |          |          |          
+               |          |          |          |          |--4.48%--0xffffffff853a3963
+               |          |          |          |          |          0xffffffff853442bf
+               |          |          |          |          |          0xffffffff853439e9
+               |          |          |          |          |          0xffffffff853438f4
+               |          |          |          |          |          0xffffffff853437ad
+               |          |          |          |          |          |          
+               |          |          |          |          |          |--2.99%--0xffffffff85342072
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |--1.49%--0xffffffff85341645
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |           --1.49%--0xffffffff85341641
+               |          |          |          |          |          |          
+               |          |          |          |          |           --1.49%--0xffffffff85342151
+               |          |          |          |          |          
+               |          |          |          |          |--1.49%--0xffffffff853a31d0
+               |          |          |          |          |          
+               |          |          |          |          |--1.49%--0xffffffff853442c0
+               |          |          |          |          |          
+               |          |          |          |          |--1.48%--0xffffffff853bb566
+               |          |          |          |          |          
+               |          |          |          |           --1.48%--0xffffffff853a3795
+               |          |          |          |          
+               |          |          |          |--1.49%--0xffffffff84d0410b
+               |          |          |          |          
+               |          |          |          |--1.49%--0xffffffff853a4c5e
+               |          |          |          |          0xffffffff853b8390
+               |          |          |          |          0xffffffff853b8120
+               |          |          |          |          
+               |          |          |           --1.47%--0xffffffff853a4c22
+               |          |          |          
+               |          |           --1.49%--0xffffffff853a501b
+               |          |          
+               |           --1.49%--0xffffffff853a5723
+               |                     0xffffffff854555af
+               |          
+               |--1.49%--0xffffffff84feb808
+               |          
+                --1.49%--0xffffffff84feb92c
+                          0xffffffff85392d40
+                          0xffffffff861f662b
+
+    40.51%     0.00%  join-bench  [unknown]             [.] 0xffffffff84feb96b
+            |
+            ---0xffffffff84feb96b
+               |          
+               |--39.02%--0xffffffff853a5627
+               |          |          
+               |          |--37.53%--0xffffffff853a53ad
+               |          |          |          
+               |          |          |--32.86%--0xffffffff853a4de7
+               |          |          |          |          
+               |          |          |          |--16.37%--0xffffffff853a37ea
+               |          |          |          |          |          
+               |          |          |          |          |--10.41%--0xffffffff853a33d2
+               |          |          |          |          |          0xffffffff8541df1b
+               |          |          |          |          |          |          
+               |          |          |          |          |          |--8.91%--0xffffffff8541a9e8
+               |          |          |          |          |          |          0xffffffff853dda90
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |--4.45%--0xffffffff853dc432
+               |          |          |          |          |          |          |          0xffffffff853da487
+               |          |          |          |          |          |          |          0xffffffff853d9102
+               |          |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |          |--2.96%--0xffffffff853d8f99
+               |          |          |          |          |          |          |          |          0xffffffff853d7d2a
+               |          |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |           --1.49%--0xffffffff853d8dd8
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |--2.99%--0xffffffff853dc6c9
+               |          |          |          |          |          |          |          0xffffffff8621b2b7
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |           --1.48%--0xffffffff853d95a7
+               |          |          |          |          |          |          
+               |          |          |          |          |           --1.49%--0xffffffff8541a780
+               |          |          |          |          |          
+               |          |          |          |          |--2.98%--0xffffffff853a3437
+               |          |          |          |          |          |          
+               |          |          |          |          |           --1.49%--0xffffffff85404a1a
+               |          |          |          |          |                     0xffffffff857c0296
+               |          |          |          |          |          
+               |          |          |          |          |--1.49%--0xffffffff853a33ec
+               |          |          |          |          |          0xffffffff85458fd3
+               |          |          |          |          |          
+               |          |          |          |           --1.49%--0xffffffff85404a01
+               |          |          |          |          
+               |          |          |          |--6.06%--0xffffffff853a3957
+               |          |          |          |          |          
+               |          |          |          |          |--2.99%--0xffffffff853bb5d6
+               |          |          |          |          |          0xffffffff853b9650
+               |          |          |          |          |          |          
+               |          |          |          |          |          |--1.49%--0xffffffff85452e38
+               |          |          |          |          |          |          0xffffffff85452a61
+               |          |          |          |          |          |          0xffffffff8517f738
+               |          |          |          |          |          |          
+               |          |          |          |          |           --1.49%--0xffffffff85452dd0
+               |          |          |          |          |          
+               |          |          |          |          |--1.62%--0xffffffff853bb5a2
+               |          |          |          |          |          
+               |          |          |          |           --1.46%--0xffffffff853bb652
+               |          |          |          |          
+               |          |          |          |--4.48%--0xffffffff853a3963
+               |          |          |          |          0xffffffff853442bf
+               |          |          |          |          0xffffffff853439e9
+               |          |          |          |          0xffffffff853438f4
+               |          |          |          |          0xffffffff853437ad
+               |          |          |          |          |          
+               |          |          |          |          |--2.99%--0xffffffff85342072
+               |          |          |          |          |          |          
+               |          |          |          |          |          |--1.49%--0xffffffff85341645
+               |          |          |          |          |          |          
+               |          |          |          |          |           --1.49%--0xffffffff85341641
+               |          |          |          |          |          
+               |          |          |          |           --1.49%--0xffffffff85342151
+               |          |          |          |          
+               |          |          |          |--1.49%--0xffffffff853a31d0
+               |          |          |          |          
+               |          |          |          |--1.49%--0xffffffff853442c0
+               |          |          |          |          
+               |          |          |          |--1.48%--0xffffffff853bb566
+               |          |          |          |          
+               |          |          |           --1.48%--0xffffffff853a3795
+               |          |          |          
+               |          |          |--1.49%--0xffffffff84d0410b
+               |          |          |          
+               |          |          |--1.49%--0xffffffff853a4c5e
+               |          |          |          0xffffffff853b8390
+               |          |          |          0xffffffff853b8120
+               |          |          |          
+               |          |           --1.47%--0xffffffff853a4c22
+               |          |          
+               |           --1.49%--0xffffffff853a501b
+               |          
+                --1.49%--0xffffffff853a5723
+                          0xffffffff854555af
+
+    39.02%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a5627
+            |
+            ---0xffffffff853a5627
+               |          
+               |--37.53%--0xffffffff853a53ad
+               |          |          
+               |          |--32.86%--0xffffffff853a4de7
+               |          |          |          
+               |          |          |--16.37%--0xffffffff853a37ea
+               |          |          |          |          
+               |          |          |          |--10.41%--0xffffffff853a33d2
+               |          |          |          |          0xffffffff8541df1b
+               |          |          |          |          |          
+               |          |          |          |          |--8.91%--0xffffffff8541a9e8
+               |          |          |          |          |          0xffffffff853dda90
+               |          |          |          |          |          |          
+               |          |          |          |          |          |--4.45%--0xffffffff853dc432
+               |          |          |          |          |          |          0xffffffff853da487
+               |          |          |          |          |          |          0xffffffff853d9102
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |          |--2.96%--0xffffffff853d8f99
+               |          |          |          |          |          |          |          0xffffffff853d7d2a
+               |          |          |          |          |          |          |          
+               |          |          |          |          |          |           --1.49%--0xffffffff853d8dd8
+               |          |          |          |          |          |          
+               |          |          |          |          |          |--2.99%--0xffffffff853dc6c9
+               |          |          |          |          |          |          0xffffffff8621b2b7
+               |          |          |          |          |          |          
+               |          |          |          |          |           --1.48%--0xffffffff853d95a7
+               |          |          |          |          |          
+               |          |          |          |           --1.49%--0xffffffff8541a780
+               |          |          |          |          
+               |          |          |          |--2.98%--0xffffffff853a3437
+               |          |          |          |          |          
+               |          |          |          |           --1.49%--0xffffffff85404a1a
+               |          |          |          |                     0xffffffff857c0296
+               |          |          |          |          
+               |          |          |          |--1.49%--0xffffffff853a33ec
+               |          |          |          |          0xffffffff85458fd3
+               |          |          |          |          
+               |          |          |           --1.49%--0xffffffff85404a01
+               |          |          |          
+               |          |          |--6.06%--0xffffffff853a3957
+               |          |          |          |          
+               |          |          |          |--2.99%--0xffffffff853bb5d6
+               |          |          |          |          0xffffffff853b9650
+               |          |          |          |          |          
+               |          |          |          |          |--1.49%--0xffffffff85452e38
+               |          |          |          |          |          0xffffffff85452a61
+               |          |          |          |          |          0xffffffff8517f738
+               |          |          |          |          |          
+               |          |          |          |           --1.49%--0xffffffff85452dd0
+               |          |          |          |          
+               |          |          |          |--1.62%--0xffffffff853bb5a2
+               |          |          |          |          
+               |          |          |           --1.46%--0xffffffff853bb652
+               |          |          |          
+               |          |          |--4.48%--0xffffffff853a3963
+               |          |          |          0xffffffff853442bf
+               |          |          |          0xffffffff853439e9
+               |          |          |          0xffffffff853438f4
+               |          |          |          0xffffffff853437ad
+               |          |          |          |          
+               |          |          |          |--2.99%--0xffffffff85342072
+               |          |          |          |          |          
+               |          |          |          |          |--1.49%--0xffffffff85341645
+               |          |          |          |          |          
+               |          |          |          |           --1.49%--0xffffffff85341641
+               |          |          |          |          
+               |          |          |           --1.49%--0xffffffff85342151
+               |          |          |          
+               |          |          |--1.49%--0xffffffff853a31d0
+               |          |          |          
+               |          |          |--1.49%--0xffffffff853442c0
+               |          |          |          
+               |          |          |--1.48%--0xffffffff853bb566
+               |          |          |          
+               |          |           --1.48%--0xffffffff853a3795
+               |          |          
+               |          |--1.49%--0xffffffff84d0410b
+               |          |          
+               |          |--1.49%--0xffffffff853a4c5e
+               |          |          0xffffffff853b8390
+               |          |          0xffffffff853b8120
+               |          |          
+               |           --1.47%--0xffffffff853a4c22
+               |          
+                --1.49%--0xffffffff853a501b
+
+    37.53%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a53ad
+            |
+            ---0xffffffff853a53ad
+               |          
+               |--32.86%--0xffffffff853a4de7
+               |          |          
+               |          |--16.37%--0xffffffff853a37ea
+               |          |          |          
+               |          |          |--10.41%--0xffffffff853a33d2
+               |          |          |          0xffffffff8541df1b
+               |          |          |          |          
+               |          |          |          |--8.91%--0xffffffff8541a9e8
+               |          |          |          |          0xffffffff853dda90
+               |          |          |          |          |          
+               |          |          |          |          |--4.45%--0xffffffff853dc432
+               |          |          |          |          |          0xffffffff853da487
+               |          |          |          |          |          0xffffffff853d9102
+               |          |          |          |          |          |          
+               |          |          |          |          |          |--2.96%--0xffffffff853d8f99
+               |          |          |          |          |          |          0xffffffff853d7d2a
+               |          |          |          |          |          |          
+               |          |          |          |          |           --1.49%--0xffffffff853d8dd8
+               |          |          |          |          |          
+               |          |          |          |          |--2.99%--0xffffffff853dc6c9
+               |          |          |          |          |          0xffffffff8621b2b7
+               |          |          |          |          |          
+               |          |          |          |           --1.48%--0xffffffff853d95a7
+               |          |          |          |          
+               |          |          |           --1.49%--0xffffffff8541a780
+               |          |          |          
+               |          |          |--2.98%--0xffffffff853a3437
+               |          |          |          |          
+               |          |          |           --1.49%--0xffffffff85404a1a
+               |          |          |                     0xffffffff857c0296
+               |          |          |          
+               |          |          |--1.49%--0xffffffff853a33ec
+               |          |          |          0xffffffff85458fd3
+               |          |          |          
+               |          |           --1.49%--0xffffffff85404a01
+               |          |          
+               |          |--6.06%--0xffffffff853a3957
+               |          |          |          
+               |          |          |--2.99%--0xffffffff853bb5d6
+               |          |          |          0xffffffff853b9650
+               |          |          |          |          
+               |          |          |          |--1.49%--0xffffffff85452e38
+               |          |          |          |          0xffffffff85452a61
+               |          |          |          |          0xffffffff8517f738
+               |          |          |          |          
+               |          |          |           --1.49%--0xffffffff85452dd0
+               |          |          |          
+               |          |          |--1.62%--0xffffffff853bb5a2
+               |          |          |          
+               |          |           --1.46%--0xffffffff853bb652
+               |          |          
+               |          |--4.48%--0xffffffff853a3963
+               |          |          0xffffffff853442bf
+               |          |          0xffffffff853439e9
+               |          |          0xffffffff853438f4
+               |          |          0xffffffff853437ad
+               |          |          |          
+               |          |          |--2.99%--0xffffffff85342072
+               |          |          |          |          
+               |          |          |          |--1.49%--0xffffffff85341645
+               |          |          |          |          
+               |          |          |           --1.49%--0xffffffff85341641
+               |          |          |          
+               |          |           --1.49%--0xffffffff85342151
+               |          |          
+               |          |--1.49%--0xffffffff853a31d0
+               |          |          
+               |          |--1.49%--0xffffffff853442c0
+               |          |          
+               |          |--1.48%--0xffffffff853bb566
+               |          |          
+               |           --1.48%--0xffffffff853a3795
+               |          
+               |--1.49%--0xffffffff84d0410b
+               |          
+               |--1.49%--0xffffffff853a4c5e
+               |          0xffffffff853b8390
+               |          0xffffffff853b8120
+               |          
+                --1.47%--0xffffffff853a4c22
+
+    32.86%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a4de7
+            |
+            ---0xffffffff853a4de7
+               |          
+               |--16.37%--0xffffffff853a37ea
+               |          |          
+               |          |--10.41%--0xffffffff853a33d2
+               |          |          0xffffffff8541df1b
+               |          |          |          
+               |          |          |--8.91%--0xffffffff8541a9e8
+               |          |          |          0xffffffff853dda90
+               |          |          |          |          
+               |          |          |          |--4.45%--0xffffffff853dc432
+               |          |          |          |          0xffffffff853da487
+               |          |          |          |          0xffffffff853d9102
+               |          |          |          |          |          
+               |          |          |          |          |--2.96%--0xffffffff853d8f99
+               |          |          |          |          |          0xffffffff853d7d2a
+               |          |          |          |          |          
+               |          |          |          |           --1.49%--0xffffffff853d8dd8
+               |          |          |          |          
+               |          |          |          |--2.99%--0xffffffff853dc6c9
+               |          |          |          |          0xffffffff8621b2b7
+               |          |          |          |          
+               |          |          |           --1.48%--0xffffffff853d95a7
+               |          |          |          
+               |          |           --1.49%--0xffffffff8541a780
+               |          |          
+               |          |--2.98%--0xffffffff853a3437
+               |          |          |          
+               |          |           --1.49%--0xffffffff85404a1a
+               |          |                     0xffffffff857c0296
+               |          |          
+               |          |--1.49%--0xffffffff853a33ec
+               |          |          0xffffffff85458fd3
+               |          |          
+               |           --1.49%--0xffffffff85404a01
+               |          
+               |--6.06%--0xffffffff853a3957
+               |          |          
+               |          |--2.99%--0xffffffff853bb5d6
+               |          |          0xffffffff853b9650
+               |          |          |          
+               |          |          |--1.49%--0xffffffff85452e38
+               |          |          |          0xffffffff85452a61
+               |          |          |          0xffffffff8517f738
+               |          |          |          
+               |          |           --1.49%--0xffffffff85452dd0
+               |          |          
+               |          |--1.62%--0xffffffff853bb5a2
+               |          |          
+               |           --1.46%--0xffffffff853bb652
+               |          
+               |--4.48%--0xffffffff853a3963
+               |          0xffffffff853442bf
+               |          0xffffffff853439e9
+               |          0xffffffff853438f4
+               |          0xffffffff853437ad
+               |          |          
+               |          |--2.99%--0xffffffff85342072
+               |          |          |          
+               |          |          |--1.49%--0xffffffff85341645
+               |          |          |          
+               |          |           --1.49%--0xffffffff85341641
+               |          |          
+               |           --1.49%--0xffffffff85342151
+               |          
+               |--1.49%--0xffffffff853a31d0
+               |          
+               |--1.49%--0xffffffff853442c0
+               |          
+               |--1.48%--0xffffffff853bb566
+               |          
+                --1.48%--0xffffffff853a3795
+
+    16.37%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a37ea
+            |
+            ---0xffffffff853a37ea
+               |          
+               |--10.41%--0xffffffff853a33d2
+               |          0xffffffff8541df1b
+               |          |          
+               |          |--8.91%--0xffffffff8541a9e8
+               |          |          0xffffffff853dda90
+               |          |          |          
+               |          |          |--4.45%--0xffffffff853dc432
+               |          |          |          0xffffffff853da487
+               |          |          |          0xffffffff853d9102
+               |          |          |          |          
+               |          |          |          |--2.96%--0xffffffff853d8f99
+               |          |          |          |          0xffffffff853d7d2a
+               |          |          |          |          
+               |          |          |           --1.49%--0xffffffff853d8dd8
+               |          |          |          
+               |          |          |--2.99%--0xffffffff853dc6c9
+               |          |          |          0xffffffff8621b2b7
+               |          |          |          
+               |          |           --1.48%--0xffffffff853d95a7
+               |          |          
+               |           --1.49%--0xffffffff8541a780
+               |          
+               |--2.98%--0xffffffff853a3437
+               |          |          
+               |           --1.49%--0xffffffff85404a1a
+               |                     0xffffffff857c0296
+               |          
+               |--1.49%--0xffffffff853a33ec
+               |          0xffffffff85458fd3
+               |          
+                --1.49%--0xffffffff85404a01
+
+    11.91%     0.00%  join-bench  [unknown]             [.] 0xffffffff84c00b90
+            |
+            ---0xffffffff84c00b90
+
+    10.41%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a33d2
+            |
+            ---0xffffffff853a33d2
+               0xffffffff8541df1b
+               |          
+               |--8.91%--0xffffffff8541a9e8
+               |          0xffffffff853dda90
+               |          |          
+               |          |--4.45%--0xffffffff853dc432
+               |          |          0xffffffff853da487
+               |          |          0xffffffff853d9102
+               |          |          |          
+               |          |          |--2.96%--0xffffffff853d8f99
+               |          |          |          0xffffffff853d7d2a
+               |          |          |          
+               |          |           --1.49%--0xffffffff853d8dd8
+               |          |          
+               |          |--2.99%--0xffffffff853dc6c9
+               |          |          0xffffffff8621b2b7
+               |          |          
+               |           --1.48%--0xffffffff853d95a7
+               |          
+                --1.49%--0xffffffff8541a780
+
+    10.41%     0.00%  join-bench  [unknown]             [.] 0xffffffff8541df1b
+            |
+            ---0xffffffff8541df1b
+               |          
+               |--8.91%--0xffffffff8541a9e8
+               |          0xffffffff853dda90
+               |          |          
+               |          |--4.45%--0xffffffff853dc432
+               |          |          0xffffffff853da487
+               |          |          0xffffffff853d9102
+               |          |          |          
+               |          |          |--2.96%--0xffffffff853d8f99
+               |          |          |          0xffffffff853d7d2a
+               |          |          |          
+               |          |           --1.49%--0xffffffff853d8dd8
+               |          |          
+               |          |--2.99%--0xffffffff853dc6c9
+               |          |          0xffffffff8621b2b7
+               |          |          
+               |           --1.48%--0xffffffff853d95a7
+               |          
+                --1.49%--0xffffffff8541a780
+
+     8.91%     0.00%  join-bench  [unknown]             [.] 0xffffffff8541a9e8
+            |
+            ---0xffffffff8541a9e8
+               0xffffffff853dda90
+               |          
+               |--4.45%--0xffffffff853dc432
+               |          0xffffffff853da487
+               |          0xffffffff853d9102
+               |          |          
+               |          |--2.96%--0xffffffff853d8f99
+               |          |          0xffffffff853d7d2a
+               |          |          
+               |           --1.49%--0xffffffff853d8dd8
+               |          
+               |--2.99%--0xffffffff853dc6c9
+               |          0xffffffff8621b2b7
+               |          
+                --1.48%--0xffffffff853d95a7
+
+     8.91%     0.00%  join-bench  [unknown]             [.] 0xffffffff853dda90
+            |
+            ---0xffffffff853dda90
+               |          
+               |--4.45%--0xffffffff853dc432
+               |          0xffffffff853da487
+               |          0xffffffff853d9102
+               |          |          
+               |          |--2.96%--0xffffffff853d8f99
+               |          |          0xffffffff853d7d2a
+               |          |          
+               |           --1.49%--0xffffffff853d8dd8
+               |          
+               |--2.99%--0xffffffff853dc6c9
+               |          0xffffffff8621b2b7
+               |          
+                --1.48%--0xffffffff853d95a7
+
+     7.56%     4.57%  join-bench  [unknown]             [k] 0xffffffff8621b2b7
+            |          
+            |--2.99%--__memmove_avx_unaligned_erms
+            |          
+            |--2.99%--0xffffffff8621b2b7
+            |          
+             --1.58%--<fp_columnar::Column>::from_lower_hex_sequence_utf8
+
+     7.45%     1.47%  join-bench  join-bench            [.] join_bench::build_ordered_utf8_frame
+            |          
+            |--5.97%--join_bench::build_ordered_utf8_frame
+            |          0xffffffff84c00bb7
+            |          0xffffffff8622811f
+            |          0xffffffff84feb96b
+            |          0xffffffff853a5627
+            |          0xffffffff853a53ad
+            |          0xffffffff853a4de7
+            |          |          
+            |          |--2.99%--0xffffffff853a37ea
+            |          |          |          
+            |          |          |--1.49%--0xffffffff853a33ec
+            |          |          |          0xffffffff85458fd3
+            |          |          |          
+            |          |           --1.49%--0xffffffff853a33d2
+            |          |                     0xffffffff8541df1b
+            |          |                     0xffffffff8541a780
+            |          |          
+            |          |--1.49%--0xffffffff853a3963
+            |          |          0xffffffff853442bf
+            |          |          0xffffffff853439e9
+            |          |          0xffffffff853438f4
+            |          |          0xffffffff853437ad
+            |          |          0xffffffff85342151
+            |          |          
+            |           --1.49%--0xffffffff853a3957
+            |                     0xffffffff853bb5d6
+            |                     0xffffffff853b9650
+            |                     0xffffffff85452dd0
+            |          
+             --1.47%--0
+                       join_bench::build_ordered_utf8_frame
+
+     6.06%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a3957
+            |
+            ---0xffffffff853a3957
+               |          
+               |--2.99%--0xffffffff853bb5d6
+               |          0xffffffff853b9650
+               |          |          
+               |          |--1.49%--0xffffffff85452e38
+               |          |          0xffffffff85452a61
+               |          |          0xffffffff8517f738
+               |          |          
+               |           --1.49%--0xffffffff85452dd0
+               |          
+               |--1.62%--0xffffffff853bb5a2
+               |          
+                --1.46%--0xffffffff853bb652
+
+     5.97%     1.49%  join-bench  [unknown]             [.] 0xffffffff853438f4
+            |          
+            |--4.48%--0xffffffff853438f4
+            |          0xffffffff853437ad
+            |          |          
+            |          |--2.99%--0xffffffff85342072
+            |          |          |          
+            |          |          |--1.49%--0xffffffff85341645
+            |          |          |          
+            |          |           --1.49%--0xffffffff85341641
+            |          |          
+            |           --1.49%--0xffffffff85342151
+            |          
+             --1.49%--__memmove_avx_unaligned_erms
+                       0xffffffff84c00b90
+
+     5.97%     0.00%  join-bench  [unknown]             [k] 0x00005827a4184fa0
+            |
+            ---0x5827a4184fa0
+               join_bench::build_ordered_utf8_frame
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               |          
+               |--2.99%--0xffffffff853a37ea
+               |          |          
+               |          |--1.49%--0xffffffff853a33ec
+               |          |          0xffffffff85458fd3
+               |          |          
+               |           --1.49%--0xffffffff853a33d2
+               |                     0xffffffff8541df1b
+               |                     0xffffffff8541a780
+               |          
+               |--1.49%--0xffffffff853a3963
+               |          0xffffffff853442bf
+               |          0xffffffff853439e9
+               |          0xffffffff853438f4
+               |          0xffffffff853437ad
+               |          0xffffffff85342151
+               |          
+                --1.49%--0xffffffff853a3957
+                          0xffffffff853bb5d6
+                          0xffffffff853b9650
+                          0xffffffff85452dd0
+
+     4.49%     0.00%  join-bench  [unknown]             [k] 0xffffffff84c0012b
+            |
+            ---0xffffffff84c0012b
+               0xffffffff86220551
+               |          
+               |--2.99%--0xffffffff84f24dad
+               |          0xffffffff853aa42b
+               |          0xffffffff853ceac8
+               |          0xffffffff853cc961
+               |          0xffffffff853cc7f5
+               |          0xffffffff853cb02c
+               |          0xffffffff853c9742
+               |          0xffffffff8539cea1
+               |          0xffffffff8539cd76
+               |          0xffffffff8539cb30
+               |          0xffffffff8539c594
+               |          0xffffffff8539c06e
+               |          0xffffffff8539b7d0
+               |          
+                --1.49%--0xffffffff84f24dda
+                          0xffffffff853ab362
+                          0xffffffff853ab2c0
+                          0xffffffff853cc7f5
+                          0xffffffff853cb02c
+                          0xffffffff853c9742
+                          0xffffffff8539cea1
+                          0xffffffff8539cd76
+                          0xffffffff8539cb30
+                          0xffffffff8539c594
+                          0xffffffff8539c06e
+                          0xffffffff8539b7d0
+
+     4.49%     0.00%  join-bench  [unknown]             [k] 0xffffffff86220551
+            |
+            ---0xffffffff86220551
+               |          
+               |--2.99%--0xffffffff84f24dad
+               |          0xffffffff853aa42b
+               |          0xffffffff853ceac8
+               |          0xffffffff853cc961
+               |          0xffffffff853cc7f5
+               |          0xffffffff853cb02c
+               |          0xffffffff853c9742
+               |          0xffffffff8539cea1
+               |          0xffffffff8539cd76
+               |          0xffffffff8539cb30
+               |          0xffffffff8539c594
+               |          0xffffffff8539c06e
+               |          0xffffffff8539b7d0
+               |          
+                --1.49%--0xffffffff84f24dda
+                          0xffffffff853ab362
+                          0xffffffff853ab2c0
+                          0xffffffff853cc7f5
+                          0xffffffff853cb02c
+                          0xffffffff853c9742
+                          0xffffffff8539cea1
+                          0xffffffff8539cd76
+                          0xffffffff8539cb30
+                          0xffffffff8539c594
+                          0xffffffff8539c06e
+                          0xffffffff8539b7d0
+
+     4.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a3963
+            |
+            ---0xffffffff853a3963
+               0xffffffff853442bf
+               0xffffffff853439e9
+               0xffffffff853438f4
+               0xffffffff853437ad
+               |          
+               |--2.99%--0xffffffff85342072
+               |          |          
+               |          |--1.49%--0xffffffff85341645
+               |          |          
+               |           --1.49%--0xffffffff85341641
+               |          
+                --1.49%--0xffffffff85342151
+
+     4.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff853442bf
+            |
+            ---0xffffffff853442bf
+               0xffffffff853439e9
+               0xffffffff853438f4
+               0xffffffff853437ad
+               |          
+               |--2.99%--0xffffffff85342072
+               |          |          
+               |          |--1.49%--0xffffffff85341645
+               |          |          
+               |           --1.49%--0xffffffff85341641
+               |          
+                --1.49%--0xffffffff85342151
+
+     4.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff853439e9
+            |
+            ---0xffffffff853439e9
+               0xffffffff853438f4
+               0xffffffff853437ad
+               |          
+               |--2.99%--0xffffffff85342072
+               |          |          
+               |          |--1.49%--0xffffffff85341645
+               |          |          
+               |           --1.49%--0xffffffff85341641
+               |          
+                --1.49%--0xffffffff85342151
+
+     4.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff853437ad
+            |
+            ---0xffffffff853437ad
+               |          
+               |--2.99%--0xffffffff85342072
+               |          |          
+               |          |--1.49%--0xffffffff85341645
+               |          |          
+               |           --1.49%--0xffffffff85341641
+               |          
+                --1.49%--0xffffffff85342151
+
+     4.48%     4.48%  join-bench  [unknown]             [k] 0xffffffff84c01192
+            |          
+            |--1.49%--<fp_columnar::Column>::from_lower_hex_sequence_utf8
+            |          
+            |--1.49%--0x5827a4184fa0
+            |          join_bench::build_ordered_utf8_frame
+            |          0xffffffff84c00bb7
+            |          0xffffffff8622811f
+            |          0xffffffff84feb96b
+            |          0xffffffff853a5627
+            |          0xffffffff853a53ad
+            |          0xffffffff853a4de7
+            |          0xffffffff853a37ea
+            |          0xffffffff853a33d2
+            |          0xffffffff8541df1b
+            |          0xffffffff8541a780
+            |          
+             --1.49%--__memmove_avx_unaligned_erms
+
+     4.48%     2.99%  join-bench  [unknown]             [k] 0xffffffff85452a61
+            |          
+            |--1.49%--<fp_columnar::Column>::from_lower_hex_sequence_utf8
+            |          __munmap
+            |          0xffffffff84c0012b
+            |          0xffffffff86220551
+            |          0xffffffff84f24dad
+            |          0xffffffff853aa42b
+            |          0xffffffff853ceac8
+            |          0xffffffff853cc961
+            |          0xffffffff853cc7f5
+            |          0xffffffff853cb02c
+            |          0xffffffff853c9742
+            |          0xffffffff8539cea1
+            |          0xffffffff8539cd76
+            |          0xffffffff8539cb30
+            |          0xffffffff8539c594
+            |          0xffffffff8539c06e
+            |          0xffffffff8539b7d0
+            |          
+            |--1.49%--0xffffffff85452a61
+            |          0xffffffff8517f738
+            |          
+             --1.49%--core::ptr::drop_in_place::<fp_columnar::Column>
+                       __munmap
+                       0xffffffff84c0012b
+                       0xffffffff86220551
+                       0xffffffff84f24dad
+                       0xffffffff853aa42b
+                       0xffffffff853ceac8
+                       0xffffffff853cc961
+                       0xffffffff853cc7f5
+                       0xffffffff853cb02c
+                       0xffffffff853c9742
+                       0xffffffff8539cea1
+                       0xffffffff8539cd76
+                       0xffffffff8539cb30
+                       0xffffffff8539c594
+                       0xffffffff8539c06e
+                       0xffffffff8539b7d0
+
+     4.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff853cc7f5
+            |
+            ---0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     4.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff853cb02c
+            |
+            ---0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     4.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff853c9742
+            |
+            ---0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     4.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff8539cea1
+            |
+            ---0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     4.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff8539cd76
+            |
+            ---0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     4.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff8539cb30
+            |
+            ---0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     4.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff8539c594
+            |
+            ---0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     4.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff8539c06e
+            |
+            ---0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     4.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff8539b7d0
+            |
+            ---0xffffffff8539b7d0
+
+     4.47%     1.49%  join-bench  [unknown]             [.] 0xffffffff853a3437
+            |          
+            |--2.98%--0xffffffff853a3437
+            |          |          
+            |           --1.49%--0xffffffff85404a1a
+            |                     0xffffffff857c0296
+            |          
+             --1.49%--__memmove_avx_unaligned_erms
+                       0xffffffff84c00b90
+
+     4.47%     4.47%  join-bench  join-bench            [.] join_bench::add_numeric_checksum
+            |
+            ---join_bench::add_numeric_checksum
+
+     4.45%     0.00%  join-bench  [unknown]             [.] 0xffffffff853dc432
+            |
+            ---0xffffffff853dc432
+               0xffffffff853da487
+               0xffffffff853d9102
+               |          
+               |--2.96%--0xffffffff853d8f99
+               |          0xffffffff853d7d2a
+               |          
+                --1.49%--0xffffffff853d8dd8
+
+     4.45%     0.00%  join-bench  [unknown]             [.] 0xffffffff853da487
+            |
+            ---0xffffffff853da487
+               0xffffffff853d9102
+               |          
+               |--2.96%--0xffffffff853d8f99
+               |          0xffffffff853d7d2a
+               |          
+                --1.49%--0xffffffff853d8dd8
+
+     4.45%     0.00%  join-bench  [unknown]             [.] 0xffffffff853d9102
+            |
+            ---0xffffffff853d9102
+               |          
+               |--2.96%--0xffffffff853d8f99
+               |          0xffffffff853d7d2a
+               |          
+                --1.49%--0xffffffff853d8dd8
+
+     2.99%     1.49%  join-bench  [unknown]             [.] 0xffffffff85452e38
+            |          
+            |--1.49%--__memmove_avx_unaligned_erms
+            |          0xffffffff84c00b90
+            |          
+             --1.49%--0xffffffff85452e38
+                       0xffffffff85452a61
+                       0xffffffff8517f738
+
+     2.99%     1.49%  join-bench  [unknown]             [k] 0xffffffff85342072
+            |          
+            |--1.49%--0xffffffff85342072
+            |          0xffffffff85341645
+            |          
+             --1.49%--__memmove_avx_unaligned_erms
+                       0xffffffff84c00bb7
+                       0xffffffff8622811f
+                       0xffffffff84feb96b
+                       0xffffffff853a5627
+                       0xffffffff853a53ad
+                       0xffffffff853a4de7
+                       0xffffffff853a3963
+                       0xffffffff853442bf
+                       0xffffffff853439e9
+                       0xffffffff853438f4
+                       0xffffffff853437ad
+                       0xffffffff85342072
+                       0xffffffff85341641
+
+     2.99%     0.00%  join-bench  [unknown]             [.] 0xffffffff853dc6c9
+            |
+            ---0xffffffff853dc6c9
+               0xffffffff8621b2b7
+
+     2.99%     0.00%  join-bench  [unknown]             [.] 0xffffffff853bb5d6
+            |
+            ---0xffffffff853bb5d6
+               0xffffffff853b9650
+               |          
+               |--1.49%--0xffffffff85452e38
+               |          0xffffffff85452a61
+               |          0xffffffff8517f738
+               |          
+                --1.49%--0xffffffff85452dd0
+
+     2.99%     0.00%  join-bench  [unknown]             [.] 0xffffffff853b9650
+            |
+            ---0xffffffff853b9650
+               |          
+               |--1.49%--0xffffffff85452e38
+               |          0xffffffff85452a61
+               |          0xffffffff8517f738
+               |          
+                --1.49%--0xffffffff85452dd0
+
+     2.99%     2.99%  join-bench  [unknown]             [k] 0xffffffff853a4efc
+            |          
+            |--1.49%--0x5827a4184fa0
+            |          join_bench::build_ordered_utf8_frame
+            |          0xffffffff84c00bb7
+            |          0xffffffff8622811f
+            |          0xffffffff84feb96b
+            |          0xffffffff853a5627
+            |          0xffffffff853a53ad
+            |          0xffffffff853a4de7
+            |          0xffffffff853a37ea
+            |          0xffffffff853a33ec
+            |          0xffffffff85458fd3
+            |          
+             --1.49%--__memmove_avx_unaligned_erms
+                       0xffffffff84c00bb7
+                       0xffffffff8622811f
+                       0xffffffff84feb96b
+                       0xffffffff853a5627
+                       0xffffffff853a53ad
+                       0xffffffff853a4de7
+                       0xffffffff853442c0
+
+     2.99%     0.00%  join-bench  libc.so.6             [.] __munmap
+            |
+            ---__munmap
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dad
+               0xffffffff853aa42b
+               0xffffffff853ceac8
+               0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     2.99%     0.00%  join-bench  [unknown]             [.] 0xffffffff84f24dad
+            |
+            ---0xffffffff84f24dad
+               0xffffffff853aa42b
+               0xffffffff853ceac8
+               0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     2.99%     0.00%  join-bench  [unknown]             [.] 0xffffffff853aa42b
+            |
+            ---0xffffffff853aa42b
+               0xffffffff853ceac8
+               0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     2.99%     0.00%  join-bench  [unknown]             [.] 0xffffffff853ceac8
+            |
+            ---0xffffffff853ceac8
+               0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     2.99%     0.00%  join-bench  [unknown]             [.] 0xffffffff853cc961
+            |
+            ---0xffffffff853cc961
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     2.98%     0.00%  join-bench  join-bench            [.] core::ptr::drop_in_place::<fp_columnar::Column>
+            |
+            ---core::ptr::drop_in_place::<fp_columnar::Column>
+               |          
+               |--1.49%--__munmap
+               |          0xffffffff84c0012b
+               |          0xffffffff86220551
+               |          0xffffffff84f24dad
+               |          0xffffffff853aa42b
+               |          0xffffffff853ceac8
+               |          0xffffffff853cc961
+               |          0xffffffff853cc7f5
+               |          0xffffffff853cb02c
+               |          0xffffffff853c9742
+               |          0xffffffff8539cea1
+               |          0xffffffff8539cd76
+               |          0xffffffff8539cb30
+               |          0xffffffff8539c594
+               |          0xffffffff8539c06e
+               |          0xffffffff8539b7d0
+               |          
+                --1.49%--_int_free_chunk
+                          systrim.constprop.0
+                          __default_morecore@GLIBC_2.2.5
+                          __brk
+                          0xffffffff84c0012b
+                          0xffffffff86220551
+                          0xffffffff84f24dda
+                          0xffffffff853ab362
+                          0xffffffff853ab2c0
+                          0xffffffff853cc7f5
+                          0xffffffff853cb02c
+                          0xffffffff853c9742
+                          0xffffffff8539cea1
+                          0xffffffff8539cd76
+                          0xffffffff8539cb30
+                          0xffffffff8539c594
+                          0xffffffff8539c06e
+                          0xffffffff8539b7d0
+
+     2.98%     2.98%  join-bench  [unknown]             [k] 0xffffffff84d0410b
+            |
+            ---__memmove_avx_unaligned_erms
+               |          
+               |--1.49%--0xffffffff84c00bb7
+               |          0xffffffff8622811f
+               |          0xffffffff84feb96b
+               |          0xffffffff853a5627
+               |          0xffffffff853a53ad
+               |          0xffffffff84d0410b
+               |          
+                --1.49%--0xffffffff84c00b90
+
+     2.96%     1.46%  join-bench  [unknown]             [.] 0xffffffff853a33ec
+            |          
+            |--1.49%--0xffffffff853a33ec
+            |          0xffffffff85458fd3
+            |          
+             --1.46%--__memmove_avx_unaligned_erms
+                       0xffffffff84c00b90
+
+     2.96%     0.00%  join-bench  [unknown]             [.] 0xffffffff853d8f99
+            |
+            ---0xffffffff853d8f99
+               0xffffffff853d7d2a
+
+     2.96%     0.00%  join-bench  [unknown]             [.] 0xffffffff853d7d2a
+            |
+            ---0xffffffff853d7d2a
+
+     1.62%     1.62%  join-bench  [unknown]             [k] 0xffffffff853a4fa3
+            |
+            ---<fp_columnar::Column>::from_lower_hex_sequence_utf8
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3957
+               0xffffffff853bb5a2
+
+     1.62%     0.00%  join-bench  [unknown]             [.] 0xffffffff853bb5a2
+            |
+            ---0xffffffff853bb5a2
+
+     1.49%     1.49%  join-bench  [unknown]             [k] 0xffffffff853dda06
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3963
+               0xffffffff853442bf
+               0xffffffff853439e9
+               0xffffffff853438f4
+               0xffffffff853437ad
+               0xffffffff85342072
+               0xffffffff85341645
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff85341645
+            |
+            ---0xffffffff85341645
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff853d8dd8
+            |
+            ---0xffffffff853d8dd8
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff84feb808
+            |
+            ---0xffffffff84feb808
+
+     1.49%     1.49%  join-bench  [unknown]             [k] 0xffffffff853d8e7c
+            |
+            ---<fp_columnar::Column>::from_lower_hex_sequence_utf8
+               0xffffffff84c01199
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff84c01199
+            |
+            ---0xffffffff84c01199
+
+     1.49%     1.49%  join-bench  [unknown]             [k] 0xffffffff8541a9a0
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5723
+               0xffffffff854555af
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a5723
+            |
+            ---0xffffffff853a5723
+               0xffffffff854555af
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff854555af
+            |
+            ---0xffffffff854555af
+
+     1.49%     1.49%  join-bench  [unknown]             [k] 0xffffffff85452ccf
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00b90
+
+     1.49%     1.49%  join-bench  [unknown]             [k] 0xffffffff85342003
+            |
+            ---0x5827a4184fa0
+               join_bench::build_ordered_utf8_frame
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3963
+               0xffffffff853442bf
+               0xffffffff853439e9
+               0xffffffff853438f4
+               0xffffffff853437ad
+               0xffffffff85342151
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff85342151
+            |
+            ---0xffffffff85342151
+
+     1.49%     1.49%  join-bench  [unknown]             [k] 0xffffffff85123f6d
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb92c
+               0xffffffff85392d40
+               0xffffffff861f662b
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff84feb92c
+            |
+            ---0xffffffff84feb92c
+               0xffffffff85392d40
+               0xffffffff861f662b
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff85392d40
+            |
+            ---0xffffffff85392d40
+               0xffffffff861f662b
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff861f662b
+            |
+            ---0xffffffff861f662b
+
+     1.49%     1.49%  join-bench  [unknown]             [k] 0xffffffff84fea905
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3957
+               0xffffffff853bb5d6
+               0xffffffff853b9650
+               0xffffffff85452e38
+               0xffffffff85452a61
+               0xffffffff8517f738
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff8517f738
+            |
+            ---0xffffffff8517f738
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff85458fd3
+            |
+            ---0xffffffff85458fd3
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff8541a780
+            |
+            ---0xffffffff8541a780
+
+     1.49%     1.49%  join-bench  [unknown]             [k] 0xffffffff85341525
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00b90
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a31d0
+            |
+            ---0xffffffff853a31d0
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff85341641
+            |
+            ---0xffffffff85341641
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff853442c0
+            |
+            ---0xffffffff853442c0
+
+     1.49%     1.49%  join-bench  [unknown]             [k] 0xffffffff853a4e56
+            |
+            ---0x5827a4184fa0
+               join_bench::build_ordered_utf8_frame
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3957
+               0xffffffff853bb5d6
+               0xffffffff853b9650
+               0xffffffff85452dd0
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff85452dd0
+            |
+            ---0xffffffff85452dd0
+
+     1.49%     1.49%  join-bench  [unknown]             [k] 0xffffffff85392d4c
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a37ea
+               0xffffffff85404a01
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff85404a01
+            |
+            ---0xffffffff85404a01
+
+     1.49%     1.49%  join-bench  [unknown]             [k] 0xffffffff8539c07d
+            |
+            ---core::ptr::drop_in_place::<fp_columnar::Column>
+               _int_free_chunk
+               systrim.constprop.0
+               __default_morecore@GLIBC_2.2.5
+               __brk
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dda
+               0xffffffff853ab362
+               0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     1.49%     0.00%  join-bench  libc.so.6             [.] _int_free_chunk
+            |
+            ---_int_free_chunk
+               systrim.constprop.0
+               __default_morecore@GLIBC_2.2.5
+               __brk
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dda
+               0xffffffff853ab362
+               0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     1.49%     0.00%  join-bench  libc.so.6             [.] systrim.constprop.0
+            |
+            ---systrim.constprop.0
+               __default_morecore@GLIBC_2.2.5
+               __brk
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dda
+               0xffffffff853ab362
+               0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     1.49%     0.00%  join-bench  libc.so.6             [.] __default_morecore@GLIBC_2.2.5
+            |
+            ---__default_morecore@GLIBC_2.2.5
+               __brk
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dda
+               0xffffffff853ab362
+               0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     1.49%     0.00%  join-bench  libc.so.6             [.] __brk
+            |
+            ---__brk
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f24dda
+               0xffffffff853ab362
+               0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff84f24dda
+            |
+            ---0xffffffff84f24dda
+               0xffffffff853ab362
+               0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff853ab362
+            |
+            ---0xffffffff853ab362
+               0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff853ab2c0
+            |
+            ---0xffffffff853ab2c0
+               0xffffffff853cc7f5
+               0xffffffff853cb02c
+               0xffffffff853c9742
+               0xffffffff8539cea1
+               0xffffffff8539cd76
+               0xffffffff8539cb30
+               0xffffffff8539c594
+               0xffffffff8539c06e
+               0xffffffff8539b7d0
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a4c5e
+            |
+            ---0xffffffff853a4c5e
+               0xffffffff853b8390
+               0xffffffff853b8120
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff853b8390
+            |
+            ---0xffffffff853b8390
+               0xffffffff853b8120
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff853b8120
+            |
+            ---0xffffffff853b8120
+
+     1.49%     1.49%  join-bench  [unknown]             [k] 0xffffffff853d90b1
+            |
+            ---<fp_columnar::Column>::from_lower_hex_sequence_utf8
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a501b
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a501b
+            |
+            ---0xffffffff853a501b
+
+     1.49%     1.49%  join-bench  [unknown]             [k] 0xffffffff853d7e9f
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a37ea
+               0xffffffff853a33d2
+               0xffffffff8541df1b
+               0xffffffff8541a9e8
+               0xffffffff853dda90
+               0xffffffff853dc432
+               0xffffffff853da487
+               0xffffffff853d9102
+               0xffffffff853d8f99
+               0xffffffff853d7d2a
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff85404a1a
+            |
+            ---0xffffffff85404a1a
+               0xffffffff857c0296
+
+     1.49%     0.00%  join-bench  [unknown]             [.] 0xffffffff857c0296
+            |
+            ---0xffffffff857c0296
+
+     1.48%     1.48%  join-bench  [unknown]             [k] 0xffffffff84feb802
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853bb566
+
+     1.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff853bb566
+            |
+            ---0xffffffff853bb566
+
+     1.48%     1.48%  join-bench  [unknown]             [k] 0xffffffff8541a792
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3795
+
+     1.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a3795
+            |
+            ---0xffffffff853a3795
+
+     1.48%     0.00%  join-bench  [unknown]             [.] 0xffffffff853d95a7
+            |
+            ---0xffffffff853d95a7
+
+     1.47%     0.00%  join-bench  [unknown]             [.] 0000000000000000
+            |
+            ---0
+               join_bench::build_ordered_utf8_frame
+
+     1.47%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a4c22
+            |
+            ---0xffffffff853a4c22
+
+     1.47%     1.47%  join-bench  [unknown]             [k] 0xffffffff853d7e97
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a37ea
+               0xffffffff853a33d2
+               0xffffffff8541df1b
+               0xffffffff8541a9e8
+               0xffffffff853dda90
+               0xffffffff853dc432
+               0xffffffff853da487
+               0xffffffff853d9102
+               0xffffffff853d8f99
+               0xffffffff853d7d2a
+
+     1.46%     1.46%  join-bench  [unknown]             [k] 0xffffffff853a5716
+            |
+            ---<fp_columnar::Column>::from_lower_hex_sequence_utf8
+
+     1.46%     1.46%  join-bench  [unknown]             [k] 0xffffffff853a4c49
+            |
+            ---__memmove_avx_unaligned_erms
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3957
+               0xffffffff853bb652
+
+     1.46%     0.00%  join-bench  [unknown]             [.] 0xffffffff853bb652
+            |
+            ---0xffffffff853bb652
+
+     0.21%     0.21%  join-bench  [unknown]             [k] 0xffffffff8532f4ab
+     0.21%     0.00%  join-bench  join-bench            [.] _start
+     0.21%     0.00%  join-bench  libc.so.6             [.] __libc_start_main@@GLIBC_2.34
+     0.21%     0.00%  join-bench  join-bench            [.] main
+     0.21%     0.00%  join-bench  join-bench            [.] std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+     0.21%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a4d51
+     0.21%     0.00%  join-bench  [unknown]             [.] 0xffffffff8539f785
+     0.21%     0.00%  join-bench  [unknown]             [.] 0xffffffff8539f2f2
+     0.21%     0.00%  join-bench  [unknown]             [.] 0xffffffff8532f6a8
+     0.21%     0.00%  join-bench  [unknown]             [.] 0xffffffff8539eb33
+     0.21%     0.00%  join-bench  [unknown]             [.] 0xffffffff853bb7b6
+     0.17%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] _dl_start_user
+     0.16%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] _dl_start
+     0.16%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] _dl_sysdep_start
+     0.16%     0.16%  join-bench  [unknown]             [k] 0xffffffff84c001bd
+     0.16%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] init_cpu_features.constprop.0
+     0.01%     0.01%  join-bench  [unknown]             [k] 0xffffffff8539eab3
+     0.01%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] _dl_init
+     0.01%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] call_init.part.0
+     0.01%     0.00%  join-bench  libc.so.6             [.] __strrchr_avx2
+     0.01%     0.01%  join-bench  [unknown]             [k] 0xffffffff853029f3
+     0.01%     0.00%  join-bench  [unknown]             [k] 0x00007681c2ef878b
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff84f25398
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff8548bea9
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff8548bbf7
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff8548a03a
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff85489f2c
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff85489bec
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff85529184
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff8548a4c5
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff853cedb9
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff853cb751
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff853ca196
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff861f84d6
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff861f3881
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff861f3623
+     0.01%     0.00%  join-bench  [unknown]             [k] 0xffffffff853f08fb
+     0.00%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] dl_main
+     0.00%     0.00%  join-bench  libc.so.6             [.] __libc_early_init
+     0.00%     0.00%  join-bench  libc.so.6             [.] __cache_sysconf
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0x00007681c2ef878b
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff84c0012b
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff86220551
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff84f25398
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8548bea9
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8548bbf7
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8548a03a
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff85489f2c
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff85489bec
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff855290b9
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8548c37d
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff84c0008b
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff85317637
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff853176f9
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff85301ecc
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff86228130
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff85317605
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff86228a43
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff853141e6
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8530d2bc
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff84f2b8d5
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8530d286
+     0.00%     0.00%  join-bench  [unknown]             [k] 0xffffffff85300b60
+     0.00%     0.00%  join-bench  [unknown]             [k] 0xffffffff8530d285
+     0.00%     0.00%  join-bench  [unknown]             [k] 0xffffffff8530d2bc
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8622884d
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff86228929
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff862289ac
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff85313ac2
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff85124022
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff85326b38
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8622f947
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff84f2b931
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff84f8cacc
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff853267c9
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8622f445
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff84f2ff25
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff84f8c9d6
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8506d590
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8621c6a7
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff84fdedcd
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

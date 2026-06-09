@@ -1372,6 +1372,57 @@ impl ScalarValues {
         Self::lazy_contiguous_utf8_arc(Arc::from(bytes), Arc::from(offsets))
     }
 
+    fn lazy_lower_hex_sequence_utf8(
+        prefix: &[u8],
+        start: u64,
+        len: usize,
+        hex_width: usize,
+    ) -> Option<Self> {
+        if prefix.is_empty() || hex_width == 0 || hex_width > 16 {
+            return None;
+        }
+        if len > 0 {
+            let last = start.checked_add(u64::try_from(len.checked_sub(1)?).ok()?)?;
+            if hex_width < 16 && (last >> (hex_width * 4)) != 0 {
+                return None;
+            }
+        }
+
+        let width = prefix.len().checked_add(hex_width)?;
+        let mut bytes = Vec::with_capacity(width.checked_mul(len)?);
+        let mut offsets = Vec::with_capacity(len.checked_add(1)?);
+        offsets.push(0);
+        for row in 0..len {
+            bytes.extend_from_slice(prefix);
+            push_fixed_width_lower_hex(
+                &mut bytes,
+                start.checked_add(u64::try_from(row).ok()?)?,
+                hex_width,
+            );
+            offsets.push(bytes.len());
+        }
+
+        let strictly_increasing = OnceLock::new();
+        let _ = strictly_increasing.set(true);
+        let fixed_width = OnceLock::new();
+        let _ = fixed_width.set(Some(width));
+        let lower_hex_sequence = OnceLock::new();
+        let _ = lower_hex_sequence.set((len > 0).then_some(Utf8LowerHexSequence {
+            prefix_len: prefix.len(),
+            hex_width,
+            start,
+        }));
+
+        Some(Self::LazyContiguousUtf8 {
+            bytes: Arc::from(bytes),
+            offsets: Arc::from(offsets),
+            strictly_increasing,
+            fixed_width,
+            lower_hex_sequence,
+            values: OnceLock::new(),
+        })
+    }
+
     /// Construct a `LazyContiguousUtf8` from already-`Arc`-shared buffers,
     /// sharing them in O(1) instead of re-allocating. Used by `Clone` so two
     /// contiguous-Utf8 columns can share one immutable byte buffer
@@ -2258,6 +2309,18 @@ fn parse_fixed_width_lower_hex(bytes: &[u8]) -> Option<u64> {
         value = value.checked_add(u64::from(lower_hex_value(byte)?))?;
     }
     Some(value)
+}
+
+fn push_fixed_width_lower_hex(bytes: &mut Vec<u8>, value: u64, width: usize) {
+    debug_assert!(width <= 16, "u64 lower-hex width cannot exceed 16");
+    for shift in (0..width).rev() {
+        let nibble = ((value >> (shift * 4)) & 0x0f) as u8;
+        bytes.push(if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + (nibble - 10)
+        });
+    }
 }
 
 fn contiguous_utf8_lower_hex_sequence(
@@ -3571,6 +3634,30 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
         }
+    }
+
+    /// Build an all-valid fixed-width lowercase-hex Utf8 sequence and seed its
+    /// immutable ordered-join certificate.
+    ///
+    /// Semantically this is identical to
+    /// `from_utf8_contiguous(prefix + format!("{start + row:0hex_width$x}"))`
+    /// for `row in 0..len`, but the producer carries the exact construction
+    /// witness so ordered joins do not rediscover it by scanning every row.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_lower_hex_sequence_utf8(
+        prefix: &[u8],
+        start: u64,
+        len: usize,
+        hex_width: usize,
+    ) -> Option<Self> {
+        let values = ScalarValues::lazy_lower_hex_sequence_utf8(prefix, start, len, hex_width)?;
+        Some(Self {
+            dtype: DType::Utf8,
+            values,
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        })
     }
 
     /// Build an all-valid Int64 column from `(value, run_len)` repeat runs
@@ -16752,6 +16839,41 @@ mod tests {
                     .is_none(),
                 "a prefix is required so arbitrary all-hex strings fall back"
             );
+        }
+
+        #[test]
+        fn lower_hex_sequence_constructor_matches_contiguous_utf8_3wo1d() {
+            let seeded =
+                Column::from_lower_hex_sequence_utf8(b"id_", 0x0a, 3, 8).expect("seeded column");
+            let manual = {
+                let values = ["id_0000000a", "id_0000000b", "id_0000000c"];
+                let mut bytes = Vec::new();
+                let mut offsets = Vec::with_capacity(values.len() + 1);
+                offsets.push(0);
+                for value in values {
+                    bytes.extend_from_slice(value.as_bytes());
+                    offsets.push(bytes.len());
+                }
+                Column::from_utf8_contiguous(bytes, offsets)
+            };
+
+            assert_eq!(seeded.values(), manual.values());
+            let (_, _, certificate) = seeded
+                .as_lower_hex_sequence_utf8_contiguous()
+                .expect("seeded certificate");
+            assert_eq!(certificate.prefix_len(), 3);
+            assert_eq!(certificate.hex_width(), 8);
+            assert_eq!(certificate.width(), 11);
+            assert_eq!(certificate.start(), 10);
+            assert_eq!(certificate.value_at(2), Some(12));
+
+            let empty =
+                Column::from_lower_hex_sequence_utf8(b"id_", 0x0a, 0, 8).expect("empty column");
+            assert!(empty.values().is_empty());
+            assert!(empty.as_lower_hex_sequence_utf8_contiguous().is_none());
+
+            assert!(Column::from_lower_hex_sequence_utf8(b"id_", 0x0e, 3, 1).is_none());
+            assert!(Column::from_lower_hex_sequence_utf8(b"", 0x0a, 3, 8).is_none());
         }
 
         #[test]

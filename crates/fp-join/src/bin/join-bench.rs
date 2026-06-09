@@ -177,6 +177,28 @@ fn try_push_sequential_lower_hex_8(
     true
 }
 
+fn build_ordered_utf8_id_column(
+    rows: usize,
+    key_start: usize,
+) -> Result<Column, Box<dyn std::error::Error>> {
+    if let Ok(start) = u64::try_from(key_start)
+        && let Some(column) = Column::from_lower_hex_sequence_utf8(b"id_", start, rows, 8)
+    {
+        return Ok(column);
+    }
+
+    let mut bytes = Vec::with_capacity(rows * 11);
+    let mut offsets = Vec::with_capacity(rows + 1);
+    offsets.push(0);
+    if !try_push_sequential_lower_hex_8(&mut bytes, &mut offsets, rows, key_start) {
+        for row in 0..rows {
+            push_id_lower_hex_8(&mut bytes, key_start.wrapping_add(row));
+            offsets.push(bytes.len());
+        }
+    }
+    Ok(Column::from_utf8_contiguous(bytes, offsets))
+}
+
 fn build_ordered_utf8_frame(
     value_name: &str,
     rows: usize,
@@ -184,24 +206,13 @@ fn build_ordered_utf8_frame(
     multiplier: u64,
 ) -> Result<DataFrame, Box<dyn std::error::Error>> {
     let index = Index::new_known_unique_int64_unit_range(0, rows);
-    let mut bytes = Vec::with_capacity(rows * 11);
-    let mut offsets = Vec::with_capacity(rows + 1);
-    offsets.push(0);
-    if !try_push_sequential_lower_hex_8(&mut bytes, &mut offsets, rows, key_start) {
-        for row in 0..rows {
-            push_id_lower_hex_8(&mut bytes, key_start + row);
-            offsets.push(bytes.len());
-        }
-    }
+    let id_column = build_ordered_utf8_id_column(rows, key_start)?;
     let values = (0..rows)
         .map(|row| ((row as u64).wrapping_mul(multiplier) % 10_003) as f64 * 0.25)
         .collect::<Vec<_>>();
 
     let mut columns = std::collections::BTreeMap::new();
-    columns.insert(
-        "id".to_string(),
-        Column::from_utf8_contiguous(bytes, offsets),
-    );
+    columns.insert("id".to_string(), id_column);
     columns.insert(value_name.to_string(), Column::from_f64_values(values));
     let column_order = vec!["id".to_string(), value_name.to_string()];
     Ok(DataFrame::new_with_column_order(
