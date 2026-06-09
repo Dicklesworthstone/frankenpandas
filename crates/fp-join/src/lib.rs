@@ -2811,30 +2811,31 @@ fn build_single_key_dense_i64_left_merge_output(
         plan.push(run);
     }
 
-    // One shared validity mask for every right lane: matched runs valid,
-    // unmatched rows null. Word-wise run fills.
-    let mut validity_words = vec![0_u64; output_len.div_ceil(64)];
-    {
-        let mut out_pos = 0usize;
-        for &(_, start, run_len) in &plan {
-            if start != UNMATCHED {
-                set_validity_bit_range(&mut validity_words, out_pos, out_pos + run_len);
-            }
-            out_pos += run_len;
-        }
-        debug_assert_eq!(out_pos, output_len);
-    }
-    let right_validity = fp_columnar::ValidityMask::from_words(validity_words, output_len);
+    // Shared right-lane segment descriptor (br-frankenpandas-yiqv5): the plan's
+    // `(bucket_start, run_len)` pairs are exactly the nullable repeated-slices
+    // segment format (`bucket_start == usize::MAX` == UNMATCHED ⇒ a null run), so
+    // every right lane is emitted as a LAZY `LazyNullableRepeatedSlicesInt64`
+    // over its bucket-order value tape instead of a materialized O(output_len)
+    // buffer. The validity mask is rebuilt from these segments inside the column
+    // ctor (matched runs valid, unmatched rows null) — identical to the prior
+    // word-wise fill.
+    let right_segments: Arc<[(usize, usize)]> = plan
+        .iter()
+        .map(|&(_, start, run_len)| (start, run_len))
+        .collect();
 
     // Left lanes as lazy repeat runs when the average fanout pays (3ad4n
     // gate); unmatched rows are singleton runs so the representation is
     // uniform.
     let use_repeat_runs = output_len >= plan.len().saturating_mul(2);
 
+    // Only LOW-FANOUT LEFT lanes still materialize into O(output_len) buffers;
+    // right lanes are always lazy (nullable repeated-slices) and high-fanout
+    // left lanes are lazy repeat runs.
     let full_specs: Vec<usize> = specs
         .iter()
         .enumerate()
-        .filter(|(_, spec)| !(use_repeat_runs && matches!(spec.side, FusedInt64Side::Left)))
+        .filter(|(_, spec)| matches!(spec.side, FusedInt64Side::Left) && !use_repeat_runs)
         .map(|(idx, _)| idx)
         .collect();
 
@@ -2969,21 +2970,29 @@ fn build_single_key_dense_i64_left_merge_output(
     let mut column_order = Vec::with_capacity(specs.len());
     let mut full_iter = full_data.into_iter();
     for spec in specs {
-        let column = if use_repeat_runs && matches!(spec.side, FusedInt64Side::Left) {
-            Column::from_i64_repeat_runs(
+        let column = match spec.side {
+            FusedInt64Side::Right => {
+                // Lazy nullable repeated-slices over the bucket-order tape
+                // (br-frankenpandas-yiqv5): O(matched) descriptor, no O(output)
+                // materialization.
+                let tape: Vec<i64> =
+                    positions.iter().map(|&right_pos| spec.values[right_pos]).collect();
+                Column::from_i64_nullable_repeated_slices_shared(
+                    tape,
+                    Arc::clone(&right_segments),
+                    output_len,
+                )
+            }
+            FusedInt64Side::Left if use_repeat_runs => Column::from_i64_repeat_runs(
                 plan.iter()
                     .map(|&(left_pos, _, run_len)| (spec.values[left_pos], run_len))
                     .collect(),
-            )
-        } else {
-            let data = full_iter
-                .next()
-                .expect("full lane buffer must exist for every non-run spec");
-            match spec.side {
-                FusedInt64Side::Left => Column::from_i64_values(data),
-                FusedInt64Side::Right => {
-                    Column::from_i64_values_with_validity(data, right_validity.clone())
-                }
+            ),
+            FusedInt64Side::Left => {
+                let data = full_iter
+                    .next()
+                    .expect("full lane buffer must exist for every non-run left spec");
+                Column::from_i64_values(data)
             }
         };
         debug_assert_eq!(column.len(), output_len);
@@ -3156,26 +3165,25 @@ fn build_single_key_dense_i64_right_merge_output(
     }
 
     // One shared validity mask for every left lane.
-    let mut validity_words = vec![0_u64; output_len.div_ceil(64)];
-    {
-        let mut out_pos = 0usize;
-        for &(_, start, run_len) in &plan {
-            if start != UNMATCHED {
-                set_validity_bit_range(&mut validity_words, out_pos, out_pos + run_len);
-            }
-            out_pos += run_len;
-        }
-        debug_assert_eq!(out_pos, output_len);
-    }
-    let left_validity = fp_columnar::ValidityMask::from_words(validity_words, output_len);
+    // Shared left-lane segment descriptor (br-frankenpandas-yiqv5): mirror of
+    // the left builder — every null-introduced LEFT lane is a LAZY
+    // `LazyNullableRepeatedSlicesInt64` over its bucket-order tape (plan's
+    // `(bucket_start, run_len)`, `usize::MAX` ⇒ null run) instead of a
+    // materialized O(output_len) buffer; validity rebuilt in the ctor.
+    let left_segments: Arc<[(usize, usize)]> = plan
+        .iter()
+        .map(|&(_, start, run_len)| (start, run_len))
+        .collect();
 
     // Right lanes (all-valid) as lazy repeat runs when the fanout pays.
     let use_repeat_runs = output_len >= plan.len().saturating_mul(2);
 
+    // Only LOW-FANOUT RIGHT lanes still materialize; left lanes are always lazy
+    // (nullable repeated-slices) and high-fanout right lanes are lazy repeat runs.
     let full_specs: Vec<usize> = specs
         .iter()
         .enumerate()
-        .filter(|(_, spec)| !(use_repeat_runs && matches!(spec.side, FusedInt64Side::Right)))
+        .filter(|(_, spec)| matches!(spec.side, FusedInt64Side::Right) && !use_repeat_runs)
         .map(|(idx, _)| idx)
         .collect();
 
@@ -3305,27 +3313,31 @@ fn build_single_key_dense_i64_right_merge_output(
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order = Vec::with_capacity(specs.len());
     let mut full_iter = full_data.into_iter();
-    let has_left_missing = plan.iter().any(|&(_, start, _)| start == UNMATCHED);
     for spec in specs {
-        let column = if use_repeat_runs && matches!(spec.side, FusedInt64Side::Right) {
-            Column::from_i64_repeat_runs(
+        let column = match spec.side {
+            FusedInt64Side::Left => {
+                // Lazy nullable repeated-slices over the left bucket-order tape
+                // (br-frankenpandas-yiqv5). When no left row is missing the
+                // segments carry no `usize::MAX` sentinel, so the ctor yields an
+                // all-valid mask — identical to the prior `from_i64_values`.
+                let tape: Vec<i64> =
+                    positions.iter().map(|&left_pos| spec.values[left_pos]).collect();
+                Column::from_i64_nullable_repeated_slices_shared(
+                    tape,
+                    Arc::clone(&left_segments),
+                    output_len,
+                )
+            }
+            FusedInt64Side::Right if use_repeat_runs => Column::from_i64_repeat_runs(
                 plan.iter()
                     .map(|&(right_pos, _, run_len)| (spec.values[right_pos], run_len))
                     .collect(),
-            )
-        } else {
-            let data = full_iter
-                .next()
-                .expect("full lane buffer must exist for every non-run spec");
-            match spec.side {
-                FusedInt64Side::Right => Column::from_i64_values(data),
-                FusedInt64Side::Left => {
-                    if has_left_missing {
-                        Column::from_i64_values_with_validity(data, left_validity.clone())
-                    } else {
-                        Column::from_i64_values(data)
-                    }
-                }
+            ),
+            FusedInt64Side::Right => {
+                let data = full_iter
+                    .next()
+                    .expect("full lane buffer must exist for every non-run right spec");
+                Column::from_i64_values(data)
             }
         };
         debug_assert_eq!(column.len(), output_len);

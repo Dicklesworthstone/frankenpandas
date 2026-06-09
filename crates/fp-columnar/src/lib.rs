@@ -1191,6 +1191,28 @@ enum ScalarValues {
         total_len: usize,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Null-introducing counterpart of [`Self::LazyRepeatedSlicesInt64`]
+    /// (br-frankenpandas-yiqv5): a dense LEFT/RIGHT/OUTER-join RIGHT lane where a
+    /// segment is EITHER a tape slice `(start, len)` of matched values OR, when
+    /// `start == usize::MAX`, a run of `len` missing values. Unmatched Int64
+    /// slots materialize `Scalar::Null(NullKind::Null)` (matching
+    /// `reindex_by_positions`); the owning column carries a validity mask with
+    /// those positions cleared.
+    LazyNullableRepeatedSlicesInt64 {
+        data: Vec<i64>,
+        segments: Arc<[(usize, usize)]>,
+        total_len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
+    /// Float64 sibling of [`Self::LazyNullableRepeatedSlicesInt64`]
+    /// (br-frankenpandas-yiqv5). Unmatched slots materialize
+    /// `Scalar::Null(NullKind::NaN)` — the Float64 missing convention.
+    LazyNullableRepeatedSlicesFloat64 {
+        data: Vec<f64>,
+        segments: Arc<[(usize, usize)]>,
+        total_len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Zero-copy contiguous row-range VIEW over an `Arc`-shared contiguous-Utf8
     /// backing (br-frankenpandas-jbyuc.1.1.1). Row `i` (`0..len`) is
     /// `bytes[offsets[start + i] .. offsets[start + i + 1]]` — the same shared
@@ -1447,6 +1469,40 @@ impl ScalarValues {
                 .all(|&(start, len)| start.checked_add(len).is_some_and(|end| end <= data.len()))
         );
         Self::LazyRepeatedSlicesFloat64 {
+            data,
+            segments,
+            total_len,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_repeated_slices_int64(
+        data: Vec<i64>,
+        segments: Arc<[(usize, usize)]>,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(
+            segments.iter().map(|&(_, len)| len).sum::<usize>(),
+            total_len
+        );
+        Self::LazyNullableRepeatedSlicesInt64 {
+            data,
+            segments,
+            total_len,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_repeated_slices_float64(
+        data: Vec<f64>,
+        segments: Arc<[(usize, usize)]>,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(
+            segments.iter().map(|&(_, len)| len).sum::<usize>(),
+            total_len
+        );
+        Self::LazyNullableRepeatedSlicesFloat64 {
             data,
             segments,
             total_len,
@@ -1936,6 +1992,46 @@ impl ScalarValues {
                     out
                 })
                 .as_slice(),
+            Self::LazyNullableRepeatedSlicesInt64 {
+                data,
+                segments,
+                total_len,
+                values,
+            } => values
+                .get_or_init(|| {
+                    let mut out = Vec::with_capacity(*total_len);
+                    for &(start, len) in segments.iter() {
+                        if start == usize::MAX {
+                            out.resize(out.len() + len, Scalar::Null(NullKind::Null));
+                        } else {
+                            for &value in &data[start..start + len] {
+                                out.push(Scalar::Int64(value));
+                            }
+                        }
+                    }
+                    out
+                })
+                .as_slice(),
+            Self::LazyNullableRepeatedSlicesFloat64 {
+                data,
+                segments,
+                total_len,
+                values,
+            } => values
+                .get_or_init(|| {
+                    let mut out = Vec::with_capacity(*total_len);
+                    for &(start, len) in segments.iter() {
+                        if start == usize::MAX {
+                            out.resize(out.len() + len, Scalar::Null(NullKind::NaN));
+                        } else {
+                            for &value in &data[start..start + len] {
+                                out.push(Scalar::Float64(value));
+                            }
+                        }
+                    }
+                    out
+                })
+                .as_slice(),
             Self::LazyUtf8Slice {
                 bytes,
                 offsets,
@@ -1977,6 +2073,8 @@ impl ScalarValues {
             Self::LazyRepeatedSlicesInt64 { total_len, .. } => *total_len,
             Self::LazyRepeatValuesFloat64 { total_len, .. } => *total_len,
             Self::LazyRepeatedSlicesFloat64 { total_len, .. } => *total_len,
+            Self::LazyNullableRepeatedSlicesInt64 { total_len, .. } => *total_len,
+            Self::LazyNullableRepeatedSlicesFloat64 { total_len, .. } => *total_len,
             Self::LazyUtf8Slice { len, .. } => *len,
         }
     }
@@ -2169,6 +2267,26 @@ impl Clone for ScalarValues {
                 total_len,
                 ..
             } => Self::lazy_repeated_slices_float64_shared(
+                data.clone(),
+                Arc::clone(segments),
+                *total_len,
+            ),
+            Self::LazyNullableRepeatedSlicesInt64 {
+                data,
+                segments,
+                total_len,
+                ..
+            } => Self::lazy_nullable_repeated_slices_int64(
+                data.clone(),
+                Arc::clone(segments),
+                *total_len,
+            ),
+            Self::LazyNullableRepeatedSlicesFloat64 {
+                data,
+                segments,
+                total_len,
+                ..
+            } => Self::lazy_nullable_repeated_slices_float64(
                 data.clone(),
                 Arc::clone(segments),
                 *total_len,
@@ -3419,6 +3537,69 @@ impl Column {
             dtype: DType::Float64,
             values: ScalarValues::lazy_repeated_slices_float64_shared(data, segments, total_len),
             validity: ValidityMask::all_valid(total_len),
+            data: None,
+        }
+    }
+
+    /// Validity mask for a nullable repeated-slices lane: bits start all-valid;
+    /// every null segment (`start == usize::MAX`) clears its output range.
+    /// O(output_len) bits but word-wise (cheap relative to materializing the
+    /// fanned-out values), and `all_valid` when there are no null segments.
+    fn nullable_repeated_slices_validity(
+        segments: &[(usize, usize)],
+        total_len: usize,
+    ) -> ValidityMask {
+        if !segments.iter().any(|&(start, _)| start == usize::MAX) {
+            return ValidityMask::all_valid(total_len);
+        }
+        let mut mask = ValidityMask::all_valid(total_len);
+        let mut pos = 0usize;
+        for &(start, len) in segments {
+            if start == usize::MAX {
+                for offset in 0..len {
+                    mask.set(pos + offset, false);
+                }
+            }
+            pos += len;
+        }
+        mask
+    }
+
+    /// Null-introducing Int64 dense-join lane (br-frankenpandas-yiqv5): repeated
+    /// slices of a bucket-order value tape, with `start == usize::MAX` segments
+    /// marking missing (`Null(NullKind::Null)`) runs. Materializes the same
+    /// Scalars + validity as the per-row `reindex_by_positions` gather, but
+    /// carries only an O(matched + nulls) descriptor until read.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_i64_nullable_repeated_slices_shared(
+        data: Vec<i64>,
+        segments: Arc<[(usize, usize)]>,
+        total_len: usize,
+    ) -> Self {
+        let validity = Self::nullable_repeated_slices_validity(&segments, total_len);
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_nullable_repeated_slices_int64(data, segments, total_len),
+            validity,
+            data: None,
+        }
+    }
+
+    /// Float64 sibling of [`Column::from_i64_nullable_repeated_slices_shared`]
+    /// (br-frankenpandas-yiqv5); missing runs are `Null(NullKind::NaN)`.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_f64_nullable_repeated_slices_shared(
+        data: Vec<f64>,
+        segments: Arc<[(usize, usize)]>,
+        total_len: usize,
+    ) -> Self {
+        let validity = Self::nullable_repeated_slices_validity(&segments, total_len);
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_nullable_repeated_slices_float64(data, segments, total_len),
+            validity,
             data: None,
         }
     }
