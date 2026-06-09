@@ -161,6 +161,17 @@ fn main() {
         print!("{}", golden_dump(&f.mul_df(&other_null).unwrap()));
         print!("{}", golden_dump(&f.div_df(&f).unwrap()));
         print!("{}", golden_dump(&fnull.add_df(&other_null).unwrap()));
+        // isin: exact float needles, cross-type Int64 needles (0.0 matches
+        // Int64(0)), and a NaN needle that matches missing slots of fnull.
+        print!(
+            "{}",
+            golden_dump(
+                &f.isin(&[Scalar::Float64(1.0), Scalar::Float64(2.5), Scalar::Float64(100.0)])
+                    .unwrap()
+            )
+        );
+        print!("{}", golden_dump(&f.isin(&[Scalar::Int64(0), Scalar::Int64(250)]).unwrap()));
+        print!("{}", golden_dump(&fnull.isin(&[Scalar::Float64(f64::NAN)]).unwrap()));
         return;
     }
     let n: usize = args
