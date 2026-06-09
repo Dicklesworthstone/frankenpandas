@@ -218,6 +218,10 @@ fn main() {
         print!("{}", golden_dump(&fi.lt(&fi2).unwrap()));
         print!("{}", golden_dump(&fi.eq(&fi2).unwrap()));
         print!("{}", golden_dump(&fi.ge(&fi).unwrap()));
+        // Int64 diff -> Float64 output (a as f64 - b as f64), in/out-of-range.
+        print!("{}", golden_dump(&fi.diff(1).unwrap()));
+        print!("{}", golden_dump(&fi.diff(3).unwrap()));
+        print!("{}", golden_dump(&fi.diff(-2).unwrap()));
         return;
     }
     let n: usize = args

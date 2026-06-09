@@ -1,0 +1,41 @@
+br-frankenpandas-drhsx — Typed Int64 fast path for Series/DataFrame.diff
+========================================================================
+
+Int64 vein (after z0dze: typed Int64 frame comparison, 154x). Series.diff had a
+Float64-only typed path (igxsj); an Int64 column fell to the general per-element
+Scalar to_f64 loop (i64.diff measured 83.7ms @ 200000 x 8 cols).
+
+The general path subtracts the two values cast to f64 — `Scalar::Float64(a.to_f64()
+- b.to_f64())` — so Int64.diff produces a Float64 output.
+
+LEVER (one): an as_i64_slice column is all-valid Int64 (no Bool/Timedelta special
+case, no missing inputs), so diff is a single i64->f64 pass into a typed Float64
+buffer (from_f64_values_with_validity), mirroring the Float64 fast path with an
+`as f64` cast. DataFrame.diff delegates per-column.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-4; loaded):
+  DataFrame.diff(1) [Int64]:  83.7  ->  1.70  = 49x
+
+SCORE: 49x >> 2.0 PASS.
+
+ISOMORPHISM:
+  - Every in-range pair yields `Float64(data[i] as f64 - data[j] as f64)` — the
+    identical cast + subtraction the Scalar path performs (Int64::to_f64 is
+    `as f64`); the difference of two finite i64-as-f64 values is finite, so the
+    output bit is set (present Float64), matching the general Float64(a-b).
+  - An out-of-range partner yields a cleared validity bit + 0.0 datum, which
+    materializes Null(NullKind::NaN) — exactly the general `_ => Null(NaN)` arm.
+  - Gated to all-valid Int64 (as_i64_slice Some only for a contiguous all-valid
+    Int64 backing; Bool/Timedelta64/nullable-Int64 return None -> the Scalar path
+    keeps its XOR / Timedelta / missing handling). Index + name preserved.
+  - Golden sha256 (gap_hunt golden: full family + Int64 frame compare + Int64
+    diff(1)/diff(3)/diff(-2) over int_frame(5000,4)) UNCHANGED:
+      7b35c38d98ee74684faee275462567c6ab0370049abf9fcaf8d264342d0436ae
+
+GATES (rch):
+  cargo check  -p fp-frame: OK
+  cargo clippy -p fp-frame: clean
+  cargo test   -p fp-frame: 2831 passed
+  cargo test   -p fp-conformance: 0 failures
+
+NEXT (Int64 vein): i64.clip 50ms (extend 0zp9e), i64.nunique 39ms.
