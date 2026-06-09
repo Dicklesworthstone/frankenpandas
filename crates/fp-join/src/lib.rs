@@ -904,6 +904,20 @@ fn collect_overlapping_column_names(
     overlaps
 }
 
+const SMALL_SCHEMA_LINEAR_COLUMN_LOOKUP_LIMIT: usize = 8;
+
+fn column_name_lookup_contains(
+    names: &[&String],
+    hashed_names: Option<&HashSet<&str>>,
+    target: &str,
+) -> bool {
+    if let Some(hashed_names) = hashed_names {
+        hashed_names.contains(target)
+    } else {
+        names.iter().any(|name| name.as_str() == target)
+    }
+}
+
 fn ensure_merge_suffixes_for_overlaps(
     overlap_names: &[String],
     suffixes: &ResolvedMergeSuffixes,
@@ -3937,21 +3951,37 @@ fn build_single_key_inner_merge_output_with_selections(
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
     let index = Index::new_known_unique_int64_unit_range(0, n);
 
-    let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
-    let right_col_names: std::collections::HashSet<&String> = right.columns().keys().collect();
-    let left_key_name_set: HashSet<&str> = left_on.iter().copied().collect();
-    let right_key_name_set: HashSet<&str> = right_on.iter().copied().collect();
-
-    let mut shared_name_positions = HashMap::<&str, (usize, usize)>::new();
-    if left_on[0] == right_on[0] {
-        shared_name_positions.insert(left_on[0], (0, 0));
-    }
-    let shared_key_names = shared_name_positions
-        .keys()
-        .copied()
-        .collect::<HashSet<&str>>();
-    let overlapping_names =
-        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+    let left_col_names = left.column_names();
+    let right_col_names = right.column_names();
+    let use_linear_name_lookup =
+        left_col_names.len() + right_col_names.len() <= SMALL_SCHEMA_LINEAR_COLUMN_LOOKUP_LIMIT;
+    let left_hashed_col_names = (!use_linear_name_lookup).then(|| {
+        left_col_names
+            .iter()
+            .map(|name| name.as_str())
+            .collect::<HashSet<_>>()
+    });
+    let right_hashed_col_names = (!use_linear_name_lookup).then(|| {
+        right_col_names
+            .iter()
+            .map(|name| name.as_str())
+            .collect::<HashSet<_>>()
+    });
+    let shared_key_name = (left_on[0] == right_on[0]).then_some(left_on[0]);
+    let mut overlapping_names = left_col_names
+        .iter()
+        .filter_map(|name| {
+            let name = name.as_str();
+            (Some(name) != shared_key_name
+                && column_name_lookup_contains(
+                    &right_col_names,
+                    right_hashed_col_names.as_ref(),
+                    name,
+                ))
+            .then(|| name.to_owned())
+        })
+        .collect::<Vec<_>>();
+    overlapping_names.sort();
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
 
     // Resolve output column specs in order (name/suffix resolution is cheap),
@@ -3961,31 +3991,37 @@ fn build_single_key_inner_merge_output_with_selections(
     // fused builder (br-frankenpandas-j3jnd). Bit-identical to the serial loop:
     // identical per-column take_positions_typed result, inserted in spec order.
     let mut specs: Vec<(String, &Column, PositionSelection<'_>)> = Vec::new();
-    for name in left.column_names() {
+    for name in left_col_names.iter().copied() {
         let col = left
             .columns()
             .get(name)
             .expect("left column listed in column_names must exist");
-        let out_name = if left_key_name_set.contains(name.as_str()) {
+        let out_name = if name.as_str() == left_on[0] {
             name.clone()
-        } else if right_col_names.contains(name) {
+        } else if column_name_lookup_contains(
+            &right_col_names,
+            right_hashed_col_names.as_ref(),
+            name.as_str(),
+        ) {
             apply_merge_suffix(name, suffixes.left.as_deref())
         } else {
             name.clone()
         };
         specs.push((out_name, col, left_positions));
     }
-    for name in right.column_names() {
-        if right_key_name_set.contains(name.as_str())
-            && shared_name_positions.contains_key(name.as_str())
-        {
+    for name in right_col_names.iter().copied() {
+        if name.as_str() == right_on[0] && shared_key_name == Some(name.as_str()) {
             continue;
         }
         let col = right
             .columns()
             .get(name)
             .expect("right column listed in column_names must exist");
-        let out_name = if left_col_names.contains(name) {
+        let out_name = if column_name_lookup_contains(
+            &left_col_names,
+            left_hashed_col_names.as_ref(),
+            name.as_str(),
+        ) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
             name.clone()

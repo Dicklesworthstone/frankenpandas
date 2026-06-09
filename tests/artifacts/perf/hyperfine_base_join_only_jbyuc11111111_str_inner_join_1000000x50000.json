@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/cargo-target-orangepeak-jbyuc11111111-before/release-perf/examples/perf_profile str_inner_join 1000000 50000",
+      "mean": 0.33100253236,
+      "stddev": 0.017929225543938165,
+      "median": 0.33535089056,
+      "user": 0.23016221999999997,
+      "system": 0.09750982,
+      "min": 0.30614965756,
+      "max": 0.35132813956000003,
+      "times": [
+        0.32022670756000005,
+        0.35132813956000003,
+        0.33535089056,
+        0.34195726656000003,
+        0.30614965756
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
