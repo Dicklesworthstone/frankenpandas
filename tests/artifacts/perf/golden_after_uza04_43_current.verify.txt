@@ -1,0 +1,2 @@
+tests/artifacts/perf/golden_after_uza04_43_current_filter_bool_1000.txt: OK
+tests/artifacts/perf/golden_after_uza04_43_current_filter_bool_100000.txt: OK
