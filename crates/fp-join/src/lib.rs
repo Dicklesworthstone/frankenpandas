@@ -5893,6 +5893,28 @@ pub fn merge_dataframes(
     on: &str,
     join_type: JoinType,
 ) -> Result<MergedDataFrame, JoinError> {
+    if matches!(join_type, JoinType::Inner) {
+        let left_key = left.column(on).ok_or_else(|| {
+            JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "left DataFrame missing key column '{on}'"
+            )))
+        })?;
+        let right_key = right.column(on).ok_or_else(|| {
+            JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "right DataFrame missing key column '{on}'"
+            )))
+        })?;
+        let suffixes = ResolvedMergeSuffixes::default();
+        return merge_single_key_inner_unsorted(
+            left,
+            right,
+            &[on],
+            &[on],
+            &[left_key],
+            &[right_key],
+            &suffixes,
+        );
+    }
     merge_dataframes_on(left, right, &[on], join_type)
 }
 

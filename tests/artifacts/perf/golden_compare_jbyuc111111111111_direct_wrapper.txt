@@ -1,0 +1,1 @@
+golden_cmp=identical
