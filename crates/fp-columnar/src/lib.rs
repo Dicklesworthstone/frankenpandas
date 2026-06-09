@@ -4142,6 +4142,33 @@ impl Column {
     /// the only path that must reason about missingness. Per
     /// br-frankenpandas-lei31.
     #[must_use]
+    /// Borrow the column's contiguous `f64` buffer **and** its validity mask
+    /// when this is a Float64 column with a directly-addressable backing
+    /// (all-valid or nullable). Unlike [`Column::as_f64_slice`] this also serves
+    /// nullable columns, so callers that handle missingness explicitly (e.g.
+    /// `combine_first`, `fillna`) can read raw `f64` + validity instead of
+    /// materializing `Vec<Scalar>`. The data for a missing slot is the stored
+    /// datum (0.0 by the nullable convention); the validity bit is authoritative.
+    /// Returns `None` for view/run-length/strided backings that are not a single
+    /// contiguous `[f64]`.
+    pub fn as_f64_slice_with_validity(&self) -> Option<(&[f64], &ValidityMask)> {
+        if self.dtype != DType::Float64 {
+            return None;
+        }
+        let data: &[f64] = match &self.values {
+            ScalarValues::LazyAllValidFloat64 { data, .. } => data.as_ref(),
+            ScalarValues::LazyNullableFloat64 { data, .. } => data.as_slice(),
+            _ => match &self.data {
+                Some(ColumnData::Float64(data)) => data.as_ref(),
+                _ => return None,
+            },
+        };
+        if data.len() != self.validity.len() {
+            return None;
+        }
+        Some((data, &self.validity))
+    }
+
     pub fn as_f64_slice(&self) -> Option<&[f64]> {
         if self.dtype == DType::Float64 && self.validity.all() {
             if let Some(ColumnData::Float64(data)) = &self.data {

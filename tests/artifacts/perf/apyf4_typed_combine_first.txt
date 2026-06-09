@@ -1,0 +1,46 @@
+br-frankenpandas-apyf4 — Typed Float64 positional fast path for DataFrame.combine_first
+=======================================================================================
+
+Part of the eydcr Scalar-bound-elementwise-ops family (after igxsj diff 30x,
+c7rfx pct_change 38x). combine_first aligned self+other by index union and, per
+output cell, did a BTreeMap label->row lookup on BOTH sides + a Scalar clone,
+then Column::new revalidation — O(n log n) per column plus Scalar churn.
+
+LEVER (one):
+  1. New Column::as_f64_slice_with_validity() (fp-columnar): borrow raw f64 data
+     + validity mask for a Float64 column (all-valid OR nullable), so callers
+     that handle missingness explicitly read typed data instead of Vec<Scalar>.
+  2. combine_first positional typed select (fp-frame): when the two indexes are
+     identical AND unique (=> union order == self order, label i -> row i on both
+     sides) and a column is two-sided Float64, select positionally from the f64
+     slices — out[i] = self.valid[i] ? self_data[i] : other_data[i]; the result
+     is valid iff self.valid[i] || other.valid[i] — emitted via
+     from_f64_values_with_validity. When EVERY column takes this path the
+     O(n log n) per-cell label maps are never consulted, so they are skipped.
+
+BENCH (gap_hunt, release-perf, n=200000 x 8 cols, ms/iter, min-of-8; machine loaded):
+  DataFrame.combine_first:  221  ->  39.7  = 5.6x
+
+SCORE: 5.6x >= 2.0 PASS.
+
+ISOMORPHISM (per-cell independent select — no f64-sum reordering hazard):
+  - self valid: result = self value (present Float64) — same as general path.
+  - self invalid, other valid: result = other value (present) — same.
+  - self invalid, other invalid: result datum = other_data[i], validity cleared
+    -> a non-NaN datum materializes Null(NaN) and a NaN datum materializes
+    Float64(NaN), exactly the LazyNullableFloat64 / Column::from_values convention
+    the general path's `oc.values()[i].clone()` produces (it returns other's
+    value WHATEVER it is, including its missing scalar).
+  - Gated on identical+unique index so positional == the BTreeMap last-occurrence
+    alignment, and on both columns Float64 so target_dtype == Float64 (matches
+    common_dtype(Float64,Float64)).
+  - Golden sha256 (gap_hunt golden: diff/pct_change + combine_first over
+    nullable/nullable and nullable/all-valid, n=5000 x4) UNCHANGED before/after:
+      8798af6f857f33bb3cb8ae370cae9c59963f26da46a23e2f01ba433e2bbeecd1
+
+GATES:
+  cargo check  -p fp-frame / fp-columnar: OK
+  cargo clippy -p fp-frame -p fp-columnar: clean
+  cargo test   -p fp-columnar: 389 passed
+  cargo test   -p fp-frame:    2830 passed
+  cargo test   -p fp-conformance: 2047 passed, 0 failed

@@ -99,6 +99,11 @@ fn main() {
         print!("{}", golden_dump(&fnull.diff(1).unwrap()));
         print!("{}", golden_dump(&f.pct_change(1).unwrap()));
         print!("{}", golden_dump(&fnull.pct_change(1).unwrap()));
+        // combine_first: nullable self over nullable other (overlapping nulls),
+        // and nullable self over all-valid other.
+        let other_null = numeric_frame(5000, 4, true);
+        print!("{}", golden_dump(&fnull.combine_first(&other_null).unwrap()));
+        print!("{}", golden_dump(&fnull.combine_first(&f).unwrap()));
         return;
     }
     let n: usize = args
