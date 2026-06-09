@@ -1,0 +1,955 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 54  of event 'cycles:P'
+# Event count (approx.): 16889835
+#
+# Children      Self  Command     Shared Object         Symbol                                                                                                                                                                                                                                                                                                                    
+# ........  ........  ..........  ....................  ..........................................................................................................................................................................................................................................................................................................................
+#
+    99.68%     0.00%  join-bench  join-bench            [.] _start
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               |          
+               |--87.98%--std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               |          join_bench::main
+               |          |          
+               |          |--72.92%--join_bench::build_ordered_utf8_frame
+               |          |          |          
+               |          |          |--28.68%--0xffffffff84c00bb7
+               |          |          |          |          
+               |          |          |           --28.67%--0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                     |--18.59%--0xffffffff84fea947
+               |          |          |                     |          
+               |          |          |                      --10.09%--0xffffffff84feb96b
+               |          |          |                                0xffffffff853a5627
+               |          |          |                                0xffffffff853a53ad
+               |          |          |                                0xffffffff853a4de7
+               |          |          |                                |          
+               |          |          |                                 --9.73%--0xffffffff853a3790
+               |          |          |          
+               |          |          |--25.74%--<fp_columnar::Column>::from_f64_values
+               |          |          |          
+               |          |           --17.91%--0xffffffff84c01199
+               |          |          
+               |           --15.06%--join_bench::merge_once
+               |                     fp_join::merge_dataframes
+               |                     fp_join::merge_single_key_inner_unsorted
+               |                     <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |                     |          
+               |                      --14.95%--<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+               |                                <std::sys::sync::once::futex::Once>::call
+               |                                <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          
+                --11.70%--pthread_getattr_np@@GLIBC_2.32
+                          fclose@@GLIBC_2.2.5
+                          llseek@GLIBC_2.2.5
+                          0xffffffff84c0012b
+                          0xffffffff86220551
+                          0xffffffff84f2561d
+                          0xffffffff8547b988
+                          0xffffffff8547b8e0
+                          0xffffffff854bfb94
+                          0xffffffff854bf814
+                          0xffffffff8554a23e
+                          0xffffffff8554a125
+                          0xffffffff8554993a
+                          0xffffffff854c0aa0
+                          0xffffffff854c0993
+
+    99.68%     0.00%  join-bench  libc.so.6             [.] __libc_start_main@@GLIBC_2.34
+            |
+            ---__libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               |          
+               |--87.98%--std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               |          join_bench::main
+               |          |          
+               |          |--72.92%--join_bench::build_ordered_utf8_frame
+               |          |          |          
+               |          |          |--28.68%--0xffffffff84c00bb7
+               |          |          |          |          
+               |          |          |           --28.67%--0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                     |--18.59%--0xffffffff84fea947
+               |          |          |                     |          
+               |          |          |                      --10.09%--0xffffffff84feb96b
+               |          |          |                                0xffffffff853a5627
+               |          |          |                                0xffffffff853a53ad
+               |          |          |                                0xffffffff853a4de7
+               |          |          |                                |          
+               |          |          |                                 --9.73%--0xffffffff853a3790
+               |          |          |          
+               |          |          |--25.74%--<fp_columnar::Column>::from_f64_values
+               |          |          |          
+               |          |           --17.91%--0xffffffff84c01199
+               |          |          
+               |           --15.06%--join_bench::merge_once
+               |                     fp_join::merge_dataframes
+               |                     fp_join::merge_single_key_inner_unsorted
+               |                     <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |                     |          
+               |                      --14.95%--<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+               |                                <std::sys::sync::once::futex::Once>::call
+               |                                <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          
+                --11.70%--pthread_getattr_np@@GLIBC_2.32
+                          fclose@@GLIBC_2.2.5
+                          llseek@GLIBC_2.2.5
+                          0xffffffff84c0012b
+                          0xffffffff86220551
+                          0xffffffff84f2561d
+                          0xffffffff8547b988
+                          0xffffffff8547b8e0
+                          0xffffffff854bfb94
+                          0xffffffff854bf814
+                          0xffffffff8554a23e
+                          0xffffffff8554a125
+                          0xffffffff8554993a
+                          0xffffffff854c0aa0
+                          0xffffffff854c0993
+
+    99.68%     0.00%  join-bench  libc.so.6             [.] __libc_start_call_main
+            |
+            ---__libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               |          
+               |--87.98%--std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               |          join_bench::main
+               |          |          
+               |          |--72.92%--join_bench::build_ordered_utf8_frame
+               |          |          |          
+               |          |          |--28.68%--0xffffffff84c00bb7
+               |          |          |          |          
+               |          |          |           --28.67%--0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                     |--18.59%--0xffffffff84fea947
+               |          |          |                     |          
+               |          |          |                      --10.09%--0xffffffff84feb96b
+               |          |          |                                0xffffffff853a5627
+               |          |          |                                0xffffffff853a53ad
+               |          |          |                                0xffffffff853a4de7
+               |          |          |                                |          
+               |          |          |                                 --9.73%--0xffffffff853a3790
+               |          |          |          
+               |          |          |--25.74%--<fp_columnar::Column>::from_f64_values
+               |          |          |          
+               |          |           --17.91%--0xffffffff84c01199
+               |          |          
+               |           --15.06%--join_bench::merge_once
+               |                     fp_join::merge_dataframes
+               |                     fp_join::merge_single_key_inner_unsorted
+               |                     <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |                     |          
+               |                      --14.95%--<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+               |                                <std::sys::sync::once::futex::Once>::call
+               |                                <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          
+                --11.70%--pthread_getattr_np@@GLIBC_2.32
+                          fclose@@GLIBC_2.2.5
+                          llseek@GLIBC_2.2.5
+                          0xffffffff84c0012b
+                          0xffffffff86220551
+                          0xffffffff84f2561d
+                          0xffffffff8547b988
+                          0xffffffff8547b8e0
+                          0xffffffff854bfb94
+                          0xffffffff854bf814
+                          0xffffffff8554a23e
+                          0xffffffff8554a125
+                          0xffffffff8554993a
+                          0xffffffff854c0aa0
+                          0xffffffff854c0993
+
+    99.68%     0.00%  join-bench  join-bench            [.] main
+            |
+            ---main
+               std::rt::lang_start_internal
+               |          
+               |--87.98%--std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               |          join_bench::main
+               |          |          
+               |          |--72.92%--join_bench::build_ordered_utf8_frame
+               |          |          |          
+               |          |          |--28.68%--0xffffffff84c00bb7
+               |          |          |          |          
+               |          |          |           --28.67%--0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                     |--18.59%--0xffffffff84fea947
+               |          |          |                     |          
+               |          |          |                      --10.09%--0xffffffff84feb96b
+               |          |          |                                0xffffffff853a5627
+               |          |          |                                0xffffffff853a53ad
+               |          |          |                                0xffffffff853a4de7
+               |          |          |                                |          
+               |          |          |                                 --9.73%--0xffffffff853a3790
+               |          |          |          
+               |          |          |--25.74%--<fp_columnar::Column>::from_f64_values
+               |          |          |          
+               |          |           --17.91%--0xffffffff84c01199
+               |          |          
+               |           --15.06%--join_bench::merge_once
+               |                     fp_join::merge_dataframes
+               |                     fp_join::merge_single_key_inner_unsorted
+               |                     <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |                     |          
+               |                      --14.95%--<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+               |                                <std::sys::sync::once::futex::Once>::call
+               |                                <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          
+                --11.70%--pthread_getattr_np@@GLIBC_2.32
+                          fclose@@GLIBC_2.2.5
+                          llseek@GLIBC_2.2.5
+                          0xffffffff84c0012b
+                          0xffffffff86220551
+                          0xffffffff84f2561d
+                          0xffffffff8547b988
+                          0xffffffff8547b8e0
+                          0xffffffff854bfb94
+                          0xffffffff854bf814
+                          0xffffffff8554a23e
+                          0xffffffff8554a125
+                          0xffffffff8554993a
+                          0xffffffff854c0aa0
+                          0xffffffff854c0993
+
+    99.68%     0.00%  join-bench  join-bench            [.] std::rt::lang_start_internal
+            |
+            ---std::rt::lang_start_internal
+               |          
+               |--87.98%--std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               |          join_bench::main
+               |          |          
+               |          |--72.92%--join_bench::build_ordered_utf8_frame
+               |          |          |          
+               |          |          |--28.68%--0xffffffff84c00bb7
+               |          |          |          |          
+               |          |          |           --28.67%--0xffffffff8622811f
+               |          |          |                     |          
+               |          |          |                     |--18.59%--0xffffffff84fea947
+               |          |          |                     |          
+               |          |          |                      --10.09%--0xffffffff84feb96b
+               |          |          |                                0xffffffff853a5627
+               |          |          |                                0xffffffff853a53ad
+               |          |          |                                0xffffffff853a4de7
+               |          |          |                                |          
+               |          |          |                                 --9.73%--0xffffffff853a3790
+               |          |          |          
+               |          |          |--25.74%--<fp_columnar::Column>::from_f64_values
+               |          |          |          
+               |          |           --17.91%--0xffffffff84c01199
+               |          |          
+               |           --15.06%--join_bench::merge_once
+               |                     fp_join::merge_dataframes
+               |                     fp_join::merge_single_key_inner_unsorted
+               |                     <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |                     |          
+               |                      --14.95%--<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+               |                                <std::sys::sync::once::futex::Once>::call
+               |                                <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+               |          
+                --11.70%--pthread_getattr_np@@GLIBC_2.32
+                          fclose@@GLIBC_2.2.5
+                          llseek@GLIBC_2.2.5
+                          0xffffffff84c0012b
+                          0xffffffff86220551
+                          0xffffffff84f2561d
+                          0xffffffff8547b988
+                          0xffffffff8547b8e0
+                          0xffffffff854bfb94
+                          0xffffffff854bf814
+                          0xffffffff8554a23e
+                          0xffffffff8554a125
+                          0xffffffff8554993a
+                          0xffffffff854c0aa0
+                          0xffffffff854c0993
+
+    87.98%     0.00%  join-bench  join-bench            [.] std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |
+            ---std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               |          
+               |--72.92%--join_bench::build_ordered_utf8_frame
+               |          |          
+               |          |--28.68%--0xffffffff84c00bb7
+               |          |          |          
+               |          |           --28.67%--0xffffffff8622811f
+               |          |                     |          
+               |          |                     |--18.59%--0xffffffff84fea947
+               |          |                     |          
+               |          |                      --10.09%--0xffffffff84feb96b
+               |          |                                0xffffffff853a5627
+               |          |                                0xffffffff853a53ad
+               |          |                                0xffffffff853a4de7
+               |          |                                |          
+               |          |                                 --9.73%--0xffffffff853a3790
+               |          |          
+               |          |--25.74%--<fp_columnar::Column>::from_f64_values
+               |          |          
+               |           --17.91%--0xffffffff84c01199
+               |          
+                --15.06%--join_bench::merge_once
+                          fp_join::merge_dataframes
+                          fp_join::merge_single_key_inner_unsorted
+                          <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                          |          
+                           --14.95%--<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+                                     <std::sys::sync::once::futex::Once>::call
+                                     <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+
+    87.98%     0.00%  join-bench  join-bench            [.] std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |
+            ---std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               |          
+               |--72.92%--join_bench::build_ordered_utf8_frame
+               |          |          
+               |          |--28.68%--0xffffffff84c00bb7
+               |          |          |          
+               |          |           --28.67%--0xffffffff8622811f
+               |          |                     |          
+               |          |                     |--18.59%--0xffffffff84fea947
+               |          |                     |          
+               |          |                      --10.09%--0xffffffff84feb96b
+               |          |                                0xffffffff853a5627
+               |          |                                0xffffffff853a53ad
+               |          |                                0xffffffff853a4de7
+               |          |                                |          
+               |          |                                 --9.73%--0xffffffff853a3790
+               |          |          
+               |          |--25.74%--<fp_columnar::Column>::from_f64_values
+               |          |          
+               |           --17.91%--0xffffffff84c01199
+               |          
+                --15.06%--join_bench::merge_once
+                          fp_join::merge_dataframes
+                          fp_join::merge_single_key_inner_unsorted
+                          <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                          |          
+                           --14.95%--<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+                                     <std::sys::sync::once::futex::Once>::call
+                                     <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+
+    87.98%     0.00%  join-bench  join-bench            [.] join_bench::main
+            |
+            ---join_bench::main
+               |          
+               |--72.92%--join_bench::build_ordered_utf8_frame
+               |          |          
+               |          |--28.68%--0xffffffff84c00bb7
+               |          |          |          
+               |          |           --28.67%--0xffffffff8622811f
+               |          |                     |          
+               |          |                     |--18.59%--0xffffffff84fea947
+               |          |                     |          
+               |          |                      --10.09%--0xffffffff84feb96b
+               |          |                                0xffffffff853a5627
+               |          |                                0xffffffff853a53ad
+               |          |                                0xffffffff853a4de7
+               |          |                                |          
+               |          |                                 --9.73%--0xffffffff853a3790
+               |          |          
+               |          |--25.74%--<fp_columnar::Column>::from_f64_values
+               |          |          
+               |           --17.91%--0xffffffff84c01199
+               |          
+                --15.06%--join_bench::merge_once
+                          fp_join::merge_dataframes
+                          fp_join::merge_single_key_inner_unsorted
+                          <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+                          |          
+                           --14.95%--<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+                                     <std::sys::sync::once::futex::Once>::call
+                                     <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+
+    72.92%     0.45%  join-bench  join-bench            [.] join_bench::build_ordered_utf8_frame
+            |          
+             --72.47%--join_bench::build_ordered_utf8_frame
+                       |          
+                       |--28.68%--0xffffffff84c00bb7
+                       |          |          
+                       |           --28.67%--0xffffffff8622811f
+                       |                     |          
+                       |                     |--18.59%--0xffffffff84fea947
+                       |                     |          
+                       |                      --10.09%--0xffffffff84feb96b
+                       |                                0xffffffff853a5627
+                       |                                0xffffffff853a53ad
+                       |                                0xffffffff853a4de7
+                       |                                |          
+                       |                                 --9.73%--0xffffffff853a3790
+                       |          
+                       |--25.74%--<fp_columnar::Column>::from_f64_values
+                       |          
+                        --17.91%--0xffffffff84c01199
+
+    28.68%     0.00%  join-bench  [unknown]             [.] 0xffffffff84c00bb7
+            |
+            ---0xffffffff84c00bb7
+               |          
+                --28.67%--0xffffffff8622811f
+                          |          
+                          |--18.59%--0xffffffff84fea947
+                          |          
+                           --10.09%--0xffffffff84feb96b
+                                     0xffffffff853a5627
+                                     0xffffffff853a53ad
+                                     0xffffffff853a4de7
+                                     |          
+                                      --9.73%--0xffffffff853a3790
+
+    28.67%    18.59%  join-bench  [unknown]             [.] 0xffffffff8622811f
+            |          
+            |--18.59%--_start
+            |          __libc_start_main@@GLIBC_2.34
+            |          __libc_start_call_main
+            |          main
+            |          std::rt::lang_start_internal
+            |          std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+            |          std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+            |          join_bench::main
+            |          join_bench::build_ordered_utf8_frame
+            |          0xffffffff84c00bb7
+            |          0xffffffff8622811f
+            |          0xffffffff84fea947
+            |          
+             --10.09%--0xffffffff8622811f
+                       0xffffffff84feb96b
+                       0xffffffff853a5627
+                       0xffffffff853a53ad
+                       0xffffffff853a4de7
+                       |          
+                        --9.73%--0xffffffff853a3790
+
+    25.74%    25.74%  join-bench  join-bench            [.] <fp_columnar::Column>::from_f64_values
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               join_bench::build_ordered_utf8_frame
+               <fp_columnar::Column>::from_f64_values
+
+    18.59%     0.00%  join-bench  [unknown]             [.] 0xffffffff84fea947
+            |
+            ---0xffffffff84fea947
+
+    17.91%    17.91%  join-bench  [unknown]             [k] 0xffffffff85104b37
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               join_bench::build_ordered_utf8_frame
+               0xffffffff84c01199
+
+    17.91%     0.00%  join-bench  [unknown]             [.] 0xffffffff84c01199
+            |
+            ---0xffffffff84c01199
+
+    15.06%     0.00%  join-bench  join-bench            [.] join_bench::merge_once
+            |
+            ---join_bench::merge_once
+               fp_join::merge_dataframes
+               fp_join::merge_single_key_inner_unsorted
+               <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          
+                --14.95%--<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+                          <std::sys::sync::once::futex::Once>::call
+                          <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+
+    15.06%     0.00%  join-bench  join-bench            [.] fp_join::merge_dataframes
+            |
+            ---fp_join::merge_dataframes
+               fp_join::merge_single_key_inner_unsorted
+               <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          
+                --14.95%--<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+                          <std::sys::sync::once::futex::Once>::call
+                          <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+
+    15.06%     0.00%  join-bench  join-bench            [.] fp_join::merge_single_key_inner_unsorted
+            |
+            ---fp_join::merge_single_key_inner_unsorted
+               <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          
+                --14.95%--<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+                          <std::sys::sync::once::futex::Once>::call
+                          <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+
+    15.06%     0.00%  join-bench  join-bench            [.] <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+            |
+            ---<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               |          
+                --14.95%--<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+                          <std::sys::sync::once::futex::Once>::call
+                          <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+
+    15.06%     0.00%  join-bench  join-bench            [.] <std::sys::sync::once::futex::Once>::call
+            |
+            ---<std::sys::sync::once::futex::Once>::call
+               |          
+                --14.95%--<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+
+    14.95%    14.95%  join-bench  join-bench            [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               join_bench::merge_once
+               fp_join::merge_dataframes
+               fp_join::merge_single_key_inner_unsorted
+               <fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous
+               <std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+
+    14.95%     0.00%  join-bench  join-bench            [.] <std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+            |
+            ---<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>
+               <std::sys::sync::once::futex::Once>::call
+               <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<usize>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#1}>::{closure#0}, !>::{closure#0}>::{closure#0}
+
+    11.93%     0.00%  join-bench  [unknown]             [.] 0xffffffff84c0012b
+            |
+            ---0xffffffff84c0012b
+               |          
+                --11.80%--0xffffffff86220551
+                          |          
+                           --11.70%--0xffffffff84f2561d
+                                     0xffffffff8547b988
+                                     0xffffffff8547b8e0
+                                     0xffffffff854bfb94
+                                     0xffffffff854bf814
+                                     0xffffffff8554a23e
+                                     0xffffffff8554a125
+                                     0xffffffff8554993a
+                                     0xffffffff854c0aa0
+                                     0xffffffff854c0993
+
+    11.80%     0.00%  join-bench  [unknown]             [.] 0xffffffff86220551
+            |
+            ---0xffffffff86220551
+               |          
+                --11.70%--0xffffffff84f2561d
+                          0xffffffff8547b988
+                          0xffffffff8547b8e0
+                          0xffffffff854bfb94
+                          0xffffffff854bf814
+                          0xffffffff8554a23e
+                          0xffffffff8554a125
+                          0xffffffff8554993a
+                          0xffffffff854c0aa0
+                          0xffffffff854c0993
+
+    11.70%    11.70%  join-bench  [unknown]             [k] 0xffffffff8620c700
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               pthread_getattr_np@@GLIBC_2.32
+               fclose@@GLIBC_2.2.5
+               llseek@GLIBC_2.2.5
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f2561d
+               0xffffffff8547b988
+               0xffffffff8547b8e0
+               0xffffffff854bfb94
+               0xffffffff854bf814
+               0xffffffff8554a23e
+               0xffffffff8554a125
+               0xffffffff8554993a
+               0xffffffff854c0aa0
+               0xffffffff854c0993
+
+    11.70%     0.00%  join-bench  libc.so.6             [.] pthread_getattr_np@@GLIBC_2.32
+            |
+            ---pthread_getattr_np@@GLIBC_2.32
+               fclose@@GLIBC_2.2.5
+               llseek@GLIBC_2.2.5
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f2561d
+               0xffffffff8547b988
+               0xffffffff8547b8e0
+               0xffffffff854bfb94
+               0xffffffff854bf814
+               0xffffffff8554a23e
+               0xffffffff8554a125
+               0xffffffff8554993a
+               0xffffffff854c0aa0
+               0xffffffff854c0993
+
+    11.70%     0.00%  join-bench  libc.so.6             [.] fclose@@GLIBC_2.2.5
+            |
+            ---fclose@@GLIBC_2.2.5
+               llseek@GLIBC_2.2.5
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f2561d
+               0xffffffff8547b988
+               0xffffffff8547b8e0
+               0xffffffff854bfb94
+               0xffffffff854bf814
+               0xffffffff8554a23e
+               0xffffffff8554a125
+               0xffffffff8554993a
+               0xffffffff854c0aa0
+               0xffffffff854c0993
+
+    11.70%     0.00%  join-bench  libc.so.6             [.] llseek@GLIBC_2.2.5
+            |
+            ---llseek@GLIBC_2.2.5
+               0xffffffff84c0012b
+               0xffffffff86220551
+               0xffffffff84f2561d
+               0xffffffff8547b988
+               0xffffffff8547b8e0
+               0xffffffff854bfb94
+               0xffffffff854bf814
+               0xffffffff8554a23e
+               0xffffffff8554a125
+               0xffffffff8554993a
+               0xffffffff854c0aa0
+               0xffffffff854c0993
+
+    11.70%     0.00%  join-bench  [unknown]             [.] 0xffffffff84f2561d
+            |
+            ---0xffffffff84f2561d
+               0xffffffff8547b988
+               0xffffffff8547b8e0
+               0xffffffff854bfb94
+               0xffffffff854bf814
+               0xffffffff8554a23e
+               0xffffffff8554a125
+               0xffffffff8554993a
+               0xffffffff854c0aa0
+               0xffffffff854c0993
+
+    11.70%     0.00%  join-bench  [unknown]             [.] 0xffffffff8547b988
+            |
+            ---0xffffffff8547b988
+               0xffffffff8547b8e0
+               0xffffffff854bfb94
+               0xffffffff854bf814
+               0xffffffff8554a23e
+               0xffffffff8554a125
+               0xffffffff8554993a
+               0xffffffff854c0aa0
+               0xffffffff854c0993
+
+    11.70%     0.00%  join-bench  [unknown]             [.] 0xffffffff8547b8e0
+            |
+            ---0xffffffff8547b8e0
+               0xffffffff854bfb94
+               0xffffffff854bf814
+               0xffffffff8554a23e
+               0xffffffff8554a125
+               0xffffffff8554993a
+               0xffffffff854c0aa0
+               0xffffffff854c0993
+
+    11.70%     0.00%  join-bench  [unknown]             [.] 0xffffffff854bfb94
+            |
+            ---0xffffffff854bfb94
+               0xffffffff854bf814
+               0xffffffff8554a23e
+               0xffffffff8554a125
+               0xffffffff8554993a
+               0xffffffff854c0aa0
+               0xffffffff854c0993
+
+    11.70%     0.00%  join-bench  [unknown]             [.] 0xffffffff854bf814
+            |
+            ---0xffffffff854bf814
+               0xffffffff8554a23e
+               0xffffffff8554a125
+               0xffffffff8554993a
+               0xffffffff854c0aa0
+               0xffffffff854c0993
+
+    11.70%     0.00%  join-bench  [unknown]             [.] 0xffffffff8554a23e
+            |
+            ---0xffffffff8554a23e
+               0xffffffff8554a125
+               0xffffffff8554993a
+               0xffffffff854c0aa0
+               0xffffffff854c0993
+
+    11.70%     0.00%  join-bench  [unknown]             [.] 0xffffffff8554a125
+            |
+            ---0xffffffff8554a125
+               0xffffffff8554993a
+               0xffffffff854c0aa0
+               0xffffffff854c0993
+
+    11.70%     0.00%  join-bench  [unknown]             [.] 0xffffffff8554993a
+            |
+            ---0xffffffff8554993a
+               0xffffffff854c0aa0
+               0xffffffff854c0993
+
+    11.70%     0.00%  join-bench  [unknown]             [.] 0xffffffff854c0aa0
+            |
+            ---0xffffffff854c0aa0
+               0xffffffff854c0993
+
+    11.70%     0.00%  join-bench  [unknown]             [.] 0xffffffff854c0993
+            |
+            ---0xffffffff854c0993
+
+    10.09%     0.00%  join-bench  [unknown]             [.] 0xffffffff84feb96b
+            |
+            ---0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               |          
+                --9.73%--0xffffffff853a3790
+
+    10.09%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a5627
+            |
+            ---0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               |          
+                --9.73%--0xffffffff853a3790
+
+    10.09%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a53ad
+            |
+            ---0xffffffff853a53ad
+               0xffffffff853a4de7
+               |          
+                --9.73%--0xffffffff853a3790
+
+    10.09%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a4de7
+            |
+            ---0xffffffff853a4de7
+               |          
+                --9.73%--0xffffffff853a3790
+
+     9.73%     9.73%  join-bench  [unknown]             [k] 0xffffffff853da491
+            |
+            ---_start
+               __libc_start_main@@GLIBC_2.34
+               __libc_start_call_main
+               main
+               std::rt::lang_start_internal
+               std::rt::lang_start::<core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>::{closure#0}
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error>>>
+               join_bench::main
+               join_bench::build_ordered_utf8_frame
+               0xffffffff84c00bb7
+               0xffffffff8622811f
+               0xffffffff84feb96b
+               0xffffffff853a5627
+               0xffffffff853a53ad
+               0xffffffff853a4de7
+               0xffffffff853a3790
+
+     9.73%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a3790
+            |
+            ---0xffffffff853a3790
+
+     0.24%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a37ea
+     0.14%     0.13%  join-bench  libc.so.6             [.] __memmove_avx_unaligned_erms
+     0.13%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] _start
+     0.13%     0.13%  join-bench  [unknown]             [k] 0xffffffff86239bc7
+     0.13%     0.00%  join-bench  [unknown]             [.] 0xffffffff86220691
+     0.13%     0.00%  join-bench  [unknown]             [.] 0xffffffff851241b0
+     0.13%     0.00%  join-bench  [unknown]             [.] 0xffffffff8504d972
+     0.13%     0.00%  join-bench  [unknown]             [.] 0xffffffff85480f75
+     0.13%     0.00%  join-bench  [unknown]             [.] 0xffffffff85480cfd
+     0.13%     0.00%  join-bench  [unknown]             [.] 0xffffffff8548e720
+     0.13%     0.00%  join-bench  [unknown]             [.] 0xffffffff8548e5ed
+     0.13%     0.00%  join-bench  [unknown]             [.] 0xffffffff853ec9ff
+     0.13%     0.00%  join-bench  [unknown]             [.] 0xffffffff854585df
+     0.13%     0.00%  join-bench  [unknown]             [.] 0xffffffff85454ece
+     0.13%     0.00%  join-bench  [unknown]             [.] 0xffffffff85454202
+     0.12%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a33d2
+     0.12%     0.00%  join-bench  [unknown]             [.] 0xffffffff8541df1b
+     0.12%     0.00%  join-bench  [unknown]             [.] 0xffffffff8541a9e8
+     0.12%     0.12%  join-bench  [unknown]             [k] 0xffffffff857c0244
+     0.12%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a3957
+     0.12%     0.00%  join-bench  [unknown]             [.] 0xffffffff853bb5d6
+     0.12%     0.00%  join-bench  [unknown]             [.] 0xffffffff853b9650
+     0.12%     0.00%  join-bench  [unknown]             [.] 0xffffffff85452e38
+     0.12%     0.00%  join-bench  [unknown]             [.] 0xffffffff85452aad
+     0.12%     0.12%  join-bench  [unknown]             [k] 0xffffffff861f66c4
+     0.12%     0.00%  join-bench  [unknown]             [.] 0xffffffff853dda90
+     0.12%     0.00%  join-bench  [unknown]             [.] 0xffffffff853dc6c9
+     0.12%     0.00%  join-bench  [unknown]             [.] 0xffffffff8621b2b7
+     0.12%     0.12%  join-bench  [unknown]             [k] 0xffffffff853a4e56
+     0.12%     0.00%  join-bench  [unknown]             [.] 0xffffffff853a33d5
+     0.10%     0.00%  join-bench  join-bench            [.] <std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#0}>::{closure#0}, !>
+     0.10%     0.10%  join-bench  libc.so.6             [.] __memcmp_avx2_movbe
+     0.10%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] _dl_start_user
+     0.10%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] _dl_start
+     0.10%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] _dl_sysdep_start
+     0.10%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] dl_main
+     0.10%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] _dl_map_object_deps
+     0.10%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] _dl_catch_exception
+     0.10%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] openaux
+     0.10%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] _dl_map_new_object
+     0.10%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] _dl_load_cache_lookup
+     0.10%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] _dl_sysdep_read_whole_file
+     0.10%     0.00%  join-bench  ld-linux-x86-64.so.2  [.] __GI___open64_nocancel
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff84f25032
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff8547a93f
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff8547a407
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff854990f4
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff85498e93
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff85492ab8
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff85479e7b
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff854f235a
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff854f0fa2
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff854f0ade
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff854f06e7
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff854f6207
+     0.10%     0.10%  join-bench  [unknown]             [k] 0xffffffff853f1ff8
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff853f221f
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff854581f9
+     0.10%     0.00%  join-bench  [unknown]             [.] 0xffffffff8545770b
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0x0000757c7ecf878b
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff84c0012b
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff86220551
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff84f25398
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8548bea9
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8548bbf7
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8548a03a
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff85489f2c
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff85489bec
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff855290b9
+     0.09%     0.09%  perf-exec   [unknown]             [k] 0xffffffff8548bf28
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8548c49f
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8548bf78
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8531785e
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff853034ac
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff853033c5
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff853029e6
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8530b15d
+     0.09%     0.00%  perf-exec   [unknown]             [k] 0xffffffff853089c3
+     0.02%     0.00%  join-bench  [unknown]             [.] 0xffffffff8622f445
+     0.02%     0.00%  join-bench  [unknown]             [.] 0xffffffff86228a43
+     0.02%     0.00%  join-bench  [unknown]             [.] 0xffffffff8506d6df
+     0.02%     0.00%  join-bench  [unknown]             [.] 0xffffffff86228929
+     0.02%     0.00%  join-bench  [unknown]             [.] 0xffffffff85314705
+     0.02%     0.00%  join-bench  [unknown]             [.] 0xffffffff85313869
+     0.02%     0.00%  join-bench  [unknown]             [.] 0xffffffff8622f947
+     0.02%     0.00%  join-bench  [unknown]             [.] 0xffffffff853136ae
+     0.01%     0.00%  join-bench  [unknown]             [.] 0xffffffff84c00f4b
+     0.01%     0.00%  join-bench  [unknown]             [.] 0xffffffff86227465
+     0.01%     0.00%  join-bench  [unknown]             [.] 0xffffffff85312e70
+     0.01%     0.00%  join-bench  [unknown]             [.] 0xffffffff8531294d
+     0.01%     0.00%  join-bench  [unknown]             [.] 0xffffffff86228130
+     0.01%     0.01%  join-bench  [unknown]             [k] 0xffffffff8530d2bc
+     0.01%     0.00%  join-bench  [unknown]             [.] 0xffffffff8530a963
+     0.01%     0.00%  join-bench  [unknown]             [.] 0xffffffff84f330ff
+     0.01%     0.00%  join-bench  [unknown]             [.] 0xffffffff84f32f97
+     0.01%     0.00%  join-bench  [unknown]             [.] 0xffffffff8622fbbf
+     0.01%     0.01%  join-bench  [unknown]             [k] 0xffffffff8530d2c3
+     0.00%     0.00%  join-bench  [unknown]             [k] 0xffffffff8530d280
+     0.00%     0.00%  join-bench  [unknown]             [k] 0xffffffff84fdedcb
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff862289ac
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8530d384
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff85312e7b
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8620a0c7
+     0.00%     0.00%  join-bench  join-bench            [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<fp_columnar::Column>::as_strictly_increasing_utf8_contiguous::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff862206af
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff85124d3c
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8548c37d
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff851a2ab6
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff85317605
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8519f3fe
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff853141e6
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff84c00f0b
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8548f9b6
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff85313a57
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff853f2116
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff86227734
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff85313869
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff853136ae
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff85312e70
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8531294d
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff85326b38
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff84d04104
+     0.00%     0.00%  join-bench  [unknown]             [k] 0xffffffff8530d285
+     0.00%     0.00%  join-bench  [unknown]             [k] 0xffffffff8530d286
+     0.00%     0.00%  join-bench  [unknown]             [k] 0xffffffff85300b69
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff854a65b8
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff853ddb37
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8530a963
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff84f330ff
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff84f32f97
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff85314719
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff853267c9
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8530d384
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff84f2e580
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff84f88b27
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8530a9de
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8530d2f5
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff853136b2
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8621c6a7
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff850c2842
+     0.00%     0.00%  join-bench  [unknown]             [k] 0xffffffff85104b20
+     0.00%     0.00%  join-bench  [unknown]             [k] 0xffffffff8530d2cc
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff85300b65
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8530d280
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8530d2c3
+     0.00%     0.00%  join-bench  [unknown]             [k] 0xffffffff85300b65
+     0.00%     0.00%  join-bench  [unknown]             [k] 0xffffffff85300b60
+     0.00%     0.00%  join-bench  [unknown]             [k] 0xffffffff850c2906
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8531473a
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff85326b49
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff84d04109
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8506d55a
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8506d582
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff852fe647
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff852fe64b
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff852ff1c5
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff853057f3
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8530d39c
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8530d3a6
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff85312e5e
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8532641b
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff85326794
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8536b5c5
+     0.00%     0.00%  join-bench  [unknown]             [.] 0xffffffff8582f973
+     0.00%     0.00%  perf-exec   [unknown]             [k] 0xffffffff8530a9c5
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
