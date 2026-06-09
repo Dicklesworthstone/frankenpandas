@@ -1,0 +1,463 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 156  of event 'cycles:P'
+# Event count (approx.): 1037275988
+#
+# Overhead  Command       Shared Object     Symbol                                                                                                                                                                                                                                                                                                                                                                              IPC   [IPC Coverage]
+# ........  ............  ................  ..................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    24.66%  perf_profile  [unknown]         [k] 0xffffffff86233c02                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+            |--18.64%--0xffffffff854c0c25
+            |          0xffffffff85699a08
+            |          0xffffffff8519f6d4
+            |          0xffffffff851a2f82
+            |          0xffffffff85492b44
+            |          0xffffffff85498e93
+            |          0xffffffff854990f4
+            |          0xffffffff8547a407
+            |          0xffffffff8547a93f
+            |          0xffffffff84f25032
+            |          0xffffffff86220551
+            |          0xffffffff84c0012b
+            |          __internal_syscall_cancel (inlined)
+            |          __syscall_cancel
+            |          __libc_open64 (inlined)
+            |          <std::sys::fs::unix::File>::open_c::{closure#0} (inlined)
+            |          std::sys::pal::unix::cvt_r::<i32, <std::sys::fs::unix::File>::open_c::{closure#0}> (inlined)
+            |          <std::sys::fs::unix::File>::open_c
+            |          0x21
+            |          <std::sys::fs::unix::File>::open::{closure#0} (inlined)
+            |          std::sys::helpers::small_c_string::run_with_cstr_stack::<std::sys::fs::unix::File> (inlined)
+            |          std::sys::helpers::small_c_string::run_with_cstr::<std::sys::fs::unix::File> (inlined)
+            |          std::sys::helpers::small_c_string::run_path_with_cstr::<std::sys::fs::unix::File> (inlined)
+            |          <std::sys::fs::unix::File>::open (inlined)
+            |          <std::fs::OpenOptions>::_open (inlined)
+            |          <std::fs::OpenOptions>::open::<&std::path::Path> (inlined)
+            |          <std::fs::File>::open::<&std::path::PathBuf> (inlined)
+            |          std::sys::thread::unix::cgroups::quota_v2 (inlined)
+            |          std::sys::thread::unix::cgroups::quota (inlined)
+            |          std::sys::thread::unix::available_parallelism (inlined)
+            |          std::thread::functions::available_parallelism
+            |          fp_join::build_single_key_inner_merge_output_with_selections
+            |          fp_join::merge_single_key_inner_unsorted
+            |          
+             --6.02%--0xffffffff86233c13
+                       0xffffffff85569cba
+                       0xffffffff85490db1
+                       0xffffffff85496941
+                       0xffffffff85498e17
+                       0xffffffff854990f4
+                       0xffffffff8547a407
+                       0xffffffff8547a93f
+                       0xffffffff84f25032
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __internal_syscall_cancel (inlined)
+                       __syscall_cancel
+                       __libc_open64 (inlined)
+                       <std::sys::fs::unix::File>::open_c::{closure#0} (inlined)
+                       std::sys::pal::unix::cvt_r::<i32, <std::sys::fs::unix::File>::open_c::{closure#0}> (inlined)
+                       <std::sys::fs::unix::File>::open_c
+                       0x6
+                       <std::sys::fs::unix::File>::open::{closure#0} (inlined)
+                       std::sys::helpers::small_c_string::run_with_cstr_stack::<std::sys::fs::unix::File> (inlined)
+                       std::sys::helpers::small_c_string::run_with_cstr::<std::sys::fs::unix::File> (inlined)
+                       std::sys::helpers::small_c_string::run_path_with_cstr::<std::sys::fs::unix::File> (inlined)
+                       <std::sys::fs::unix::File>::open (inlined)
+                       <std::fs::OpenOptions>::_open (inlined)
+                       <std::fs::OpenOptions>::open::<&std::path::Path> (inlined)
+                       <std::fs::File>::open::<&std::path::PathBuf> (inlined)
+                       std::sys::thread::unix::cgroups::quota_v2 (inlined)
+                       std::sys::thread::unix::cgroups::quota (inlined)
+                       std::sys::thread::unix::available_parallelism (inlined)
+                       std::thread::functions::available_parallelism
+                       fp_join::build_single_key_inner_merge_output_with_selections
+                       fp_join::merge_single_key_inner_unsorted
+
+    13.03%  perf_profile  [unknown]         [k] 0xffffffff862311fd                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff854582eb
+               0xffffffff853f3854
+               0xffffffff854c0338
+               0xffffffff8556ece1
+               0xffffffff8547e990
+               0xffffffff8547f8b1
+               0xffffffff8547f959
+               0xffffffff84f252d5
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __GI___libc_read (inlined)
+               <std::sys::fd::unix::FileDesc>::read (inlined)
+               <std::sys::fs::unix::File>::read (inlined)
+               <&std::fs::File as std::io::Read>::read (inlined)
+               std::io::default_read_to_end::small_probe_read::<&std::fs::File>
+               std::io::default_read_to_end::<&std::fs::File>
+               std::io::default_read_to_string::<&std::fs::File>::{closure#0} (inlined)
+               std::io::append_to_string::<std::io::default_read_to_string<&std::fs::File>::{closure#0}> (inlined)
+               std::io::default_read_to_string::<&std::fs::File> (inlined)
+               <&std::fs::File as std::io::Read>::read_to_string
+               <std::fs::File as std::io::Read>::read_to_string (inlined)
+               std::sys::thread::unix::cgroups::quota_v2::{closure#0} (inlined)
+               <core::result::Result<std::fs::File, std::io::error::Error>>::and_then::<usize, std::sys::thread::unix::cgroups::quota_v2::{closure#0}> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+
+    12.83%  perf_profile  [unknown]         [k] 0xffffffff851a08e5                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8582faa3
+               0xffffffff85492449
+               0xffffffff85496ad0
+               0xffffffff85498e17
+               0xffffffff854990f4
+               0xffffffff8547a407
+               0xffffffff8547a93f
+               0xffffffff84f25032
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __libc_open64 (inlined)
+               <std::sys::fs::unix::File>::open_c::{closure#0} (inlined)
+               std::sys::pal::unix::cvt_r::<i32, <std::sys::fs::unix::File>::open_c::{closure#0}> (inlined)
+               <std::sys::fs::unix::File>::open_c
+               0x33
+               <std::sys::fs::unix::File>::open::{closure#0} (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr_stack::<std::sys::fs::unix::File> (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr::<std::sys::fs::unix::File> (inlined)
+               std::sys::helpers::small_c_string::run_path_with_cstr::<std::sys::fs::unix::File> (inlined)
+               <std::sys::fs::unix::File>::open (inlined)
+               <std::fs::OpenOptions>::_open (inlined)
+               <std::fs::OpenOptions>::open::<&std::path::Path> (inlined)
+               <std::fs::File>::open::<&std::path::PathBuf> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+
+     4.88%  perf_profile  [unknown]         [k] 0xffffffff84d0410b                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --4.68%--0xffffffff854969cd
+                       0xffffffff85498e17
+                       0xffffffff854990f4
+                       0xffffffff8547a407
+                       0xffffffff8547a93f
+                       0xffffffff84f25032
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __internal_syscall_cancel (inlined)
+                       __syscall_cancel
+                       __libc_open64 (inlined)
+                       <std::sys::fs::unix::File>::open_c::{closure#0} (inlined)
+                       std::sys::pal::unix::cvt_r::<i32, <std::sys::fs::unix::File>::open_c::{closure#0}> (inlined)
+                       <std::sys::fs::unix::File>::open_c
+                       0x69
+                       <std::sys::fs::unix::File>::open::{closure#0} (inlined)
+                       std::sys::helpers::small_c_string::run_with_cstr_stack::<std::sys::fs::unix::File> (inlined)
+                       std::sys::helpers::small_c_string::run_with_cstr::<std::sys::fs::unix::File> (inlined)
+                       std::sys::helpers::small_c_string::run_path_with_cstr::<std::sys::fs::unix::File> (inlined)
+                       <std::sys::fs::unix::File>::open (inlined)
+                       <std::fs::OpenOptions>::_open (inlined)
+                       <std::fs::OpenOptions>::open::<&std::path::Path> (inlined)
+                       <std::fs::File>::open::<&std::path::PathBuf> (inlined)
+                       std::sys::thread::unix::cgroups::quota_v2 (inlined)
+                       std::sys::thread::unix::cgroups::quota (inlined)
+                       std::sys::thread::unix::available_parallelism (inlined)
+                       std::thread::functions::available_parallelism
+                       fp_join::build_single_key_inner_merge_output_with_selections
+                       fp_join::merge_single_key_inner_unsorted
+
+     4.51%  perf_profile  [unknown]         [k] 0xffffffff85496965                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8519f630
+               0xffffffff851a2f82
+               0xffffffff85498575
+               0xffffffff85487e79
+               0xffffffff85488ce7
+               0xffffffff8548907e
+               0xffffffff84f253a7
+               0xffffffff86220551
+               0xffffffff84c0012b
+               statx
+               std::sys::fs::unix::try_statx::statx (inlined)
+               std::sys::fs::unix::try_statx
+               std::sys::fs::unix::stat (inlined)
+               <std::sys::fs::unix::stat as core::ops::function::Fn<(&core::ffi::c_str::CStr,)>>::call (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr_stack::<std::sys::fs::unix::FileAttr> (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr::<std::sys::fs::unix::FileAttr> (inlined)
+               std::sys::helpers::small_c_string::run_path_with_cstr::<std::sys::fs::unix::FileAttr> (inlined)
+               std::sys::fs::metadata
+               std::fs::metadata::<&std::path::Path> (inlined)
+               std::sys::fs::common::exists (inlined)
+               std::sys::fs::exists (inlined)
+               std::fs::exists::<&std::path::PathBuf> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+
+     4.28%  perf_profile  [unknown]         [k] 0xffffffff84c001bd                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |          
+             --4.11%--0xffffffff851a04fa
+                       0xffffffff851a2b6a
+                       0xffffffff85124d3c
+                       0xffffffff862206af
+                       0xffffffff84c0012b
+                       statx
+                       std::sys::fs::unix::try_statx::statx (inlined)
+                       std::sys::fs::unix::try_statx
+                       <std::sys::fs::unix::File>::file_attr (inlined)
+                       <std::fs::File>::metadata (inlined)
+                       std::fs::buffer_capacity_required
+                       <&std::fs::File as std::io::Read>::read_to_string
+                       <std::fs::File as std::io::Read>::read_to_string (inlined)
+                       std::sys::thread::unix::cgroups::quota_v2::{closure#0} (inlined)
+                       <core::result::Result<std::fs::File, std::io::error::Error>>::and_then::<usize, std::sys::thread::unix::cgroups::quota_v2::{closure#0}> (inlined)
+                       std::sys::thread::unix::cgroups::quota_v2 (inlined)
+                       std::sys::thread::unix::cgroups::quota (inlined)
+                       std::sys::thread::unix::available_parallelism (inlined)
+                       std::thread::functions::available_parallelism
+                       fp_join::build_single_key_inner_merge_output_with_selections
+                       fp_join::merge_single_key_inner_unsorted
+
+     4.01%  perf_profile  [unknown]         [k] 0xffffffff85124a27                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff85717872
+               0xffffffff85717a6f
+               0xffffffff8569f879
+               0xffffffff8547b2a7
+               0xffffffff8547e7a1
+               0xffffffff8547f8b1
+               0xffffffff8547f959
+               0xffffffff84f252d5
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __GI___libc_read (inlined)
+               <std::sys::fd::unix::FileDesc>::read_buf (inlined)
+               <std::sys::fs::unix::File>::read_buf (inlined)
+               <&std::fs::File as std::io::Read>::read_buf (inlined)
+               std::io::default_read_to_end::<&std::fs::File>
+               <&std::fs::File as std::io::Read>::read_to_end (inlined)
+               <std::fs::File as std::io::Read>::read_to_end (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+
+     3.94%  perf_profile  [unknown]         [k] 0xffffffff85480db2                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff8547a905
+               0xffffffff84f25032
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __libc_open64 (inlined)
+               <std::sys::fs::unix::File>::open_c::{closure#0} (inlined)
+               std::sys::pal::unix::cvt_r::<i32, <std::sys::fs::unix::File>::open_c::{closure#0}> (inlined)
+               <std::sys::fs::unix::File>::open_c
+               0x11
+               <std::sys::fs::unix::File>::open::{closure#0} (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr_stack::<std::sys::fs::unix::File> (inlined)
+               std::sys::helpers::small_c_string::run_with_cstr::<std::sys::fs::unix::File> (inlined)
+               std::sys::helpers::small_c_string::run_path_with_cstr::<std::sys::fs::unix::File> (inlined)
+               <std::sys::fs::unix::File>::open (inlined)
+               <std::fs::OpenOptions>::_open (inlined)
+               <std::fs::OpenOptions>::open::<&std::path::Path> (inlined)
+               <std::fs::File>::open::<&std::path::PathBuf> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+
+     3.91%  perf_profile  perf_profile      [.] std::thread::functions::available_parallelism                                                                                                                                                                                                                                                                                                                                   -      -            
+            |
+            ---0xffffffff8548f9c2
+               0xffffffff8519f3fe
+               0xffffffff851a2ab6
+               0xffffffff85124d3c
+               0xffffffff862206af
+               0xffffffff84c0012b
+
+     3.90%  perf_profile  [unknown]         [k] 0xffffffff851a2b6f                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff85480cdf
+               0xffffffff85481670
+               0xffffffff8547768e
+               0xffffffff84f24b82
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __GI___close (inlined)
+               <std::os::fd::owned::OwnedFd as core::ops::drop::Drop>::drop (inlined)
+               core::ptr::drop_in_place::<std::os::fd::owned::OwnedFd> (inlined)
+               core::ptr::drop_in_place::<std::sys::fd::unix::FileDesc> (inlined)
+               core::ptr::drop_in_place::<std::sys::fs::unix::File> (inlined)
+               core::ptr::drop_in_place::<std::fs::File> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2::{closure#0} (inlined)
+               <core::result::Result<std::fs::File, std::io::error::Error>>::and_then::<usize, std::sys::thread::unix::cgroups::quota_v2::{closure#0}> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+
+     3.89%  perf_profile  [unknown]         [k] 0xffffffff851a2abb                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff851934a8
+               0xffffffff85488e61
+               0xffffffff8548906c
+               0xffffffff84f253a7
+               0xffffffff86220551
+               0xffffffff84c0012b
+               statx
+               std::sys::fs::unix::try_statx::statx (inlined)
+               std::sys::fs::unix::try_statx
+               <std::sys::fs::unix::File>::file_attr (inlined)
+               <std::fs::File>::metadata (inlined)
+               std::fs::buffer_capacity_required
+               <&std::fs::File as std::io::Read>::read_to_string
+               <std::fs::File as std::io::Read>::read_to_string (inlined)
+               std::sys::thread::unix::cgroups::quota_v2::{closure#0} (inlined)
+               <core::result::Result<std::fs::File, std::io::error::Error>>::and_then::<usize, std::sys::thread::unix::cgroups::quota_v2::{closure#0}> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+
+     3.88%  perf_profile  perf_profile      [.] fp_join::build_single_key_inner_merge_output_with_selections                                                                                                                                                                                                                                                                                                                    -      -            
+            |
+            ---fp_join::build_single_key_inner_merge_output_with_selections
+
+     3.79%  perf_profile  perf_profile      [.] std::io::default_read_to_end::<&std::fs::File>                                                                                                                                                                                                                                                                                                                                  -      -            
+            |          
+             --3.79%--0xffffffff85458209
+                       0xffffffff853f3854
+                       0xffffffff854c0338
+                       0xffffffff8556ece1
+                       0xffffffff8547e990
+                       0xffffffff8547f8b1
+                       0xffffffff8547f959
+                       0xffffffff84f252d5
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+
+     3.69%  perf_profile  [unknown]         [k] 0xffffffff851a2b20                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---0xffffffff851a04fa
+               0xffffffff851a2b6a
+               0xffffffff85124d3c
+               0xffffffff862206af
+               0xffffffff84c0012b
+               __internal_syscall_cancel (inlined)
+               __syscall_cancel
+               __GI___libc_read (inlined)
+               <std::sys::fd::unix::FileDesc>::read_buf (inlined)
+               <std::sys::fs::unix::File>::read_buf (inlined)
+               <&std::fs::File as std::io::Read>::read_buf (inlined)
+               std::io::default_read_to_end::<&std::fs::File>
+               std::io::default_read_to_string::<&std::fs::File>::{closure#0} (inlined)
+               std::io::append_to_string::<std::io::default_read_to_string<&std::fs::File>::{closure#0}> (inlined)
+               std::io::default_read_to_string::<&std::fs::File> (inlined)
+               <&std::fs::File as std::io::Read>::read_to_string
+               <std::fs::File as std::io::Read>::read_to_string (inlined)
+               std::sys::thread::unix::cgroups::quota_v2::{closure#0} (inlined)
+               <core::result::Result<std::fs::File, std::io::error::Error>>::and_then::<usize, std::sys::thread::unix::cgroups::quota_v2::{closure#0}> (inlined)
+               std::sys::thread::unix::cgroups::quota_v2 (inlined)
+               std::sys::thread::unix::cgroups::quota (inlined)
+               std::sys::thread::unix::available_parallelism (inlined)
+               std::thread::functions::available_parallelism
+               fp_join::build_single_key_inner_merge_output_with_selections
+               fp_join::merge_single_key_inner_unsorted
+
+     0.77%  perf_profile  perf_profile      [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<fp_columnar::Utf8LowerHexSequence>>>::get_or_init<<fp_columnar::Column>::as_lower_hex_sequence_utf8_contiguous::{closure#2}>::{closure#0}, !>::{closure#0}>::{closure#0}  -      -            
+     0.30%  perf_profile  [unknown]         [k] 0xffffffff85497a66                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.30%  perf_profile  perf_profile      [.] perf_profile::build_str_join_frame                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.25%  perf_profile  [unknown]         [k] 0xffffffff853d957d                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.24%  perf_profile  [unknown]         [k] 0xffffffff851965e6                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.23%  perf_profile  perf_profile      [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                                                                                                                                                                                                                                                                            -      -            
+     0.23%  perf_profile  [unknown]         [k] 0xffffffff8571c0a6                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.22%  perf_profile  [unknown]         [k] 0xffffffff84d04109                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.20%  perf_profile  [unknown]         [k] 0xffffffff8556e674                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.20%  perf_profile  [unknown]         [k] 0xffffffff8556e63d                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.20%  perf_profile  [unknown]         [k] 0xffffffff84c00005                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.20%  perf_profile  [unknown]         [k] 0xffffffff854936ba                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.19%  perf_profile  [unknown]         [k] 0xffffffff8622fb84                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.19%  perf_profile  [unknown]         [k] 0xffffffff854c0196                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff8541ddb2                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff851965fa                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff8556df49                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff84c01192                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff86229e6b                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.16%  perf_profile  [unknown]         [k] 0xffffffff86220597                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  libc.so.6         [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                                                                                                                                    -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8508f702                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8592b660                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85104b2d                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86220551                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8621b2b7                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f8c9d1                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  perf_profile      [.] fp_join::merge_dataframes_on_with_options                                                                                                                                                                                                                                                                                                                                       -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8519f743                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8556b0be                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8621c6a9                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff853f173a                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8582fba2                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8582f979                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff853d9213                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff84d04104                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  libc.so.6         [.] read                                                                                                                                                                                                                                                                                                                                                                            -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff854912ee                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84d04104                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedcb                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2bc                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86228550                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d280                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d285                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff850c2910                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d286                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2c3                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f32f8e                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b60                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d289                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2cc                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d280                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d2bc                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d2c3                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedcd                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedd5                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedd7                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff850c2906                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85104b41                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b66                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b69                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b80                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d28c                                                                                                                                                                                                                                                                                                                                                              -      -            
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86228551                                                                                                                                                                                                                                                                                                                                                              -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

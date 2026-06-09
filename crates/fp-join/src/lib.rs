@@ -70,7 +70,7 @@ use std::{
 };
 
 use bumpalo::{Bump, collections::Vec as BumpVec};
-use fp_columnar::{Column, ColumnError};
+use fp_columnar::{Column, ColumnError, Utf8LowerHexSequence};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexLabel};
 use fp_types::{DType, NullKind, Scalar, TypeError};
@@ -1086,6 +1086,25 @@ fn ordered_unique_utf8_fixed_width(left_key: &Column, right_key: &Column) -> Opt
     (left_width == right_width && left_width > 0).then_some(left_width)
 }
 
+fn ordered_utf8_lower_hex_overlap_len(
+    left_cert: Utf8LowerHexSequence,
+    right_cert: Utf8LowerHexSequence,
+    left_idx: usize,
+    left_n: usize,
+    right_idx: usize,
+    right_n: usize,
+) -> Option<usize> {
+    if !left_cert.same_shape(right_cert) {
+        return None;
+    }
+    let left_value = left_cert.value_at(left_idx)?;
+    let right_value = right_cert.value_at(right_idx)?;
+    if left_value != right_value {
+        return None;
+    }
+    Some(left_n.saturating_sub(left_idx).min(right_n - right_idx))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InnerPositionPlan {
     Gather {
@@ -1179,6 +1198,38 @@ fn ordered_unique_utf8_inner_position_plan(
                     && !fixed_width_bulk_attempted
                 {
                     fixed_width_bulk_attempted = true;
+                    // This branch is reached only after the current left/right
+                    // key spans compare equal. Matching lower-hex shapes then
+                    // prove the remaining shifted windows without a full
+                    // byte-window memcmp.
+                    let lower_hex_sequences = match (
+                        left_key.as_lower_hex_sequence_utf8_contiguous(),
+                        right_key.as_lower_hex_sequence_utf8_contiguous(),
+                    ) {
+                        (Some((_, _, left_cert)), Some((_, _, right_cert))) => {
+                            Some((left_cert, right_cert))
+                        }
+                        _ => None,
+                    };
+                    if let Some((left_cert, right_cert)) = lower_hex_sequences
+                        && let Some(run_len) = ordered_utf8_lower_hex_overlap_len(
+                            left_cert, right_cert, left_idx, left_n, right_idx, right_n,
+                        )
+                        && run_len > 1
+                    {
+                        if left_positions.is_empty() {
+                            return Some(InnerPositionPlan::ContiguousRanges {
+                                left_start: left_idx,
+                                right_start: right_idx,
+                                len: run_len,
+                            });
+                        }
+                        left_positions.extend(left_idx..left_idx + run_len);
+                        right_positions.extend(right_idx..right_idx + run_len);
+                        left_idx += run_len;
+                        right_idx += run_len;
+                        continue;
+                    }
                     let run_len = left_n.saturating_sub(left_idx).min(right_n - right_idx);
                     if run_len > 1
                         && let Some(byte_len) = run_len.checked_mul(width)
@@ -6639,8 +6690,8 @@ mod tests {
         FusedInt64Side, InnerPositionPlan, JoinExecutionOptions, JoinType,
         build_dense_i64_inner_output_data, join_series, join_series_with_options,
         join_series_with_trace, ordered_unique_utf8_inner_position_plan,
-        ordered_unique_utf8_inner_positions, strictly_increasing_utf8_key_spans,
-        utf8_span_lower_bound,
+        ordered_unique_utf8_inner_positions, ordered_utf8_lower_hex_overlap_len,
+        strictly_increasing_utf8_key_spans, utf8_span_lower_bound,
     };
 
     fn contiguous_utf8_column(values: &[&str]) -> Column {
@@ -9553,6 +9604,47 @@ mod tests {
                 len: 3
             }
         );
+    }
+
+    #[test]
+    fn ordered_unique_utf8_lower_hex_certificate_returns_range_plan_jbyuc111111() {
+        let left =
+            contiguous_utf8_column(&["id_0000000a", "id_0000000b", "id_0000000c", "id_0000000d"]);
+        let right = contiguous_utf8_column(&["id_0000000c", "id_0000000d", "id_0000000e"]);
+        let (_, _, left_cert) = left
+            .as_lower_hex_sequence_utf8_contiguous()
+            .expect("left sequence certificate");
+        let (_, _, right_cert) = right
+            .as_lower_hex_sequence_utf8_contiguous()
+            .expect("right sequence certificate");
+
+        assert_eq!(
+            ordered_utf8_lower_hex_overlap_len(left_cert, right_cert, 2, 4, 0, 3),
+            Some(2)
+        );
+        let plan =
+            ordered_unique_utf8_inner_position_plan(&left, &right).expect("ordered utf8 plan");
+        assert_eq!(
+            plan,
+            InnerPositionPlan::ContiguousRanges {
+                left_start: 2,
+                right_start: 0,
+                len: 2
+            }
+        );
+    }
+
+    #[test]
+    fn ordered_unique_utf8_uncertified_fixed_width_still_matches_jbyuc111111() {
+        let left = contiguous_utf8_column(&["k00A", "k00B", "k00C", "k00D"]);
+        let right = contiguous_utf8_column(&["k00B", "k00D"]);
+
+        assert!(left.as_lower_hex_sequence_utf8_contiguous().is_none());
+        assert!(right.as_lower_hex_sequence_utf8_contiguous().is_none());
+        let (left_positions, right_positions) =
+            ordered_unique_utf8_inner_positions(&left, &right).expect("ordered utf8 positions");
+        assert_eq!(left_positions, vec![1, 3]);
+        assert_eq!(right_positions, vec![0, 1]);
     }
 
     #[test]

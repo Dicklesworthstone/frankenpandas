@@ -67,6 +67,46 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Utf8LowerHexSequence {
+    prefix_len: usize,
+    hex_width: usize,
+    start: u64,
+}
+
+impl Utf8LowerHexSequence {
+    #[must_use]
+    pub fn prefix_len(&self) -> usize {
+        self.prefix_len
+    }
+
+    #[must_use]
+    pub fn hex_width(&self) -> usize {
+        self.hex_width
+    }
+
+    #[must_use]
+    pub fn width(&self) -> usize {
+        self.prefix_len + self.hex_width
+    }
+
+    #[must_use]
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    #[must_use]
+    pub fn value_at(&self, row: usize) -> Option<u64> {
+        self.start.checked_add(row as u64)
+    }
+
+    #[must_use]
+    pub fn same_shape(&self, other: Self) -> bool {
+        self.prefix_len == other.prefix_len && self.hex_width == other.hex_width
+    }
+}
+
 #[derive(Debug, Clone, Eq)]
 pub struct ValidityMask {
     words: Vec<u64>,
@@ -1062,6 +1102,7 @@ enum ScalarValues {
         offsets: Arc<[usize]>,
         strictly_increasing: OnceLock<bool>,
         fixed_width: OnceLock<Option<usize>>,
+        lower_hex_sequence: OnceLock<Option<Utf8LowerHexSequence>>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Nullable counterpart of `LazyContiguousUtf8` (br-frankenpandas-cmxjz):
@@ -1224,6 +1265,7 @@ impl ScalarValues {
             offsets,
             strictly_increasing: OnceLock::new(),
             fixed_width: OnceLock::new(),
+            lower_hex_sequence: OnceLock::new(),
             values: OnceLock::new(),
         }
     }
@@ -1803,6 +1845,63 @@ fn contiguous_utf8_fixed_width(offsets: &[usize]) -> Option<usize> {
         }
     }
     Some(width)
+}
+
+fn lower_hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn parse_fixed_width_lower_hex(bytes: &[u8]) -> Option<u64> {
+    let mut value = 0_u64;
+    for &byte in bytes {
+        value = value.checked_mul(16)?;
+        value = value.checked_add(u64::from(lower_hex_value(byte)?))?;
+    }
+    Some(value)
+}
+
+fn contiguous_utf8_lower_hex_sequence(
+    bytes: &[u8],
+    offsets: &[usize],
+    width: usize,
+) -> Option<Utf8LowerHexSequence> {
+    let n = offsets.len().checked_sub(1)?;
+    if n == 0 || width == 0 || width > 64 {
+        return None;
+    }
+
+    let first = &bytes[offsets[0]..offsets[1]];
+    let mut hex_start = first.len();
+    while hex_start > 0 && lower_hex_value(first[hex_start - 1]).is_some() {
+        hex_start -= 1;
+    }
+    let hex_width = first.len().checked_sub(hex_start)?;
+    if hex_width == 0 || hex_width == first.len() {
+        return None;
+    }
+
+    let prefix = &first[..hex_start];
+    let start = parse_fixed_width_lower_hex(&first[hex_start..])?;
+    for row in 1..n {
+        let span = &bytes[offsets[row]..offsets[row + 1]];
+        if span.len() != width || &span[..hex_start] != prefix {
+            return None;
+        }
+        let value = parse_fixed_width_lower_hex(&span[hex_start..])?;
+        if value != start.checked_add(row as u64)? {
+            return None;
+        }
+    }
+
+    Some(Utf8LowerHexSequence {
+        prefix_len: hex_start,
+        hex_width,
+        start,
+    })
 }
 
 /// If `positions` is a non-empty contiguous ascending run
@@ -3233,6 +3332,44 @@ impl Column {
                 .as_ref()
                 .copied()?;
             return Some((bytes.as_ref(), offsets.as_ref(), width));
+        }
+        None
+    }
+
+    /// Borrow a strict fixed-width contiguous-Utf8 backing and its cached
+    /// lower-hex sequence certificate.
+    ///
+    /// The certificate is deterministic: every row is proven to be
+    /// `prefix + fixed-width lowercase hex(start + row)`. Ordered joins can use
+    /// matching certificates to prove a shifted overlap is byte-identical
+    /// without scanning the whole overlap window.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn as_lower_hex_sequence_utf8_contiguous(
+        &self,
+    ) -> Option<(&[u8], &[usize], Utf8LowerHexSequence)> {
+        if self.dtype == DType::Utf8
+            && self.validity.all()
+            && let ScalarValues::LazyContiguousUtf8 {
+                bytes,
+                offsets,
+                strictly_increasing,
+                fixed_width,
+                lower_hex_sequence,
+                ..
+            } = &self.values
+            && *strictly_increasing
+                .get_or_init(|| contiguous_utf8_offsets_are_strictly_increasing(bytes, offsets))
+        {
+            let width = fixed_width
+                .get_or_init(|| contiguous_utf8_fixed_width(offsets))
+                .as_ref()
+                .copied()?;
+            let certificate = lower_hex_sequence
+                .get_or_init(|| contiguous_utf8_lower_hex_sequence(bytes, offsets, width))
+                .as_ref()
+                .copied()?;
+            return Some((bytes.as_ref(), offsets.as_ref(), certificate));
         }
         None
     }
@@ -15610,6 +15747,49 @@ mod tests {
                 scalar_backed
                     .as_strictly_increasing_utf8_contiguous()
                     .is_none()
+            );
+        }
+
+        #[test]
+        fn contiguous_utf8_lower_hex_sequence_certificate_jbyuc111111() {
+            fn contiguous(values: &[&str]) -> Column {
+                let mut bytes = Vec::new();
+                let mut offsets = Vec::with_capacity(values.len() + 1);
+                offsets.push(0);
+                for value in values {
+                    bytes.extend_from_slice(value.as_bytes());
+                    offsets.push(bytes.len());
+                }
+                Column::from_utf8_contiguous(bytes, offsets)
+            }
+
+            let certified = contiguous(&["id_0000000a", "id_0000000b", "id_0000000c"]);
+            let (_, _, certificate) = certified
+                .as_lower_hex_sequence_utf8_contiguous()
+                .expect("lower-hex sequence certificate");
+            assert_eq!(certificate.prefix_len(), 3);
+            assert_eq!(certificate.hex_width(), 8);
+            assert_eq!(certificate.width(), 11);
+            assert_eq!(certificate.start(), 10);
+            assert_eq!(certificate.value_at(2), Some(12));
+
+            assert!(
+                contiguous(&["id_0000000a", "id_0000000c"])
+                    .as_lower_hex_sequence_utf8_contiguous()
+                    .is_none(),
+                "gapped sequences are not certified"
+            );
+            assert!(
+                contiguous(&["id_0000000a", "id_0000000B"])
+                    .as_lower_hex_sequence_utf8_contiguous()
+                    .is_none(),
+                "uppercase hex is not certified by the lowercase witness"
+            );
+            assert!(
+                contiguous(&["0000000a", "0000000b"])
+                    .as_lower_hex_sequence_utf8_contiguous()
+                    .is_none(),
+                "a prefix is required so arbitrary all-hex strings fall back"
             );
         }
 
