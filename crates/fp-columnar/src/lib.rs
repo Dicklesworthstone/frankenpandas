@@ -110,12 +110,35 @@ impl Utf8LowerHexSequence {
 #[derive(Debug, Clone, Eq)]
 pub struct ValidityMask {
     words: Vec<u64>,
+    invalid_ranges: Option<Arc<[(usize, usize)]>>,
     len: usize,
 }
 
 impl ValidityMask {
     fn is_all_valid_sentinel(&self) -> bool {
-        self.len > 0 && self.words.is_empty()
+        self.len > 0 && self.words.is_empty() && self.invalid_ranges.is_none()
+    }
+
+    fn invalid_ranges_contain(ranges: &[(usize, usize)], idx: usize) -> bool {
+        let mut lo = 0usize;
+        let mut hi = ranges.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let (start, len) = ranges[mid];
+            let end = start + len;
+            if idx < start {
+                hi = mid;
+            } else if idx >= end {
+                lo = mid + 1;
+            } else {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn invalid_ranges_len(ranges: &[(usize, usize)]) -> usize {
+        ranges.iter().map(|&(_, len)| len).sum()
     }
 
     fn materialized_all_valid_words(len: usize) -> Vec<u64> {
@@ -128,6 +151,22 @@ impl ValidityMask {
             *last = (1_u64 << remainder) - 1;
         }
         words
+    }
+
+    fn materialized_words(&self) -> Vec<u64> {
+        if self.is_all_valid_sentinel() {
+            return Self::materialized_all_valid_words(self.len);
+        }
+        if let Some(ranges) = &self.invalid_ranges {
+            let mut words = Self::materialized_all_valid_words(self.len);
+            for &(start, len) in ranges.iter() {
+                for idx in start..start + len {
+                    words[idx / 64] &= !(1_u64 << (idx % 64));
+                }
+            }
+            return words;
+        }
+        self.words.clone()
     }
 
     fn words_are_all_valid(words: &[u64], len: usize) -> bool {
@@ -150,8 +189,9 @@ impl ValidityMask {
     }
 
     fn materialize_if_all_valid_sentinel(&mut self) {
-        if self.is_all_valid_sentinel() {
-            self.words = Self::materialized_all_valid_words(self.len);
+        if self.is_all_valid_sentinel() || self.invalid_ranges.is_some() {
+            self.words = self.materialized_words();
+            self.invalid_ranges = None;
         }
     }
 
@@ -171,7 +211,11 @@ impl ValidityMask {
         if all_valid {
             return Self::all_valid(len);
         }
-        Self { words, len }
+        Self {
+            words,
+            invalid_ranges: None,
+            len,
+        }
     }
 
     /// Build a validity mask from a contiguous `f64` buffer, marking NaN
@@ -195,13 +239,18 @@ impl ValidityMask {
         if all_valid {
             return Self::all_valid(len);
         }
-        Self { words, len }
+        Self {
+            words,
+            invalid_ranges: None,
+            len,
+        }
     }
 
     #[must_use]
     pub fn all_valid(len: usize) -> Self {
         Self {
             words: Vec::new(),
+            invalid_ranges: None,
             len,
         }
     }
@@ -221,7 +270,34 @@ impl ValidityMask {
         if Self::words_are_all_valid(&words, len) {
             return Self::all_valid(len);
         }
-        Self { words, len }
+        Self {
+            words,
+            invalid_ranges: None,
+            len,
+        }
+    }
+
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_invalid_ranges(invalid_ranges: Arc<[(usize, usize)]>, len: usize) -> Self {
+        debug_assert!(
+            invalid_ranges.iter().all(|&(start, run_len)| {
+                start.checked_add(run_len).is_some_and(|end| end <= len)
+            })
+        );
+        debug_assert!(invalid_ranges.windows(2).all(|window| {
+            let (left_start, left_len) = window[0];
+            let (right_start, _) = window[1];
+            left_start + left_len <= right_start
+        }));
+        if invalid_ranges.is_empty() {
+            return Self::all_valid(len);
+        }
+        Self {
+            words: Vec::new(),
+            invalid_ranges: Some(invalid_ranges),
+            len,
+        }
     }
 
     #[must_use]
@@ -229,6 +305,7 @@ impl ValidityMask {
         let word_count = len.div_ceil(64);
         Self {
             words: vec![0_u64; word_count],
+            invalid_ranges: None,
             len,
         }
     }
@@ -240,6 +317,9 @@ impl ValidityMask {
         }
         if self.is_all_valid_sentinel() {
             return true;
+        }
+        if let Some(ranges) = &self.invalid_ranges {
+            return !Self::invalid_ranges_contain(ranges, idx);
         }
         (self.words[idx / 64] >> (idx % 64)) & 1 == 1
     }
@@ -253,6 +333,8 @@ impl ValidityMask {
                 return;
             }
             self.materialize_if_all_valid_sentinel();
+        } else if self.invalid_ranges.is_some() {
+            self.materialize_if_all_valid_sentinel();
         }
         if value {
             self.words[idx / 64] |= 1_u64 << (idx % 64);
@@ -265,6 +347,9 @@ impl ValidityMask {
     pub fn count_valid(&self) -> usize {
         if self.is_all_valid_sentinel() {
             return self.len;
+        }
+        if let Some(ranges) = &self.invalid_ranges {
+            return self.len.saturating_sub(Self::invalid_ranges_len(ranges));
         }
         let full_words = self.len / 64;
         let mut count: u32 = self.words[..full_words]
@@ -304,13 +389,15 @@ impl ValidityMask {
         if other.is_all_valid_sentinel() {
             return self.slice(0, len);
         }
+        let left_words = self.materialized_words();
+        let right_words = other.materialized_words();
         let word_count = len.div_ceil(64);
-        let words = self.words[..word_count]
+        let words = left_words[..word_count]
             .iter()
-            .zip(&other.words[..word_count])
+            .zip(&right_words[..word_count])
             .map(|(a, b)| a & b)
             .collect();
-        Self { words, len }
+        Self::from_words(words, len)
     }
 
     #[must_use]
@@ -322,13 +409,15 @@ impl ValidityMask {
         if self.is_all_valid_sentinel() || other.is_all_valid_sentinel() {
             return Self::all_valid(len);
         }
+        let left_words = self.materialized_words();
+        let right_words = other.materialized_words();
         let word_count = len.div_ceil(64);
-        let words = self.words[..word_count]
+        let words = left_words[..word_count]
             .iter()
-            .zip(&other.words[..word_count])
+            .zip(&right_words[..word_count])
             .map(|(a, b)| a | b)
             .collect();
-        Self { words, len }
+        Self::from_words(words, len)
     }
 
     #[must_use]
@@ -336,16 +425,13 @@ impl ValidityMask {
         if self.is_all_valid_sentinel() {
             return Self::all_invalid(self.len);
         }
-        let mut words: Vec<u64> = self.words.iter().map(|w| !w).collect();
+        let mut words: Vec<u64> = self.materialized_words().iter().map(|w| !w).collect();
         let remainder = self.len % 64;
         if remainder > 0 && !words.is_empty() {
             let last = words.len() - 1;
             words[last] &= (1_u64 << remainder) - 1;
         }
-        Self {
-            words,
-            len: self.len,
-        }
+        Self::from_words(words, self.len)
     }
 
     /// Returns an iterator yielding bool values, compatible with the previous
@@ -396,10 +482,12 @@ impl ValidityMask {
         if other.is_all_valid_sentinel() {
             return self.slice(0, len).not_mask();
         }
+        let left_words = self.materialized_words();
+        let right_words = other.materialized_words();
         let word_count = len.div_ceil(64);
-        let mut words: Vec<u64> = self.words[..word_count]
+        let mut words: Vec<u64> = left_words[..word_count]
             .iter()
-            .zip(&other.words[..word_count])
+            .zip(&right_words[..word_count])
             .map(|(a, b)| a ^ b)
             .collect();
         let remainder = len % 64;
@@ -407,7 +495,7 @@ impl ValidityMask {
             let last = words.len() - 1;
             words[last] &= (1_u64 << remainder) - 1;
         }
-        Self { words, len }
+        Self::from_words(words, len)
     }
 
     /// Extract a contiguous sub-range as a new mask.
@@ -3870,28 +3958,38 @@ impl Column {
         }
     }
 
-    /// Validity mask for a nullable repeated-slices lane: bits start all-valid;
-    /// every null segment (`start == usize::MAX`) clears its output range.
-    /// O(output_len) bits but word-wise (cheap relative to materializing the
-    /// fanned-out values), and `all_valid` when there are no null segments.
+    /// Validity mask for a nullable repeated-slices lane. Null runs are stored
+    /// as sparse invalid ranges, deferring the O(output_len / 64) packed bitmap
+    /// write until a cold caller needs concrete mask algebra or serialization.
     fn nullable_repeated_slices_validity(
         segments: &[(usize, usize)],
         total_len: usize,
     ) -> ValidityMask {
-        if !segments.iter().any(|&(start, _)| start == usize::MAX) {
-            return ValidityMask::all_valid(total_len);
-        }
-        let mut mask = ValidityMask::all_valid(total_len);
+        let mut invalid_ranges = Vec::new();
         let mut pos = 0usize;
         for &(start, len) in segments {
-            if start == usize::MAX {
-                for offset in 0..len {
-                    mask.set(pos + offset, false);
-                }
+            if start == usize::MAX && len > 0 {
+                invalid_ranges.push((pos, len));
             }
             pos += len;
         }
-        mask
+        ValidityMask::from_invalid_ranges(Arc::from(invalid_ranges), total_len)
+    }
+
+    fn nullable_repeat_values_validity(
+        run_valid: &[bool],
+        run_lens: &[usize],
+        total_len: usize,
+    ) -> ValidityMask {
+        let mut invalid_ranges = Vec::new();
+        let mut pos = 0usize;
+        for (&valid, &run_len) in run_valid.iter().zip(run_lens.iter()) {
+            if !valid && run_len > 0 {
+                invalid_ranges.push((pos, run_len));
+            }
+            pos += run_len;
+        }
+        ValidityMask::from_invalid_ranges(Arc::from(invalid_ranges), total_len)
     }
 
     /// Null-introducing Int64 dense-join lane (br-frankenpandas-yiqv5): repeated
@@ -3946,21 +4044,7 @@ impl Column {
         run_lens: Arc<[usize]>,
         total_len: usize,
     ) -> Self {
-        let validity = if run_valid.iter().all(|&v| v) {
-            ValidityMask::all_valid(total_len)
-        } else {
-            let mut mask = ValidityMask::all_valid(total_len);
-            let mut pos = 0usize;
-            for (&valid, &run_len) in run_valid.iter().zip(run_lens.iter()) {
-                if !valid {
-                    for offset in 0..run_len {
-                        mask.set(pos + offset, false);
-                    }
-                }
-                pos += run_len;
-            }
-            mask
-        };
+        let validity = Self::nullable_repeat_values_validity(&run_valid, &run_lens, total_len);
         Self {
             dtype: DType::Float64,
             values: ScalarValues::lazy_nullable_repeat_values_float64(
@@ -4131,7 +4215,7 @@ impl Column {
         }
         Some(Self::from_f64_values_with_validity(
             data,
-            ValidityMask { words, len: n },
+            ValidityMask::from_words(words, n),
         ))
     }
 
@@ -4706,7 +4790,7 @@ impl Column {
                     words[out_idx / 64] |= 1_u64 << (out_idx % 64);
                 }
             }
-            return Self::from_f64_values_with_validity(data, ValidityMask { words, len: n });
+            return Self::from_f64_values_with_validity(data, ValidityMask::from_words(words, n));
         }
 
         let mut values = Vec::with_capacity(n);
@@ -4721,7 +4805,7 @@ impl Column {
         Self {
             dtype: self.dtype,
             values: ScalarValues::from_vec(values),
-            validity: ValidityMask { words, len: n },
+            validity: ValidityMask::from_words(words, n),
             data: None,
         }
     }
@@ -5593,7 +5677,7 @@ impl Column {
             }
             return Ok(Self::from_i64_values_with_validity(
                 data,
-                ValidityMask { words, len: n },
+                ValidityMask::from_words(words, n),
             ));
         }
         if let Some(slice) = self.as_f64_slice() {
@@ -5610,7 +5694,7 @@ impl Column {
             }
             return Ok(Self::from_f64_values_with_validity(
                 data,
-                ValidityMask { words, len: n },
+                ValidityMask::from_words(words, n),
             ));
         }
 
@@ -5644,7 +5728,7 @@ impl Column {
             return Ok(Self::from_utf8_lazy_gather(
                 Arc::clone(source),
                 plan.into(),
-                ValidityMask { words, len: n },
+                ValidityMask::from_words(words, n),
             ));
         }
 
@@ -5675,7 +5759,7 @@ impl Column {
             return Ok(Self::from_utf8_values_with_validity(
                 new_bytes,
                 new_offsets,
-                ValidityMask { words, len: n },
+                ValidityMask::from_words(words, n),
             ));
         }
 
@@ -5871,10 +5955,7 @@ impl Column {
         }
         Ok(Self::from_f64_values_with_validity(
             data,
-            ValidityMask {
-                words,
-                len: out_len,
-            },
+            ValidityMask::from_words(words, out_len),
         ))
     }
 
@@ -5965,10 +6046,7 @@ impl Column {
         }
         Ok(Self::from_f64_values_with_validity(
             data,
-            ValidityMask {
-                words,
-                len: out_len,
-            },
+            ValidityMask::from_words(words, out_len),
         ))
     }
 
@@ -13468,6 +13546,8 @@ impl CrackIndex {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use fp_types::{DType, Interval, IntervalClosed, NullKind, Scalar, SparseDType};
 
     use super::{
@@ -14218,6 +14298,33 @@ mod tests {
         assert!(mask.get(63));
         assert!(mask.get(65));
         assert_eq!(mask.bits().filter(|valid| *valid).count(), 129);
+    }
+
+    #[test]
+    fn validity_mask_sparse_invalid_ranges_match_explicit_bitmap() {
+        let sparse = ValidityMask::from_invalid_ranges(Arc::from(vec![(2, 3), (9, 2)]), 12);
+        let mut explicit = ValidityMask::all_valid(12);
+        for idx in [2, 3, 4, 9, 10] {
+            explicit.set(idx, false);
+        }
+
+        assert!(sparse.words.is_empty());
+        assert!(sparse.invalid_ranges.is_some());
+        assert_eq!(sparse, explicit);
+        assert_eq!(sparse.count_valid(), 7);
+        assert_eq!(sparse.count_invalid(), 5);
+        assert!(sparse.get(1));
+        assert!(!sparse.get(3));
+        assert!(sparse.get(8));
+        assert!(!sparse.get(10));
+        assert_eq!(sparse.slice(1, 6), explicit.slice(1, 6));
+        assert_eq!(sparse.not_mask(), explicit.not_mask());
+
+        let mut mutated = sparse.clone();
+        mutated.set(2, true);
+        explicit.set(2, true);
+        assert_eq!(mutated, explicit);
+        assert!(mutated.invalid_ranges.is_none());
     }
 
     #[test]
@@ -21058,5 +21165,60 @@ mod tests {
         assert_eq!(lazy.as_i64_slice(), eager.as_i64_slice());
         assert_eq!(lazy.values(), eager.values());
         assert_eq!(lazy, eager);
+    }
+
+    #[test]
+    fn nullable_repeated_slices_store_sparse_invalid_ranges() {
+        let segments: Arc<[(usize, usize)]> = Arc::from(vec![(0, 2), (usize::MAX, 3), (2, 1)]);
+        let column =
+            Column::from_f64_nullable_repeated_slices_shared(vec![1.0, 2.0, 3.0], segments, 6);
+
+        assert_eq!(column.dtype(), DType::Float64);
+        assert!(column.validity.words.is_empty());
+        assert_eq!(
+            column.validity.invalid_ranges.as_deref(),
+            Some(&[(2, 3)][..])
+        );
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn nullable_repeat_values_store_sparse_invalid_ranges() {
+        let run_valid: Arc<[bool]> = Arc::from(vec![true, false, true]);
+        let run_lens: Arc<[usize]> = Arc::from(vec![2, 3, 1]);
+        let column = Column::from_f64_nullable_repeat_values_run_lengths(
+            vec![7.0, 0.0, -9.0],
+            run_valid,
+            run_lens,
+            6,
+        );
+
+        assert_eq!(column.dtype(), DType::Float64);
+        assert!(column.validity.words.is_empty());
+        assert_eq!(
+            column.validity.invalid_ranges.as_deref(),
+            Some(&[(2, 3)][..])
+        );
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(-9.0),
+            ]
+        );
     }
 }

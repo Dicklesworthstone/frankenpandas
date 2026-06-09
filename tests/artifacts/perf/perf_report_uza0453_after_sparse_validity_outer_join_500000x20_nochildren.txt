@@ -1,0 +1,612 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cycles:P'
+# Event count (approx.): 1637841589
+#
+# Overhead  Command       Shared Object     Symbol                                                                                                                                                                                                                                                              IPC   [IPC Coverage]
+# ........  ............  ................  ..................................................................................................................................................................................................................................................................  ....................
+#
+    11.90%  perf_profile  perf_profile      [.] fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}                                                                                                                                                                                             -      -
+            |
+             --11.71%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#6}
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+    11.23%  perf_profile  perf_profile      [.] fp_join::build_single_key_dense_i64_outer_merge_output::{closure#8}                                                                                                                                                                                             -      -
+            |
+             --11.05%--fp_join::build_single_key_dense_i64_outer_merge_output::{closure#8}
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     9.83%  perf_profile  perf_profile      [.] fp_join::build_single_key_dense_i64_outer_merge_output                                                                                                                                                                                                          -      -
+            |
+             --9.76%--fp_join::build_single_key_dense_i64_outer_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     9.52%  perf_profile  perf_profile      [.] fp_join::build_single_key_dense_i64_outer_merge_output::{closure#0}                                                                                                                                                                                             -      -
+            |
+            ---fp_join::build_single_key_dense_i64_outer_merge_output::{closure#0}
+               fp_join::build_single_key_dense_i64_outer_merge_output
+               fp_join::merge_dataframes_on_with_options
+               fp_join::merge_dataframes
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     4.99%  perf_profile  libc.so.6         [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                    -      -
+            |
+            |--3.21%--__memmove_avx_unaligned_erms
+            |          |
+            |          |--2.13%--<fp_columnar::Column>::from_f64_nullable_repeated_slices_shared
+            |          |          fp_join::build_single_key_dense_i64_outer_merge_output
+            |          |          fp_join::merge_dataframes_on_with_options
+            |          |          fp_join::merge_dataframes
+            |          |          perf_profile::main
+            |          |          std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |          |          std::rt::lang_start::<()>::{closure#0}
+            |          |          std::rt::lang_start_internal
+            |          |          main
+            |          |          __libc_start_call_main
+            |          |          __libc_start_main@@GLIBC_2.34
+            |          |          _start
+            |          |
+            |           --1.08%--realloc
+            |                     |
+            |                      --0.90%--<alloc::raw_vec::RawVecInner>::finish_grow
+            |                                <alloc::raw_vec::RawVec<(usize, usize)>>::grow_one
+            |                                <fp_columnar::Column>::nullable_repeated_slices_validity
+            |                                <fp_columnar::Column>::from_f64_nullable_repeated_slices_shared
+            |                                fp_join::build_single_key_dense_i64_outer_merge_output
+            |                                fp_join::merge_dataframes_on_with_options
+            |                                fp_join::merge_dataframes
+            |                                perf_profile::main
+            |                                std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+            |                                std::rt::lang_start::<()>::{closure#0}
+            |                                std::rt::lang_start_internal
+            |                                main
+            |                                __libc_start_call_main
+            |                                __libc_start_main@@GLIBC_2.34
+            |                                _start
+            |
+             --0.89%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       __memmove_avx_unaligned_erms
+                       <fp_columnar::Column>::from_values
+                       <fp_frame::DataFrame>::from_dict
+                       perf_profile::build_join_frame_offset
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     4.34%  perf_profile  perf_profile      [.] <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#1}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice                                                           -      -
+            |
+            ---<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#1}> as alloc::sync::ToArcSlice<usize>>::to_arc_slice
+               fp_join::build_single_key_dense_i64_outer_merge_output
+               fp_join::merge_dataframes_on_with_options
+               fp_join::merge_dataframes
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     4.23%  perf_profile  perf_profile      [.] <fp_columnar::Column>::nullable_repeated_slices_validity                                                                                                                                                                                                        -      -
+            |
+             --4.17%--<fp_columnar::Column>::nullable_repeated_slices_validity
+                       <fp_columnar::Column>::from_f64_nullable_repeated_slices_shared
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     4.06%  perf_profile  perf_profile      [.] <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice                                                   -      -
+            |
+             --3.76%--<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_left_merge_output::{closure#0}> as alloc::sync::ToArcSlice<(usize, usize)>>::to_arc_slice
+                       fp_join::build_single_key_dense_i64_outer_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     3.76%  perf_profile  perf_profile      [.] fp_join::build_single_key_dense_i64_outer_all_matched_merge_output                                                                                                                                                                                              -      -
+            |
+             --3.69%--fp_join::build_single_key_dense_i64_outer_all_matched_merge_output
+                       fp_join::merge_dataframes_on_with_options
+                       fp_join::merge_dataframes
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     3.37%  perf_profile  perf_profile      [.] <core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice                                                            -      -
+            |
+            ---<core::iter::adapters::map::Map<core::slice::iter::Iter<(usize, usize, usize)>, fp_join::build_single_key_dense_i64_outer_merge_output::{closure#2}> as alloc::sync::ToArcSlice<bool>>::to_arc_slice
+               fp_join::build_single_key_dense_i64_outer_merge_output
+               fp_join::merge_dataframes_on_with_options
+               fp_join::merge_dataframes
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     3.14%  perf_profile  libc.so.6         [.] __memset_avx2_unaligned_erms                                                                                                                                                                                                                                    -      -
+            |
+             --3.10%--__memset_avx2_unaligned_erms
+                       |
+                        --3.04%--fp_join::build_single_key_dense_i64_outer_merge_output
+                                  fp_join::merge_dataframes_on_with_options
+                                  fp_join::merge_dataframes
+                                  perf_profile::main
+                                  std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                                  std::rt::lang_start::<()>::{closure#0}
+                                  std::rt::lang_start_internal
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     2.57%  perf_profile  [unknown]         [k] 0xffffffff8621b2b7                                                                                                                                                                                                                                              -      -
+            |
+            |--0.65%--0xffffffff84c01199
+            |
+             --0.53%--__memmove_avx_unaligned_erms
+
+     2.28%  perf_profile  perf_profile      [.] <fp_columnar::Column>::new                                                                                                                                                                                                                                      -      -
+            |
+            ---<fp_columnar::Column>::new
+               <fp_columnar::Column>::from_values
+               <fp_frame::DataFrame>::from_dict
+               perf_profile::build_join_frame_offset
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.79%  perf_profile  perf_profile      [.] <fp_columnar::Column>::from_f64_nullable_repeat_values_run_lengths                                                                                                                                                                                              -      -
+            |
+            ---<fp_columnar::Column>::from_f64_nullable_repeat_values_run_lengths
+               fp_join::build_single_key_dense_i64_outer_merge_output
+               fp_join::merge_dataframes_on_with_options
+               fp_join::merge_dataframes
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.39%  perf_profile  [unknown]         [k] 0xffffffff84c01192                                                                                                                                                                                                                                              -      -
+     1.19%  perf_profile  perf_profile      [.] fp_types::infer_dtype                                                                                                                                                                                                                                           -      -
+            |
+            ---fp_types::infer_dtype
+               <fp_columnar::Column>::from_values
+               <fp_frame::DataFrame>::from_dict
+               perf_profile::build_join_frame_offset
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.90%  perf_profile  perf_profile      [.] <fp_columnar::ValidityMask>::from_values                                                                                                                                                                                                                        -      -
+            |
+            ---<fp_columnar::ValidityMask>::from_values
+               <fp_columnar::Column>::new
+               <fp_columnar::Column>::from_values
+               <fp_frame::DataFrame>::from_dict
+               perf_profile::build_join_frame_offset
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.84%  perf_profile  perf_profile      [.] <alloc::sync::Arc<[fp_types::Scalar]>>::drop_slow                                                                                                                                                                                                               -      -
+            |
+            ---<alloc::sync::Arc<[fp_types::Scalar]>>::drop_slow
+               core::ptr::drop_in_place::<fp_columnar::Column>
+               core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+               core::ptr::drop_in_place::<fp_frame::DataFrame>
+               perf_profile::main
+               std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+               std::rt::lang_start::<()>::{closure#0}
+               std::rt::lang_start_internal
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     0.73%  perf_profile  perf_profile      [.] perf_profile::build_join_frame_offset                                                                                                                                                                                                                           -      -
+            |
+             --0.52%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       perf_profile::build_join_frame_offset
+                       perf_profile::main
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+                       std::rt::lang_start::<()>::{closure#0}
+                       std::rt::lang_start_internal
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     0.66%  perf_profile  perf_profile      [.] <fp_columnar::ColumnData>::from_scalars                                                                                                                                                                                                                         -      -
+     0.52%  perf_profile  [unknown]         [k] 0xffffffff84c01248                                                                                                                                                                                                                                              -      -
+     0.31%  perf_profile  [unknown]         [k] 0xffffffff84d04109                                                                                                                                                                                                                                              -      -
+     0.30%  perf_profile  [unknown]         [k] 0xffffffff84d04104                                                                                                                                                                                                                                              -      -
+     0.29%  perf_profile  [unknown]         [k] 0xffffffff85452a61                                                                                                                                                                                                                                              -      -
+     0.23%  perf_profile  [unknown]         [k] 0xffffffff853d7e8c                                                                                                                                                                                                                                              -      -
+     0.23%  perf_profile  [unknown]         [k] 0xffffffff84d0410b                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff85459378                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff85452a65                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff853b9650                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff853d7e8a                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff853d90b1                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff853d7e86                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff853d7d8d                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff85452e38                                                                                                                                                                                                                                              -      -
+     0.18%  perf_profile  [unknown]         [k] 0xffffffff85452a69                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff8510f1f0                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff853dc6c9                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff853a33ec                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff853d234c                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff84c00bb7                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff84c015d7                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff85458faf                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff85452e3d                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff86223c8e                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff853442bf                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff853a3790                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff85392d17                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff853b8129                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff853d7e8f                                                                                                                                                                                                                                              -      -
+     0.12%  perf_profile  [unknown]         [k] 0xffffffff86228130                                                                                                                                                                                                                                              -      -
+     0.11%  perf_profile  [unknown]         [k] 0xffffffff853a5723                                                                                                                                                                                                                                              -      -
+     0.11%  perf_profile  [unknown]         [k] 0xffffffff85392d37                                                                                                                                                                                                                                              -      -
+     0.11%  perf_profile  [unknown]         [k] 0xffffffff85404a1a                                                                                                                                                                                                                                              -      -
+     0.11%  perf_profile  [unknown]         [k] 0xffffffff854529f6                                                                                                                                                                                                                                              -      -
+     0.10%  perf_profile  [unknown]         [k] 0xffffffff85455438                                                                                                                                                                                                                                              -      -
+     0.10%  perf_profile  [unknown]         [k] 0xffffffff8545555b                                                                                                                                                                                                                                              -      -
+     0.09%  perf_profile  [unknown]         [k] 0xffffffff853d2393                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff857c02ab                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85080fa4                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853dda90                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff850a7306                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a33dc                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85452e2a                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8539a82f                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8539b7bc                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d232b                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8539c06e                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8539b8ec                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853432f8                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d2333                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d43dd                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff854552b3                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff850884fa                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853439ea                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a3859                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff84feb7bc                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a3967                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a33d5                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853b84dc                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff857c02a1                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d71b1                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8539d537                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff854529de                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85341525                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8541a898                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85392d40                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a5736                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a529c                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85123f76                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85394553                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8510f1ec                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85458fa1                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff86228a46                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a4eae                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853b83fc                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85395f6c                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a4e56                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d429c                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8539d907                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a50ea                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853ddb37                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  perf_profile      [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<<std::sync::once_lock::OnceLock<bool>>::try_insert::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}  -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85458fa7                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff854578da                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85452c87                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a4ee9                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d43cd                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85341ffb                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  libc.so.6         [.] _int_free_merge_chunk                                                                                                                                                                                                                                           -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853410e7                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8541a960                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85392dc4                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8545296c                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85393cd1                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d8e00                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85123fb4                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85123f6d                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff84c00b93                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a387d                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff857c0267                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853ddb3d                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a37a0                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8536ba15                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85123f65                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a4c5e                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d7e91                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff84f87bc0                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85392dcf                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85392ceb                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d9224                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff854049f5                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853b8398                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff84c00b90                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85393f38                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853ddb18                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d2335                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8541df20                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853b9628                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff86228854                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853434fb                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85341136                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8517f717                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85452caa                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a50d8                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a3963                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff854554e8                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85392dd3                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85455446                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85392d32                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85452a86                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a33d2                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a37ce                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853b811c                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8622885e                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85393da1                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85452a80                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8541a7a4                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d829e                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8536b5d4                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8541df08                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853b83c2                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d7d6c                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85452c69                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85342144                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a3437                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8541a990                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d2364                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853b968d                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a37ea                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d90b9                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a55d6                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853dc432                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85452c8c                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d7cd6                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a4de7                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a53ad                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff862280ca                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8541a9e8                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8544f986                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8515258d                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a3847                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853dd919                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a5627                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853daed2                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff862287c4                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85137dbb                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85104b20                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8623b8a0                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff861f65c3                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a56b1                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8506f941                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8510f1f2                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8536ba10                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff854578c9                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85458fb6                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853dda93                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff862251d0                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff84feb92c                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85452de1                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a3adc                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff86228147                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8539b7d0                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a4d33                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853b9698                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853bbce9                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85392df2                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85341fcb                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85452ded                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853dda04                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85343936                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a5540                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d2353                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a38ed                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d8d81                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85341ffe                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85393d97                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853b8390                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff85455557                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a4c59                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853d9105                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a3ae8                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853a5589                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff8545725c                                                                                                                                                                                                                                              -      -
+     0.06%  perf_profile  [unknown]         [k] 0xffffffff853b838b                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff85104b37                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff853a4efc                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff853a514a                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff85342161                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff85123fae                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff8623a508                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff84feb96b                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff861f6517                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  libc.so.6         [.] __cache_sysconf                                                                                                                                                                                                                                                 -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff86228a43                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff853d8e3c                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff85458fe5                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff8507b58c                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff84c001bd                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff8621b866                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff853d3d35                                                                                                                                                                                                                                              -      -
+     0.05%  perf_profile  [unknown]         [k] 0xffffffff853dc709                                                                                                                                                                                                                                              -      -
+     0.04%  perf_profile  [unknown]         [k] 0xffffffff853db073                                                                                                                                                                                                                                              -      -
+     0.04%  perf_profile  [unknown]         [k] 0xffffffff8539b793                                                                                                                                                                                                                                              -      -
+     0.04%  perf_profile  [unknown]         [k] 0xffffffff85394c42                                                                                                                                                                                                                                              -      -
+     0.04%  perf_profile  [unknown]         [k] 0xffffffff85104b41                                                                                                                                                                                                                                              -      -
+     0.04%  perf_profile  [unknown]         [k] 0xffffffff8539ba13                                                                                                                                                                                                                                              -      -
+     0.04%  perf_profile  [unknown]         [k] 0xffffffff85452ac1                                                                                                                                                                                                                                              -      -
+     0.04%  perf_profile  [unknown]         [k] 0xffffffff853a3795                                                                                                                                                                                                                                              -      -
+     0.04%  perf_profile  [unknown]         [k] 0xffffffff85301db0                                                                                                                                                                                                                                              -      -
+     0.04%  perf_profile  [unknown]         [k] 0xffffffff8539b9fc                                                                                                                                                                                                                                              -      -
+     0.03%  perf_profile  [unknown]         [k] 0xffffffff85455026                                                                                                                                                                                                                                              -      -
+     0.03%  perf_profile  [unknown]         [k] 0xffffffff853439e9                                                                                                                                                                                                                                              -      -
+     0.03%  perf_profile  [unknown]         [k] 0xffffffff85387da8                                                                                                                                                                                                                                              -      -
+     0.02%  perf_profile  [unknown]         [k] 0xffffffff854c0c48                                                                                                                                                                                                                                              -      -
+     0.01%  perf_profile  [unknown]         [k] 0xffffffff84f7560a                                                                                                                                                                                                                                              -      -
+     0.01%  perf_profile  [unknown]         [k] 0xffffffff851013f5                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff853d8d80                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  perf_profile      [.] core::ptr::drop_in_place::<fp_columnar::Column>                                                                                                                                                                                                                 -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8545766c                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8541aa07                                                                                                                                                                                                                                              -      -
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8623ba40                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff854f6207                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8621c6a9                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff850a7955                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84c01184                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f8c9d1                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84c00f4b                                                                                                                                                                                                                                              -      -
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff84fdedcb                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff853fc718                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86224bf5                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff86227da0                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedcb                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2bc                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2c3                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f88cf9                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff862252e9                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f2e570                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f3374a                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f337ee                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d384                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d280                                                                                                                                                                                                                                              -      -
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff84f2e5cc                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f2e592                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f2e5f9                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d37a                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f2e518                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f337e5                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d285                                                                                                                                                                                                                                              -      -
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d280                                                                                                                                                                                                                                              -      -
+     0.00%  perf-exec     [unknown]         [k] 0xffffffff8530d2c3                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84f337e9                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff84fdedcd                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85104b2e                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b65                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff85300b79                                                                                                                                                                                                                                              -      -
+     0.00%  perf_profile  [unknown]         [k] 0xffffffff8530d2cc                                                                                                                                                                                                                                              -      -
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
