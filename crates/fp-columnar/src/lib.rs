@@ -1213,6 +1213,20 @@ enum ScalarValues {
         total_len: usize,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Null-introducing repeat-VALUES Float64 lane (br-frankenpandas-yiqv5): the
+    /// BROADCAST counterpart of `LazyNullableRepeatedSlicesFloat64`, for an OUTER
+    /// merge's promoted LEFT side where each run is either `run_values[k]`
+    /// repeated `run_lens[k]` times (matched/left-only row) or, when
+    /// `!run_valid[k]`, a run of `Null(NullKind::NaN)` (right-only row). The
+    /// `run_valid` / `run_lens` descriptors are shared across all promoted
+    /// lanes; only `run_values` differs per column.
+    LazyNullableRepeatValuesFloat64 {
+        run_values: Vec<f64>,
+        run_valid: Arc<[bool]>,
+        run_lens: Arc<[usize]>,
+        total_len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Zero-copy contiguous row-range VIEW over an `Arc`-shared contiguous-Utf8
     /// backing (br-frankenpandas-jbyuc.1.1.1). Row `i` (`0..len`) is
     /// `bytes[offsets[start + i] .. offsets[start + i + 1]]` — the same shared
@@ -1505,6 +1519,24 @@ impl ScalarValues {
         Self::LazyNullableRepeatedSlicesFloat64 {
             data,
             segments,
+            total_len,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_repeat_values_float64(
+        run_values: Vec<f64>,
+        run_valid: Arc<[bool]>,
+        run_lens: Arc<[usize]>,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(run_values.len(), run_lens.len());
+        debug_assert_eq!(run_valid.len(), run_lens.len());
+        debug_assert_eq!(run_lens.iter().sum::<usize>(), total_len);
+        Self::LazyNullableRepeatValuesFloat64 {
+            run_values,
+            run_valid,
+            run_lens,
             total_len,
             values: OnceLock::new(),
         }
@@ -2032,6 +2064,27 @@ impl ScalarValues {
                     out
                 })
                 .as_slice(),
+            Self::LazyNullableRepeatValuesFloat64 {
+                run_values,
+                run_valid,
+                run_lens,
+                total_len,
+                values,
+            } => values
+                .get_or_init(|| {
+                    let mut out = Vec::with_capacity(*total_len);
+                    for ((&value, &valid), &run_len) in
+                        run_values.iter().zip(run_valid.iter()).zip(run_lens.iter())
+                    {
+                        if valid {
+                            out.resize(out.len() + run_len, Scalar::Float64(value));
+                        } else {
+                            out.resize(out.len() + run_len, Scalar::Null(NullKind::NaN));
+                        }
+                    }
+                    out
+                })
+                .as_slice(),
             Self::LazyUtf8Slice {
                 bytes,
                 offsets,
@@ -2075,6 +2128,7 @@ impl ScalarValues {
             Self::LazyRepeatedSlicesFloat64 { total_len, .. } => *total_len,
             Self::LazyNullableRepeatedSlicesInt64 { total_len, .. } => *total_len,
             Self::LazyNullableRepeatedSlicesFloat64 { total_len, .. } => *total_len,
+            Self::LazyNullableRepeatValuesFloat64 { total_len, .. } => *total_len,
             Self::LazyUtf8Slice { len, .. } => *len,
         }
     }
@@ -2289,6 +2343,18 @@ impl Clone for ScalarValues {
             } => Self::lazy_nullable_repeated_slices_float64(
                 data.clone(),
                 Arc::clone(segments),
+                *total_len,
+            ),
+            Self::LazyNullableRepeatValuesFloat64 {
+                run_values,
+                run_valid,
+                run_lens,
+                total_len,
+                ..
+            } => Self::lazy_nullable_repeat_values_float64(
+                run_values.clone(),
+                Arc::clone(run_valid),
+                Arc::clone(run_lens),
                 *total_len,
             ),
             Self::LazyUtf8Slice {
@@ -3599,6 +3665,44 @@ impl Column {
         Self {
             dtype: DType::Float64,
             values: ScalarValues::lazy_nullable_repeated_slices_float64(data, segments, total_len),
+            validity,
+            data: None,
+        }
+    }
+
+    /// Null-introducing repeat-VALUES Float64 lane (br-frankenpandas-yiqv5): the
+    /// broadcast counterpart of [`Column::from_f64_nullable_repeated_slices_shared`]
+    /// for an outer merge's promoted left lane. `run_valid[k] == false` marks
+    /// `run_lens[k]` missing rows (`Null(NullKind::NaN)`); the validity mask is
+    /// rebuilt from the run descriptors.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_f64_nullable_repeat_values_run_lengths(
+        run_values: Vec<f64>,
+        run_valid: Arc<[bool]>,
+        run_lens: Arc<[usize]>,
+        total_len: usize,
+    ) -> Self {
+        let validity = if run_valid.iter().all(|&v| v) {
+            ValidityMask::all_valid(total_len)
+        } else {
+            let mut mask = ValidityMask::all_valid(total_len);
+            let mut pos = 0usize;
+            for (&valid, &run_len) in run_valid.iter().zip(run_lens.iter()) {
+                if !valid {
+                    for offset in 0..run_len {
+                        mask.set(pos + offset, false);
+                    }
+                }
+                pos += run_len;
+            }
+            mask
+        };
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_nullable_repeat_values_float64(
+                run_values, run_valid, run_lens, total_len,
+            ),
             validity,
             data: None,
         }

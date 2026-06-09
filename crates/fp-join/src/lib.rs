@@ -2631,26 +2631,6 @@ fn build_single_key_dense_i64_inner_merge_output(
     }))
 }
 
-/// Set validity bits `[start, end)` word-wise (full-word fills with edge
-/// masks instead of per-bit loops).
-fn set_validity_bit_range(words: &mut [u64], start: usize, end: usize) {
-    if start >= end {
-        return;
-    }
-    let first_word = start / 64;
-    let last_word = (end - 1) / 64;
-    let first_mask = u64::MAX << (start % 64);
-    let last_mask = u64::MAX >> (63 - ((end - 1) % 64));
-    if first_word == last_word {
-        words[first_word] |= first_mask & last_mask;
-        return;
-    }
-    words[first_word] |= first_mask;
-    for word in &mut words[first_word + 1..last_word] {
-        *word = u64::MAX;
-    }
-    words[last_word] |= last_mask;
-}
 
 /// Fused dense-i64 LEFT merge builder (br-frankenpandas-7wxoc).
 ///
@@ -3546,242 +3526,61 @@ fn build_single_key_dense_i64_outer_merge_output(
         key_runs.push((min_key + bucket as i64, bucket_rows));
     }
 
-    // Per-side shared validity masks, word-filled from the plan.
-    let mut left_words = vec![0_u64; output_len.div_ceil(64)];
-    let mut right_words = vec![0_u64; output_len.div_ceil(64)];
-    {
-        let mut out_pos = 0usize;
-        for &(lp, rs, run_len) in &plan {
-            if lp != NONE_POS {
-                set_validity_bit_range(&mut left_words, out_pos, out_pos + run_len);
-            }
-            if rs != NONE_POS {
-                set_validity_bit_range(&mut right_words, out_pos, out_pos + run_len);
-            }
-            out_pos += run_len;
-        }
-        debug_assert_eq!(out_pos, output_len);
-    }
-    let left_validity = fp_columnar::ValidityMask::from_words(left_words, output_len);
-    let right_validity = fp_columnar::ValidityMask::from_words(right_words, output_len);
+    // Shared lazy-lane descriptors (br-frankenpandas-yiqv5): the plan drives
+    // every value lane as a LAZY column rather than an O(output_len) materialized
+    // buffer. `run_lens` is the per-run output length; `left_run_valid` flags
+    // matched/left-only runs (left value present); `right_segments` carries the
+    // bucket-order tape `(start, run_len)` per run with `NONE_POS == usize::MAX`
+    // marking a null right run. The kept side stays all-valid; the promoted
+    // (null-introduced) side becomes the matching nullable lazy lane — the
+    // validity is rebuilt inside the column ctors, identical to the prior
+    // word-filled masks.
+    let run_lens: Arc<[usize]> = plan.iter().map(|&(_, _, run_len)| run_len).collect();
+    let left_run_valid: Arc<[bool]> = plan.iter().map(|&(lp, _, _)| lp != NONE_POS).collect();
+    let right_segments: Arc<[(usize, usize)]> =
+        plan.iter().map(|&(_, rs, run_len)| (rs, run_len)).collect();
 
-    // Group lanes: promoted (nullable Float64) when that side has missing
-    // rows, preserved (all-valid Int64 gather semantics) otherwise.
+    // Promoted (nullable Float64) when that side has missing rows, preserved
+    // (all-valid Int64) otherwise.
     let promoted = |side: FusedInt64Side| match side {
         FusedInt64Side::Left => has_left_missing,
         FusedInt64Side::Right => has_right_missing,
     };
-    let mut i64_lanes = Vec::<usize>::new();
-    let mut f64_lanes = Vec::<usize>::new();
-    for (idx, kind) in spec_kinds.iter().enumerate() {
-        if let OuterLaneKind::Lane(side) = kind {
-            if promoted(*side) {
-                f64_lanes.push(idx);
-            } else {
-                i64_lanes.push(idx);
-            }
-        }
-    }
 
-    // Right value tapes in bucket order (muis1): i64 always, f64 once-cast
-    // for promoted right lanes.
+    // Right value tapes in bucket order (muis1): i64 (preserved) or f64 (promoted).
     let tape_i64 = |idx: usize| -> Vec<i64> {
         right_positions_csr
             .iter()
             .map(|&pos| spec_values[idx][pos])
             .collect()
     };
-
-    // Output-balanced chunk boundaries over the plan (6bsw3), shared by both
-    // fill groups.
-    let thread_count = join_parallel_thread_count();
-    let parallel = output_len >= DENSE_I64_INNER_PARALLEL_MIN_VALUES && thread_count > 1;
-    let mut boundaries = vec![(0usize, 0usize)];
-    if parallel {
-        let target = output_len.div_ceil(thread_count).max(1);
-        let mut cumulative = 0usize;
-        let mut next_target = target;
-        for (plan_idx, &(_, _, run_len)) in plan.iter().enumerate() {
-            cumulative += run_len;
-            if cumulative >= next_target && plan_idx + 1 < plan.len() {
-                boundaries.push((plan_idx + 1, cumulative));
-                next_target = cumulative.saturating_add(target);
-            }
-        }
-    }
-    boundaries.push((plan.len(), output_len));
-    let chunk_count = boundaries.len() - 1;
-
-    // Fill the i64 group then the f64 group with the same chunked walk.
-    // (Macro-free duplication: the two loops differ only in element type and
-    // the `as f64` widening on left values.)
-    let fill_i64: Vec<Vec<i64>> = {
-        let tapes: Vec<Option<Vec<i64>>> = i64_lanes
+    let tape_f64 = |idx: usize| -> Vec<f64> {
+        right_positions_csr
             .iter()
-            .map(|&idx| match &spec_kinds[idx] {
-                OuterLaneKind::Lane(FusedInt64Side::Right) => Some(tape_i64(idx)),
-                _ => None,
-            })
-            .collect();
-        let mut bufs: Vec<Vec<i64>> = i64_lanes.iter().map(|_| vec![0i64; output_len]).collect();
-        if !i64_lanes.is_empty() {
-            let mut bundles: Vec<Vec<&mut [i64]>> = (0..chunk_count)
-                .map(|_| Vec::with_capacity(i64_lanes.len()))
-                .collect();
-            for buf in &mut bufs {
-                let mut rest: &mut [i64] = buf.as_mut_slice();
-                let mut prev = 0usize;
-                for (chunk_idx, window) in boundaries.windows(2).enumerate() {
-                    let (chunk_slice, tail) = rest.split_at_mut(window[1].1 - prev);
-                    prev = window[1].1;
-                    rest = tail;
-                    bundles[chunk_idx].push(chunk_slice);
-                }
-            }
-            let plan = &plan;
-            let i64_lanes = &i64_lanes;
-            let spec_kinds = &spec_kinds;
-            let spec_values = &spec_values;
-            std::thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(chunk_count);
-                for (chunk_idx, mut bundle) in bundles.into_iter().enumerate() {
-                    let (plan_start, out_start) = boundaries[chunk_idx];
-                    let (plan_end, out_end) = boundaries[chunk_idx + 1];
-                    let tapes = &tapes;
-                    handles.push(scope.spawn(move || {
-                        let mut cursor = 0usize;
-                        for &(lp, rs, run_len) in &plan[plan_start..plan_end] {
-                            for (slice, (&idx, tape)) in
-                                bundle.iter_mut().zip(i64_lanes.iter().zip(tapes.iter()))
-                            {
-                                match &spec_kinds[idx] {
-                                    OuterLaneKind::Lane(FusedInt64Side::Left) => {
-                                        if lp != NONE_POS {
-                                            slice[cursor..cursor + run_len]
-                                                .fill(spec_values[idx][lp]);
-                                        }
-                                    }
-                                    OuterLaneKind::Lane(FusedInt64Side::Right) => {
-                                        if rs != NONE_POS {
-                                            slice[cursor..cursor + run_len].copy_from_slice(
-                                                &tape
-                                                    .as_ref()
-                                                    .expect("right lane must have a tape")
-                                                    [rs..rs + run_len],
-                                            );
-                                        }
-                                    }
-                                    OuterLaneKind::SharedKey => {
-                                        unreachable!("key lane is synthesized, not filled")
-                                    }
-                                }
-                            }
-                            cursor += run_len;
-                        }
-                        debug_assert_eq!(cursor, out_end - out_start);
-                    }));
-                }
-                for handle in handles {
-                    handle
-                        .join()
-                        .expect("dense i64 outer output worker must not panic");
-                }
-            });
-        }
-        bufs
+            .map(|&pos| spec_values[idx][pos] as f64)
+            .collect()
     };
-    let fill_f64: Vec<Vec<f64>> = {
-        let tapes: Vec<Option<Vec<f64>>> = f64_lanes
-            .iter()
-            .map(|&idx| match &spec_kinds[idx] {
-                OuterLaneKind::Lane(FusedInt64Side::Right) => Some(
-                    right_positions_csr
-                        .iter()
-                        .map(|&pos| spec_values[idx][pos] as f64)
-                        .collect(),
-                ),
-                _ => None,
-            })
-            .collect();
-        let mut bufs: Vec<Vec<f64>> = f64_lanes.iter().map(|_| vec![0f64; output_len]).collect();
-        if !f64_lanes.is_empty() {
-            let mut bundles: Vec<Vec<&mut [f64]>> = (0..chunk_count)
-                .map(|_| Vec::with_capacity(f64_lanes.len()))
-                .collect();
-            for buf in &mut bufs {
-                let mut rest: &mut [f64] = buf.as_mut_slice();
-                let mut prev = 0usize;
-                for (chunk_idx, window) in boundaries.windows(2).enumerate() {
-                    let (chunk_slice, tail) = rest.split_at_mut(window[1].1 - prev);
-                    prev = window[1].1;
-                    rest = tail;
-                    bundles[chunk_idx].push(chunk_slice);
-                }
-            }
-            let plan = &plan;
-            let f64_lanes = &f64_lanes;
-            let spec_kinds = &spec_kinds;
-            let spec_values = &spec_values;
-            std::thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(chunk_count);
-                for (chunk_idx, mut bundle) in bundles.into_iter().enumerate() {
-                    let (plan_start, out_start) = boundaries[chunk_idx];
-                    let (plan_end, out_end) = boundaries[chunk_idx + 1];
-                    let tapes = &tapes;
-                    handles.push(scope.spawn(move || {
-                        let mut cursor = 0usize;
-                        for &(lp, rs, run_len) in &plan[plan_start..plan_end] {
-                            for (slice, (&idx, tape)) in
-                                bundle.iter_mut().zip(f64_lanes.iter().zip(tapes.iter()))
-                            {
-                                match &spec_kinds[idx] {
-                                    OuterLaneKind::Lane(FusedInt64Side::Left) => {
-                                        if lp != NONE_POS {
-                                            slice[cursor..cursor + run_len]
-                                                .fill(spec_values[idx][lp] as f64);
-                                        }
-                                    }
-                                    OuterLaneKind::Lane(FusedInt64Side::Right) => {
-                                        if rs != NONE_POS {
-                                            slice[cursor..cursor + run_len].copy_from_slice(
-                                                &tape
-                                                    .as_ref()
-                                                    .expect("right lane must have a tape")
-                                                    [rs..rs + run_len],
-                                            );
-                                        }
-                                    }
-                                    OuterLaneKind::SharedKey => {
-                                        unreachable!("key lane is synthesized, not filled")
-                                    }
-                                }
-                            }
-                            cursor += run_len;
-                        }
-                        debug_assert_eq!(cursor, out_end - out_start);
-                    }));
-                }
-                for handle in handles {
-                    handle
-                        .join()
-                        .expect("dense f64 outer output worker must not panic");
-                }
-            });
-        }
-        bufs
+    // Left broadcast run values (one per run): i64 (preserved) or f64 (promoted).
+    let left_run_values_i64 = |idx: usize| -> Vec<i64> {
+        plan.iter()
+            .map(|&(lp, _, _)| if lp != NONE_POS { spec_values[idx][lp] } else { 0 })
+            .collect()
+    };
+    let left_run_values_f64 = |idx: usize| -> Vec<f64> {
+        plan.iter()
+            .map(|&(lp, _, _)| if lp != NONE_POS { spec_values[idx][lp] as f64 } else { 0.0 })
+            .collect()
     };
 
-    // Assemble columns in spec order.
+    // Assemble columns in spec order, each a lazy lane.
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
     let mut columns = std::collections::BTreeMap::new();
     let mut column_order = Vec::with_capacity(spec_names.len());
-    let mut i64_iter = fill_i64.into_iter();
-    let mut f64_iter = fill_f64.into_iter();
     for (idx, (name, kind)) in spec_names.into_iter().zip(spec_kinds.iter()).enumerate() {
         let column = match kind {
             OuterLaneKind::SharedKey => {
-                // Closed-form coalesced key: all-valid, bucket key repeated
-                // bucket_rows times, in ascending bucket order.
+                // Closed-form coalesced key: all-valid, bucket key repeated in
+                // ascending bucket order. Lazy repeat-runs when the fanout pays.
                 if output_len >= key_runs.len().saturating_mul(2) {
                     Column::from_i64_repeat_runs(key_runs.clone())
                 } else {
@@ -3793,20 +3592,35 @@ fn build_single_key_dense_i64_outer_merge_output(
                 }
             }
             OuterLaneKind::Lane(side) => {
-                if promoted(*side) {
-                    let data = f64_iter.next().expect("promoted lane buffer must exist");
-                    let validity = match side {
-                        FusedInt64Side::Left => left_validity.clone(),
-                        FusedInt64Side::Right => right_validity.clone(),
-                    };
-                    Column::from_f64_values_with_validity(data, validity)
-                } else {
-                    let data = i64_iter.next().expect("preserved lane buffer must exist");
-                    Column::from_i64_values(data)
+                match (side, promoted(*side)) {
+                    (FusedInt64Side::Left, false) => Column::from_i64_repeat_values_run_lengths(
+                        left_run_values_i64(idx),
+                        Arc::clone(&run_lens),
+                    ),
+                    (FusedInt64Side::Left, true) => {
+                        Column::from_f64_nullable_repeat_values_run_lengths(
+                            left_run_values_f64(idx),
+                            Arc::clone(&left_run_valid),
+                            Arc::clone(&run_lens),
+                            output_len,
+                        )
+                    }
+                    (FusedInt64Side::Right, false) => Column::from_i64_repeated_slices_shared(
+                        tape_i64(idx),
+                        Arc::clone(&right_segments),
+                        output_len,
+                    ),
+                    (FusedInt64Side::Right, true) => {
+                        Column::from_f64_nullable_repeated_slices_shared(
+                            tape_f64(idx),
+                            Arc::clone(&right_segments),
+                            output_len,
+                        )
+                    }
                 }
             }
         };
-        debug_assert_eq!(column.len(), output_len, "lane {idx} length");
+        debug_assert_eq!(column.len(), output_len);
         insert_merged_output_column(&mut columns, &mut column_order, name, column)?;
     }
 
