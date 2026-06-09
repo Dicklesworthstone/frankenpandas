@@ -1059,6 +1059,13 @@ fn run_golden(scenario: &str, n: usize) {
             let out = s.isin(&needles).expect("isin");
             return print!("{}", golden_dump_series(&out));
         }
+        "str_duplicated" => {
+            // Series.duplicated over contiguous-Utf8 — byte-span FxHash dup-flags
+            // + typed Bool mask (vcstr).
+            let s = build_str_vc_series(n, 1000);
+            let out = s.duplicated().expect("duplicated");
+            return print!("{}", golden_dump_series(&out));
+        }
         "reindex_str" => {
             // Reindex an all-valid Utf8 Series to ~50% missing labels — exercises
             // Column::reindex_by_positions' null-introducing Utf8 gather (cmxjz).
@@ -1673,6 +1680,13 @@ fn main() {
                 .collect();
             for _ in 0..iters {
                 let out = s.isin(&needles).expect("isin");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_duplicated" => {
+            let s = build_str_vc_series(n, 1000);
+            for _ in 0..iters {
+                let out = s.duplicated().expect("duplicated");
                 sink = sink.wrapping_add(out.len());
             }
         }

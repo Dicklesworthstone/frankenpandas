@@ -1,0 +1,7 @@
+Series.duplicated / duplicated_keep string byte-span FxHash dup-flags + typed Bool (vcstr)
+Golden bit-identical: str_duplicated sha256 7e632ba21fb83dcb before==after.
+A/B min-of-5 @200k (card 1000): 10.003 -> 3.41 ms/iter = 2.93x.
+Tests: fp-frame 2830 (incl 78 duplicated/drop_dup) green.
+Lever: duplicated() + duplicated_keep(First/Last/None) on all-valid contiguous-Utf8 mark dup positions
+from raw &[u8] spans with FxHash + emit typed Bool mask (from_bool_values, 1B vs 32B Vec<Scalar::Bool>;
+output-bound). Bit-identical (same first/last/count>1 rule on same key spans; all-valid => no NullKind keying).
