@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-jbyuc11111111111-gate-base/release-perf/join-bench --str-ordered --rows 1000000 --right-rows 1000000 --join-type inner --warmup 3 --iters 20
+  Time (mean ± σ):     125.5 ms ±   3.6 ms    [User: 79.9 ms, System: 45.2 ms]
+  Range (min … max):   122.5 ms … 132.8 ms    7 runs
+ 

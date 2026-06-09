@@ -222,6 +222,26 @@ fn golden_dump(frame: &MergedDataFrame) -> String {
     out
 }
 
+fn add_numeric_checksum(column: &Column, checksum: &mut f64) {
+    if let Some(values) = column.as_f64_slice() {
+        for &value in values {
+            *checksum += value;
+        }
+        return;
+    }
+    if let Some(values) = column.as_i64_slice() {
+        for &value in values {
+            *checksum += value as f64;
+        }
+        return;
+    }
+    for value in column.values() {
+        if let Ok(v) = value.to_f64() {
+            *checksum += v;
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rows = parse_arg("rows", 50_000usize);
     let right_rows = parse_arg("right-rows", rows);
@@ -297,15 +317,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .get("right_value")
             .ok_or("merge output missing right_value column")?;
 
-        for value in left_values
-            .values()
-            .iter()
-            .chain(right_values.values().iter())
-        {
-            if let Ok(v) = value.to_f64() {
-                checksum += v;
-            }
-        }
+        add_numeric_checksum(left_values, &mut checksum);
+        add_numeric_checksum(right_values, &mut checksum);
     }
 
     durations_ns.sort_unstable();
