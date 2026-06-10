@@ -237,6 +237,26 @@ fn main() {
         print!("{}", golden_dump(&fi.div_df(&fi).unwrap()));
         // Int64 fillna: all-valid -> no-op copy (Int64 output preserved).
         print!("{}", golden_dump(&fi.fillna(&Scalar::Int64(0)).unwrap()));
+        // Int64 where / mask (br-frankenpandas-eydcr): all-valid Int64 self,
+        // all-valid Bool cond (deterministic true/false pattern), Int64 fill.
+        // Output is pure all-valid Int64 (keep self vs fill), bit-identical
+        // across the typed and Scalar select paths.
+        let cond_b = {
+            let labels: Vec<IndexLabel> = (0..5000).map(|i| IndexLabel::Int64(i as i64)).collect();
+            let mut columns = std::collections::BTreeMap::new();
+            let mut order = Vec::new();
+            for c in 0..4 {
+                let name = format!("c{c}");
+                let v: Vec<bool> = (0..5000).map(|i| (i + c) % 3 == 0).collect();
+                columns.insert(name.clone(), Column::from_bool_values(v));
+                order.push(name);
+            }
+            DataFrame::new_with_column_order(Index::new(labels), columns, order).unwrap()
+        };
+        print!("{}", golden_dump(&fi.where_cond(&cond_b, Some(&Scalar::Int64(0))).unwrap()));
+        print!("{}", golden_dump(&fi.where_cond(&cond_b, Some(&Scalar::Int64(-7))).unwrap()));
+        print!("{}", golden_dump(&fi.mask(&cond_b, Some(&Scalar::Int64(0))).unwrap()));
+        print!("{}", golden_dump(&fi.mask(&cond_b, Some(&Scalar::Int64(99))).unwrap()));
         return;
     }
     let n: usize = args
