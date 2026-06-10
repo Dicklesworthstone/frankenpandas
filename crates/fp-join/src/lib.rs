@@ -3347,9 +3347,9 @@ fn dense_cycle_domain(witness: Int64DenseCycleWitness) -> Option<(i64, i64)> {
 }
 
 struct DenseOuterRunTape {
-    run_lens: Arc<[usize]>,
-    left_run_valid: Arc<[bool]>,
-    left_run_positions: Arc<[usize]>,
+    run_lens: Option<Arc<[usize]>>,
+    left_run_valid: Option<Arc<[bool]>>,
+    left_run_positions: Option<Arc<[usize]>>,
     right_positions_csr: Option<Arc<[usize]>>,
     right_segments: Option<Arc<[(usize, usize)]>>,
     key_runs: Vec<(i64, usize)>,
@@ -3426,9 +3426,10 @@ fn build_dense_cycle_outer_run_tape(
         output_len = output_len.checked_add(rows)?;
     }
 
-    let mut run_lens = Vec::with_capacity(run_count);
-    let mut left_run_valid = Vec::with_capacity(run_count);
-    let mut left_run_positions = Vec::with_capacity(run_count);
+    let build_left_tape = !has_left_missing;
+    let mut run_lens = Vec::with_capacity(if build_left_tape { run_count } else { 0 });
+    let mut left_run_valid = Vec::with_capacity(if build_left_tape { run_count } else { 0 });
+    let mut left_run_positions = Vec::with_capacity(if build_left_tape { run_count } else { 0 });
     let mut right_positions_csr = Vec::with_capacity(right_witness.len);
     let mut right_segments = Vec::with_capacity(run_count);
     let mut key_runs = Vec::with_capacity(active_key_count);
@@ -3463,36 +3464,46 @@ fn build_dense_cycle_outer_run_tape(
         let rows = match (left_span, right_span) {
             (Some((mut left_pos, left_count)), Some((_, right_count))) => {
                 let rows = left_count.checked_mul(right_count)?;
-                run_lens.extend(std::iter::repeat_n(right_count, left_count));
-                left_run_valid.extend(std::iter::repeat_n(true, left_count));
+                if build_left_tape {
+                    run_lens.extend(std::iter::repeat_n(right_count, left_count));
+                    left_run_valid.extend(std::iter::repeat_n(true, left_count));
+                }
                 if build_right_tape {
                     right_segments
                         .extend(std::iter::repeat_n((right_start, right_count), left_count));
                 }
-                for _ in 0..left_count {
-                    left_run_positions.push(left_pos);
-                    left_pos = left_pos.checked_add(left_witness.period)?;
+                if build_left_tape {
+                    for _ in 0..left_count {
+                        left_run_positions.push(left_pos);
+                        left_pos = left_pos.checked_add(left_witness.period)?;
+                    }
                 }
                 rows
             }
             (Some((mut left_pos, left_count)), None) => {
                 push_dense_outer_invalid_range(&mut right_invalid_ranges, out_pos, left_count);
-                run_lens.extend(std::iter::repeat_n(1, left_count));
-                left_run_valid.extend(std::iter::repeat_n(true, left_count));
+                if build_left_tape {
+                    run_lens.extend(std::iter::repeat_n(1, left_count));
+                    left_run_valid.extend(std::iter::repeat_n(true, left_count));
+                }
                 if build_right_tape {
                     right_segments.extend(std::iter::repeat_n((usize::MAX, 1), left_count));
                 }
-                for _ in 0..left_count {
-                    left_run_positions.push(left_pos);
-                    left_pos = left_pos.checked_add(left_witness.period)?;
+                if build_left_tape {
+                    for _ in 0..left_count {
+                        left_run_positions.push(left_pos);
+                        left_pos = left_pos.checked_add(left_witness.period)?;
+                    }
                 }
                 left_count
             }
             (None, Some((_, right_count))) => {
                 push_dense_outer_invalid_range(&mut left_invalid_ranges, out_pos, right_count);
-                run_lens.push(right_count);
-                left_run_valid.push(false);
-                left_run_positions.push(0);
+                if build_left_tape {
+                    run_lens.push(right_count);
+                    left_run_valid.push(false);
+                    left_run_positions.push(0);
+                }
                 if build_right_tape {
                     right_segments.push((right_start, right_count));
                 }
@@ -3504,9 +3515,14 @@ fn build_dense_cycle_outer_run_tape(
         out_pos = out_pos.checked_add(rows)?;
     }
     if out_pos != output_len
-        || run_lens.len() != run_count
-        || left_run_valid.len() != run_count
-        || left_run_positions.len() != run_count
+        || (build_left_tape
+            && (run_lens.len() != run_count
+                || left_run_valid.len() != run_count
+                || left_run_positions.len() != run_count))
+        || (!build_left_tape
+            && (!run_lens.is_empty()
+                || !left_run_valid.is_empty()
+                || !left_run_positions.is_empty()))
         || (build_right_tape
             && (right_segments.len() != run_count
                 || right_positions_csr.len() != right_witness.len))
@@ -3516,9 +3532,9 @@ fn build_dense_cycle_outer_run_tape(
     }
 
     Some(DenseOuterRunTape {
-        run_lens: Arc::from(run_lens),
-        left_run_valid: Arc::from(left_run_valid),
-        left_run_positions: Arc::from(left_run_positions),
+        run_lens: build_left_tape.then(|| Arc::from(run_lens)),
+        left_run_valid: build_left_tape.then(|| Arc::from(left_run_valid)),
+        left_run_positions: build_left_tape.then(|| Arc::from(left_run_positions)),
         right_positions_csr: build_right_tape.then(|| Arc::from(right_positions_csr)),
         right_segments: build_right_tape.then(|| Arc::from(right_segments)),
         key_runs,
@@ -3821,9 +3837,9 @@ fn build_single_key_dense_i64_outer_merge_output(
         let right_segments: Arc<[(usize, usize)]> =
             plan.iter().map(|&(_, rs, run_len)| (rs, run_len)).collect();
         Some(DenseOuterRunTape {
-            run_lens,
-            left_run_valid,
-            left_run_positions,
+            run_lens: Some(run_lens),
+            left_run_valid: Some(left_run_valid),
+            left_run_positions: Some(left_run_positions),
             right_positions_csr: Some(Arc::from(right_positions_csr)),
             right_segments: Some(right_segments),
             key_runs,
@@ -3852,12 +3868,15 @@ fn build_single_key_dense_i64_outer_merge_output(
     };
 
     // Left broadcast run values (one per run): i64 (preserved) or f64 (promoted).
-    let left_run_values_i64 = |idx: usize| -> Vec<i64> {
-        left_run_positions
-            .iter()
-            .zip(left_run_valid.iter())
-            .map(|(&lp, &valid)| if valid { spec_values[idx][lp] } else { 0 })
-            .collect()
+    let left_run_values_i64 = |idx: usize| -> Option<Vec<i64>> {
+        Some(
+            left_run_positions
+                .as_ref()?
+                .iter()
+                .zip(left_run_valid.as_ref()?.iter())
+                .map(|(&lp, &valid)| if valid { spec_values[idx][lp] } else { 0 })
+                .collect(),
+        )
     };
     // Assemble columns in spec order, each a lazy lane.
     let index = Index::new_known_unique_int64_unit_range(0, output_len);
@@ -3879,19 +3898,48 @@ fn build_single_key_dense_i64_outer_merge_output(
                 }
             }
             OuterLaneKind::Lane(side) => match (side, promoted(*side)) {
-                (FusedInt64Side::Left, false) => Column::from_i64_repeat_values_run_lengths(
-                    left_run_values_i64(idx),
-                    Arc::clone(&run_lens),
-                ),
+                (FusedInt64Side::Left, false) => {
+                    let Some(run_lens) = run_lens.as_ref() else {
+                        return Ok(None);
+                    };
+                    let Some(run_values) = left_run_values_i64(idx) else {
+                        return Ok(None);
+                    };
+                    Column::from_i64_repeat_values_run_lengths(run_values, Arc::clone(run_lens))
+                }
                 (FusedInt64Side::Left, true) => {
-                    Column::from_i64_nullable_repeat_positions_as_f64_with_sparse_validity(
-                        Arc::clone(&spec_sources[idx]),
-                        Arc::clone(&left_run_positions),
-                        Arc::clone(&left_run_valid),
-                        Arc::clone(&run_lens),
-                        left_sparse_validity.clone(),
-                        output_len,
-                    )
+                    if left_run_positions.is_none()
+                        && let (Some(left_witness), Some(right_witness)) =
+                            (left_witness, right_witness)
+                    {
+                        Column::from_i64_nullable_dense_cycle_left_as_f64_with_sparse_validity(
+                            Arc::clone(&spec_sources[idx]),
+                            left_witness,
+                            right_witness,
+                            min_key,
+                            span,
+                            left_sparse_validity.clone(),
+                            output_len,
+                        )
+                    } else {
+                        let Some(run_lens) = run_lens.as_ref() else {
+                            return Ok(None);
+                        };
+                        let Some(left_run_positions) = left_run_positions.as_ref() else {
+                            return Ok(None);
+                        };
+                        let Some(left_run_valid) = left_run_valid.as_ref() else {
+                            return Ok(None);
+                        };
+                        Column::from_i64_nullable_repeat_positions_as_f64_with_sparse_validity(
+                            Arc::clone(&spec_sources[idx]),
+                            Arc::clone(left_run_positions),
+                            Arc::clone(left_run_valid),
+                            Arc::clone(run_lens),
+                            left_sparse_validity.clone(),
+                            output_len,
+                        )
+                    }
                 }
                 (FusedInt64Side::Right, false) => {
                     let Some(right_positions_csr) = right_positions_csr.as_ref() else {

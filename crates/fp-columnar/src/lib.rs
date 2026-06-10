@@ -1456,6 +1456,19 @@ enum ScalarValues {
         total_len: usize,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Dense-cycle source-position sibling for promoted OUTER-join LEFT lanes.
+    /// Stores the certified left/right key witnesses instead of per-run
+    /// left-position/run-length descriptors; materialization reconstructs the
+    /// same left broadcast runs in bucket order.
+    LazyNullableDenseCycleLeftI64AsFloat64 {
+        source: Arc<[i64]>,
+        left_witness: Int64DenseCycleWitness,
+        right_witness: Int64DenseCycleWitness,
+        min_key: i64,
+        span: usize,
+        total_len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Source-position backed sibling of `LazyNullableRepeatValuesFloat64`.
     /// Each valid run reads `source[run_positions[k]] as f64` lazily; invalid
     /// runs materialize `Null(NaN)` under the same validity mask.
@@ -1931,6 +1944,27 @@ impl ScalarValues {
         debug_assert_eq!(source.len(), right_witness.len);
         debug_assert!(span > 0 || total_len == 0);
         Self::LazyNullableDenseCycleRightI64AsFloat64 {
+            source,
+            left_witness,
+            right_witness,
+            min_key,
+            span,
+            total_len,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_dense_cycle_left_i64_as_float64(
+        source: Arc<[i64]>,
+        left_witness: Int64DenseCycleWitness,
+        right_witness: Int64DenseCycleWitness,
+        min_key: i64,
+        span: usize,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(source.len(), left_witness.len);
+        debug_assert!(span > 0 || total_len == 0);
+        Self::LazyNullableDenseCycleLeftI64AsFloat64 {
             source,
             left_witness,
             right_witness,
@@ -2638,6 +2672,49 @@ impl ScalarValues {
                     out
                 })
                 .as_slice(),
+            Self::LazyNullableDenseCycleLeftI64AsFloat64 {
+                source,
+                left_witness,
+                right_witness,
+                min_key,
+                span,
+                total_len,
+                values,
+            } => values
+                .get_or_init(|| {
+                    let mut out = Vec::with_capacity(*total_len);
+                    for bucket in 0..*span {
+                        let key = min_key
+                            .checked_add(i64::try_from(bucket).expect("bucket fits in i64"))
+                            .expect("dense-cycle key span was prevalidated");
+                        let left_span = left_witness.offset_count_for_key(key);
+                        let right_span = right_witness.offset_count_for_key(key);
+                        match (left_span, right_span) {
+                            (Some((mut left_pos, left_count)), Some((_, right_count))) => {
+                                for _ in 0..left_count {
+                                    out.resize(
+                                        out.len() + right_count,
+                                        Scalar::Float64(source[left_pos] as f64),
+                                    );
+                                    left_pos += left_witness.period;
+                                }
+                            }
+                            (Some((mut left_pos, left_count)), None) => {
+                                for _ in 0..left_count {
+                                    out.push(Scalar::Float64(source[left_pos] as f64));
+                                    left_pos += left_witness.period;
+                                }
+                            }
+                            (None, Some((_, right_count))) => {
+                                out.resize(out.len() + right_count, Scalar::Null(NullKind::NaN));
+                            }
+                            (None, None) => {}
+                        }
+                    }
+                    debug_assert_eq!(out.len(), *total_len);
+                    out
+                })
+                .as_slice(),
             Self::LazyNullableRepeatPositionsI64AsFloat64 {
                 source,
                 run_positions,
@@ -2714,6 +2791,7 @@ impl ScalarValues {
             Self::LazyNullableRepeatValuesFloat64 { total_len, .. } => *total_len,
             Self::LazyNullableRepeatedPositionsI64AsFloat64 { total_len, .. } => *total_len,
             Self::LazyNullableDenseCycleRightI64AsFloat64 { total_len, .. } => *total_len,
+            Self::LazyNullableDenseCycleLeftI64AsFloat64 { total_len, .. } => *total_len,
             Self::LazyNullableRepeatPositionsI64AsFloat64 { total_len, .. } => *total_len,
             Self::LazyUtf8Slice { len, .. } => *len,
         }
@@ -3013,6 +3091,22 @@ impl Clone for ScalarValues {
                 total_len,
                 ..
             } => Self::lazy_nullable_dense_cycle_right_i64_as_float64(
+                Arc::clone(source),
+                *left_witness,
+                *right_witness,
+                *min_key,
+                *span,
+                *total_len,
+            ),
+            Self::LazyNullableDenseCycleLeftI64AsFloat64 {
+                source,
+                left_witness,
+                right_witness,
+                min_key,
+                span,
+                total_len,
+                ..
+            } => Self::lazy_nullable_dense_cycle_left_i64_as_float64(
                 Arc::clone(source),
                 *left_witness,
                 *right_witness,
@@ -4489,6 +4583,38 @@ impl Column {
         Self {
             dtype: DType::Float64,
             values: ScalarValues::lazy_nullable_dense_cycle_right_i64_as_float64(
+                source,
+                left_witness,
+                right_witness,
+                min_key,
+                span,
+                total_len,
+            ),
+            validity,
+            data: None,
+        }
+    }
+
+    /// Dense-cycle witness variant of
+    /// [`Column::from_i64_nullable_repeat_positions_as_f64_with_sparse_validity`]
+    /// for promoted LEFT lanes in certified dense-cycle OUTER joins. It avoids
+    /// constructing per-run left-position/run-length descriptors in the join
+    /// hot path.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_i64_nullable_dense_cycle_left_as_f64_with_sparse_validity(
+        source: Arc<[i64]>,
+        left_witness: Int64DenseCycleWitness,
+        right_witness: Int64DenseCycleWitness,
+        min_key: i64,
+        span: usize,
+        validity: ValidityMask,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(validity.len(), total_len);
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_nullable_dense_cycle_left_i64_as_float64(
                 source,
                 left_witness,
                 right_witness,
