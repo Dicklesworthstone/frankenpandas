@@ -70,7 +70,9 @@ use std::{
 };
 
 use bumpalo::{Bump, collections::Vec as BumpVec};
-use fp_columnar::{Column, ColumnError, Utf8LowerHexSequence, ValidityMask};
+use fp_columnar::{
+    Column, ColumnError, Int64DenseCycleWitness, Utf8LowerHexSequence, ValidityMask,
+};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexLabel};
 use fp_types::{DType, NullKind, Scalar, TypeError};
@@ -3478,7 +3480,43 @@ fn build_single_key_dense_i64_outer_merge_output(
     let span = usize::try_from(span).expect("span bounded by max_dense_span");
 
     // CSR layouts for both sides (replaces the per-bucket Vec<Vec<usize>>).
-    let build_csr = |keys: &[i64]| {
+    let build_dense_cycle_csr =
+        |witness: Int64DenseCycleWitness| -> Option<(Vec<usize>, Vec<usize>)> {
+            let mut offsets = Vec::with_capacity(span + 1);
+            offsets.push(0);
+            let mut total = 0usize;
+            for bucket in 0..span {
+                let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+                let count = witness
+                    .offset_count_for_key(key)
+                    .map_or(0, |(_, count)| count);
+                total = total.checked_add(count)?;
+                offsets.push(total);
+            }
+            if total != witness.len {
+                return None;
+            }
+            let mut positions = Vec::with_capacity(witness.len);
+            for bucket in 0..span {
+                let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+                let Some((offset, count)) = witness.offset_count_for_key(key) else {
+                    continue;
+                };
+                let mut pos = offset;
+                for _ in 0..count {
+                    positions.push(pos);
+                    pos = pos.checked_add(witness.period)?;
+                }
+            }
+            (positions.len() == witness.len).then_some((offsets, positions))
+        };
+    let build_csr = |keys: &[i64], witness: Option<Int64DenseCycleWitness>| {
+        if let Some(csr) = witness
+            .filter(|witness| witness.len == keys.len())
+            .and_then(&build_dense_cycle_csr)
+        {
+            return csr;
+        }
         let mut offsets = vec![0usize; span + 1];
         for &key in keys {
             offsets[(key - min_key) as usize + 1] += 1;
@@ -3495,8 +3533,10 @@ fn build_single_key_dense_i64_outer_merge_output(
         }
         (offsets, positions)
     };
-    let (left_offsets, left_positions_csr) = build_csr(left_keys);
-    let (right_offsets, right_positions_csr) = build_csr(right_keys);
+    let (left_offsets, left_positions_csr) =
+        build_csr(left_keys, left_key.int64_dense_cycle_witness());
+    let (right_offsets, right_positions_csr) =
+        build_csr(right_keys, right_key.int64_dense_cycle_witness());
     let right_positions_csr: Arc<[usize]> = Arc::from(right_positions_csr);
 
     // Bucket walk -> compact plan + closed-form key runs + output length.

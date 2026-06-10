@@ -617,6 +617,67 @@ pub enum ColumnData {
     Interval(Vec<Interval>),
 }
 
+/// Exact witness for all-valid Int64 columns whose key at row `i` is
+/// `start + (i % period)`.
+///
+/// The witness is only produced after scanning every row and checking the
+/// closed form exactly. Consumers may derive bucket counts and input positions
+/// from it, but must fall back to the source slice when the witness is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct Int64DenseCycleWitness {
+    pub start: i64,
+    pub period: usize,
+    pub len: usize,
+}
+
+impl Int64DenseCycleWitness {
+    #[must_use]
+    pub fn offset_count_for_key(self, key: i64) -> Option<(usize, usize)> {
+        let offset = usize::try_from(key.checked_sub(self.start)?).ok()?;
+        if offset >= self.period {
+            return None;
+        }
+        let full_cycles = self.len / self.period;
+        let tail = self.len % self.period;
+        let count = full_cycles + usize::from(offset < tail);
+        (count > 0).then_some((offset, count))
+    }
+}
+
+fn certify_int64_dense_cycle(data: &[i64]) -> Option<Int64DenseCycleWitness> {
+    let (&start, rest) = data.split_first()?;
+    let mut period = None;
+    for (idx, &value) in rest.iter().enumerate() {
+        let row = idx + 1;
+        if value == start {
+            period = Some(row);
+            break;
+        }
+        let row_i64 = i64::try_from(row).ok()?;
+        if value != start.checked_add(row_i64)? {
+            return None;
+        }
+    }
+    let period = period.unwrap_or(data.len());
+    if period == 0 {
+        return None;
+    }
+    let last_offset = i64::try_from(period.checked_sub(1)?).ok()?;
+    start.checked_add(last_offset)?;
+    for (row, &value) in data.iter().enumerate() {
+        let offset = i64::try_from(row % period).ok()?;
+        if value != start.checked_add(offset)? {
+            return None;
+        }
+    }
+    Some(Int64DenseCycleWitness {
+        start,
+        period,
+        len: data.len(),
+    })
+}
+
 impl ColumnData {
     /// Materialize typed array from a `Vec<Scalar>` and its `ValidityMask`.
     ///
@@ -1148,6 +1209,7 @@ enum ScalarValues {
     Eager(Arc<[Scalar]>),
     LazyAllValidInt64 {
         data: Arc<[i64]>,
+        dense_cycle: OnceLock<Option<Int64DenseCycleWitness>>,
         values: OnceLock<Vec<Scalar>>,
     },
     LazyAllValidFloat64 {
@@ -1417,6 +1479,7 @@ impl ScalarValues {
     fn lazy_all_valid_int64_arc(data: Arc<[i64]>) -> Self {
         Self::LazyAllValidInt64 {
             data,
+            dense_cycle: OnceLock::new(),
             values: OnceLock::new(),
         }
     }
@@ -2141,7 +2204,7 @@ impl ScalarValues {
     fn as_slice(&self) -> &[Scalar] {
         match self {
             Self::Eager(values) => values,
-            Self::LazyAllValidInt64 { data, values } => values
+            Self::LazyAllValidInt64 { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Int64).collect())
                 .as_slice(),
             Self::LazyAllValidFloat64 { data, values } => values
@@ -3928,12 +3991,19 @@ impl Column {
         };
 
         let validity = ValidityMask::from_values(&coerced);
+        let data = Self::cached_data_for_values(dtype, &coerced);
+        let values = match (&data, dtype, validity.all()) {
+            (Some(ColumnData::Int64(data)), DType::Int64, true) => {
+                ScalarValues::lazy_all_valid_int64_arc(Arc::clone(data))
+            }
+            _ => ScalarValues::from_vec(coerced),
+        };
 
         Ok(Self {
             dtype,
             validity,
-            data: Self::cached_data_for_values(dtype, &coerced),
-            values: ScalarValues::from_vec(coerced),
+            data,
+            values,
         })
     }
 
@@ -4549,6 +4619,25 @@ impl Column {
                 return Some(Arc::clone(data));
             }
             return self.as_i64_slice().map(Arc::from);
+        }
+        None
+    }
+
+    /// Return a cached exact dense-cycle witness for all-valid Int64 columns.
+    ///
+    /// The first successful/failed lookup scans the backing once and caches the
+    /// result. Consumers can then avoid rediscovering `start + (row % period)`
+    /// shape inside repeated kernels while preserving a generic fallback.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn int64_dense_cycle_witness(&self) -> Option<Int64DenseCycleWitness> {
+        if self.dtype == DType::Int64
+            && self.validity.all()
+            && let ScalarValues::LazyAllValidInt64 {
+                data, dense_cycle, ..
+            } = &self.values
+        {
+            return *dense_cycle.get_or_init(|| certify_int64_dense_cycle(data.as_ref()));
         }
         None
     }
@@ -21563,6 +21652,64 @@ mod tests {
             return;
         };
         assert!(Arc::ptr_eq(cached, data));
+    }
+
+    #[test]
+    fn int64_dense_cycle_witness_is_exact_and_cached_uza0466() {
+        let col = Column::new(
+            DType::Int64,
+            vec![
+                Scalar::Int64(5),
+                Scalar::Int64(6),
+                Scalar::Int64(7),
+                Scalar::Int64(5),
+                Scalar::Int64(6),
+                Scalar::Int64(7),
+                Scalar::Int64(5),
+            ],
+        )
+        .unwrap();
+        let witness = col
+            .int64_dense_cycle_witness()
+            .expect("dense cycle should certify");
+        assert_eq!(witness.start, 5);
+        assert_eq!(witness.period, 3);
+        assert_eq!(witness.len, 7);
+        assert_eq!(witness.offset_count_for_key(5), Some((0, 3)));
+        assert_eq!(witness.offset_count_for_key(6), Some((1, 2)));
+        assert_eq!(witness.offset_count_for_key(7), Some((2, 2)));
+        assert_eq!(witness.offset_count_for_key(8), None);
+
+        let again = col
+            .int64_dense_cycle_witness()
+            .expect("cached dense cycle should be reusable");
+        assert_eq!(again, witness);
+    }
+
+    #[test]
+    fn int64_dense_cycle_witness_rejects_gaps_and_nulls_uza0466() {
+        let gapped = Column::new(
+            DType::Int64,
+            vec![
+                Scalar::Int64(5),
+                Scalar::Int64(6),
+                Scalar::Int64(8),
+                Scalar::Int64(5),
+            ],
+        )
+        .unwrap();
+        assert_eq!(gapped.int64_dense_cycle_witness(), None);
+
+        let nullable = Column::new(
+            DType::Int64,
+            vec![
+                Scalar::Int64(5),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(7),
+            ],
+        )
+        .unwrap();
+        assert_eq!(nullable.int64_dense_cycle_witness(), None);
     }
 
     #[test]

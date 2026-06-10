@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-uza0466-base/release-perf/examples/perf_profile outer_join 500000 20
+  Time (mean ± σ):     269.7 ms ±   9.7 ms    [User: 189.6 ms, System: 79.5 ms]
+  Range (min … max):   252.9 ms … 280.6 ms    10 runs
+ 
+Benchmark 2: /data/projects/.scratch/cargo-target-orangepeak-uza0466-after/release-perf/examples/perf_profile outer_join 500000 20
+  Time (mean ± σ):     230.7 ms ±  21.2 ms    [User: 172.2 ms, System: 57.5 ms]
+  Range (min … max):   201.4 ms … 272.8 ms    10 runs
+ 
+Summary
+  /data/projects/.scratch/cargo-target-orangepeak-uza0466-after/release-perf/examples/perf_profile outer_join 500000 20 ran
+    1.17 ± 0.12 times faster than /data/projects/.scratch/cargo-target-orangepeak-uza0466-base/release-perf/examples/perf_profile outer_join 500000 20

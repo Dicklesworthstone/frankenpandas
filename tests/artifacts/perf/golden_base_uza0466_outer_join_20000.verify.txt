@@ -1,0 +1,1 @@
+tests/artifacts/perf/golden_base_uza0466_outer_join_20000.txt: OK
