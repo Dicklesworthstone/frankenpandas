@@ -230,6 +230,11 @@ fn main() {
         print!("{}", golden_dump(&fi.clip(None, Some(800.0)).unwrap()));
         // Int64 nunique: dense direct-address distinct count (bounded all-valid).
         print!("{}", golden_dump(&fi.nunique().unwrap().to_frame(Some("nu")).unwrap()));
+        // Int64 frame arithmetic -> Float64 output (incl div-by-zero NaN via fi/fi).
+        print!("{}", golden_dump(&fi.add_df(&fi2).unwrap()));
+        print!("{}", golden_dump(&fi.sub_df(&fi2).unwrap()));
+        print!("{}", golden_dump(&fi.mul_df(&fi2).unwrap()));
+        print!("{}", golden_dump(&fi.div_df(&fi).unwrap()));
         return;
     }
     let n: usize = args
@@ -363,6 +368,25 @@ fn main() {
     });
     time_it("i64.gt", 1, 20, || {
         let _ = fi.gt(&fi).unwrap();
+    });
+    let cond_i = fi.gt(&fi).unwrap();
+    time_it("i64.fillna", 1, 20, || {
+        let _ = fi.fillna(&Scalar::Int64(0)).unwrap();
+    });
+    time_it("i64.where", 1, 20, || {
+        let _ = fi.where_cond(&cond_i, Some(&Scalar::Int64(0))).unwrap();
+    });
+    time_it("i64.mask", 1, 20, || {
+        let _ = fi.mask(&cond_i, Some(&Scalar::Int64(0))).unwrap();
+    });
+    time_it("i64.add_df", 1, 20, || {
+        let _ = fi.add_df(&fi).unwrap();
+    });
+    time_it("i64.quantile", 1, 20, || {
+        let _ = fi.quantile(0.5).unwrap();
+    });
+    time_it("i64.mode", 1, 10, || {
+        let _ = fi.mode().unwrap();
     });
     time_it("sem", 1, 20, || {
         let _ = f.sem_agg().unwrap();
