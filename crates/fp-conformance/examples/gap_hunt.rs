@@ -128,6 +128,15 @@ fn main() {
         print!("{}", golden_dump(&fnull.corrwith(&other_null).unwrap().to_frame(Some("c")).unwrap()));
         // interpolate: interior gaps linear-filled, trailing carried, leading NaN.
         print!("{}", golden_dump(&fnull.interpolate().unwrap()));
+        // apply_per_column family (round/cumsum/cumprod/abs) — all route through
+        // the column-parallel apply_per_column helper; f is 5000x4 (>=16384
+        // values) so the parallel path is exercised bit-for-bit.
+        print!("{}", golden_dump(&f.round(2).unwrap()));
+        print!("{}", golden_dump(&fnull.round(3).unwrap()));
+        print!("{}", golden_dump(&f.cumsum().unwrap()));
+        print!("{}", golden_dump(&f.cumprod().unwrap()));
+        print!("{}", golden_dump(&f.abs().unwrap()));
+        print!("{}", golden_dump(&fnull.cumsum().unwrap()));
         // rank: all methods over the multi-column frame (>=2 cols + >=16384
         // values => exercises the column-parallel rank path bit-for-bit).
         for method in ["average", "min", "max", "first", "dense"] {
