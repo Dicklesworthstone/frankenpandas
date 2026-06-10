@@ -3379,7 +3379,6 @@ fn append_dense_cycle_positions(
     key: i64,
 ) -> Option<usize> {
     let (mut pos, count) = witness.offset_count_for_key(key)?;
-    positions.reserve(count);
     for _ in 0..count {
         positions.push(pos);
         pos = pos.checked_add(witness.period)?;
@@ -3459,22 +3458,22 @@ fn build_dense_cycle_outer_run_tape(
         let rows = match (left_span, right_span) {
             (Some((mut left_pos, left_count)), Some((_, right_count))) => {
                 let rows = left_count.checked_mul(right_count)?;
+                run_lens.extend(std::iter::repeat_n(right_count, left_count));
+                left_run_valid.extend(std::iter::repeat_n(true, left_count));
+                right_segments.extend(std::iter::repeat_n((right_start, right_count), left_count));
                 for _ in 0..left_count {
-                    run_lens.push(right_count);
-                    left_run_valid.push(true);
                     left_run_positions.push(left_pos);
-                    right_segments.push((right_start, right_count));
                     left_pos = left_pos.checked_add(left_witness.period)?;
                 }
                 rows
             }
             (Some((mut left_pos, left_count)), None) => {
                 push_dense_outer_invalid_range(&mut right_invalid_ranges, out_pos, left_count);
+                run_lens.extend(std::iter::repeat_n(1, left_count));
+                left_run_valid.extend(std::iter::repeat_n(true, left_count));
+                right_segments.extend(std::iter::repeat_n((usize::MAX, 1), left_count));
                 for _ in 0..left_count {
-                    run_lens.push(1);
-                    left_run_valid.push(true);
                     left_run_positions.push(left_pos);
-                    right_segments.push((usize::MAX, 1));
                     left_pos = left_pos.checked_add(left_witness.period)?;
                 }
                 left_count

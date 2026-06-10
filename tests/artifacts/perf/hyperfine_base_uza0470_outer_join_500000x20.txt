@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-uza0470-base/release-perf/examples/perf_profile outer_join 500000 20
+  Time (mean ± σ):     161.3 ms ±  11.6 ms    [User: 108.0 ms, System: 52.7 ms]
+  Range (min … max):   141.6 ms … 175.7 ms    10 runs
+ 
