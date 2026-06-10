@@ -228,6 +228,12 @@ fn main() {
         print!("{}", golden_dump(&dup.mode().unwrap()));
         print!("{}", golden_dump(&dupn.mode().unwrap()));
         print!("{}", golden_dump(&f.mode().unwrap()));
+        // sort_index over a shuffled Int64 index: radix argsort + the
+        // (column-parallel) per-column row gather in reorder_rows_by_positions.
+        // 5000x4 (>=16384 values) exercises the parallel gather path bit-for-bit.
+        let shuf = shuffled_index_frame(5000, 4);
+        print!("{}", golden_dump(&shuf.sort_index(true).unwrap()));
+        print!("{}", golden_dump(&shuf.sort_index(false).unwrap()));
         // Int64 frame comparison (compared as f64, matching the Scalar path).
         let fi = int_frame(5000, 4);
         let fi2 = int_frame(5000, 4);
