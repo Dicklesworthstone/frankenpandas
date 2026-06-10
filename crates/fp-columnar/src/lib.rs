@@ -5600,6 +5600,22 @@ impl Column {
         self.take_positions(positions)
     }
 
+    /// Internal companion for callers that already proved a positional gather
+    /// is the arithmetic progression `start + i * step` for `i in 0..len`.
+    ///
+    /// Returns `None` when this column does not have a descriptor-only affine
+    /// representation, letting callers fall back to [`Self::take_positions`].
+    #[must_use]
+    #[doc(hidden)]
+    pub fn take_affine_positions_without_materialized_positions(
+        &self,
+        start: usize,
+        step: usize,
+        len: usize,
+    ) -> Option<Self> {
+        self.take_affine_all_valid_float64_positions(len, start, step)
+    }
+
     fn take_affine_all_valid_float64_positions(
         &self,
         len: usize,

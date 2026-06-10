@@ -1,0 +1,548 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 302  of event 'cycles:P'
+# Event count (approx.): 638857450
+#
+# Overhead  Command       Shared Object         Symbol
+# ........  ............  ....................  .....................................................
+#
+    77.36%  perf_profile  perf_profile          [.] <fp_frame::DataFrame>::loc_bool
+            |
+            |--35.05%--<fp_frame::DataFrame>::loc_bool
+            |          |
+            |          |--6.23%--push<i64, alloc::alloc::Global> (inlined)
+            |          |          take_rows_by_positions_with_affine_certificate_unchecked (inlined)
+            |          |          loc_bool (inlined)
+            |          |          0x1869f
+            |          |          0x729eb6cb5d0f
+            |          |
+            |          |--4.71%--ptr<alloc::alloc::Global, i64> (inlined)
+            |          |          ptr<i64, alloc::alloc::Global> (inlined)
+            |          |          |
+            |          |          |--3.43%--as_mut_ptr<i64, alloc::alloc::Global> (inlined)
+            |          |          |          push_mut<i64, alloc::alloc::Global> (inlined)
+            |          |          |          push<i64, alloc::alloc::Global> (inlined)
+            |          |          |          take_rows_by_positions_with_affine_certificate_unchecked (inlined)
+            |          |          |          loc_bool (inlined)
+            |          |          |          0x1869f
+            |          |          |          0x729eb6cb5d0f
+            |          |          |
+            |          |           --1.28%--as_ptr<i64, alloc::alloc::Global> (inlined)
+            |          |                     as_slice<i64, alloc::alloc::Global> (inlined)
+            |          |                     deref<i64, alloc::alloc::Global> (inlined)
+            |          |                     index<i64, usize, alloc::alloc::Global> (inlined)
+            |          |                     take_rows_by_positions_with_affine_certificate_unchecked (inlined)
+            |          |                     loc_bool (inlined)
+            |          |                     0x1869f
+            |          |                     0x729eb6cb5d0f
+            |          |
+            |          |--3.92%--deref<i64, alloc::alloc::Global> (inlined)
+            |          |          index<i64, usize, alloc::alloc::Global> (inlined)
+            |          |          take_rows_by_positions_with_affine_certificate_unchecked (inlined)
+            |          |          loc_bool (inlined)
+            |          |          0x1869f
+            |          |          0x729eb6cb5d0f
+            |          |
+            |          |--3.85%--push_mut<usize, alloc::alloc::Global> (inlined)
+            |          |          push<usize, alloc::alloc::Global> (inlined)
+            |          |          boolean_mask_positions (inlined)
+            |          |          loc_bool (inlined)
+            |          |
+            |          |--3.29%--push<usize, alloc::alloc::Global> (inlined)
+            |          |          boolean_mask_positions (inlined)
+            |          |          loc_bool (inlined)
+            |          |
+            |          |--3.22%--boolean_mask_positions (inlined)
+            |          |          loc_bool (inlined)
+            |          |
+            |          |--2.77%--push_mut<i64, alloc::alloc::Global> (inlined)
+            |          |          push<i64, alloc::alloc::Global> (inlined)
+            |          |          take_rows_by_positions_with_affine_certificate_unchecked (inlined)
+            |          |          loc_bool (inlined)
+            |          |          0x1869f
+            |          |          0x729eb6cb5d0f
+            |          |
+            |          |--2.58%--loc_bool (inlined)
+            |          |          |
+            |          |           --1.30%--0x1869f
+            |          |                     0x729eb6cb5d0f
+            |          |
+            |          |--1.98%--ptr<alloc::alloc::Global, usize> (inlined)
+            |          |          ptr<usize, alloc::alloc::Global> (inlined)
+            |          |          as_mut_ptr<usize, alloc::alloc::Global> (inlined)
+            |          |          push_mut<usize, alloc::alloc::Global> (inlined)
+            |          |          push<usize, alloc::alloc::Global> (inlined)
+            |          |          boolean_mask_positions (inlined)
+            |          |          loc_bool (inlined)
+            |          |
+            |          |--1.94%--next<usize> (inlined)
+            |          |          take_rows_by_positions_with_affine_certificate_unchecked (inlined)
+            |          |          loc_bool (inlined)
+            |          |          0x1869f
+            |          |          0x729eb6cb5d0f
+            |          |
+            |           --0.56%--next<bool> (inlined)
+            |                     next<core::slice::iter::ChunksExact<bool>> (inlined)
+            |                     boolean_mask_positions (inlined)
+            |                     loc_bool (inlined)
+            |
+            |--15.93%--push (inlined)
+            |          boolean_mask_positions (inlined)
+            |          loc_bool (inlined)
+            |
+            |--9.74%--boolean_mask_positions (inlined)
+            |          loc_bool (inlined)
+            |          |
+            |           --0.66%--0x10030d3ff
+            |
+            |--6.58%--push_mut<usize, alloc::alloc::Global> (inlined)
+            |          push<usize, alloc::alloc::Global> (inlined)
+            |          boolean_mask_positions (inlined)
+            |          loc_bool (inlined)
+            |
+            |--4.85%--take_rows_by_positions_with_affine_certificate_unchecked (inlined)
+            |          loc_bool (inlined)
+            |          0x1869f
+            |          0x729eb6cb5d0f
+            |
+            |--3.73%--index<i64> (inlined)
+            |          index<i64, usize> (inlined)
+            |          index<i64, usize, alloc::alloc::Global> (inlined)
+            |          take_rows_by_positions_with_affine_certificate_unchecked (inlined)
+            |          loc_bool (inlined)
+            |          0x1869f
+            |          0x729eb6cb5d0f
+            |
+             --1.47%--push_mut<i64, alloc::alloc::Global> (inlined)
+                       push<i64, alloc::alloc::Global> (inlined)
+                       take_rows_by_positions_with_affine_certificate_unchecked (inlined)
+                       loc_bool (inlined)
+                       0x1869f
+                       0x729eb6cb5d0f
+
+     2.64%  perf_profile  perf_profile          [.] <fp_columnar::ValidityMask>::from_values
+            |
+            ---<fp_columnar::ValidityMask>::from_values
+               |
+               |--0.83%--<fp_columnar::ValidityMask>::from_values
+               |          0x1869f
+               |
+               |--0.69%--is_missing (inlined)
+               |          from_values (inlined)
+               |          0x1869f
+               |
+               |--0.57%--0x1869f
+               |
+                --0.55%--next<fp_types::Scalar> (inlined)
+                          next<core::slice::iter::Iter<fp_types::Scalar>> (inlined)
+                          <fp_columnar::ValidityMask>::from_values
+                          0x1869f
+
+     2.32%  perf_profile  libc.so.6             [.] __memmove_avx_unaligned_erms
+            |
+             --2.32%--0xffffffff8621b2b7
+                       0xffffffff853dc6c9
+                       0xffffffff853dda90
+                       0xffffffff8541a9e8
+                       0xffffffff8541df1b
+                       0xffffffff853a33d2
+                       0xffffffff853a37ea
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+
+     1.56%  perf_profile  [unknown]             [k] 0xffffffff84c01192
+            |
+            |--0.59%--0xffffffff8621b2b7
+            |          0xffffffff853dc6c9
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          __memcpy_avx_unaligned_erms (inlined)
+            |          <fp_columnar::Column>::new
+            |          from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+            |          from_vec (inlined)
+            |          new (inlined)
+            |
+             --0.56%--0xffffffff853a50da
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       __memcpy_avx_unaligned_erms (inlined)
+                       <fp_columnar::Column>::new
+                       from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+                       from_vec (inlined)
+                       new (inlined)
+
+     1.56%  perf_profile  perf_profile          [.] <fp_columnar::Column>::new
+            |
+            |--0.85%--<fp_columnar::Column>::new
+            |
+             --0.71%--normalize_missing_for_dtype (inlined)
+                       {closure#5} (inlined)
+                       {closure#0}<fp_types::Scalar, fp_types::Scalar, alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, core::result::Result<alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, !>, fp_columnar::{impl#19}::new::{closure_env#5}, alloc::vec::in_place_collect::write_in_place_with_drop::{closure_env#0}<fp_types::Scalar>> (inlined)
+                       try_fold<fp_types::Scalar, alloc::alloc::Global, alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, core::iter::adapters::map::map_try_fold::{closure_env#0}<fp_types::Scalar, fp_types::Scalar, alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, core::result::Result<alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, !>, fp_columnar::{impl#19}::new::{closure_env#5}, alloc::vec::in_place_collect::write_in_place_with_drop::{closure_env#0}<fp_types::Scalar>>, core::result::Result<alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, !>> (inlined)
+                       try_fold<fp_types::Scalar, alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}, alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, alloc::vec::in_place_collect::write_in_place_with_drop::{closure_env#0}<fp_types::Scalar>, core::result::Result<alloc::vec::in_place_drop::InPlaceDrop<fp_types::Scalar>, !>> (inlined)
+                       collect_in_place<fp_types::Scalar, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>> (inlined)
+                       from_iter_in_place<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>, fp_types::Scalar> (inlined)
+                       from_iter<fp_types::Scalar, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>> (inlined)
+                       from_iter<fp_types::Scalar, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>> (inlined)
+                       collect<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fp_types::Scalar, alloc::alloc::Global>, fp_columnar::{impl#19}::new::{closure_env#5}>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+                       new (inlined)
+
+     1.16%  perf_profile  [unknown]             [k] 0xffffffff84d04109
+            |
+            |--0.57%--0xffffffff85341423
+            |          0xffffffff85342072
+            |          0xffffffff853437ad
+            |          0xffffffff853438f4
+            |          0xffffffff853439e9
+            |          0xffffffff853442bf
+            |          0xffffffff853a3963
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          __memcpy_avx_unaligned_erms (inlined)
+            |          <fp_columnar::Column>::new
+            |          from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+            |          from_vec (inlined)
+            |          new (inlined)
+            |
+             --0.54%--0xffffffff84c01199
+
+     1.14%  perf_profile  [unknown]             [k] 0xffffffff85452a61
+            |
+            |--0.63%--0xffffffff85341ffe
+            |          0xffffffff853437ad
+            |          0xffffffff853438f4
+            |          0xffffffff853439e9
+            |          0xffffffff853442bf
+            |          0xffffffff853a3963
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          __memcpy_avx_unaligned_erms (inlined)
+            |          <fp_columnar::Column>::new
+            |          from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+            |          from_vec (inlined)
+            |          new (inlined)
+            |
+             --0.50%--0xffffffff8539b7d0
+                       0xffffffff8539c06e
+                       0xffffffff8539c594
+                       0xffffffff8539cb30
+                       0xffffffff8539cd76
+                       0xffffffff8539cea1
+                       0xffffffff853c9742
+                       0xffffffff853cb02c
+                       0xffffffff853cc7f5
+                       0xffffffff853ab2c0
+                       0xffffffff853ab362
+                       0xffffffff84f24dda
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __brk
+                       __GI___sbrk (inlined)
+                       __glibc_morecore (inlined)
+                       systrim (inlined)
+                       _int_free_chunk
+                       core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>
+                       drop<fp_columnar::Column> (inlined)
+                       drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> (inlined)
+                       drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> (inlined)
+                       drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+                       drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+                       drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+                       drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> (inlined)
+                       drop_in_place<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> (inlined)
+                       0x729eb6cb5d0f
+
+     1.04%  perf_profile  perf_profile          [.] fp_types::infer_dtype
+            |
+            ---fp_types::infer_dtype
+               |
+                --0.60%--fp_types::infer_dtype
+                          0x9
+
+     1.01%  perf_profile  [unknown]             [k] 0xffffffff84d0410b
+            |
+             --0.56%--0xffffffff84c00b90
+                       __memcpy_avx_unaligned_erms (inlined)
+                       <fp_columnar::Column>::new
+                       from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+                       from_vec (inlined)
+                       new (inlined)
+
+     1.00%  perf_profile  perf_profile          [.] <alloc::sync::Arc<[fp_types::Scalar]>>::drop_slow
+            |
+            ---<alloc::sync::Arc<[fp_types::Scalar]>>::drop_slow
+               |
+                --0.99%--drop_in_place<[fp_types::Scalar]> (inlined)
+                          drop_slow<[fp_types::Scalar], alloc::alloc::Global> (inlined)
+
+     0.87%  perf_profile  [unknown]             [k] 0xffffffff8623a4f5
+            |
+            ---0xffffffff85458fd7
+               0xffffffff853a33ec
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               perf_profile::build_numeric_frame
+               {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>> (inlined)
+               {closure#0}<usize, fp_types::Scalar, (), perf_profile::build_numeric_frame::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>>> (inlined)
+               fold<core::ops::range::Range<usize>, (), core::iter::adapters::map::map_fold::{closure_env#0}<usize, fp_types::Scalar, (), perf_profile::build_numeric_frame::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>>>> (inlined)
+               fold<fp_types::Scalar, core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>>> (inlined)
+               for_each<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>>> (inlined)
+               extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>, alloc::alloc::Global> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>> (inlined)
+               collect<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_numeric_frame::{closure_env#1}>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> (inlined)
+               build_numeric_frame (inlined)
+
+     0.84%  perf_profile  [unknown]             [k] 0xffffffff84c015d7
+            |
+            ---0xffffffff8621b2b7
+               0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+
+     0.83%  perf_profile  [unknown]             [k] 0xffffffff8534374c
+            |
+            ---0xffffffff8536a276
+               0xffffffff853437ad
+               0xffffffff853438f4
+               0xffffffff853439e9
+               0xffffffff853442bf
+               0xffffffff853a3963
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+
+     0.77%  perf_profile  [unknown]             [k] 0xffffffff85089c48
+            |
+            ---0xffffffff850874dd
+               0xffffffff8508755c
+               0xffffffff850884fa
+               0xffffffff850886ad
+               0xffffffff85089c4d
+               0xffffffff85079cb1
+               0xffffffff85137e40
+               0xffffffff851524f6
+               0xffffffff85139003
+               0xffffffff85139f5d
+               0xffffffff84fc4bc8
+               0xffffffff86227724
+               0xffffffff84c00f0b
+               <fp_frame::DataFrame>::loc_bool
+               push<usize, alloc::alloc::Global> (inlined)
+               boolean_mask_positions (inlined)
+               loc_bool (inlined)
+
+     0.67%  perf_profile  [unknown]             [k] 0xffffffff853a3aeb
+            |
+            ---__memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+
+     0.66%  perf_profile  [unknown]             [k] 0xffffffff8621b2b7
+            |
+             --0.60%--0xffffffff84c01199
+
+     0.65%  perf_profile  [unknown]             [k] 0xffffffff853a3437
+            |
+            ---0xffffffff84c00b90
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+
+     0.61%  perf_profile  [unknown]             [k] 0xffffffff850915a8
+            |
+            ---0xffffffff8620d8eb
+               0xffffffff851389fa
+               0xffffffff85139030
+               0xffffffff85139f5d
+               0xffffffff84fc4bc8
+               0xffffffff86227724
+               0xffffffff84c00f0b
+               push (inlined)
+               boolean_mask_positions (inlined)
+               loc_bool (inlined)
+
+     0.58%  perf_profile  [unknown]             [k] 0xffffffff84c00b90
+            |
+            ---0xffffffff8621b2b7
+               0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::ColumnData>::from_scalars
+               from<f64, alloc::alloc::Global> (inlined)
+               from_scalars (inlined)
+
+     0.57%  perf_profile  [unknown]             [k] 0xffffffff853b9650
+            |
+            ---0xffffffff85392d6e
+               0xffffffff84feb92c
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::ColumnData>::from_scalars
+               from<f64, alloc::alloc::Global> (inlined)
+               from_scalars (inlined)
+
+     0.56%  perf_profile  [unknown]             [k] 0xffffffff853d90f7
+            |
+            ---0xffffffff85452dd0
+               0xffffffff853b9650
+               0xffffffff853bb5d6
+               0xffffffff853a3957
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memcpy_avx_unaligned_erms (inlined)
+               <fp_columnar::Column>::new
+               from<fp_types::Scalar, alloc::alloc::Global> (inlined)
+               from_vec (inlined)
+               new (inlined)
+
+     0.55%  perf_profile  perf_profile          [.] perf_profile::build_numeric_frame
+            |
+            ---0xffffffff8621b2b7
+               0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+
+     0.44%  perf_profile  [unknown]             [k] 0xffffffff85331786
+     0.23%  perf_profile  ld-linux-x86-64.so.2  [.] strcmp
+     0.06%  perf_profile  [unknown]             [k] 0xffffffff853439a0
+     0.05%  perf_profile  [unknown]             [k] 0xffffffff854552b3
+     0.05%  perf_profile  [unknown]             [k] 0xffffffff853436a6
+     0.05%  perf_profile  [unknown]             [k] 0xffffffff853436a3
+     0.04%  perf_profile  [unknown]             [k] 0xffffffff853a4e10
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff8620210b
+     0.03%  perf_profile  [unknown]             [k] 0xffffffff84feb972
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff853a5736
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f8ca76
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff853d43d1
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8539c06e
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c01248
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8622fb88
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff853dc308
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84c0188e
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85452400
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff850a94b5
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f8c9d1
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85326766
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8621f937
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff852fe67c
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8531473a
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85326526
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8506d551
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300f99
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d280
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff862252e9
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8622871b
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84fdedcb
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff862276fb
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff84c0181e
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86228550
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86224c51
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff84f7dc88
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2c3
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b66
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d285
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2bc
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b43
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff86228551
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff84fdedcb
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d280
+     0.00%  perf-exec     [unknown]             [k] 0xffffffff8530d2c3
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff850c2906
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85104b25
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b60
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff85300b69
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d286
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2a7
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2af
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff8530d2b7
+     0.00%  perf_profile  [unknown]             [k] 0xffffffff862251d0
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
