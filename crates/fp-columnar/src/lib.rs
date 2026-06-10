@@ -1258,6 +1258,17 @@ enum ScalarValues {
         validity: ValidityMask,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Nullable Bool mirror of `LazyNullableInt64` (br-frankenpandas-rcvpj):
+    /// contiguous `bool` data + validity, where an invalid slot materializes
+    /// `Scalar::Null(NullKind::Null)` — exactly `missing_for_dtype(DType::Bool)`.
+    /// Backs comparison / where / mask / isin outputs that carry nulls, so the
+    /// Bool result skips the per-row `Vec<Scalar>` + `Column::from_values`
+    /// dtype-inference and validity rescan.
+    LazyNullableBool {
+        data: Vec<bool>,
+        validity: ValidityMask,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyAllValidBool {
         data: Arc<[bool]>,
         values: OnceLock<Vec<Scalar>>,
@@ -1538,6 +1549,14 @@ impl ScalarValues {
 
     fn lazy_nullable_int64(data: Vec<i64>, validity: ValidityMask) -> Self {
         Self::LazyNullableInt64 {
+            data,
+            validity,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_bool(data: Vec<bool>, validity: ValidityMask) -> Self {
+        Self::LazyNullableBool {
             data,
             validity,
             values: OnceLock::new(),
@@ -2369,6 +2388,24 @@ impl ScalarValues {
                         .collect()
                 })
                 .as_slice(),
+            Self::LazyNullableBool {
+                data,
+                validity,
+                values,
+            } => values
+                .get_or_init(|| {
+                    data.iter()
+                        .enumerate()
+                        .map(|(idx, value)| {
+                            if validity.get(idx) {
+                                Scalar::Bool(*value)
+                            } else {
+                                Scalar::Null(NullKind::Null)
+                            }
+                        })
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyRepeatRunsInt64 {
                 runs,
                 total_len,
@@ -2589,6 +2626,7 @@ impl ScalarValues {
             Self::LazyNullableUtf8 { offsets, .. } => offsets.len() - 1,
             Self::LazyGatherUtf8 { positions, .. } => positions.len(),
             Self::LazyNullableInt64 { data, .. } => data.len(),
+            Self::LazyNullableBool { data, .. } => data.len(),
             Self::LazyRepeatRunsInt64 { total_len, .. } => *total_len,
             Self::LazyRepeatValuesInt64 { total_len, .. } => *total_len,
             Self::LazyRepeatedSlicesInt64 { total_len, .. } => *total_len,
@@ -2799,6 +2837,9 @@ impl Clone for ScalarValues {
             } => Self::lazy_gather_utf8(Arc::clone(source), Arc::clone(positions)),
             Self::LazyNullableInt64 { data, validity, .. } => {
                 Self::lazy_nullable_int64(data.clone(), validity.clone())
+            }
+            Self::LazyNullableBool { data, validity, .. } => {
+                Self::lazy_nullable_bool(data.clone(), validity.clone())
             }
             Self::LazyRepeatRunsInt64 {
                 runs, total_len, ..
@@ -4423,6 +4464,28 @@ impl Column {
         Self {
             dtype: DType::Int64,
             values: ScalarValues::lazy_nullable_int64(data, validity.clone()),
+            validity,
+            data: None,
+        }
+    }
+
+    /// Build a `Bool` column from already-typed contiguous values plus a
+    /// validity mask (br-frankenpandas-rcvpj). The nullable counterpart of
+    /// [`Column::from_bool_values`]: an all-valid mask folds to the contiguous
+    /// all-valid backing, otherwise invalid slots materialize
+    /// `Scalar::Null(NullKind::Null)` (= `missing_for_dtype(Bool)`), exactly
+    /// what `Column::from_values` over the equivalent `[Bool/Null]` scalars
+    /// produces — but defers the per-row `Scalar` boxing + dtype inference.
+    /// Used by null-bearing comparison / where / mask / isin outputs.
+    #[must_use]
+    pub fn from_bool_values_with_validity(data: Vec<bool>, validity: ValidityMask) -> Self {
+        debug_assert_eq!(data.len(), validity.len());
+        if validity.all() {
+            return Self::from_bool_values(data);
+        }
+        Self {
+            dtype: DType::Bool,
+            values: ScalarValues::lazy_nullable_bool(data, validity.clone()),
             validity,
             data: None,
         }
