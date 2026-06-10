@@ -3341,6 +3341,11 @@ fn build_single_key_dense_i64_right_merge_output(
     }))
 }
 
+fn dense_cycle_domain(witness: Int64DenseCycleWitness) -> Option<(i64, i64)> {
+    let last_offset = i64::try_from(witness.period.checked_sub(1)?).ok()?;
+    Some((witness.start, witness.start.checked_add(last_offset)?))
+}
+
 /// Fused dense-i64 OUTER merge builder (br-frankenpandas-343ho).
 ///
 /// `dense_int64_outer_positions` + the position-vector outer builder cost:
@@ -3465,12 +3470,29 @@ fn build_single_key_dense_i64_outer_merge_output(
 
     // Dense span over BOTH key sets (same gate as dense_int64_outer_positions
     // so fused/fallback routing matches).
-    let mut min_key = left_keys[0];
-    let mut max_key = left_keys[0];
-    for &key in left_keys.iter().chain(right_keys.iter()) {
-        min_key = min_key.min(key);
-        max_key = max_key.max(key);
-    }
+    let left_witness = left_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == left_keys.len());
+    let right_witness = right_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == right_keys.len());
+    let (min_key, max_key) = match (
+        left_witness.and_then(dense_cycle_domain),
+        right_witness.and_then(dense_cycle_domain),
+    ) {
+        (Some((left_min, left_max)), Some((right_min, right_max))) => {
+            (left_min.min(right_min), left_max.max(right_max))
+        }
+        _ => {
+            let mut min_key = left_keys[0];
+            let mut max_key = left_keys[0];
+            for &key in left_keys.iter().chain(right_keys.iter()) {
+                min_key = min_key.min(key);
+                max_key = max_key.max(key);
+            }
+            (min_key, max_key)
+        }
+    };
     let span = (i128::from(max_key)) - (i128::from(min_key)) + 1;
     let row_count = left_keys.len().saturating_add(right_keys.len());
     let max_dense_span = row_count.saturating_mul(4).max(1024);
@@ -3533,10 +3555,8 @@ fn build_single_key_dense_i64_outer_merge_output(
         }
         (offsets, positions)
     };
-    let (left_offsets, left_positions_csr) =
-        build_csr(left_keys, left_key.int64_dense_cycle_witness());
-    let (right_offsets, right_positions_csr) =
-        build_csr(right_keys, right_key.int64_dense_cycle_witness());
+    let (left_offsets, left_positions_csr) = build_csr(left_keys, left_witness);
+    let (right_offsets, right_positions_csr) = build_csr(right_keys, right_witness);
     let right_positions_csr: Arc<[usize]> = Arc::from(right_positions_csr);
 
     // Bucket walk -> compact plan + closed-form key runs + output length.
@@ -3936,21 +3956,40 @@ fn build_single_key_dense_i64_outer_all_matched_merge_output(
     let dense_domain = if left_keys.is_empty() {
         None
     } else {
-        let min_max = |keys: &[i64]| {
-            let mut min_key = keys[0];
-            let mut max_key = keys[0];
-            for &key in &keys[1..] {
-                min_key = min_key.min(key);
-                max_key = max_key.max(key);
+        let left_witness = left_key
+            .int64_dense_cycle_witness()
+            .filter(|witness| witness.len == left_keys.len());
+        let right_witness = right_key
+            .int64_dense_cycle_witness()
+            .filter(|witness| witness.len == right_keys.len());
+        match (
+            left_witness.and_then(dense_cycle_domain),
+            right_witness.and_then(dense_cycle_domain),
+        ) {
+            (Some(left_domain), Some(right_domain)) => {
+                if left_domain != right_domain {
+                    return Ok(None);
+                }
+                Some(left_domain)
             }
-            (min_key, max_key)
-        };
-        let (left_min_key, left_max_key) = min_max(left_keys);
-        let (right_min_key, right_max_key) = min_max(right_keys);
-        if left_min_key != right_min_key || left_max_key != right_max_key {
-            return Ok(None);
+            _ => {
+                let min_max = |keys: &[i64]| {
+                    let mut min_key = keys[0];
+                    let mut max_key = keys[0];
+                    for &key in &keys[1..] {
+                        min_key = min_key.min(key);
+                        max_key = max_key.max(key);
+                    }
+                    (min_key, max_key)
+                };
+                let (left_min_key, left_max_key) = min_max(left_keys);
+                let (right_min_key, right_max_key) = min_max(right_keys);
+                if left_min_key != right_min_key || left_max_key != right_max_key {
+                    return Ok(None);
+                }
+                Some((left_min_key, left_max_key))
+            }
         }
-        Some((left_min_key, left_max_key))
     };
 
     let left_col_names: std::collections::HashSet<&String> = left.columns().keys().collect();
