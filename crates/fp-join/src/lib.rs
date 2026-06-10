@@ -3350,8 +3350,8 @@ struct DenseOuterRunTape {
     run_lens: Arc<[usize]>,
     left_run_valid: Arc<[bool]>,
     left_run_positions: Arc<[usize]>,
-    right_positions_csr: Arc<[usize]>,
-    right_segments: Arc<[(usize, usize)]>,
+    right_positions_csr: Option<Arc<[usize]>>,
+    right_segments: Option<Arc<[(usize, usize)]>>,
     key_runs: Vec<(i64, usize)>,
     left_sparse_validity: ValidityMask,
     right_sparse_validity: ValidityMask,
@@ -3435,6 +3435,7 @@ fn build_dense_cycle_outer_run_tape(
     let mut left_invalid_ranges = Vec::<(usize, usize)>::new();
     let mut right_invalid_ranges = Vec::<(usize, usize)>::new();
     let mut out_pos = 0usize;
+    let build_right_tape = !has_right_missing;
     for bucket in 0..span {
         let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
         let left_span = left_witness.offset_count_for_key(key);
@@ -3446,11 +3447,15 @@ fn build_dense_cycle_outer_run_tape(
         }
 
         let right_start = if rl > 0 {
-            let start = right_positions_csr.len();
-            let appended =
-                append_dense_cycle_positions(&mut right_positions_csr, right_witness, key)?;
-            debug_assert_eq!(appended, rl);
-            start
+            if build_right_tape {
+                let start = right_positions_csr.len();
+                let appended =
+                    append_dense_cycle_positions(&mut right_positions_csr, right_witness, key)?;
+                debug_assert_eq!(appended, rl);
+                start
+            } else {
+                0
+            }
         } else {
             usize::MAX
         };
@@ -3460,7 +3465,10 @@ fn build_dense_cycle_outer_run_tape(
                 let rows = left_count.checked_mul(right_count)?;
                 run_lens.extend(std::iter::repeat_n(right_count, left_count));
                 left_run_valid.extend(std::iter::repeat_n(true, left_count));
-                right_segments.extend(std::iter::repeat_n((right_start, right_count), left_count));
+                if build_right_tape {
+                    right_segments
+                        .extend(std::iter::repeat_n((right_start, right_count), left_count));
+                }
                 for _ in 0..left_count {
                     left_run_positions.push(left_pos);
                     left_pos = left_pos.checked_add(left_witness.period)?;
@@ -3471,7 +3479,9 @@ fn build_dense_cycle_outer_run_tape(
                 push_dense_outer_invalid_range(&mut right_invalid_ranges, out_pos, left_count);
                 run_lens.extend(std::iter::repeat_n(1, left_count));
                 left_run_valid.extend(std::iter::repeat_n(true, left_count));
-                right_segments.extend(std::iter::repeat_n((usize::MAX, 1), left_count));
+                if build_right_tape {
+                    right_segments.extend(std::iter::repeat_n((usize::MAX, 1), left_count));
+                }
                 for _ in 0..left_count {
                     left_run_positions.push(left_pos);
                     left_pos = left_pos.checked_add(left_witness.period)?;
@@ -3483,7 +3493,9 @@ fn build_dense_cycle_outer_run_tape(
                 run_lens.push(right_count);
                 left_run_valid.push(false);
                 left_run_positions.push(0);
-                right_segments.push((right_start, right_count));
+                if build_right_tape {
+                    right_segments.push((right_start, right_count));
+                }
                 right_count
             }
             (None, None) => unreachable!("empty buckets are skipped above"),
@@ -3495,8 +3507,10 @@ fn build_dense_cycle_outer_run_tape(
         || run_lens.len() != run_count
         || left_run_valid.len() != run_count
         || left_run_positions.len() != run_count
-        || right_segments.len() != run_count
-        || right_positions_csr.len() != right_witness.len
+        || (build_right_tape
+            && (right_segments.len() != run_count
+                || right_positions_csr.len() != right_witness.len))
+        || (!build_right_tape && (!right_segments.is_empty() || !right_positions_csr.is_empty()))
     {
         return None;
     }
@@ -3505,8 +3519,8 @@ fn build_dense_cycle_outer_run_tape(
         run_lens: Arc::from(run_lens),
         left_run_valid: Arc::from(left_run_valid),
         left_run_positions: Arc::from(left_run_positions),
-        right_positions_csr: Arc::from(right_positions_csr),
-        right_segments: Arc::from(right_segments),
+        right_positions_csr: build_right_tape.then(|| Arc::from(right_positions_csr)),
+        right_segments: build_right_tape.then(|| Arc::from(right_segments)),
         key_runs,
         left_sparse_validity: ValidityMask::from_invalid_ranges(
             Arc::from(left_invalid_ranges),
@@ -3810,8 +3824,8 @@ fn build_single_key_dense_i64_outer_merge_output(
             run_lens,
             left_run_valid,
             left_run_positions,
-            right_positions_csr: Arc::from(right_positions_csr),
-            right_segments,
+            right_positions_csr: Some(Arc::from(right_positions_csr)),
+            right_segments: Some(right_segments),
             key_runs,
             left_sparse_validity: ValidityMask::from_invalid_ranges(
                 Arc::from(left_invalid_ranges),
@@ -3837,13 +3851,6 @@ fn build_single_key_dense_i64_outer_merge_output(
         FusedInt64Side::Right => has_right_missing,
     };
 
-    // Right value tapes in bucket order (muis1): i64 (preserved) or f64 (promoted).
-    let tape_i64 = |idx: usize| -> Vec<i64> {
-        right_positions_csr
-            .iter()
-            .map(|&pos| spec_values[idx][pos])
-            .collect()
-    };
     // Left broadcast run values (one per run): i64 (preserved) or f64 (promoted).
     let left_run_values_i64 = |idx: usize| -> Vec<i64> {
         left_run_positions
@@ -3886,19 +3893,52 @@ fn build_single_key_dense_i64_outer_merge_output(
                         output_len,
                     )
                 }
-                (FusedInt64Side::Right, false) => Column::from_i64_repeated_slices_shared(
-                    tape_i64(idx),
-                    Arc::clone(&right_segments),
-                    output_len,
-                ),
-                (FusedInt64Side::Right, true) => {
-                    Column::from_i64_nullable_repeated_positions_as_f64_with_sparse_validity(
-                        Arc::clone(&spec_sources[idx]),
-                        Arc::clone(&right_positions_csr),
-                        Arc::clone(&right_segments),
-                        right_sparse_validity.clone(),
+                (FusedInt64Side::Right, false) => {
+                    let Some(right_positions_csr) = right_positions_csr.as_ref() else {
+                        return Ok(None);
+                    };
+                    let Some(right_segments) = right_segments.as_ref() else {
+                        return Ok(None);
+                    };
+                    let tape_i64 = right_positions_csr
+                        .iter()
+                        .map(|&pos| spec_values[idx][pos])
+                        .collect();
+                    Column::from_i64_repeated_slices_shared(
+                        tape_i64,
+                        Arc::clone(right_segments),
                         output_len,
                     )
+                }
+                (FusedInt64Side::Right, true) => {
+                    if right_positions_csr.is_none()
+                        && let (Some(left_witness), Some(right_witness)) =
+                            (left_witness, right_witness)
+                    {
+                        Column::from_i64_nullable_dense_cycle_right_as_f64_with_sparse_validity(
+                            Arc::clone(&spec_sources[idx]),
+                            left_witness,
+                            right_witness,
+                            min_key,
+                            span,
+                            right_sparse_validity.clone(),
+                            output_len,
+                        )
+                    } else {
+                        let Some(right_positions_csr) = right_positions_csr.as_ref() else {
+                            return Ok(None);
+                        };
+                        let Some(right_segments) = right_segments.as_ref() else {
+                            return Ok(None);
+                        };
+                        Column::from_i64_nullable_repeated_positions_as_f64_with_sparse_validity(
+                            Arc::clone(&spec_sources[idx]),
+                            Arc::clone(right_positions_csr),
+                            Arc::clone(right_segments),
+                            right_sparse_validity.clone(),
+                            output_len,
+                        )
+                    }
                 }
             },
         };
