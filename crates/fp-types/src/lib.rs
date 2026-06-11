@@ -2140,8 +2140,10 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let days_since_epoch = total_secs / 86400;
+        // Floor (not truncate) so pre-1970 instants with a sub-day part map to
+        // the correct calendar day (br-frankenpandas-wkjtw); div_euclid == `/`
+        // for the post-1970 positive case.
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
@@ -2161,8 +2163,10 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let days_since_epoch = total_secs / 86400;
+        // Floor (not truncate) so pre-1970 instants with a sub-day part map to
+        // the correct calendar day (br-frankenpandas-wkjtw); div_euclid == `/`
+        // for the post-1970 positive case.
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
@@ -2180,8 +2184,10 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let days_since_epoch = total_secs / 86400;
+        // Floor (not truncate) so pre-1970 instants with a sub-day part map to
+        // the correct calendar day (br-frankenpandas-wkjtw); div_euclid == `/`
+        // for the post-1970 positive case.
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
@@ -2199,8 +2205,10 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+        // rem_euclid keeps the seconds-of-day in [0, 86400) even for negative
+        // (pre-1970) nanos with a sub-second part (br-frankenpandas-wkjtw);
+        // rem_euclid == `%` for the post-1970 positive case.
+        let secs_of_day = self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
         Some(secs_of_day / 3600)
     }
 
@@ -2212,8 +2220,10 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+        // rem_euclid keeps the seconds-of-day in [0, 86400) even for negative
+        // (pre-1970) nanos with a sub-second part (br-frankenpandas-wkjtw);
+        // rem_euclid == `%` for the post-1970 positive case.
+        let secs_of_day = self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
         Some((secs_of_day % 3600) / 60)
     }
 
@@ -2225,8 +2235,10 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+        // rem_euclid keeps the seconds-of-day in [0, 86400) even for negative
+        // (pre-1970) nanos with a sub-second part (br-frankenpandas-wkjtw);
+        // rem_euclid == `%` for the post-1970 positive case.
+        let secs_of_day = self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
         Some(secs_of_day % 60)
     }
 
@@ -2238,7 +2250,9 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let sub_nanos = (self.nanos % Timedelta::NANOS_PER_SEC).unsigned_abs();
+        // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
+        // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
+        let sub_nanos = self.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
         Some((sub_nanos / 1000) as i64)
     }
 
@@ -2250,7 +2264,9 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let sub_nanos = (self.nanos % Timedelta::NANOS_PER_SEC).unsigned_abs();
+        // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
+        // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
+        let sub_nanos = self.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
         Some((sub_nanos % 1000) as i64)
     }
 
@@ -2262,7 +2278,8 @@ impl Timestamp {
         if self.is_nat() {
             return None;
         }
-        let days_since_epoch = self.nanos / Timedelta::NANOS_PER_DAY;
+        // Floor days for pre-1970 (br-frankenpandas-wkjtw); == `/` for positive.
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
         let dow = ((days_since_epoch + 3) % 7 + 7) % 7;
         Some(dow)
     }
@@ -2631,7 +2648,9 @@ impl Timestamp {
             return "NaT".to_string();
         }
         let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let sub_nanos = (self.nanos % Timedelta::NANOS_PER_SEC).unsigned_abs();
+        // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
+        // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
+        let sub_nanos = self.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
         let days_since_epoch = total_secs / 86400;
         let secs_of_day = (total_secs % 86400 + 86400) % 86400;
 
@@ -2826,7 +2845,9 @@ impl Timestamp {
             return "NaT".to_string();
         }
         let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let sub_nanos = (self.nanos % Timedelta::NANOS_PER_SEC).unsigned_abs();
+        // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
+        // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
+        let sub_nanos = self.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
 
         let days_since_epoch = total_secs / 86400;
         let secs_of_day = (total_secs % 86400 + 86400) % 86400;
@@ -2901,8 +2922,10 @@ impl Timestamp {
         if self.is_nat() {
             return "NaT".to_string();
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
-        let days_since_epoch = total_secs / 86400;
+        // Floor (not truncate) so pre-1970 instants with a sub-day part map to
+        // the correct calendar day (br-frankenpandas-wkjtw); div_euclid == `/`
+        // for the post-1970 positive case.
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
@@ -6817,6 +6840,37 @@ mod tests {
     }
 
     // ── Timestamp rounding tests (br-frankenpandas-5h6n) ────────────────
+
+    #[test]
+    fn timestamp_pre_epoch_accessors_floor_not_truncate() {
+        // br-frankenpandas-wkjtw: pre-1970 instants with a sub-day part used to
+        // truncate toward zero, landing on the wrong calendar day. -1 ns is
+        // 1969-12-31 23:59:59.999999999 UTC.
+        let ts = Timestamp::from_nanos(-1);
+        assert_eq!(ts.year(), Some(1969));
+        assert_eq!(ts.month(), Some(12));
+        assert_eq!(ts.day(), Some(31));
+        assert_eq!(ts.hour(), Some(23));
+        assert_eq!(ts.minute(), Some(59));
+        assert_eq!(ts.second(), Some(59));
+        assert_eq!(ts.microsecond(), Some(999_999));
+        assert_eq!(ts.nanosecond(), Some(999));
+        // 1969-12-31 is a Wednesday (pandas Monday=0 -> 2).
+        assert_eq!(ts.dayofweek(), Some(2));
+
+        // 1969-12-31 12:00:00 — the classic truncation case (-43200 s).
+        let noon = Timestamp::from_nanos(-43200 * Timedelta::NANOS_PER_SEC);
+        assert_eq!(noon.year(), Some(1969));
+        assert_eq!(noon.month(), Some(12));
+        assert_eq!(noon.day(), Some(31));
+        assert_eq!(noon.hour(), Some(12));
+
+        // Exact midnight pre-epoch was already correct; keep it green.
+        let midnight = Timestamp::from_nanos(-Timedelta::NANOS_PER_DAY);
+        assert_eq!(midnight.year(), Some(1969));
+        assert_eq!(midnight.day(), Some(31));
+        assert_eq!(midnight.hour(), Some(0));
+    }
 
     #[test]
     fn timestamp_floor_to_rounds_down() {
