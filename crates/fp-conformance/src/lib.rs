@@ -91,8 +91,8 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use fp_columnar::{ArithmeticOp, Column};
 use fp_expr::{eval_str_with_locals, parse_expr, query_str, query_str_with_locals};
 use fp_frame::{
-    ConcatJoin, DataFrame, FrameError, Series, concat_dataframes_with_axis_join, concat_series,
-    cut, qcut, to_numeric,
+    ConcatJoin, DataFrame, FrameError, Series, ToNumericErrors, ToNumericOptions,
+    concat_dataframes_with_axis_join, concat_series, cut, qcut, to_numeric_with_options,
 };
 use fp_groupby::{
     GroupByExecutionOptions, GroupByOptions, groupby_count, groupby_first, groupby_last,
@@ -16460,7 +16460,16 @@ fn execute_series_module_utility_fixture_operation(
 ) -> Result<Series, String> {
     let series = build_series(require_left_series(fixture)?)?;
     match fixture.operation {
-        FixtureOperation::SeriesToNumeric => to_numeric(&series).map_err(|err| err.to_string()),
+        // The series_to_numeric oracle uses errors='coerce' (pandas_oracle.py),
+        // so replay through the coerce policy — bare to_numeric now defaults to
+        // raise (br-frankenpandas-mlaht).
+        FixtureOperation::SeriesToNumeric => to_numeric_with_options(
+            &series,
+            ToNumericOptions {
+                errors: ToNumericErrors::Coerce,
+            },
+        )
+        .map_err(|err| err.to_string()),
         FixtureOperation::SeriesConvertDtypes => {
             series.convert_dtypes().map_err(|err| err.to_string())
         }

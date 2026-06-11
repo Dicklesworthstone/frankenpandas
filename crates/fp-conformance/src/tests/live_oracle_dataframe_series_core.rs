@@ -9501,7 +9501,15 @@ fn live_oracle_series_to_numeric_clean_strings() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let result = fp_frame::to_numeric(&series).expect("to_numeric");
+    // The series_to_numeric oracle uses errors='coerce'; bare to_numeric now
+    // defaults to errors='raise' (br-frankenpandas-mlaht).
+    let result = fp_frame::to_numeric_with_options(
+        &series,
+        fp_frame::ToNumericOptions {
+            errors: fp_frame::ToNumericErrors::Coerce,
+        },
+    )
+    .expect("to_numeric");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -9549,7 +9557,15 @@ fn live_oracle_series_to_numeric_with_invalid_coerces_to_nan() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let result = fp_frame::to_numeric(&series).expect("to_numeric");
+    // The series_to_numeric oracle uses errors='coerce'; bare to_numeric now
+    // defaults to errors='raise' (br-frankenpandas-mlaht).
+    let result = fp_frame::to_numeric_with_options(
+        &series,
+        fp_frame::ToNumericOptions {
+            errors: fp_frame::ToNumericErrors::Coerce,
+        },
+    )
+    .expect("to_numeric");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -9595,7 +9611,15 @@ fn live_oracle_series_to_numeric_already_numeric() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let result = fp_frame::to_numeric(&series).expect("to_numeric");
+    // The series_to_numeric oracle uses errors='coerce'; bare to_numeric now
+    // defaults to errors='raise' (br-frankenpandas-mlaht).
+    let result = fp_frame::to_numeric_with_options(
+        &series,
+        fp_frame::ToNumericOptions {
+            errors: fp_frame::ToNumericErrors::Coerce,
+        },
+    )
+    .expect("to_numeric");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -19512,7 +19536,7 @@ fn live_oracle_series_to_numeric_strings() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = super::to_numeric(&series).expect("to_numeric");
+    let actual = fp_frame::to_numeric(&series).expect("to_numeric");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -33754,7 +33778,7 @@ fn live_oracle_series_to_numeric_scientific() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = super::to_numeric(&series).expect("to_numeric");
+    let actual = fp_frame::to_numeric(&series).expect("to_numeric");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
