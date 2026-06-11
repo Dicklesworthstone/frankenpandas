@@ -609,7 +609,7 @@ impl<'de> Deserialize<'de> for ValidityMask {
 pub enum ColumnData {
     Float64(Arc<[f64]>),
     Int64(Arc<[i64]>),
-    Bool(Vec<bool>),
+    Bool(Arc<[bool]>),
     Utf8(Vec<String>),
     Timedelta64(Vec<i64>),
     Datetime64(Vec<i64>),
@@ -678,6 +678,82 @@ fn certify_int64_dense_cycle(data: &[i64]) -> Option<Int64DenseCycleWitness> {
     })
 }
 
+/// Exact witness for all-valid Bool columns whose true positions are affine.
+///
+/// The witness is produced only after scanning an immutable bool backing.
+/// Consumers can skip rediscovering the same selection vector across repeated
+/// filters, but must still validate frame length and bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct BoolAffineSelectionWitness {
+    pub start: usize,
+    pub step: usize,
+    pub len: usize,
+}
+
+#[derive(Default)]
+struct BoolAffineSelectionBuilder {
+    first: usize,
+    previous: usize,
+    step: usize,
+    len: usize,
+    is_affine: bool,
+}
+
+impl BoolAffineSelectionBuilder {
+    fn push(&mut self, position: usize) {
+        match self.len {
+            0 => {
+                self.first = position;
+                self.previous = position;
+                self.is_affine = true;
+            }
+            1 => {
+                self.step = position - self.first;
+                self.is_affine = self.step != 0;
+                self.previous = position;
+            }
+            _ => {
+                if position - self.previous != self.step {
+                    self.is_affine = false;
+                }
+                self.previous = position;
+            }
+        }
+        self.len += 1;
+    }
+
+    fn finish(self) -> Option<BoolAffineSelectionWitness> {
+        match self.len {
+            0 => None,
+            1 => Some(BoolAffineSelectionWitness {
+                start: self.first,
+                step: 1,
+                len: self.len,
+            }),
+            _ if self.is_affine => Some(BoolAffineSelectionWitness {
+                start: self.first,
+                step: self.step,
+                len: self.len,
+            }),
+            _ => None,
+        }
+    }
+}
+
+fn certify_bool_affine_selection(data: &[bool]) -> Option<BoolAffineSelectionWitness> {
+    let mut builder = BoolAffineSelectionBuilder::default();
+    for (idx, keep) in data.iter().copied().enumerate() {
+        if keep {
+            builder.push(idx);
+            if !builder.is_affine {
+                return None;
+            }
+        }
+    }
+    builder.finish()
+}
+
 impl ColumnData {
     /// Materialize typed array from a `Vec<Scalar>` and its `ValidityMask`.
     ///
@@ -729,7 +805,7 @@ impl ColumnData {
                         _ => false,
                     })
                     .collect();
-                Self::Bool(data)
+                Self::Bool(Arc::from(data))
             }
             DType::Utf8 => {
                 let data: Vec<String> = values
@@ -1271,6 +1347,7 @@ enum ScalarValues {
     },
     LazyAllValidBool {
         data: Arc<[bool]>,
+        affine_selection: OnceLock<Option<BoolAffineSelectionWitness>>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Contiguous backing for all-valid Utf8 columns
@@ -1597,6 +1674,7 @@ impl ScalarValues {
     fn lazy_all_valid_bool_arc(data: Arc<[bool]>) -> Self {
         Self::LazyAllValidBool {
             data,
+            affine_selection: OnceLock::new(),
             values: OnceLock::new(),
         }
     }
@@ -2346,7 +2424,7 @@ impl ScalarValues {
                         .collect()
                 })
                 .as_slice(),
-            Self::LazyAllValidBool { data, values } => values
+            Self::LazyAllValidBool { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Bool).collect())
                 .as_slice(),
             Self::LazyContiguousUtf8 {
@@ -4105,7 +4183,7 @@ impl Column {
                 // demand. BoolNullable is excluded: an all-valid clone of a
                 // nullable-bool column must stay Eager so its dtype-tagged Scalar
                 // view is preserved.
-                Some(ScalarValues::lazy_all_valid_bool(data.clone()))
+                Some(ScalarValues::lazy_all_valid_bool_arc(Arc::clone(data)))
             }
             (Some(ColumnData::Int64(data)), DType::Int64) if data.len() == self.values.len() => {
                 // Carry the contiguous i64 buffer through the clone as a lazy
@@ -4222,6 +4300,9 @@ impl Column {
         let validity = ValidityMask::from_values(&coerced);
         let data = Self::cached_data_for_values(dtype, &coerced);
         let values = match (&data, dtype, validity.all()) {
+            (Some(ColumnData::Bool(data)), DType::Bool, true) => {
+                ScalarValues::lazy_all_valid_bool_arc(Arc::clone(data))
+            }
             (Some(ColumnData::Int64(data)), DType::Int64, true) => {
                 ScalarValues::lazy_all_valid_int64_arc(Arc::clone(data))
             }
@@ -5239,11 +5320,32 @@ impl Column {
     pub fn as_bool_slice(&self) -> Option<&[bool]> {
         if self.dtype == DType::Bool && self.validity.all() {
             if let Some(ColumnData::Bool(data)) = &self.data {
-                return Some(data.as_slice());
+                return Some(data.as_ref());
             }
             if let ScalarValues::LazyAllValidBool { data, .. } = &self.values {
                 return Some(data.as_ref());
             }
+        }
+        None
+    }
+
+    /// Return a cached affine-selection witness for all-valid Bool masks.
+    ///
+    /// This is an internal proof-carrying companion to [`Self::as_bool_slice`]:
+    /// the first query scans the immutable bool backing and subsequent filters
+    /// reuse the exact certificate instead of rediscovering it in `loc_bool`.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn bool_affine_selection_witness(&self) -> Option<BoolAffineSelectionWitness> {
+        if self.dtype == DType::Bool
+            && self.validity.all()
+            && let ScalarValues::LazyAllValidBool {
+                data,
+                affine_selection,
+                ..
+            } = &self.values
+        {
+            return *affine_selection.get_or_init(|| certify_bool_affine_selection(data.as_ref()));
         }
         None
     }
@@ -14328,7 +14430,8 @@ mod tests {
     use fp_types::{DType, Interval, IntervalClosed, NullKind, Scalar, SparseDType};
 
     use super::{
-        ArithmeticOp, Column, ColumnData, ColumnError, ScalarValues, SparseColumn, ValidityMask,
+        ArithmeticOp, BoolAffineSelectionWitness, Column, ColumnData, ColumnError, ScalarValues,
+        SparseColumn, ValidityMask,
     };
 
     #[test]
@@ -22014,6 +22117,62 @@ mod tests {
             .int64_dense_cycle_witness()
             .expect("cached dense cycle should be reusable");
         assert_eq!(again, witness);
+    }
+
+    #[test]
+    fn bool_affine_selection_witness_is_exact_and_cached_uza0478() {
+        let scalar_built = Column::new(
+            DType::Bool,
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            &scalar_built.values,
+            ScalarValues::LazyAllValidBool { .. }
+        ));
+        assert_eq!(
+            scalar_built.bool_affine_selection_witness(),
+            Some(BoolAffineSelectionWitness {
+                start: 0,
+                step: 2,
+                len: 3,
+            })
+        );
+        assert_eq!(
+            scalar_built.bool_affine_selection_witness(),
+            Some(BoolAffineSelectionWitness {
+                start: 0,
+                step: 2,
+                len: 3,
+            })
+        );
+
+        let typed_built = Column::from_bool_values(vec![false, true, false, true, false]);
+        assert_eq!(
+            typed_built.bool_affine_selection_witness(),
+            Some(BoolAffineSelectionWitness {
+                start: 1,
+                step: 2,
+                len: 2,
+            })
+        );
+
+        let non_affine = Column::from_bool_values(vec![true, false, false, true, true]);
+        assert_eq!(non_affine.bool_affine_selection_witness(), None);
+
+        let nullable = Column::from_values(vec![
+            Scalar::Bool(true),
+            Scalar::Null(NullKind::Null),
+            Scalar::Bool(true),
+        ])
+        .unwrap();
+        assert_eq!(nullable.bool_affine_selection_witness(), None);
     }
 
     #[test]
