@@ -4905,6 +4905,36 @@ mod tests {
     }
 
     #[test]
+    fn cast_float_to_utf8_threshold_boundaries_match_python() {
+        // Python str(float) switches to scientific notation only at |x| >= 1e16
+        // or |x| < 1e-4. Values JUST INSIDE those bounds must stay decimal — a
+        // formatter that switches to sci early (or late) diverges. All expected
+        // values verified against Python 3 str()/repr (== pandas astype(str)).
+        let cases: &[(f64, &str)] = &[
+            (1e15, "1000000000000000.0"),
+            (9_999_999_999_999_998.0, "9999999999999998.0"),
+            (1_234_567_890_123_456.0, "1234567890123456.0"),
+            (123_456_789_012_345.0, "123456789012345.0"),
+            (12_345_678_901_234_567.0, "1.2345678901234568e+16"),
+            (1e16, "1e+16"),
+            (1.5e16, "1.5e+16"),
+            (1e17, "1e+17"),
+            (1e-4, "0.0001"),
+            (5e-5, "5e-05"),
+            (-1e15, "-1000000000000000.0"),
+            (-1e16, "-1e+16"),
+            (-1e-5, "-1e-05"),
+        ];
+        for (v, expected) in cases {
+            assert_eq!(
+                cast_scalar(&Scalar::Float64(*v), DType::Utf8).unwrap(),
+                Scalar::Utf8((*expected).to_owned()),
+                "float {v} -> str"
+            );
+        }
+    }
+
+    #[test]
     fn cast_to_bool_uses_pandas_nonzero_truthiness() {
         // pandas astype(bool): zero -> False, any nonzero -> True (not just 0/1),
         // -0.0 -> False, and NaN -> True (numpy bool(nan), br-cyi4h). Verified vs
