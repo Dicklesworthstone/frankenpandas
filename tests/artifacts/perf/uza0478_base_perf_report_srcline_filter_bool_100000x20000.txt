@@ -1,0 +1,141 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 188  of event 'cycles:P'
+# Event count (approx.): 603159680
+#
+# Overhead  Source:Line                     
+# ........  ................................
+#
+    19.98%  const_ptr.rs:863
+            |          
+            |--14.36%--<fp_frame::DataFrame>::loc_bool
+            |          <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+            |          
+            |--2.11%--malloc_consolidate
+            |          _int_malloc
+            |          __libc_malloc2
+            |          <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+            |          0x7ffc00000003
+            |          
+            |--2.10%--__memcmp_avx2_movbe
+            |          
+             --1.41%--__memmove_avx_unaligned_erms
+                       0x2
+
+    14.00%  ??:0
+            |          
+            |--2.70%--0xffffffff84c00b90
+            |          |          
+            |           --1.00%--0x793f5b998cbb
+            |          
+            |--1.30%--0xffffffff853d7d2a
+            |          0xffffffff853d8f99
+            |          0xffffffff853d9102
+            |          0xffffffff853da487
+            |          0xffffffff853dc432
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          0x5982779d342d
+            |          
+            |--1.12%--0xffffffff8510f1ee
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          0x793f5b998d37
+            |          
+             --1.01%--0xffffffff85342052
+                       0xffffffff853437ad
+                       0xffffffff853438f4
+                       0xffffffff853439e9
+                       0xffffffff853442bf
+                       0xffffffff853a3963
+                       0xffffffff853a4de7
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       0x793f5b998cb7
+
+    13.10%  lib.rs:3009
+            |          
+             --10.98%--<fp_frame::DataFrame>::loc_bool
+                       <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+
+     6.91%  cmp.rs:158
+            |          
+             --5.49%--<fp_frame::DataFrame>::loc_bool
+                       <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+
+     5.92%  mod.rs:2155
+            |          
+            |--3.53%--<fp_frame::DataFrame>::loc_bool
+            |          <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+            |          
+            |--1.32%--__memmove_avx_unaligned_erms
+            |          
+             --1.07%--malloc_consolidate
+                       _int_malloc
+                       __libc_malloc2
+                       <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+                       0x7ffc00000003
+
+     2.59%  mod.rs:809
+            |          
+             --1.88%--<alloc::sync::Arc<[fp_types::Scalar]>>::drop_slow
+
+     1.71%  mod.rs:1920
+     1.62%  lib.rs:4169
+     1.47%  macros.rs:279
+            |
+            ---<fp_frame::DataFrame>::loc_bool
+               <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+
+     1.42%  cmp.rs:357
+     1.13%  index.rs:266
+            |
+            ---<fp_frame::DataFrame>::loc_bool
+               <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+
+     1.13%  memmove-vec-unaligned-erms.S:486
+            |
+            ---0xffffffff8621b2b7
+               0xffffffff853dc6c9
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+     1.06%  lib.rs:488
+            |
+            ---<fp_columnar::Column>::new
+               0
+               0x30000000000
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

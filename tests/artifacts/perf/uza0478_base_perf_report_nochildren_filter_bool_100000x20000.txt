@@ -1,0 +1,140 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 188  of event 'cycles:P'
+# Event count (approx.): 603159680
+#
+# Overhead  Symbol                                                                                                                IPC   [IPC Coverage]
+# ........  ....................................................................................................................  ....................
+#
+    50.78%  [.] <fp_frame::DataFrame>::loc_bool                                                                                   -      -            
+            |          
+            |--34.35%--<fp_frame::DataFrame>::loc_bool
+            |          <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+            |          
+            |--3.93%--malloc_consolidate
+            |          _int_malloc
+            |          __libc_malloc2
+            |          <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert
+            |          0x7ffc00000003
+            |          
+            |--3.51%--__memcmp_avx2_movbe
+            |          
+            |--2.74%--__memmove_avx_unaligned_erms
+            |          |          
+            |           --2.09%--0x2
+            |          
+            |--2.04%--<fp_frame::DataFrame>::new_with_axes
+            |          
+             --1.42%--<fp_columnar::Column>::take_affine_all_valid_float64_positions
+                       <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+
+     5.61%  [.] __memmove_avx_unaligned_erms                                                                                      -      -            
+            |          
+            |--1.81%--0xffffffff8621b2b7
+            |          0xffffffff853dc6c9
+            |          0xffffffff853dda90
+            |          0xffffffff8541a9e8
+            |          0xffffffff8541df1b
+            |          0xffffffff853a33d2
+            |          0xffffffff853a37ea
+            |          0xffffffff853a4de7
+            |          0xffffffff853a53ad
+            |          0xffffffff853a5627
+            |          0xffffffff84feb96b
+            |          0xffffffff8622811f
+            |          0xffffffff84c00bb7
+            |          __memmove_avx_unaligned_erms
+            |          
+             --1.51%--<fp_frame::DataFrame>::loc_bool
+                       <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+
+     4.02%  [k] 0xffffffff84d0410b                                                                                                -      -            
+            |          
+            |--1.95%--0xffffffff84c00b90
+            |          |          
+            |           --1.00%--__memmove_avx_unaligned_erms
+            |          
+             --1.12%--0xffffffff8510f1ee
+                       0xffffffff853a53ad
+                       0xffffffff853a5627
+                       0xffffffff84feb96b
+                       0xffffffff8622811f
+                       0xffffffff84c00bb7
+                       __memmove_avx_unaligned_erms
+
+     3.56%  [.] <fp_frame::DataFrame>::new_with_axes                                                                              -      -            
+            |          
+             --1.47%--<fp_frame::DataFrame>::loc_bool
+                       <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+
+     3.56%  [.] <fp_columnar::Column>::new                                                                                        -      -            
+            |
+            ---0
+               |          
+                --2.68%--0x30000000000
+
+     3.55%  [.] <alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>::insert                    -      -            
+            |          
+             --2.12%--<fp_frame::DataFrame>::new_with_axes
+
+     2.90%  [.] __memcmp_avx2_movbe                                                                                               -      -            
+            |          
+             --1.42%--<fp_frame::DataFrame>::loc_bool
+                       <std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+
+     2.04%  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>                                     -      -            
+     1.88%  [.] <alloc::sync::Arc<[fp_types::Scalar]>>::drop_slow                                                                 -      -            
+     1.73%  [.] <fp_columnar::ColumnData>::from_scalars                                                                           -      -            
+            |
+            ---0
+               0x30000000000
+
+     1.35%  [.] _int_malloc                                                                                                       -      -            
+     1.30%  [k] 0xffffffff853d7d8d                                                                                                -      -            
+            |
+            ---0xffffffff853d8f99
+               0xffffffff853d9102
+               0xffffffff853da487
+               0xffffffff853dc432
+               0xffffffff853dda90
+               0xffffffff8541a9e8
+               0xffffffff8541df1b
+               0xffffffff853a33d2
+               0xffffffff853a37ea
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               perf_profile::build_numeric_frame
+
+     1.30%  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>                   -      -            
+     1.14%  [k] 0xffffffff84c01192                                                                                                -      -            
+     1.13%  [.] core::ptr::drop_in_place::<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column>>  -      -            
+            |
+            ---<std::io::default_write_fmt::Adapter<std::io::stdio::StderrLock> as core::fmt::Write>::write_str
+
+     1.01%  [k] 0xffffffff85342003                                                                                                -      -            
+            |
+            ---0xffffffff853437ad
+               0xffffffff853438f4
+               0xffffffff853439e9
+               0xffffffff853442bf
+               0xffffffff853a3963
+               0xffffffff853a4de7
+               0xffffffff853a53ad
+               0xffffffff853a5627
+               0xffffffff84feb96b
+               0xffffffff8622811f
+               0xffffffff84c00bb7
+               __memmove_avx_unaligned_erms
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
