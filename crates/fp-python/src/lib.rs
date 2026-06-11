@@ -65,7 +65,7 @@ fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
 }
 
 /// Python wrapper for FrankenPandas Series.
-#[pyclass(name = "Series")]
+#[pyclass(name = "Series", from_py_object)]
 #[derive(Clone)]
 pub struct PySeries {
     inner: Series,
@@ -197,7 +197,7 @@ impl PySeries {
 }
 
 /// Python wrapper for FrankenPandas DataFrame.
-#[pyclass(name = "DataFrame")]
+#[pyclass(name = "DataFrame", from_py_object)]
 #[derive(Clone)]
 pub struct PyDataFrame {
     inner: DataFrame,
@@ -215,7 +215,7 @@ impl PyDataFrame {
 
         for (key, value) in data.iter() {
             let col_name: String = key.extract()?;
-            let values: &Bound<'_, PyList> = value.downcast()?;
+            let values: &Bound<'_, PyList> = value.cast()?;
 
             let scalars: Vec<Scalar> = values
                 .iter()
