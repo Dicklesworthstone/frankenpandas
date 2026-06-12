@@ -10887,7 +10887,13 @@ impl Column {
             }
             let n_distinct = ord;
             let mut occ = vec![0i64; range];
-            let mut ranks = vec![Scalar::Null(NullKind::NaN); len];
+            // Typed rank output (br-frankenpandas-dwmu9): every row of an
+            // all-valid Int64 column gets a finite f64 rank, so build a contiguous
+            // Vec<f64> and hand it to from_f64_values instead of boxing 1 Scalar
+            // per row and re-validating through Self::new. Bit-identical: ranks are
+            // never NaN (1-based ordinals / their averages), so from_f64_values
+            // marks every slot valid, exactly like Self::new over Scalar::Float64.
+            let mut ranks = vec![0.0_f64; len];
             for (i, &v) in data.iter().enumerate() {
                 let s = (v as i128 - min as i128) as usize;
                 let c = count[s];
@@ -10920,9 +10926,9 @@ impl Column {
                     }
                     _ => unreachable!(),
                 };
-                ranks[i] = Scalar::Float64(value);
+                ranks[i] = value;
             }
-            return Self::new(DType::Float64, ranks);
+            return Ok(Self::from_f64_values(ranks));
         }
 
         // Radix fast path: an all-valid, NaN-free Float64 column ranks in O(n)

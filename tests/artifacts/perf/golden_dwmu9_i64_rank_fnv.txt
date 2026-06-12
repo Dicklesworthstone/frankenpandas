@@ -1,0 +1,12 @@
+# br-frankenpandas-dwmu9 golden: Column::rank Int64 counting-sort output digest
+# (f64 rank bits + per-row validity, FNV-1a64) n=200000, before==after.
+average asc  e5f512524f5b5225
+average desc f219a0a9ff24f325
+min     asc  603a0684489eabe5
+min     desc 499f4e3e5f828b25
+max     asc  1eeb183e6f69db85
+max     desc 7742b958e956cd45
+first   asc  d4ec6568dd9f1da5
+first   desc 4e69e93fa568a049
+dense   asc  933fa2ac74265365
+dense   desc 105f5e992b5e06e5
