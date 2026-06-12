@@ -173,6 +173,8 @@ pub enum IoError {
     Arrow(String),
     #[error("sql error: {0}")]
     Sql(String),
+    #[error("clipboard error: {0}")]
+    Clipboard(String),
     #[error(transparent)]
     Csv(#[from] csv::Error),
     #[error(transparent)]
@@ -4712,10 +4714,10 @@ pub fn read_fwf(path: &Path, options: &FwfReadOptions) -> Result<DataFrame, IoEr
 
 // ── Deferred reader surfaces ───────────────────────────────────────────
 //
-// pandas exposes pd.read_clipboard / pd.read_gbq / pd.read_sas / pd.read_spss.
-// Each is out of scope for FrankenPandas's local file-format charter:
+// pandas exposes pd.read_gbq / pd.read_sas / pd.read_spss (read_clipboard is
+// implemented above via an OS subprocess backend). Each remaining one is out of
+// scope for FrankenPandas's local file-format charter:
 //
-//   * read_clipboard pulls from the OS clipboard (GUI-only, headless-hostile).
 //   * read_gbq calls Google BigQuery (external service, GCP credentials).
 //   * read_sas / read_spss are proprietary statistical-software formats with
 //     no first-party Rust reader at parity (pandas calls into pyreadstat /
@@ -4738,12 +4740,105 @@ fn deferred_writer_error(method: &str, reason: &str) -> IoError {
     ))
 }
 
-/// Reject-closed clipboard reader, matching `pd.read_clipboard()` shape.
+// ── Clipboard I/O (br-frankenpandas-261) ───────────────────────────────
+//
+// pandas `read_clipboard` / `to_clipboard` shell out to an OS clipboard helper
+// (pyperclip → xclip/xsel/wl-clipboard/pbcopy). FrankenPandas mirrors that with
+// a zero-dependency subprocess backend: no `arboard`/X11 dep tree is pulled in,
+// and the pure TSV transform (`read_clipboard_str` / the `to_clipboard` writer)
+// is fully testable without a live clipboard. When no backend binary is
+// installed (e.g. a headless CI box) the call returns a clear `Clipboard`
+// error, exactly as pandas raises `PyperclipException`.
+
+/// Backends tried in order for READING the clipboard: `(binary, args)`.
+const CLIPBOARD_READ_BACKENDS: &[(&str, &[&str])] = &[
+    ("wl-paste", &["-n"]),
+    ("xclip", &["-selection", "clipboard", "-o"]),
+    ("xsel", &["-b", "-o"]),
+    ("pbpaste", &[]),
+];
+
+/// Backends tried in order for WRITING the clipboard: `(binary, args)`.
+const CLIPBOARD_WRITE_BACKENDS: &[(&str, &[&str])] = &[
+    ("wl-copy", &[]),
+    ("xclip", &["-selection", "clipboard"]),
+    ("xsel", &["-b", "-i"]),
+    ("pbcopy", &[]),
+];
+
+fn clipboard_get() -> Result<String, IoError> {
+    let mut last =
+        String::from("no clipboard backend found (tried wl-paste, xclip, xsel, pbpaste)");
+    for (cmd, args) in CLIPBOARD_READ_BACKENDS {
+        match std::process::Command::new(cmd).args(*args).output() {
+            Ok(out) if out.status.success() => {
+                return String::from_utf8(out.stdout)
+                    .map_err(|e| IoError::Clipboard(format!("clipboard text is not UTF-8: {e}")));
+            }
+            Ok(_) => last = format!("{cmd}: exited non-zero"),
+            Err(_) => {} // binary not installed — try the next backend
+        }
+    }
+    Err(IoError::Clipboard(last))
+}
+
+fn clipboard_set(text: &str) -> Result<(), IoError> {
+    use std::io::Write as _;
+    let mut last = String::from("no clipboard backend found (tried wl-copy, xclip, xsel, pbcopy)");
+    for (cmd, args) in CLIPBOARD_WRITE_BACKENDS {
+        let spawned = std::process::Command::new(cmd)
+            .args(*args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(_) => continue, // binary not installed — try the next backend
+        };
+        if let Some(mut stdin) = child.stdin.take()
+            && stdin.write_all(text.as_bytes()).is_err()
+        {
+            last = format!("{cmd}: writing to stdin failed");
+            continue;
+        }
+        match child.wait() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(_) => last = format!("{cmd}: exited non-zero"),
+            Err(e) => last = format!("{cmd}: {e}"),
+        }
+    }
+    Err(IoError::Clipboard(last))
+}
+
+/// Parse clipboard text into a `DataFrame` — the pure, backend-free core of
+/// [`read_clipboard`]. Tab-separated, matching the bytes `to_clipboard` writes
+/// (pandas `excel=True`).
+pub fn read_clipboard_str(text: &str) -> Result<DataFrame, IoError> {
+    let options = CsvReadOptions {
+        delimiter: b'\t',
+        ..CsvReadOptions::default()
+    };
+    read_csv_with_options(text, &options)
+}
+
+/// Read the system clipboard, matching `pd.read_clipboard()`. The clipboard is
+/// fetched via the first available OS backend (`wl-paste`/`xclip`/`xsel`/
+/// `pbpaste`) and parsed as TSV (the format [`DataFrameIoExt::to_clipboard`]
+/// writes). Returns a `Clipboard` error when no backend is installed.
 pub fn read_clipboard() -> Result<DataFrame, IoError> {
-    Err(deferred_reader_error(
-        "read_clipboard",
-        "OS clipboard access requires GUI bindings outside FrankenPandas's headless charter",
-    ))
+    read_clipboard_str(&clipboard_get()?)
+}
+
+/// Serialize a frame to the tab-separated bytes `to_clipboard` puts on the
+/// clipboard (pandas `excel=True`, index included). Pure/testable.
+fn clipboard_tsv(frame: &DataFrame) -> Result<String, IoError> {
+    let options = CsvWriteOptions {
+        delimiter: b'\t',
+        include_index: true,
+        ..CsvWriteOptions::default()
+    };
+    write_csv_string_with_options(frame, &options)
 }
 
 /// Reject-closed BigQuery reader, matching `pd.read_gbq(query, project_id)`.
@@ -11840,7 +11935,7 @@ pub trait DataFrameIoExt {
         options: &SqlWriteOptions,
     ) -> Result<(), IoError>;
 
-    /// Reject-closed clipboard writer, matching `pd.DataFrame.to_clipboard()` shape.
+    /// Clipboard writer (TSV via an OS backend), matching `pd.DataFrame.to_clipboard()`.
     fn to_clipboard(&self) -> Result<(), IoError>;
 
     /// Reject-closed BigQuery writer, matching `pd.DataFrame.to_gbq(destination_table, project_id)`.
@@ -12105,11 +12200,7 @@ impl DataFrameIoExt for DataFrame {
     }
 
     fn to_clipboard(&self) -> Result<(), IoError> {
-        let _ = self;
-        Err(deferred_writer_error(
-            "to_clipboard",
-            "OS clipboard access requires GUI bindings outside FrankenPandas's headless charter",
-        ))
+        clipboard_set(&clipboard_tsv(self)?)
     }
 
     fn to_gbq(&self, _destination_table: &str, _project_id: Option<&str>) -> Result<(), IoError> {
@@ -12301,7 +12392,7 @@ pub trait SeriesIoExt {
         options: &SqlWriteOptions,
     ) -> Result<(), IoError>;
 
-    /// Reject-closed clipboard writer, matching `pd.Series.to_clipboard()` shape.
+    /// Clipboard writer (TSV via an OS backend), matching `pd.Series.to_clipboard()`.
     fn to_clipboard(&self) -> Result<(), IoError>;
 }
 
@@ -12487,11 +12578,7 @@ impl SeriesIoExt for Series {
     }
 
     fn to_clipboard(&self) -> Result<(), IoError> {
-        let _ = self;
-        Err(deferred_writer_error(
-            "to_clipboard",
-            "OS clipboard access requires GUI bindings outside FrankenPandas's headless charter",
-        ))
+        clipboard_set(&clipboard_tsv(&self.to_frame(None)?)?)
     }
 }
 
@@ -16447,13 +16534,35 @@ mod tests {
     // ── Deferred reader surfaces 2yy4d ─────────────────────────────────
 
     #[test]
-    fn read_clipboard_rejects_with_deferred_marker_2yy4d() {
-        let err = super::read_clipboard().expect_err("must reject");
+    fn clipboard_tsv_round_trips_through_read_clipboard_str() {
+        let frame = make_test_dataframe();
+        // The pure write core: the exact tab-separated bytes `to_clipboard` puts
+        // on the clipboard (index included, pandas excel=True).
+        let tsv = super::clipboard_tsv(&frame).expect("tsv");
         assert!(
-            matches!(&err, super::IoError::Deferred(message)
-                if message.contains("read_clipboard") && message.contains("headless")),
-            "unexpected error: {err:?}"
+            tsv.contains('\t'),
+            "clipboard payload must be tab-separated"
         );
+
+        // The pure read core round-trips the payload back to a frame with the
+        // same shape (the written index becomes a leading column, matching
+        // pandas read_clipboard's default no-index-col behavior).
+        let parsed = super::read_clipboard_str(&tsv).expect("parse clipboard tsv");
+        assert_eq!(parsed.len(), frame.len());
+        assert_eq!(parsed.column_names().len(), frame.column_names().len() + 1);
+    }
+
+    #[test]
+    fn read_clipboard_is_ok_or_reports_missing_backend() {
+        // Environment-independent: on a box with wl-paste/xclip/xsel/pbpaste it
+        // reads real clipboard text (Ok or a parse error); headless it reports a
+        // Clipboard backend error. Never a Deferred reject and never a panic.
+        match super::read_clipboard() {
+            Ok(_) => {}
+            Err(super::IoError::Clipboard(_)) | Err(super::IoError::Csv(_)) => {}
+            Err(super::IoError::MissingHeaders) => {}
+            other => panic!("unexpected read_clipboard result: {other:?}"),
+        }
     }
 
     #[test]
@@ -16473,12 +16582,13 @@ mod tests {
         use super::DataFrameIoExt;
 
         let frame = make_test_dataframe();
-        let clipboard_err = frame
-            .to_clipboard()
-            .expect_err("must reject clipboard writer");
-        assert!(
-            matches!(&clipboard_err, super::IoError::Deferred(message) if message.contains("to_clipboard") && message.contains("headless"))
-        );
+        // Clipboard writer is implemented (subprocess backend): Ok where a
+        // backend exists, else a Clipboard error — never a Deferred reject.
+        match frame.to_clipboard() {
+            Ok(()) => {}
+            Err(super::IoError::Clipboard(_)) => {}
+            other => panic!("unexpected to_clipboard result: {other:?}"),
+        }
 
         let gbq_err = frame
             .to_gbq("dataset.table", Some("project"))
@@ -16494,7 +16604,7 @@ mod tests {
     }
 
     #[test]
-    fn series_clipboard_writer_rejects_with_deferred_marker() {
+    fn series_clipboard_writer_is_ok_or_reports_missing_backend() {
         use super::SeriesIoExt;
 
         let source = Series::from_values(
@@ -16503,12 +16613,11 @@ mod tests {
             vec![Scalar::Int64(10), Scalar::Int64(12)],
         )
         .expect("source series");
-        let err = source
-            .to_clipboard()
-            .expect_err("must reject series clipboard writer");
-        assert!(
-            matches!(&err, super::IoError::Deferred(message) if message.contains("to_clipboard") && message.contains("headless"))
-        );
+        match source.to_clipboard() {
+            Ok(()) => {}
+            Err(super::IoError::Clipboard(_)) => {}
+            other => panic!("unexpected series to_clipboard result: {other:?}"),
+        }
     }
 
     #[test]
