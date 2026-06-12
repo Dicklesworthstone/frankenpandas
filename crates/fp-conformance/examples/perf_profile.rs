@@ -1366,6 +1366,30 @@ fn main() {
                 sink = sink.wrapping_add(out.len());
             }
         }
+        "str_groupby_sum_lowcard" => {
+            // Common-case groupby: many rows, FEW distinct string keys
+            // (br-frankenpandas-90yoh). 64 groups -> hash-group + sort-distinct.
+            let frame = build_str_key_frame_repeated(n, 64);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("str groupby")
+                    .sum()
+                    .expect("str groupby sum");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "str_groupby_count_lowcard" => {
+            let frame = build_str_key_frame_repeated(n, 64);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("str groupby")
+                    .count()
+                    .expect("str groupby count");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
         "str_groupby_min" => {
             let frame = build_str_key_frame(n, 4096);
             for _ in 0..iters {
