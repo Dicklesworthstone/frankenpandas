@@ -415,6 +415,12 @@ fn build_numeric_frame(n: usize, cols: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, column_order).expect("frame")
 }
 
+fn build_every_other_bool_mask(index: &Index, n: usize) -> Series {
+    let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+    let column = Column::from_bool_values(mask);
+    Series::new("__mask", index.clone(), column).expect("bool mask")
+}
+
 /// Frame for the multi-column sort benchmark (br-frankenpandas-1tuf5): an Int64
 /// key with many ties (low cardinality) so the second sort key actually breaks
 /// ties, plus a Float64 second key + a Float64 payload. Sorting by `[k0, k1]`
@@ -873,8 +879,8 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("str groupby median"),
         "filter_bool" => {
             let frame = build_numeric_frame(n, 10);
-            let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
-            frame.iloc_bool(&mask).expect("filter")
+            let mask = build_every_other_bool_mask(frame.index(), n);
+            frame.filter_rows(&mask).expect("filter")
         }
         "str_filter" => {
             // Filter a text-heavy frame (4 contiguous-Utf8 columns): exercises
@@ -1480,9 +1486,9 @@ fn main() {
         }
         "filter_bool" => {
             let frame = build_numeric_frame(n, 10);
-            let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+            let mask = build_every_other_bool_mask(frame.index(), n);
             for _ in 0..iters {
-                let out = frame.iloc_bool(&mask).expect("filter");
+                let out = frame.filter_rows(&mask).expect("filter");
                 sink = sink.wrapping_add(out.len());
             }
         }

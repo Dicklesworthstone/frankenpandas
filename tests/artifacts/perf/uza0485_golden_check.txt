@@ -1,0 +1,4 @@
+tests/artifacts/perf/uza0485_base_golden_filter_bool_1000.txt: OK
+tests/artifacts/perf/uza0485_base_golden_filter_bool_100000.txt: OK
+tests/artifacts/perf/uza0485_after_golden_filter_bool_1000.txt: OK
+tests/artifacts/perf/uza0485_after_golden_filter_bool_100000.txt: OK
