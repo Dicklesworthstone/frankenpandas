@@ -1,0 +1,2 @@
+cd726ef905573f7e869818443fb3320d49ecf7fbc0556ca2d2d6794743491fc4  tests/artifacts/perf/a3y5o_after_golden_str_factorize_1000.txt
+da2da85584bdca84af3055c9104c531d5bdf760b191420e8aa5f8366cfd3fe11  tests/artifacts/perf/a3y5o_after_golden_str_factorize_500000.txt
