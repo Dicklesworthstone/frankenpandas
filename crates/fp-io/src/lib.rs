@@ -5177,8 +5177,25 @@ fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
         // the value path above — previously emitted raw nanoseconds, which
         // matched neither pandas nor FP's own value serialization.
         // (br-frankenpandas-lb0iu)
-        IndexLabel::Timedelta64(ns) => serde_json::json!(*ns / 1_000_000),
-        IndexLabel::Datetime64(ns) => serde_json::json!(*ns / 1_000_000),
+        //
+        // A NaT label (the i64::MIN sentinel) must serialize as JSON null, NOT
+        // `i64::MIN / 1e6` (-9223372036854775) — the latter is neither pandas nor
+        // FP's own value path (`scalar_to_json_value`), which already null-checks
+        // `Timestamp::NAT`/`Timedelta::NAT`. (br-frankenpandas-natjson)
+        IndexLabel::Timedelta64(ns) => {
+            if *ns == fp_types::Timedelta::NAT {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(*ns / 1_000_000)
+            }
+        }
+        IndexLabel::Datetime64(ns) => {
+            if *ns == fp_types::Timestamp::NAT {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(*ns / 1_000_000)
+            }
+        }
         // pandas to_json renders a missing label as JSON null.
         IndexLabel::Null(_) => serde_json::Value::Null,
     }
@@ -5190,6 +5207,12 @@ fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
 /// (br-frankenpandas-lb0iu)
 fn index_label_json_key(label: &IndexLabel) -> String {
     match label {
+        // NaT (i64::MIN) as an object key renders as "null" rather than the
+        // sentinel's epoch garbage (-9223372036854775), matching the JSON-null
+        // the value path emits for a missing temporal label.
+        // (br-frankenpandas-natjson)
+        IndexLabel::Datetime64(ns) if *ns == fp_types::Timestamp::NAT => "null".to_owned(),
+        IndexLabel::Timedelta64(ns) if *ns == fp_types::Timedelta::NAT => "null".to_owned(),
         IndexLabel::Datetime64(ns) | IndexLabel::Timedelta64(ns) => (*ns / 1_000_000).to_string(),
         other => other.to_string(),
     }
@@ -14612,6 +14635,43 @@ mod tests {
             )
             .expect("w"),
             ",v\n2020-01-01 00:00:00.500,0\n2020-01-01 00:00:00.250,1\n"
+        );
+    }
+
+    #[test]
+    fn to_json_nat_index_label_is_null_not_sentinel_epoch_natjson() {
+        use super::{JsonOrient, write_json_string};
+        // A DatetimeIndex containing NaT (the i64::MIN sentinel): the index label
+        // must serialize as JSON null, NOT i64::MIN/1e6 (-9223372036854775).
+        let labels = vec![
+            IndexLabel::Datetime64(1_577_836_800_000_000_000), // 2020-01-01
+            IndexLabel::Datetime64(i64::MIN),                  // NaT
+        ];
+        let index = Index::new(labels);
+        let col = Column::new(DType::Int64, vec![Scalar::Int64(7), Scalar::Int64(9)]).expect("col");
+        let mut cols = BTreeMap::new();
+        cols.insert("v".to_string(), col);
+        let frame =
+            DataFrame::new_with_column_order(index, cols, vec!["v".to_string()]).expect("frame");
+
+        // The garbage sentinel epoch must never appear in any orient.
+        for orient in [
+            JsonOrient::Split,
+            JsonOrient::Records,
+            JsonOrient::Columns,
+            JsonOrient::Index,
+        ] {
+            let out = write_json_string(&frame, orient).expect("json");
+            assert!(
+                !out.contains("-9223372036854775"),
+                "orient {orient:?} leaked the NaT sentinel epoch: {out}"
+            );
+        }
+        // Split orient lists the index as values -> NaT becomes literal null.
+        let split = write_json_string(&frame, JsonOrient::Split).expect("json");
+        assert!(
+            split.contains("null"),
+            "NaT index label should be null in split orient: {split}"
         );
     }
 
