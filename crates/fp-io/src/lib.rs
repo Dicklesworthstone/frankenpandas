@@ -5225,7 +5225,14 @@ fn index_label_to_scalar_value(label: &IndexLabel) -> Scalar {
         IndexLabel::Int64(v) => Scalar::Int64(*v),
         IndexLabel::Utf8(v) => Scalar::Utf8(v.clone()),
         IndexLabel::Timedelta64(v) => Scalar::Timedelta64(*v),
-        IndexLabel::Datetime64(v) => Scalar::Utf8(format_datetime_ns(*v)),
+        // Keep the TYPED Datetime64 scalar, like the Timedelta64 arm above —
+        // materializing a MultiIndex level into a column must preserve its dtype
+        // (pandas reset_index keeps a datetime level as datetime64, not object).
+        // The old `Scalar::Utf8(format_datetime_ns(..))` downgrade made datetime
+        // levels render as ISO strings in to_json (inconsistent with a single
+        // DatetimeIndex's epoch-ms ints) and bypassed to_csv's column-uniform
+        // datetime format. (br-frankenpandas-mdt64)
+        IndexLabel::Datetime64(v) => Scalar::Datetime64(*v),
         // Typed-null label round-trips to the same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
     }
@@ -14672,6 +14679,29 @@ mod tests {
         assert!(
             split.contains("null"),
             "NaT index label should be null in split orient: {split}"
+        );
+    }
+
+    #[test]
+    fn index_label_to_scalar_value_preserves_temporal_dtype_mdt64() {
+        // Materializing a MultiIndex level into a column must keep the level's
+        // dtype: a Datetime64 label stays a typed Datetime64 scalar (like the
+        // Timedelta64 arm), NOT a downgraded Utf8 string — otherwise a datetime
+        // level becomes an object column (pandas keeps datetime64) and serializes
+        // inconsistently with a single DatetimeIndex.
+        assert_eq!(
+            super::index_label_to_scalar_value(&IndexLabel::Datetime64(1_577_836_800_000_000_000)),
+            Scalar::Datetime64(1_577_836_800_000_000_000)
+        );
+        assert_eq!(
+            super::index_label_to_scalar_value(&IndexLabel::Timedelta64(86_400_000_000_000)),
+            Scalar::Timedelta64(86_400_000_000_000)
+        );
+        // NaT sentinel stays the typed Datetime64 NaT (downstream writers map it
+        // to na_rep / null), not the "NaT" literal a Utf8 downgrade produced.
+        assert_eq!(
+            super::index_label_to_scalar_value(&IndexLabel::Datetime64(i64::MIN)),
+            Scalar::Datetime64(i64::MIN)
         );
     }
 

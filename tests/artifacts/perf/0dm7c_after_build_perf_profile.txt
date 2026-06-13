@@ -1,0 +1,673 @@
+  [2m2026-06-13T00:52:34.390560Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1227854 at root@109.123.245.77 (2 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:34.761768Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenpandas-orangepeak-0dm7c-after (hash: e7b8c17c9223af6b)[0m
+    [2;3mat[0m rch/src/hook.rs:5994 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:34.761827Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6016 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:38.550829Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1227854...[0m
+    [2;3mat[0m rch/src/hook.rs:6046 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:38.550902Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:41.915447Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3364ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:41.915534Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-columnar -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-columnar on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:43.799796Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1884ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:43.799891Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-conformance -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-conformance on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:46.295282Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2495ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:46.295359Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-expr -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-expr on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:48.179250Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1883ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:48.179337Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-frame -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-frame on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:50.136695Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1957ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:50.136786Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-frankentui -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-frankentui on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:51.990027Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1853ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:51.990096Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-groupby -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-groupby on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:53.766857Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1776ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:53.766974Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-index -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-index on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:55.676116Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1909ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:55.676233Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-io -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-io on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:57.485421Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1809ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:57.485500Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-join -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-join on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:59.287555Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1802ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:52:59.287647Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-python -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-python on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:53:01.215889Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1928ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:53:01.215994Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-runtime -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-runtime on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:53:03.064176Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1848ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:53:03.064258Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-types -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-types on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:53:04.987643Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1923ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:53:04.987718Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/frankenpandas -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/frankenpandas on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:53:06.835894Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1848ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:53:06.835927Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 7055 files, 4156047 bytes in 28279ms[0m
+    [2;3mat[0m rch/src/hook.rs:6209 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:53:10.959886Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo build -p fp-conformance --profile release-perf --example perf_profile[0m
+    [2;3mat[0m rch/src/hook.rs:6252 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:53:10.959924Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.scratch/cargo-target-orangepeak-0dm7c-after -> /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/.rch-target-vmi1227854-job-29884606035526339-1781311958550821462-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+warning: /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded equivalent v1.0.2
+  Downloaded rustc-hash v2.1.2
+  Downloaded rustc_version v0.4.1
+  Downloaded adler2 v2.0.1
+  Downloaded ego-tree v0.11.0
+  Downloaded either v1.15.0
+  Downloaded errno v0.3.14
+  Downloaded siphasher v1.0.2
+  Downloaded servo_arc v0.4.3
+  Downloaded simdutf8 v0.1.5
+  Downloaded same-file v1.0.6
+  Downloaded slab v0.4.12
+  Downloaded smallvec v1.15.1
+  Downloaded serde_core v1.0.228
+  Downloaded serde_yaml v0.9.34+deprecated
+  Downloaded string_cache_codegen v0.6.1
+  Downloaded unarray v0.1.4
+  Downloaded fnv v1.0.7
+  Downloaded snafu v0.8.9
+  Downloaded alloca v0.4.0
+  Downloaded seq-macro v0.3.6
+  Downloaded tokio-macros v2.7.0
+  Downloaded scopeguard v1.2.0
+  Downloaded tinyvec_macros v0.1.1
+  Downloaded tiny-keccak v2.0.2
+  Downloaded anes v0.1.6
+  Downloaded snafu-derive v0.8.9
+  Downloaded string_cache v0.9.0
+  Downloaded futures-io v0.3.32
+  Downloaded block-buffer v0.12.0
+  Downloaded atoi v2.0.0
+  Downloaded unicode-casefold v0.2.0
+  Downloaded wait-timeout v0.2.1
+  Downloaded version_check v0.9.5
+  Downloaded stable_deref_trait v1.2.1
+  Downloaded utf-8 v0.7.6
+  Downloaded zmij v1.0.21
+  Downloaded cfg-if v1.0.4
+  Downloaded cast v0.3.0
+  Downloaded walkdir v2.5.0
+  Downloaded atoi_simd v0.17.0
+  Downloaded thiserror v1.0.69
+  Downloaded tinytemplate v1.2.1
+  Downloaded zstd v0.13.3
+  Downloaded futures-sink v0.3.32
+  Downloaded anstyle v1.0.14
+  Downloaded autocfg v1.5.0
+  Downloaded web_atoms v0.2.4
+  Downloaded scraper v0.27.0
+  Downloaded shlex v1.3.0
+  Downloaded thiserror-impl v1.0.69
+  Downloaded page_size v0.6.0
+  Downloaded thiserror v2.0.18
+  Downloaded snap v1.1.1
+  Downloaded ciborium-io v0.2.2
+  Downloaded ciborium-ll v0.2.2
+  Downloaded rusty-fork v0.3.1
+  Downloaded bit-vec v0.8.0
+  Downloaded async-trait v0.1.89
+  Downloaded zstd-safe v7.2.4
+  Downloaded simd-adler32 v0.3.9
+  Downloaded futures-macro v0.3.32
+  Downloaded heck v0.5.0
+  Downloaded clap_lex v1.1.0
+  Downloaded codepage v0.1.2
+  Downloaded const-random v0.1.18
+  Downloaded unicode-ident v1.0.24
+  Downloaded ahash v0.8.12
+  Downloaded precomputed-hash v0.1.1
+  Downloaded futures-core v0.3.32
+  Downloaded iter-read v1.1.0
+  Downloaded tempfile v3.27.0
+  Downloaded phf_shared v0.13.1
+  Downloaded twox-hash v2.1.2
+  Downloaded num-iter v0.1.45
+  Downloaded num v0.4.3
+  Downloaded const-random-macro v0.1.16
+  Downloaded tinyvec v1.11.0
+  Downloaded cpufeatures v0.3.0
+  Downloaded crypto-common v0.2.1
+  Downloaded crunchy v0.2.4
+  Downloaded cssparser-macros v0.7.0
+  Downloaded debug_unsafe v0.1.4
+  Downloaded thrift v0.17.0
+  Downloaded thiserror-impl v2.0.18
+  Downloaded arrow-csv v58.3.0
+  Downloaded semver v1.0.28
+  Downloaded sha2 v0.11.0
+  Downloaded tendril v0.5.0
+  Downloaded dtoa-short v0.3.5
+  Downloaded arrow-string v58.3.0
+  Downloaded futures-task v0.3.32
+  Downloaded quick-error v1.2.3
+  Downloaded fallible-streaming-iterator v0.1.9
+  Downloaded bit-set v0.8.0
+  Downloaded arrow-row v58.3.0
+  Downloaded serde_derive v1.0.228
+  Downloaded ciborium v0.2.2
+  Downloaded anyhow v1.0.102
+  Downloaded arrow-arith v58.3.0
+  Downloaded arrow-data v58.3.0
+  Downloaded csv-core v0.1.13
+  Downloaded zopfli v0.8.3
+  Downloaded ordered-float v2.10.1
+  Downloaded digest v0.11.2
+  Downloaded rand_xorshift v0.4.0
+  Downloaded phf_generator v0.13.1
+  Downloaded phf_shared v0.12.1
+  Downloaded dtoa v1.0.11
+  Downloaded new_debug_unreachable v1.0.6
+  Downloaded integer-encoding v3.0.4
+  Downloaded arrow-ord v58.3.0
+  Downloaded ryu v1.0.23
+  Downloaded selectors v0.38.0
+  Downloaded serde_json v1.0.150
+  Downloaded unsafe-libyaml v0.2.11
+  Downloaded arrow-json v58.3.0
+  Downloaded crc32fast v1.5.0
+  Downloaded bytes v1.11.1
+  Downloaded const-oid v0.10.2
+  Downloaded phf_codegen v0.13.1
+  Downloaded arrow-schema v58.3.0
+  Downloaded serde v1.0.228
+  Downloaded cssparser v0.37.0
+  Downloaded foldhash v0.2.0
+  Downloaded getopts v0.2.24
+  Downloaded jobserver v0.1.34
+  Downloaded phf v0.12.1
+  Downloaded pin-project-lite v0.2.17
+  Downloaded base64 v0.22.1
+  Downloaded fastrand v2.4.1
+  Downloaded phf_macros v0.13.1
+  Downloaded prost v0.13.5
+  Downloaded cc v1.2.60
+  Downloaded lock_api v0.4.14
+  Downloaded fallible-iterator v0.3.0
+  Downloaded arrow-buffer v58.3.0
+  Downloaded rand_core v0.9.5
+  Downloaded num-rational v0.4.2
+  Downloaded lexical-core v1.0.6
+  Downloaded num-complex v0.4.6
+  Downloaded typenum v1.20.0
+  Downloaded zerocopy-derive v0.8.48
+  Downloaded zip v7.2.0
+  Downloaded markup5ever v0.39.0
+  Downloaded num-integer v0.1.46
+  Downloaded oorandom v11.1.5
+  Downloaded paste v1.0.15
+  Downloaded phf v0.13.1
+  Downloaded pkg-config v0.3.33
+  Downloaded prost-derive v0.13.5
+  Downloaded rand_chacha v0.9.0
+  Downloaded typed-path v0.12.3
+  Downloaded quote v1.0.45
+  Downloaded byteorder v1.5.0
+  Downloaded futures-channel v0.3.32
+  Downloaded getrandom v0.2.17
+  Downloaded hashlink v0.12.0
+  Downloaded flatbuffers v25.12.19
+  Downloaded once_cell v1.21.4
+  Downloaded getrandom v0.3.4
+  Downloaded comfy-table v7.2.2
+  Downloaded criterion-plot v0.8.2
+  Downloaded fast-float2 v0.2.3
+  Downloaded parking_lot v0.12.5
+  Downloaded lz4_flex v0.11.6
+  Downloaded lz4_flex v0.13.0
+  Downloaded itoa v1.0.18
+  Downloaded hybrid-array v0.4.10
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded unicode-segmentation v1.13.2
+  Downloaded arrow v58.3.0
+  Downloaded rusqlite v0.40.1
+  Downloaded unicode-normalization v0.1.25
+  Downloaded lexical-parse-integer v1.0.6
+  Downloaded parking_lot_core v0.9.12
+  Downloaded bitflags v2.11.1
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded half v2.7.1
+  Downloaded futures v0.3.32
+  Downloaded getrandom v0.4.2
+  Downloaded log v0.4.29
+  Downloaded arrow-ipc v58.3.0
+  Downloaded num-traits v0.2.19
+  Downloaded iana-time-zone v0.1.65
+  Downloaded proc-macro2 v1.0.106
+  Downloaded arrow-cast v58.3.0
+  Downloaded derive_more v2.1.1
+  Downloaded arrow-select v58.3.0
+  Downloaded derive_more-impl v2.1.1
+  Downloaded bytemuck v1.25.0
+  Downloaded clap v4.6.1
+  Downloaded lexical-write-integer v1.0.6
+  Downloaded miniz_oxide v0.8.9
+  Downloaded raptorq v2.0.1
+  Downloaded flate2 v1.1.9
+  Downloaded html5ever v0.39.0
+  Downloaded criterion v0.8.2
+  Downloaded calamine v0.35.0
+  Downloaded lexical-write-float v1.0.6
+  Downloaded num-bigint v0.4.6
+  Downloaded rand v0.9.4
+  Downloaded indexmap v2.14.0
+  Downloaded memchr v2.8.0
+  Downloaded bumpalo v3.20.3
+  Downloaded lexical-util v1.0.7
+  Downloaded aho-corasick v1.1.4
+  Downloaded clap_builder v4.6.0
+  Downloaded zlib-rs v0.6.3
+  Downloaded orc-rust v0.8.0
+  Downloaded hashbrown v0.17.0
+  Downloaded itertools v0.13.0
+  Downloaded futures-util v0.3.32
+  Downloaded regex v1.12.3
+  Downloaded libm v0.2.16
+  Downloaded vcpkg v0.2.15
+  Downloaded lexical-parse-float v1.0.6
+  Downloaded unicode-width v0.2.2
+  Downloaded quick-xml v0.39.2
+  Downloaded regex-syntax v0.8.10
+  Downloaded chrono v0.4.45
+  Downloaded proptest v1.11.0
+  Downloaded arrow-array v58.3.0
+  Downloaded quick-xml v0.40.1
+  Downloaded syn v2.0.117
+  Downloaded dta v0.6.0
+  Downloaded serde-pickle v1.2.0
+  Downloaded ucd v0.1.1
+  Downloaded zerocopy v0.8.48
+  Downloaded rustix v1.1.4
+  Downloaded regex-automata v0.4.14
+  Downloaded chrono-tz v0.10.4
+  Downloaded zstd-sys v2.0.16+zstd.1.5.7
+  Downloaded tokio v1.52.3
+  Downloaded csv v1.4.0
+  Downloaded rust_xlsxwriter v0.95.0
+  Downloaded libc v0.2.185
+  Downloaded parquet v58.3.0
+  Downloaded encoding_rs v0.8.35
+  Downloaded linux-raw-sys v0.12.1
+  Downloaded libsqlite3-sys v0.38.1
+  Downloaded lzokay-native v0.1.0
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling libc v0.2.185
+   Compiling cfg-if v1.0.4
+   Compiling libm v0.2.16
+   Compiling autocfg v1.5.0
+   Compiling siphasher v1.0.2
+   Compiling foldhash v0.2.0
+   Compiling zerocopy v0.8.48
+   Compiling memchr v2.8.0
+   Compiling serde_core v1.0.228
+   Compiling hashbrown v0.17.0
+   Compiling getrandom v0.3.4
+   Compiling iana-time-zone v0.1.65
+   Compiling num-traits v0.2.19
+   Compiling phf_shared v0.12.1
+   Compiling chrono-tz v0.10.4
+   Compiling find-msvc-tools v0.1.9
+   Compiling syn v2.0.117
+   Compiling shlex v1.3.0
+   Compiling phf v0.12.1
+   Compiling once_cell v1.21.4
+   Compiling itoa v1.0.18
+   Compiling bytes v1.11.1
+   Compiling serde v1.0.228
+   Compiling equivalent v1.0.2
+   Compiling version_check v0.9.5
+   Compiling indexmap v2.14.0
+   Compiling jobserver v0.1.34
+   Compiling phf_shared v0.13.1
+   Compiling ahash v0.8.12
+   Compiling cc v1.2.60
+   Compiling fastrand v2.4.1
+   Compiling pkg-config v0.3.33
+   Compiling arrow-schema v58.3.0
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.150
+   Compiling phf_generator v0.13.1
+   Compiling regex-syntax v0.8.10
+   Compiling bitflags v2.11.1
+   Compiling num-integer v0.1.46
+   Compiling chrono v0.4.45
+   Compiling num-complex v0.4.6
+   Compiling num-bigint v0.4.6
+   Compiling aho-corasick v1.1.4
+   Compiling smallvec v1.15.1
+   Compiling typenum v1.20.0
+   Compiling lexical-util v1.0.7
+   Compiling thiserror v2.0.18
+   Compiling hybrid-array v0.4.10
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling phf_codegen v0.13.1
+   Compiling rustc-hash v2.1.2
+   Compiling log v0.4.29
+   Compiling regex-automata v0.4.14
+   Compiling unicode-width v0.2.2
+   Compiling semver v1.0.28
+   Compiling parking_lot_core v0.9.12
+   Compiling crc32fast v1.5.0
+   Compiling rustc_version v0.4.1
+   Compiling crypto-common v0.2.1
+   Compiling block-buffer v0.12.0
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling ryu v1.0.23
+   Compiling simd-adler32 v0.3.9
+   Compiling const-oid v0.10.2
+   Compiling zstd-safe v7.2.4
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling phf_macros v0.13.1
+   Compiling new_debug_unreachable v1.0.6
+   Compiling scopeguard v1.2.0
+   Compiling phf v0.13.1
+   Compiling lock_api v0.4.14
+   Compiling digest v0.11.2
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling flatbuffers v25.12.19
+   Compiling string_cache_codegen v0.6.1
+   Compiling regex v1.12.3
+   Compiling unicode-segmentation v1.13.2
+   Compiling bumpalo v3.20.3
+   Compiling byteorder v1.5.0
+   Compiling precomputed-hash v0.1.1
+   Compiling base64 v0.22.1
+   Compiling twox-hash v2.1.2
+   Compiling cpufeatures v0.3.0
+   Compiling adler2 v2.0.1
+   Compiling tinyvec_macros v0.1.1
+   Compiling miniz_oxide v0.8.9
+   Compiling tinyvec v1.11.0
+   Compiling sha2 v0.11.0
+   Compiling comfy-table v7.2.2
+   Compiling web_atoms v0.2.4
+   Compiling parking_lot v0.12.5
+   Compiling lexical-core v1.0.6
+   Compiling atoi v2.0.0
+   Compiling zlib-rs v0.6.3
+   Compiling anyhow v1.0.102
+   Compiling string_cache v0.9.0
+   Compiling unicode-normalization v0.1.25
+   Compiling lz4_flex v0.13.0
+   Compiling csv-core v0.1.13
+   Compiling fp-types v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-types)
+   Compiling fp-runtime v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-runtime)
+   Compiling encoding_rs v0.8.35
+   Compiling thiserror v1.0.69
+   Compiling futures-core v0.3.32
+   Compiling pin-project-lite v0.2.17
+   Compiling ucd v0.1.1
+   Compiling either v1.15.0
+   Compiling dtoa v1.0.11
+   Compiling unicode-casefold v0.2.0
+   Compiling utf-8 v0.7.6
+   Compiling snap v1.1.1
+   Compiling fp-index v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-index)
+   Compiling fp-columnar v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-columnar)
+   Compiling vcpkg v0.2.15
+   Compiling half v2.7.1
+   Compiling arrow-buffer v58.3.0
+   Compiling flate2 v1.1.9
+   Compiling futures-sink v0.3.32
+   Compiling libsqlite3-sys v0.38.1
+   Compiling futures-channel v0.3.32
+   Compiling tendril v0.5.0
+   Compiling itertools v0.13.0
+   Compiling dtoa-short v0.3.5
+   Compiling arrow-data v58.3.0
+   Compiling csv v1.4.0
+   Compiling zopfli v0.8.3
+   Compiling futures-macro v0.3.32
+   Compiling arrow-array v58.3.0
+   Compiling fp-frame v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-frame)
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v1.0.69
+   Compiling cssparser-macros v0.7.0
+   Compiling selectors v0.38.0
+   Compiling rustix v1.1.4
+   Compiling paste v1.0.15
+   Compiling heck v0.5.0
+   Compiling slab v0.4.12
+   Compiling futures-io v0.3.32
+   Compiling getrandom v0.4.2
+   Compiling stable_deref_trait v1.2.1
+   Compiling typed-path v0.12.3
+   Compiling futures-task v0.3.32
+   Compiling simdutf8 v0.1.5
+   Compiling futures-util v0.3.32
+   Compiling servo_arc v0.4.3
+   Compiling snafu-derive v0.8.9
+   Compiling derive_more v2.1.1
+   Compiling cssparser v0.37.0
+   Compiling zip v7.2.0
+   Compiling arrow-select v58.3.0
+   Compiling arrow-row v58.3.0
+   Compiling arrow-arith v58.3.0
+   Compiling prost-derive v0.13.5
+   Compiling markup5ever v0.39.0
+   Compiling arrow-ord v58.3.0
+   Compiling arrow-string v58.3.0
+   Compiling arrow-cast v58.3.0
+   Compiling tokio-macros v2.7.0
+   Compiling num-rational v0.4.2
+   Compiling num-iter v0.1.45
+   Compiling ordered-float v2.10.1
+   Compiling rand_core v0.9.5
+   Compiling debug_unsafe v0.1.4
+   Compiling linux-raw-sys v0.12.1
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling integer-encoding v3.0.4
+   Compiling thrift v0.17.0
+   Compiling arrow-csv v58.3.0
+   Compiling arrow-json v58.3.0
+   Compiling atoi_simd v0.17.0
+   Compiling num v0.4.3
+   Compiling tokio v1.52.3
+   Compiling prost v0.13.5
+   Compiling html5ever v0.39.0
+   Compiling futures v0.3.32
+   Compiling snafu v0.8.9
+   Compiling lzokay-native v0.1.0
+   Compiling quick-xml v0.39.2
+   Compiling codepage v0.1.2
+   Compiling lz4_flex v0.11.6
+   Compiling async-trait v0.1.89
+   Compiling getopts v0.2.24
+   Compiling alloca v0.4.0
+   Compiling hashlink v0.12.0
+   Compiling ciborium-io v0.2.2
+   Compiling ego-tree v0.11.0
+   Compiling bytemuck v1.25.0
+   Compiling iter-read v1.1.0
+   Compiling anstyle v1.0.14
+   Compiling clap_lex v1.1.0
+   Compiling seq-macro v0.3.6
+   Compiling fallible-iterator v0.3.0
+   Compiling fast-float2 v0.2.3
+   Compiling clap_builder v4.6.0
+   Compiling calamine v0.35.0
+   Compiling serde-pickle v1.2.0
+   Compiling scraper v0.27.0
+   Compiling tempfile v3.27.0
+   Compiling ciborium-ll v0.2.2
+   Compiling rust_xlsxwriter v0.95.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling dta v0.6.0
+   Compiling wait-timeout v0.2.1
+   Compiling quick-xml v0.40.1
+   Compiling same-file v1.0.6
+   Compiling bit-vec v0.8.0
+   Compiling quick-error v1.2.3
+   Compiling cast v0.3.0
+   Compiling unsafe-libyaml v0.2.11
+   Compiling fnv v1.0.7
+   Compiling rusty-fork v0.3.1
+   Compiling bit-set v0.8.0
+   Compiling criterion-plot v0.8.2
+   Compiling walkdir v2.5.0
+   Compiling rand_chacha v0.9.0
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling ciborium v0.2.2
+   Compiling clap v4.6.1
+   Compiling rand_xorshift v0.4.0
+   Compiling rand v0.9.4
+   Compiling fp-groupby v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-groupby)
+   Compiling fp-join v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-join)
+   Compiling fp-expr v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-expr)
+   Compiling tinytemplate v1.2.1
+   Compiling raptorq v2.0.1
+   Compiling page_size v0.6.0
+   Compiling unarray v0.1.4
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling proptest v1.11.0
+   Compiling criterion v0.8.2
+   Compiling zstd v0.13.3
+   Compiling arrow-ipc v58.3.0
+   Compiling arrow v58.3.0
+   Compiling parquet v58.3.0
+   Compiling orc-rust v0.8.0
+   Compiling rusqlite v0.40.1
+   Compiling fp-io v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-io)
+   Compiling fp-conformance v0.1.0 (/data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/crates/fp-conformance)
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 3m 17s
+  [2m2026-06-13T00:56:30.358104Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 199398ms[0m
+    [2;3mat[0m rch/src/hook.rs:6376 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:56:30.358330Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6425 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:56:30.358343Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:56:32.327474Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1969ms (1 files, 1356 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:56:32.327493Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1356 bytes in 1969ms[0m
+    [2;3mat[0m rch/src/hook.rs:6458 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:56:32.327579Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenpandas-orangepeak-0dm7c-after/.rch-target-vmi1227854-job-29884606035526339-1781311958550821462-0 on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:56:54.642922Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 22315ms (2611 files, 43191 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:56:54.642958Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 2611 files, 43191 bytes in 22315ms[0m
+    [2;3mat[0m rch/src/hook.rs:6582 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1227854 (260.3s)
