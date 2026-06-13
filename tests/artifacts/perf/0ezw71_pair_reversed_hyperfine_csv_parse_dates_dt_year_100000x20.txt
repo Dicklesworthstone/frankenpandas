@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-0ezw71-after/release-perf/examples/perf_profile csv_parse_dates_dt_year 100000 20
+  Time (mean ± σ):      2.936 s ±  0.154 s    [User: 2.816 s, System: 0.118 s]
+  Range (min … max):    2.852 s …  3.311 s    8 runs
+
+Benchmark 2: /data/projects/.scratch/cargo-target-orangepeak-0ezw71-base/release-perf/examples/perf_profile csv_parse_dates_dt_year 100000 20
+  Time (mean ± σ):      3.028 s ±  0.096 s    [User: 2.897 s, System: 0.128 s]
+  Range (min … max):    2.908 s …  3.147 s    8 runs
+
+Summary
+  /data/projects/.scratch/cargo-target-orangepeak-0ezw71-after/release-perf/examples/perf_profile csv_parse_dates_dt_year 100000 20 ran
+    1.03 ± 0.06 times faster than /data/projects/.scratch/cargo-target-orangepeak-0ezw71-base/release-perf/examples/perf_profile csv_parse_dates_dt_year 100000 20

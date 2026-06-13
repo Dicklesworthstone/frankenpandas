@@ -1,0 +1,2 @@
+perf_profile: scenario=csv_parse_dates_dt_year n=100000 iters=80
+perf_profile: done 80 iters in 11.668s (145.848 ms/iter), sink=8000000

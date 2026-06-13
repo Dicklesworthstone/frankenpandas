@@ -16,7 +16,7 @@
 //!   str_groupby_var, str_groupby_std, str_groupby_first, str_groupby_last,
 //!   str_groupby_prod, str_groupby_median, str_series_sort, str_sort_chain,
 //!   filter_bool, dt_year, inner_join, series_add, series_add_same, series_add_align,
-//!   csv_read, csv_read_options, csv_read_no_na_filter }
+//!   csv_read, csv_read_options, csv_read_no_na_filter, csv_parse_dates_dt_year }
 
 use std::{collections::BTreeMap, fmt::Write as _, time::Instant};
 
@@ -123,6 +123,50 @@ fn build_datetime_string_series(n: usize) -> Series {
         })
         .collect();
     Series::from_values("ts", labels, values).expect("datetime string series")
+}
+
+fn build_datetime_csv_string(n: usize, value_cols: usize) -> String {
+    let mut csv = String::with_capacity(n * (value_cols + 1) * 18);
+    csv.push_str("ts");
+    for c in 0..value_cols {
+        write!(&mut csv, ",v{c}").expect("writing to a String cannot fail");
+    }
+    csv.push('\n');
+
+    for i in 0..n {
+        let year = 2020 + (i % 5);
+        let month = (i % 12) + 1;
+        let day = (i % 28) + 1;
+        let hour = i % 24;
+        let minute = (i / 7) % 60;
+        let second = (i / 13) % 60;
+        write!(
+            &mut csv,
+            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
+        )
+        .expect("writing to a String cannot fail");
+        for c in 0..value_cols {
+            write!(&mut csv, ",{}", (i * (c + 1)) as i64).expect("writing to a String cannot fail");
+        }
+        csv.push('\n');
+    }
+
+    csv
+}
+
+fn read_csv_parse_dates_dt_year(csv: &str) -> Series {
+    let options = CsvReadOptions {
+        parse_dates: Some(vec!["ts".to_owned()]),
+        ..CsvReadOptions::default()
+    };
+    let frame = read_csv_with_options(csv, &options).expect("csv parse_dates read");
+    let column = frame
+        .columns()
+        .get("ts")
+        .expect("parse_dates column must exist")
+        .clone();
+    let series = Series::new("ts", frame.index().clone(), column).expect("datetime series");
+    series.dt().year().expect("dt year")
 }
 
 /// Series of Float64 values with moderate cardinality (so rank tie-groups
@@ -908,6 +952,11 @@ fn run_golden(scenario: &str, n: usize) {
                 .expect("dt year");
             return print!("{}", golden_dump_series(&out));
         }
+        "csv_parse_dates_dt_year" => {
+            let csv = build_datetime_csv_string(n, 4);
+            let out = read_csv_parse_dates_dt_year(&csv);
+            return print!("{}", golden_dump_series(&out));
+        }
         "str_filter" => {
             // Filter a text-heavy frame (4 contiguous-Utf8 columns): exercises
             // Column::take_positions' Utf8 gather (br-frankenpandas-nl1tw).
@@ -1522,6 +1571,13 @@ fn main() {
             let parsed = to_datetime(&build_datetime_string_series(n)).expect("to datetime");
             for _ in 0..iters {
                 let out = parsed.dt().year().expect("dt year");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "csv_parse_dates_dt_year" => {
+            let csv = build_datetime_csv_string(n, 4);
+            for _ in 0..iters {
+                let out = read_csv_parse_dates_dt_year(&csv);
                 sink = sink.wrapping_add(out.len());
             }
         }

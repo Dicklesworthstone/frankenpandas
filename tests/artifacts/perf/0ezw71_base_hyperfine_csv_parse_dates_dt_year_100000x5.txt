@@ -1,0 +1,3 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-0ezw71-base/release-perf/examples/perf_profile csv_parse_dates_dt_year 100000 5
+  Time (mean ± σ):     831.2 ms ±  31.3 ms    [User: 751.5 ms, System: 78.5 ms]
+  Range (min … max):   793.7 ms … 901.7 ms    10 runs

@@ -1,0 +1,12 @@
+Warning: 'set target-async', an alias for the command 'set mi-async', is deprecated.
+Use 'set mi-async'.
+
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/.scratch/cargo-target-orangepeak-0ezw71-base/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+Selected thread is running.
+Cannot execute this command while the selected thread is running.
+Selected thread is running.
+Cannot execute this command while the selected thread is running.
+Selected thread is running.
+[Inferior 1 (process 2001605) detached]

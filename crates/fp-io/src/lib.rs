@@ -121,7 +121,7 @@ use dta::stata::{
     stata_long::StataLong,
 };
 use fp_columnar::{Column, ColumnError};
-use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_with_options};
+use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_values_with_options};
 use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
 use fp_types::{DType, NullKind, Scalar, Timedelta, Timestamp, cast_scalar_owned};
 #[cfg(feature = "hdf5")]
@@ -4016,16 +4016,8 @@ fn apply_parse_dates(
             continue;
         };
 
-        let index_labels = (0..columns[column_idx].len() as i64)
-            .map(IndexLabel::Int64)
-            .collect::<Vec<_>>();
-        let series = Series::from_values(
-            column_name.clone(),
-            index_labels,
-            columns[column_idx].clone(),
-        )?;
-        if let Some(parsed) = parse_csv_datetime_column(&series)? {
-            columns[column_idx] = parsed.values().to_vec();
+        if let Some(parsed) = parse_csv_datetime_values(&columns[column_idx])? {
+            columns[column_idx] = parsed;
         }
     }
 
@@ -4142,29 +4134,27 @@ fn apply_one_parse_date_combination(
         .collect::<Result<Vec<_>, _>>()?;
     positions.sort_unstable();
 
-    let index_labels = (0..columns[positions[0]].len() as i64)
-        .map(IndexLabel::Int64)
-        .collect::<Vec<_>>();
     let combined_values = combine_parse_date_values(
         &positions
             .iter()
             .map(|&idx| columns[idx].clone())
             .collect::<Vec<_>>(),
     );
-    let combined_series =
-        Series::from_values(combined_name.clone(), index_labels, combined_values)?;
-    let parsed = parse_csv_datetime_column(&combined_series)?.unwrap_or(combined_series);
+    let parsed_values = match parse_csv_datetime_values(&combined_values)? {
+        Some(parsed) => parsed,
+        None => combined_values,
+    };
 
     for idx in positions.iter().rev() {
         headers.remove(*idx);
         columns.remove(*idx);
     }
     headers.insert(positions[0], combined_name);
-    columns.insert(positions[0], parsed.values().to_vec());
+    columns.insert(positions[0], parsed_values);
     Ok(())
 }
 
-fn parse_csv_datetime_column(series: &Series) -> Result<Option<Series>, IoError> {
+fn parse_csv_datetime_values(values: &[Scalar]) -> Result<Option<Vec<Scalar>>, IoError> {
     // pandas pd.read_csv(parse_dates=[col]) parses each value on its own —
     // a column with mixed naive ("2024-01-15 10:30:00") and aware
     // ("2024-01-15T10:30:00Z") entries normalizes each value
@@ -4174,17 +4164,16 @@ fn parse_csv_datetime_column(series: &Series) -> Result<Option<Series>, IoError>
     // leaves the column as raw strings even though every individual value
     // is parseable. Set it explicitly to false so each value goes through
     // parse_datetime_string, which already handles both naive and aware.
-    let parsed = to_datetime_with_options(
-        series,
+    let parsed = to_datetime_values_with_options(
+        values,
         ToDatetimeOptions {
             infer_mixed_timezone: false,
             ..ToDatetimeOptions::default()
         },
     )?;
-    let parse_failed = series
-        .values()
+    let parse_failed = values
         .iter()
-        .zip(parsed.values())
+        .zip(parsed.iter())
         .any(|(original, parsed)| !original.is_missing() && parsed.is_missing());
 
     if parse_failed {
@@ -21763,8 +21752,9 @@ mod tests {
     fn csv_parse_dates_mixed_naive_and_aware_strings_normalizes_per_value() {
         // pandas pd.read_csv(parse_dates=["ts"]) normalizes each value
         // independently when the column has mixed naive + aware timestamps:
-        // the naive entry stays naive ("YYYY-MM-DD HH:MM:SS"), and the
-        // aware entry is rewritten to the offset form ("...+00:00").
+        // the naive entry is represented as typed Datetime64, and the aware
+        // entry stays in offset string form because the scalar model has no
+        // timezone metadata slot.
         // The previous "preserves object" behavior locked the entire
         // column to the first inferred timezone pattern and silently
         // rejected mismatched values; conformance fixture FP-P2D-429
@@ -21778,7 +21768,7 @@ mod tests {
         assert_eq!(
             frame.column("ts").unwrap().values(),
             &[
-                Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
+                Scalar::Datetime64(1_705_314_600_000_000_000),
                 Scalar::Utf8("2024-01-15 10:30:00+00:00".to_owned()),
             ]
         );
@@ -21800,8 +21790,8 @@ mod tests {
         assert_eq!(
             frame.column("date_time").unwrap().values(),
             &[
-                Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
-                Scalar::Utf8("2024-01-16 11:45:30".to_owned()),
+                Scalar::Datetime64(1_705_314_600_000_000_000),
+                Scalar::Datetime64(1_705_405_530_000_000_000),
             ]
         );
         assert!(frame.column("date").is_none());
@@ -21831,8 +21821,8 @@ mod tests {
         assert_eq!(
             frame.column("timestamp").unwrap().values(),
             &[
-                Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
-                Scalar::Utf8("2024-01-16 11:45:30".to_owned()),
+                Scalar::Datetime64(1_705_314_600_000_000_000),
+                Scalar::Datetime64(1_705_405_530_000_000_000),
             ]
         );
     }
@@ -21860,8 +21850,8 @@ mod tests {
         assert_eq!(
             frame.column("start").unwrap().values(),
             &[
-                Scalar::Utf8("2024-01-01 09:00:00".to_owned()),
-                Scalar::Utf8("2024-02-01 09:00:00".to_owned()),
+                Scalar::Datetime64(1_704_099_600_000_000_000),
+                Scalar::Datetime64(1_706_778_000_000_000_000),
             ]
         );
     }
