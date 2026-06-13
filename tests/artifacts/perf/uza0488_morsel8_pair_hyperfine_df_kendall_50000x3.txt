@@ -1,0 +1,14 @@
+  [2m2026-06-13T01:29:22.648900Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: hyperfine --warmup 1 --runs 7 --export-json tests/artifacts/perf/uza0488_morsel8_pair_hyperfine_df_kendall_50000x3.json -n base '/data/projects/.scratch/cargo-target-orangepeak-uza0488-base/release-perf/examples/perf_profile df_kendall 50000 3' -n morsel8 '/data/projects/.scratch/cargo-target-orangepeak-uza0488-morsel8/release-perf/examples/perf_profile df_kendall 50000 3'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Benchmark 1: base
+  Time (mean ± σ):     468.9 ms ±  27.8 ms    [User: 2803.1 ms, System: 210.5 ms]
+  Range (min … max):   427.4 ms … 502.4 ms    7 runs
+ 
+Benchmark 2: morsel8
+  Time (mean ± σ):     439.1 ms ±  11.6 ms    [User: 2816.4 ms, System: 199.5 ms]
+  Range (min … max):   418.1 ms … 456.3 ms    7 runs
+ 
+Summary
+  morsel8 ran
+    1.07 ± 0.07 times faster than base
