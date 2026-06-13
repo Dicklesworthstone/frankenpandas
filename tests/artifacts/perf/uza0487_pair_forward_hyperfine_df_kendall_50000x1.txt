@@ -1,0 +1,14 @@
+  [2m2026-06-13T03:52:14.165607Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: hyperfine --warmup 1 --runs 7 --export-json tests/artifacts/perf/uza0487_pair_forward_hyperfine_df_kendall_50000x1.json -n base '/data/projects/.scratch/cargo-target-orangepeak-uza0487-base/release-perf/examples/perf_profile df_kendall 50000 1' -n after '/data/projects/.scratch/cargo-target-orangepeak-uza0487-after/release-perf/examples/perf_profile df_kendall 50000 1'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Benchmark 1: base
+  Time (mean ± σ):     117.2 ms ±   2.7 ms    [User: 680.6 ms, System: 49.7 ms]
+  Range (min … max):   113.7 ms … 121.6 ms    7 runs
+
+Benchmark 2: after
+  Time (mean ± σ):     146.5 ms ±   3.0 ms    [User: 629.1 ms, System: 57.9 ms]
+  Range (min … max):   142.3 ms … 150.6 ms    7 runs
+
+Summary
+  base ran
+    1.25 ± 0.04 times faster than after

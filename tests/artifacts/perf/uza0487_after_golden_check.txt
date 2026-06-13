@@ -1,0 +1,3 @@
+tests/artifacts/perf/uza0487_base_golden_df_kendall_2000.txt: OK
+tests/artifacts/perf/uza0487_base_golden_df_kendall_5000.txt: OK
+tests/artifacts/perf/uza0487_base_golden_df_kendall_20000.txt: OK
