@@ -2208,7 +2208,8 @@ impl Timestamp {
         // rem_euclid keeps the seconds-of-day in [0, 86400) even for negative
         // (pre-1970) nanos with a sub-second part (br-frankenpandas-wkjtw);
         // rem_euclid == `%` for the post-1970 positive case.
-        let secs_of_day = self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
+        let secs_of_day =
+            self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
         Some(secs_of_day / 3600)
     }
 
@@ -2223,7 +2224,8 @@ impl Timestamp {
         // rem_euclid keeps the seconds-of-day in [0, 86400) even for negative
         // (pre-1970) nanos with a sub-second part (br-frankenpandas-wkjtw);
         // rem_euclid == `%` for the post-1970 positive case.
-        let secs_of_day = self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
+        let secs_of_day =
+            self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
         Some((secs_of_day % 3600) / 60)
     }
 
@@ -2238,7 +2240,8 @@ impl Timestamp {
         // rem_euclid keeps the seconds-of-day in [0, 86400) even for negative
         // (pre-1970) nanos with a sub-second part (br-frankenpandas-wkjtw);
         // rem_euclid == `%` for the post-1970 positive case.
-        let secs_of_day = self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
+        let secs_of_day =
+            self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
         Some(secs_of_day % 60)
     }
 
@@ -4196,14 +4199,20 @@ impl Interval {
 }
 
 impl std::fmt::Display for Interval {
-    /// Matches `str(pd.Interval(0, 5, 'right'))` → `"(0, 5]"`.
+    /// Matches `str(pd.Interval(...))` for the `interval[float64]` subtype, which
+    /// is the only subtype FrankenPandas stores (f64 endpoints): the endpoints
+    /// render with Python `str(float)` semantics, so whole numbers KEEP ".0"
+    /// (`str(pd.Interval(0.0, 5.0, 'right'))` is `"(0.0, 5.0]"`, not `"(0, 5]"`).
+    /// Verified vs pandas 2.2.3 across whole/fractional/negative/scientific
+    /// endpoints. (br-frankenpandas-5xw1b)
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let left_bracket = if self.closed.left_closed() { '[' } else { '(' };
         let right_bracket = if self.closed.right_closed() { ']' } else { ')' };
         write!(
             f,
             "{left_bracket}{}, {}{right_bracket}",
-            self.left, self.right
+            float_to_string_for_astype(self.left),
+            float_to_string_for_astype(self.right)
         )
     }
 }
@@ -4654,7 +4663,7 @@ mod tests {
         );
         assert_eq!(
             cast_scalar(&left, DType::Utf8).expect("interval string cast"),
-            Scalar::Utf8("(0, 1]".to_owned())
+            Scalar::Utf8("(0.0, 1.0]".to_owned())
         );
         assert_eq!(
             super::nannunique(&[left.clone(), right, left, Scalar::Null(NullKind::Null)]),
@@ -6111,19 +6120,31 @@ mod tests {
     fn interval_display_matches_pandas_notation() {
         assert_eq!(
             Interval::new(0.0, 5.0, IntervalClosed::Right).to_string(),
-            "(0, 5]"
+            "(0.0, 5.0]"
         );
         assert_eq!(
             Interval::new(0.0, 5.0, IntervalClosed::Left).to_string(),
-            "[0, 5)"
+            "[0.0, 5.0)"
         );
         assert_eq!(
             Interval::new(0.0, 5.0, IntervalClosed::Both).to_string(),
-            "[0, 5]"
+            "[0.0, 5.0]"
         );
         assert_eq!(
             Interval::new(0.0, 5.0, IntervalClosed::Neither).to_string(),
-            "(0, 5)"
+            "(0.0, 5.0)"
+        );
+        assert_eq!(
+            Interval::new(2.5, 3.5, IntervalClosed::Right).to_string(),
+            "(2.5, 3.5]"
+        );
+        assert_eq!(
+            Interval::new(-1.0, 0.0, IntervalClosed::Right).to_string(),
+            "(-1.0, 0.0]"
+        );
+        assert_eq!(
+            Interval::new(1e20, 2e20, IntervalClosed::Right).to_string(),
+            "(1e+20, 2e+20]"
         );
     }
 
