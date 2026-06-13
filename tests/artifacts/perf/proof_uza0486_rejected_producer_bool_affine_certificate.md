@@ -76,12 +76,20 @@ Isomorphism obligations:
 
 ## Timings
 
-Forward paired gate:
+Initial forward paired gate:
 
 | Workload | Baseline | After | Verdict |
 | --- | ---: | ---: | --- |
 | `filter_bool 100000 1000` | `18.6 ms +/- 1.5` | `19.7 ms +/- 2.2` | baseline `1.06x +/- 0.14` faster |
 | `filter_bool 100000 20000` | `63.4 ms +/- 2.5` | `65.7 ms +/- 2.9` | baseline `1.04x +/- 0.06` faster |
+
+Supplemental same-order rerun captured after the commit, still below the keep
+gate:
+
+| Workload | Baseline | After | Verdict |
+| --- | ---: | ---: | --- |
+| `filter_bool 100000 1000` | `20.4 ms +/- 1.4` | `19.1 ms +/- 1.7` | after `1.07x +/- 0.12` faster |
+| `filter_bool 100000 20000` | `65.6 ms +/- 3.4` | `64.7 ms +/- 2.6` | after `1.02x +/- 0.07` faster |
 
 Reversed paired gate:
 
@@ -90,8 +98,8 @@ Reversed paired gate:
 | `filter_bool 100000 1000` | `18.6 ms +/- 1.7` | `19.1 ms +/- 2.5` | after `1.02x +/- 0.16` faster |
 | `filter_bool 100000 20000` | `68.0 ms +/- 4.9` | `73.5 ms +/- 7.4` | after `1.08x +/- 0.13` faster |
 
-The reversed long run is noise and below the keep threshold. The forward run
-shows a regression. The lever does not clear Score >= 2.0.
+The supplemental same-order rerun and the reversed long run are noise and below
+the keep threshold. The lever does not clear Score >= 2.0.
 
 ## Profile Limitation
 
