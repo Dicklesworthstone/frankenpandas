@@ -94,6 +94,57 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+/// A total-ordering, hashable `f64` wrapper for use as an index label
+/// (br-frankenpandas-i10en). `-0.0` is normalized to `+0.0` and all NaNs
+/// collapse to one bucket, so `Eq`/`Hash`/`Ord` are mutually consistent
+/// (a == b implies cmp == Equal) — matching pandas' Float64Index. NaN sorts
+/// after every finite value (pandas NaN-last).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OrderedF64(pub f64);
+
+impl OrderedF64 {
+    #[inline]
+    fn canonical_bits(self) -> u64 {
+        if self.0.is_nan() {
+            f64::NAN.to_bits()
+        } else if self.0 == 0.0 {
+            0.0_f64.to_bits()
+        } else {
+            self.0.to_bits()
+        }
+    }
+}
+
+impl PartialEq for OrderedF64 {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical_bits() == other.canonical_bits()
+    }
+}
+impl Eq for OrderedF64 {}
+impl std::hash::Hash for OrderedF64 {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.canonical_bits().hash(state);
+    }
+}
+impl Ord for OrderedF64 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        let (a, b) = (self.0, other.0);
+        match (a.is_nan(), b.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
+        }
+    }
+}
+impl PartialOrd for OrderedF64 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum IndexLabel {
@@ -101,6 +152,12 @@ pub enum IndexLabel {
     Utf8(String),
     Timedelta64(i64),
     Datetime64(i64),
+    /// pandas Float64Index label (br-frankenpandas-i10en). Placed before
+    /// `Null` so the derived cross-variant order keeps every concrete label
+    /// before nulls.
+    Float64(OrderedF64),
+    /// pandas boolean index label.
+    Bool(bool),
     /// Typed missing label (br-frankenpandas-joeff): lets value_counts
     /// (dropna=False) and friends keep pandas' distinct None / nan / NaT
     /// buckets instead of collapsing them or colliding with genuine
@@ -136,7 +193,8 @@ impl IndexLabel {
         match self {
             Self::Timedelta64(value) => *value == Timedelta::NAT,
             Self::Datetime64(value) => *value == i64::MIN,
-            Self::Int64(_) | Self::Utf8(_) => false,
+            Self::Float64(v) => v.0.is_nan(),
+            Self::Int64(_) | Self::Utf8(_) | Self::Bool(_) => false,
             Self::Null(_) => true,
         }
     }
@@ -148,6 +206,8 @@ fn index_label_is_truthy(label: &IndexLabel) -> bool {
     }
     match label {
         IndexLabel::Int64(v) => *v != 0,
+        IndexLabel::Float64(v) => v.0 != 0.0,
+        IndexLabel::Bool(b) => *b,
         IndexLabel::Utf8(s) => !s.is_empty(),
         IndexLabel::Timedelta64(v) => *v != 0,
         IndexLabel::Datetime64(v) => *v != 0,
@@ -160,6 +220,18 @@ impl fmt::Display for IndexLabel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Int64(v) => write!(f, "{v}"),
+            Self::Float64(v) => {
+                if v.0.is_nan() {
+                    return write!(f, "NaN");
+                }
+                let t = format!("{}", v.0);
+                if t.contains('.') || t.contains('e') || t.contains("inf") {
+                    write!(f, "{t}")
+                } else {
+                    write!(f, "{t}.0")
+                }
+            }
+            Self::Bool(b) => write!(f, "{}", if *b { "True" } else { "False" }),
             Self::Utf8(v) => write!(f, "{v}"),
             Self::Timedelta64(v) => write!(f, "{}", Timedelta::format(*v)),
             Self::Datetime64(v) => write!(f, "{}", format_datetime_ns(*v)),
@@ -236,8 +308,10 @@ fn detect_sort_order(labels: &[IndexLabel]) -> SortOrder {
             Some(IndexLabel::Utf8(_)) => SortOrder::AscendingUtf8,
             Some(IndexLabel::Timedelta64(_)) => SortOrder::AscendingTimedelta64,
             Some(IndexLabel::Datetime64(_)) => SortOrder::AscendingDatetime64,
-            // Null labels never enable a typed binary-search backend.
-            Some(IndexLabel::Null(_)) => SortOrder::Unsorted,
+            // Float64/Bool/Null labels use the general (non-typed) backend.
+            Some(IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Null(_)) => {
+                SortOrder::Unsorted
+            }
         };
     }
 
@@ -1752,6 +1826,8 @@ impl Index {
                 .iter()
                 .map(|l| match l {
                     IndexLabel::Int64(_) => l.clone(),
+                    IndexLabel::Float64(v) => IndexLabel::Int64(v.0 as i64),
+                    IndexLabel::Bool(b) => IndexLabel::Int64(i64::from(*b)),
                     IndexLabel::Utf8(s) => s
                         .parse::<i64>()
                         .map_or_else(|_| l.clone(), IndexLabel::Int64),
@@ -1776,6 +1852,19 @@ impl Index {
                 .iter()
                 .map(|l| match l {
                     IndexLabel::Int64(v) => IndexLabel::Utf8(v.to_string()),
+                    IndexLabel::Float64(v) => IndexLabel::Utf8(if v.0.is_nan() {
+                        "nan".to_owned()
+                    } else {
+                        let t = format!("{}", v.0);
+                        if t.contains('.') || t.contains('e') || t.contains("inf") {
+                            t
+                        } else {
+                            format!("{t}.0")
+                        }
+                    }),
+                    IndexLabel::Bool(b) => {
+                        IndexLabel::Utf8(if *b { "True" } else { "False" }.to_owned())
+                    }
                     IndexLabel::Utf8(_) => l.clone(),
                     IndexLabel::Timedelta64(ns) => IndexLabel::Utf8(Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => IndexLabel::Utf8(format_datetime_ns(*ns)),
@@ -2026,9 +2115,11 @@ impl Index {
             .iter()
             .map(|label| match label {
                 IndexLabel::Int64(_)
+                | IndexLabel::Float64(_)
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Null(_) => 8,
+                IndexLabel::Bool(_) => 1,
                 IndexLabel::Utf8(s) => {
                     if deep {
                         std::mem::size_of::<String>() + s.len()
@@ -2400,6 +2491,8 @@ impl Index {
             matches!(
                 (first, label),
                 (IndexLabel::Int64(_), IndexLabel::Int64(_))
+                    | (IndexLabel::Float64(_), IndexLabel::Float64(_))
+                    | (IndexLabel::Bool(_), IndexLabel::Bool(_))
                     | (IndexLabel::Utf8(_), IndexLabel::Utf8(_))
                     | (IndexLabel::Timedelta64(_), IndexLabel::Timedelta64(_))
                     | (IndexLabel::Datetime64(_), IndexLabel::Datetime64(_))
@@ -2410,6 +2503,8 @@ impl Index {
         }
         match first {
             IndexLabel::Int64(_) => "integer",
+            IndexLabel::Float64(_) => "floating",
+            IndexLabel::Bool(_) => "boolean",
             IndexLabel::Utf8(_) => "string",
             IndexLabel::Timedelta64(_) => "timedelta64",
             IndexLabel::Datetime64(_) => "datetime64",
@@ -2786,6 +2881,8 @@ impl<'a> IndexStringAccessor<'a> {
             .map(|label| match label {
                 IndexLabel::Utf8(value) => Some(func(value)),
                 IndexLabel::Int64(_)
+                | IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Null(_) => None,
@@ -2943,6 +3040,8 @@ where
         .map(|label| match label {
             IndexLabel::Datetime64(nanos) => datetime_from_nanos(*nanos).map(&func),
             IndexLabel::Int64(_)
+            | IndexLabel::Float64(_)
+            | IndexLabel::Bool(_)
             | IndexLabel::Utf8(_)
             | IndexLabel::Timedelta64(_)
             | IndexLabel::Null(_) => None,
@@ -2973,6 +3072,8 @@ fn datetime_label_time_nanos(label: &IndexLabel) -> Option<i64> {
             datetime_from_nanos(*nanos).map(|dt| time_to_nanos(dt.time()))
         }
         IndexLabel::Int64(_)
+        | IndexLabel::Float64(_)
+        | IndexLabel::Bool(_)
         | IndexLabel::Utf8(_)
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Null(_) => None,
@@ -3008,6 +3109,8 @@ where
         .map(|label| match label {
             IndexLabel::Timedelta64(nanos) if *nanos != Timedelta::NAT => Some(func(*nanos)),
             IndexLabel::Int64(_)
+            | IndexLabel::Float64(_)
+            | IndexLabel::Bool(_)
             | IndexLabel::Utf8(_)
             | IndexLabel::Timedelta64(_)
             | IndexLabel::Datetime64(_)
@@ -3724,6 +3827,8 @@ impl DatetimeIndex {
             .map(|label| match label {
                 IndexLabel::Datetime64(nanos) if *nanos != i64::MIN => Some(*nanos),
                 IndexLabel::Int64(_)
+                | IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
                 | IndexLabel::Utf8(_)
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
@@ -3767,6 +3872,8 @@ impl DatetimeIndex {
             .map(|label| match label {
                 IndexLabel::Datetime64(nanos) => *nanos,
                 IndexLabel::Int64(_)
+                | IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
                 | IndexLabel::Utf8(_)
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Null(_) => i64::MIN,
@@ -5603,6 +5710,8 @@ impl TimedeltaIndex {
             .map(|label| match label {
                 IndexLabel::Timedelta64(nanos) => *nanos,
                 IndexLabel::Int64(_)
+                | IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
                 | IndexLabel::Utf8(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Null(_) => Timedelta::NAT,
@@ -8326,7 +8435,9 @@ impl RangeIndex {
             .iter()
             .filter_map(|label| match label {
                 IndexLabel::Int64(value) => Some(*value),
-                IndexLabel::Utf8(_)
+                IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
+                | IndexLabel::Utf8(_)
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Null(_) => None,
@@ -11730,6 +11841,8 @@ impl MultiIndex {
     fn asof_comparison_type_name(&self) -> &'static str {
         match self.levels.first().and_then(|level| level.first()) {
             Some(IndexLabel::Int64(_)) => "int",
+            Some(IndexLabel::Float64(_)) => "float",
+            Some(IndexLabel::Bool(_)) => "bool",
             Some(IndexLabel::Utf8(_)) => "str",
             Some(IndexLabel::Timedelta64(_)) => "Timedelta",
             Some(IndexLabel::Datetime64(_)) => "Timestamp",
@@ -12064,9 +12177,11 @@ impl MultiIndex {
             .flatten()
             .map(|label| match label {
                 IndexLabel::Int64(_)
+                | IndexLabel::Float64(_)
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Null(_) => 8,
+                IndexLabel::Bool(_) => 1,
                 IndexLabel::Utf8(value) => {
                     if deep {
                         std::mem::size_of::<String>() + value.len()

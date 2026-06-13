@@ -2292,6 +2292,7 @@ fn html_index_label_string(
         IndexLabel::Utf8(s) => s.clone(),
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
+        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
         IndexLabel::Null(_) => label.to_string(),
     };
     Ok(html_text(&raw, escape))
@@ -5210,6 +5211,8 @@ fn json_key_to_index_label(value: &str) -> IndexLabel {
 fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
     match label {
         IndexLabel::Int64(v) => serde_json::json!(*v),
+        IndexLabel::Float64(v) => serde_json::json!(v.0),
+        IndexLabel::Bool(b) => serde_json::json!(*b),
         IndexLabel::Utf8(v) => serde_json::Value::String(v.clone()),
         // Epoch-millisecond ints, matching pandas to_json (date_unit='ms') and
         // the value path above — previously emitted raw nanoseconds, which
@@ -5261,6 +5264,8 @@ const SYNTHETIC_ROW_MULTIINDEX_PREFIX: &str = "__index_level_";
 fn index_label_to_scalar_value(label: &IndexLabel) -> Scalar {
     match label {
         IndexLabel::Int64(v) => Scalar::Int64(*v),
+        IndexLabel::Float64(v) => Scalar::Float64(v.0),
+        IndexLabel::Bool(b) => Scalar::Bool(*b),
         IndexLabel::Utf8(v) => Scalar::Utf8(v.clone()),
         IndexLabel::Timedelta64(v) => Scalar::Timedelta64(*v),
         // Keep the TYPED Datetime64 scalar, like the Timedelta64 arm above —
@@ -7347,6 +7352,16 @@ fn write_excel_index_label(
         }
         // Missing labels leave the cell blank, like NAT timedelta/datetime
         // above (pandas writes an empty cell for a NaN index label).
+        IndexLabel::Float64(v) => {
+            worksheet
+                .write_number(excel_row, excel_col, v.0)
+                .map_err(|e| IoError::Excel(format!("write index float: {e}")))?;
+        }
+        IndexLabel::Bool(b) => {
+            worksheet
+                .write_boolean(excel_row, excel_col, *b)
+                .map_err(|e| IoError::Excel(format!("write index bool: {e}")))?;
+        }
         IndexLabel::Null(_) => {}
     }
     Ok(())
@@ -8737,6 +8752,8 @@ fn sql_value_from_scalar(scalar: &Scalar) -> rusqlite::types::Value {
 fn scalar_from_index_label(label: &IndexLabel) -> Scalar {
     match label {
         IndexLabel::Int64(v) => Scalar::Int64(*v),
+        IndexLabel::Float64(v) => Scalar::Float64(v.0),
+        IndexLabel::Bool(b) => Scalar::Bool(*b),
         IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
         // Typed-null label round-trips to the same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),

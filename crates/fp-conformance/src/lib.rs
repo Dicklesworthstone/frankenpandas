@@ -17095,6 +17095,8 @@ fn dataframe_with_index_as_columns(
 fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
     match label {
         IndexLabel::Int64(value) => Scalar::Int64(*value),
+        IndexLabel::Float64(value) => Scalar::Float64(value.0),
+        IndexLabel::Bool(value) => Scalar::Bool(*value),
         IndexLabel::Utf8(value) => Scalar::Utf8(value.clone()),
         IndexLabel::Timedelta64(value) => Scalar::Timedelta64(*value),
         IndexLabel::Datetime64(value) => Scalar::Utf8(format_datetime_ns(*value)),

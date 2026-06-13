@@ -694,7 +694,32 @@ impl Ord for JoinKeyComponent {
             }
             (FloatBits(_), Present(IndexLabel::Utf8(_))) => Ordering::Less,
             (Present(IndexLabel::Utf8(_)), FloatBits(_)) => Ordering::Greater,
+            // Float64/Bool index labels (br-frankenpandas-i10en). Join key
+            // extraction maps float keys to FloatBits and bool keys to Int64, so
+            // a Present(Float64)/Present(Bool) join key is unreachable today;
+            // these arms only keep the manual `Ord` total (same-variant compares
+            // by value, cross-variant by a stable variant rank).
+            (Present(IndexLabel::Float64(a)), Present(IndexLabel::Float64(b))) => a.cmp(b),
+            (Present(IndexLabel::Bool(a)), Present(IndexLabel::Bool(b))) => a.cmp(b),
+            (a, b) => join_component_rank(a).cmp(&join_component_rank(b)),
         }
+    }
+}
+
+/// Stable per-variant rank used only as the cross-variant fallback for the
+/// (unreachable) Float64/Bool join-key cases above, keeping `Ord` total.
+fn join_component_rank(c: &JoinKeyComponent) -> u8 {
+    use JoinKeyComponent::{FloatBits, Missing, Present};
+    match c {
+        Present(IndexLabel::Int64(_)) => 0,
+        Present(IndexLabel::Float64(_)) => 1,
+        Present(IndexLabel::Bool(_)) => 2,
+        Present(IndexLabel::Utf8(_)) => 3,
+        Present(IndexLabel::Timedelta64(_)) => 4,
+        Present(IndexLabel::Datetime64(_)) => 5,
+        Present(IndexLabel::Null(_)) => 6,
+        FloatBits(_) => 7,
+        Missing => 8,
     }
 }
 
