@@ -10,6 +10,7 @@ members = [
   "crates/fp-join",
   "crates/fp-io",
   "crates/fp-conformance",
+  "crates/fp-bench",
   "crates/fp-runtime",
   "crates/fp-frankentui",
   "crates/fp-python",

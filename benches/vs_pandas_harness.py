@@ -307,8 +307,11 @@ def run_pandas_workload(category: str, workload: str, size: str,
 
 def run_fp_workload_subprocess(category: str, workload: str, size: str,
                                dtype: str) -> TimingResult:
-    """Run FrankenPandas workload via subprocess (placeholder)."""
-    bench_binary = PROJECT_ROOT / "target" / "release-perf" / "fp-bench"
+    """Run FrankenPandas workload via subprocess."""
+    # Respect CARGO_TARGET_DIR (rch/remote builds set a custom target dir);
+    # fall back to the in-tree ./target.
+    target_dir = Path(os.environ.get("CARGO_TARGET_DIR", str(PROJECT_ROOT / "target")))
+    bench_binary = target_dir / "release-perf" / "fp-bench"
 
     if not bench_binary.exists():
         print(f"[WARN] fp-bench binary not found at {bench_binary}", file=sys.stderr)

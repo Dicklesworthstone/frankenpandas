@@ -1,0 +1,22 @@
+[package]
+name = "fp-bench"
+description = "Head-to-head vs-pandas timing harness binary. Driven by benches/vs_pandas_harness.py: `fp-bench --category C --workload W --size S --dtype D --json` prints {\"times_us\":[...]}. Restores the FrankenPandas side of the no-gaps measurement loop."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "fp-bench"
+path = "src/main.rs"
+
+[dependencies]
+fp-columnar = { path = "../fp-columnar", version = "0.1.0" }
+fp-frame = { path = "../fp-frame", version = "0.1.0" }
+fp-index = { path = "../fp-index", version = "0.1.0" }
