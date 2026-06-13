@@ -1,0 +1,1 @@
+perf_stat_exit=255

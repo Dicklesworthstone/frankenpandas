@@ -1,0 +1,6 @@
+str_groupby_count 1000 cmp=0
+str_groupby_count 200000 cmp=0
+str_groupby_sum 1000 cmp=0
+str_groupby_sum 200000 cmp=0
+str_groupby_std 1000 cmp=0
+str_groupby_std 200000 cmp=0
