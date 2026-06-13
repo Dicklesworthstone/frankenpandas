@@ -1,0 +1,31 @@
+Benchmark 1: base left_join 500000x20
+  Time (mean ± σ):     729.1 ms ±  21.5 ms    [User: 315.8 ms, System: 412.2 ms]
+  Range (min … max):   688.9 ms … 754.1 ms    10 runs
+
+Benchmark 2: dense-cycle left_join 500000x20
+  Time (mean ± σ):     142.2 ms ±   8.9 ms    [User: 94.6 ms, System: 46.1 ms]
+  Range (min … max):   121.5 ms … 154.2 ms    20 runs
+
+Benchmark 3: base right_join 500000x20
+  Time (mean ± σ):     673.6 ms ±  14.1 ms    [User: 335.6 ms, System: 335.7 ms]
+  Range (min … max):   656.3 ms … 697.3 ms    10 runs
+
+Benchmark 4: dense-cycle right_join 500000x20
+  Time (mean ± σ):     144.0 ms ±   9.9 ms    [User: 101.6 ms, System: 42.2 ms]
+  Range (min … max):   128.6 ms … 161.0 ms    18 runs
+
+Benchmark 5: base outer_join 500000x20
+  Time (mean ± σ):      81.0 ms ±   6.7 ms    [User: 35.7 ms, System: 45.2 ms]
+  Range (min … max):    68.5 ms …  95.1 ms    38 runs
+
+Benchmark 6: dense-cycle outer_join 500000x20
+  Time (mean ± σ):      81.0 ms ±   8.5 ms    [User: 36.7 ms, System: 44.0 ms]
+  Range (min … max):    69.5 ms … 100.4 ms    41 runs
+
+Summary
+  dense-cycle outer_join 500000x20 ran
+    1.00 ± 0.13 times faster than base outer_join 500000x20
+    1.76 ± 0.21 times faster than dense-cycle left_join 500000x20
+    1.78 ± 0.22 times faster than dense-cycle right_join 500000x20
+    8.32 ± 0.89 times faster than base right_join 500000x20
+    9.00 ± 0.98 times faster than base left_join 500000x20

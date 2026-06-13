@@ -2719,6 +2719,7 @@ fn build_single_key_dense_i64_left_merge_output(
         collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
 
     let mut specs = Vec::<FusedInt64OutputColumn<'_>>::new();
+    let mut sources = Vec::<Arc<[i64]>>::new();
     for name in left.column_names() {
         let col = left
             .columns()
@@ -2727,6 +2728,7 @@ fn build_single_key_dense_i64_left_merge_output(
         let Some(values) = col.as_i64_slice() else {
             return Ok(None);
         };
+        let source = col.as_i64_arc().unwrap_or_else(|| Arc::from(values));
         let out_name = if left_key_name_set.contains(name.as_str()) {
             name.clone()
         } else if right_col_names.contains(name) {
@@ -2739,6 +2741,7 @@ fn build_single_key_dense_i64_left_merge_output(
             side: FusedInt64Side::Left,
             values,
         });
+        sources.push(source);
     }
     for name in right.column_names() {
         let col = right
@@ -2751,6 +2754,7 @@ fn build_single_key_dense_i64_left_merge_output(
         let Some(values) = col.as_i64_slice() else {
             return Ok(None);
         };
+        let source = col.as_i64_arc().unwrap_or_else(|| Arc::from(values));
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
@@ -2761,8 +2765,59 @@ fn build_single_key_dense_i64_left_merge_output(
             side: FusedInt64Side::Right,
             values,
         });
+        sources.push(source);
     }
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    let row_count = left_keys.len().saturating_add(right_keys.len());
+    let max_dense_span = row_count.saturating_mul(4).max(1024);
+    let left_witness = left_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == left_keys.len());
+    let right_witness = right_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == right_keys.len());
+    if let (Some(left_witness), Some(right_witness), Some((right_min, right_max))) = (
+        left_witness,
+        right_witness,
+        right_witness.and_then(dense_cycle_domain),
+    ) {
+        let right_span = i128::from(right_max) - i128::from(right_min) + 1;
+        if right_span <= max_dense_span as i128
+            && let Some((output_len, right_validity)) =
+                dense_cycle_probe_output_len_and_validity(left_witness, right_witness)
+        {
+            let index = Index::new_known_unique_int64_unit_range(0, output_len);
+            let mut columns = std::collections::BTreeMap::new();
+            let mut column_order = Vec::with_capacity(specs.len());
+            for (spec, source) in specs.into_iter().zip(sources) {
+                let column = match spec.side {
+                    FusedInt64Side::Left => Column::from_i64_dense_cycle_probe_repeat(
+                        source,
+                        left_witness,
+                        right_witness,
+                        output_len,
+                    ),
+                    FusedInt64Side::Right => {
+                        Column::from_i64_nullable_dense_cycle_probe_build_with_sparse_validity(
+                            source,
+                            left_witness,
+                            right_witness,
+                            right_validity.clone(),
+                            output_len,
+                        )
+                    }
+                };
+                debug_assert_eq!(column.len(), output_len);
+                insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
+            }
+            return Ok(Some(MergedDataFrame {
+                index,
+                columns,
+                column_order,
+            }));
+        }
+    }
 
     // Dense CSR over the RIGHT key range — same gate as the position path
     // (span <= 4*(rows)+1024) so routing between fused/fallback matches
@@ -2774,8 +2829,6 @@ fn build_single_key_dense_i64_left_merge_output(
         max_key = max_key.max(key);
     }
     let span = (i128::from(max_key)) - (i128::from(min_key)) + 1;
-    let row_count = left_keys.len().saturating_add(right_keys.len());
-    let max_dense_span = row_count.saturating_mul(4).max(1024);
     if span > max_dense_span as i128 {
         return Ok(None);
     }
@@ -3067,6 +3120,7 @@ fn build_single_key_dense_i64_right_merge_output(
     // but carries RIGHT key values (all output rows have a right row), so it
     // is a Right-side lane on right_keys.
     let mut specs = Vec::<FusedInt64OutputColumn<'_>>::new();
+    let mut sources = Vec::<Arc<[i64]>>::new();
     for name in left.column_names() {
         let col = left
             .columns()
@@ -3076,13 +3130,22 @@ fn build_single_key_dense_i64_right_merge_output(
             return Ok(None);
         };
         if left_key_name_set.contains(name.as_str()) && shared_key_names.contains(name.as_str()) {
+            let right_key_col = right
+                .columns()
+                .get(right_on[0])
+                .expect("right key column must exist");
+            let source = right_key_col
+                .as_i64_arc()
+                .unwrap_or_else(|| Arc::from(right_keys));
             specs.push(FusedInt64OutputColumn {
                 name: name.clone(),
                 side: FusedInt64Side::Right,
                 values: right_keys,
             });
+            sources.push(source);
             continue;
         }
+        let source = col.as_i64_arc().unwrap_or_else(|| Arc::from(values));
         let out_name = if left_key_name_set.contains(name.as_str()) {
             name.clone()
         } else if right_col_names.contains(name) {
@@ -3095,6 +3158,7 @@ fn build_single_key_dense_i64_right_merge_output(
             side: FusedInt64Side::Left,
             values,
         });
+        sources.push(source);
     }
     for name in right.column_names() {
         let col = right
@@ -3107,6 +3171,7 @@ fn build_single_key_dense_i64_right_merge_output(
         let Some(values) = col.as_i64_slice() else {
             return Ok(None);
         };
+        let source = col.as_i64_arc().unwrap_or_else(|| Arc::from(values));
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
@@ -3117,8 +3182,59 @@ fn build_single_key_dense_i64_right_merge_output(
             side: FusedInt64Side::Right,
             values,
         });
+        sources.push(source);
     }
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    let row_count = left_keys.len().saturating_add(right_keys.len());
+    let max_dense_span = row_count.saturating_mul(4).max(1024);
+    let left_witness = left_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == left_keys.len());
+    let right_witness = right_key
+        .int64_dense_cycle_witness()
+        .filter(|witness| witness.len == right_keys.len());
+    if let (Some(left_witness), Some(right_witness), Some((left_min, left_max))) = (
+        left_witness,
+        right_witness,
+        left_witness.and_then(dense_cycle_domain),
+    ) {
+        let left_span = i128::from(left_max) - i128::from(left_min) + 1;
+        if left_span <= max_dense_span as i128
+            && let Some((output_len, left_validity)) =
+                dense_cycle_probe_output_len_and_validity(right_witness, left_witness)
+        {
+            let index = Index::new_known_unique_int64_unit_range(0, output_len);
+            let mut columns = std::collections::BTreeMap::new();
+            let mut column_order = Vec::with_capacity(specs.len());
+            for (spec, source) in specs.into_iter().zip(sources) {
+                let column = match spec.side {
+                    FusedInt64Side::Left => {
+                        Column::from_i64_nullable_dense_cycle_probe_build_with_sparse_validity(
+                            source,
+                            right_witness,
+                            left_witness,
+                            left_validity.clone(),
+                            output_len,
+                        )
+                    }
+                    FusedInt64Side::Right => Column::from_i64_dense_cycle_probe_repeat(
+                        source,
+                        right_witness,
+                        left_witness,
+                        output_len,
+                    ),
+                };
+                debug_assert_eq!(column.len(), output_len);
+                insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
+            }
+            return Ok(Some(MergedDataFrame {
+                index,
+                columns,
+                column_order,
+            }));
+        }
+    }
 
     // Dense CSR over the LEFT key range — same gate as
     // dense_int64_right_positions (span <= 4*rows+1024).
@@ -3129,8 +3245,6 @@ fn build_single_key_dense_i64_right_merge_output(
         max_key = max_key.max(key);
     }
     let span = (i128::from(max_key)) - (i128::from(min_key)) + 1;
-    let row_count = left_keys.len().saturating_add(right_keys.len());
-    let max_dense_span = row_count.saturating_mul(4).max(1024);
     if span > max_dense_span as i128 {
         return Ok(None);
     }
@@ -3369,6 +3483,29 @@ fn build_single_key_dense_i64_right_merge_output(
 fn dense_cycle_domain(witness: Int64DenseCycleWitness) -> Option<(i64, i64)> {
     let last_offset = i64::try_from(witness.period.checked_sub(1)?).ok()?;
     Some((witness.start, witness.start.checked_add(last_offset)?))
+}
+
+fn dense_cycle_probe_output_len_and_validity(
+    probe_witness: Int64DenseCycleWitness,
+    build_witness: Int64DenseCycleWitness,
+) -> Option<(usize, ValidityMask)> {
+    let mut output_len = 0usize;
+    let mut invalid_ranges = Vec::<(usize, usize)>::new();
+    for probe_pos in 0..probe_witness.len {
+        let offset = i64::try_from(probe_pos % probe_witness.period).ok()?;
+        let key = probe_witness.start.checked_add(offset)?;
+        let run_len = build_witness
+            .offset_count_for_key(key)
+            .map_or(1, |(_, count)| count);
+        if build_witness.offset_count_for_key(key).is_none() {
+            push_dense_outer_invalid_range(&mut invalid_ranges, output_len, 1);
+        }
+        output_len = output_len.checked_add(run_len)?;
+    }
+    Some((
+        output_len,
+        ValidityMask::from_invalid_ranges(Arc::from(invalid_ranges), output_len),
+    ))
 }
 
 struct DenseOuterRunTape {
@@ -5141,7 +5278,10 @@ fn build_single_key_ordered_unique_outer_merge_output(
                 jobs.push((name.clone(), spec));
             } else {
                 let spec = if let Some(positions) = all_present_left_positions {
-                    ColBuild::Take { col, present: positions }
+                    ColBuild::Take {
+                        col,
+                        present: positions,
+                    }
                 } else {
                     ColBuild::Reindex {
                         col,
@@ -5153,7 +5293,10 @@ fn build_single_key_ordered_unique_outer_merge_output(
             continue;
         }
         let spec = if let Some(positions) = all_present_left_positions {
-            ColBuild::Take { col, present: positions }
+            ColBuild::Take {
+                col,
+                present: positions,
+            }
         } else {
             ColBuild::Reindex {
                 col,
@@ -5178,7 +5321,10 @@ fn build_single_key_ordered_unique_outer_merge_output(
             continue;
         }
         let spec = if let Some(positions) = all_present_right_positions {
-            ColBuild::Take { col, present: positions }
+            ColBuild::Take {
+                col,
+                present: positions,
+            }
         } else {
             ColBuild::Reindex {
                 col,
@@ -5259,7 +5405,7 @@ fn build_single_key_ordered_unique_outer_merge_output(
         jobs.iter().map(|(_, spec)| compute(spec)).collect()
     };
 
-    for ((out_name, _), col_res) in jobs.into_iter().zip(computed.into_iter()) {
+    for ((out_name, _), col_res) in jobs.into_iter().zip(computed) {
         insert_merged_output_column(&mut columns, &mut column_order, out_name, col_res?)?;
     }
 
@@ -7482,7 +7628,9 @@ mod tests {
     use super::{
         DataFrameMergeExt, DenseI64InnerOutputPlan, DenseI64LaneData, FusedInt64OutputColumn,
         FusedInt64Side, InnerPositionPlan, JoinExecutionOptions, JoinType, PositionSelection,
-        build_dense_i64_inner_output_data, build_single_key_inner_contiguous_no_overlap_output,
+        build_dense_i64_inner_output_data, build_single_key_dense_i64_left_merge_output,
+        build_single_key_dense_i64_right_merge_output, build_single_key_dense_left_merge_output,
+        build_single_key_inner_contiguous_no_overlap_output, dense_int64_left_positions,
         join_series, join_series_with_options, join_series_with_trace,
         lower_hex_overlap_plan_from_certificates, ordered_unique_utf8_inner_position_plan,
         ordered_unique_utf8_inner_positions, ordered_utf8_lower_hex_overlap_len,
@@ -8975,6 +9123,106 @@ mod tests {
     }
 
     #[test]
+    fn merge_left_dense_cycle_probe_output_matches_materialized_positions_yq96z() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(12),
+                        Scalar::Int64(13),
+                        Scalar::Int64(14),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(101),
+                        Scalar::Int64(201),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let left_key = left.columns().get("id").unwrap();
+        let right_key = right.columns().get("id").unwrap();
+        assert!(left_key.int64_dense_cycle_witness().is_some());
+        assert!(right_key.int64_dense_cycle_witness().is_some());
+        let suffixes = resolve_merge_suffixes(None);
+
+        let fused = build_single_key_dense_i64_left_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            left_key,
+            right_key,
+            &suffixes,
+        )
+        .unwrap()
+        .expect("dense-cycle left route should accept");
+        let (left_positions, right_positions) =
+            dense_int64_left_positions(left_key, right_key).unwrap();
+        let materialized = build_single_key_dense_left_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        )
+        .unwrap();
+
+        assert_eq!(fused.index, materialized.index);
+        assert_eq!(fused.column_order, materialized.column_order);
+        assert_eq!(fused.columns, materialized.columns);
+        assert_eq!(
+            fused.columns.get("w").unwrap().values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+                Scalar::Int64(200),
+                Scalar::Int64(201),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+            ]
+        );
+    }
+
+    #[test]
     fn merge_left_all_matched_dense_int64_fused_output_matches_sorted_generic_route() {
         let left = DataFrame::from_dict(
             &["id", "v"],
@@ -9522,6 +9770,106 @@ mod tests {
         assert_eq!(right_values[3], Scalar::Int64(201));
         assert_eq!(right_values[4], Scalar::Int64(300));
         assert_eq!(right_values[5], Scalar::Int64(400));
+    }
+
+    #[test]
+    fn merge_right_dense_cycle_probe_output_matches_materialized_positions_yq96z() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(101),
+                        Scalar::Int64(201),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(0),
+                        Scalar::Int64(1),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(12),
+                        Scalar::Int64(13),
+                        Scalar::Int64(14),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let left_key = left.columns().get("id").unwrap();
+        let right_key = right.columns().get("id").unwrap();
+        assert!(left_key.int64_dense_cycle_witness().is_some());
+        assert!(right_key.int64_dense_cycle_witness().is_some());
+        let suffixes = resolve_merge_suffixes(None);
+
+        let fused = build_single_key_dense_i64_right_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            left_key,
+            right_key,
+            &suffixes,
+        )
+        .unwrap()
+        .expect("dense-cycle right route should accept");
+        let (left_positions, right_positions) =
+            dense_int64_right_positions(left_key, right_key).unwrap();
+        let materialized = build_single_key_dense_right_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        )
+        .unwrap();
+
+        assert_eq!(fused.index, materialized.index);
+        assert_eq!(fused.column_order, materialized.column_order);
+        assert_eq!(fused.columns, materialized.columns);
+        assert_eq!(
+            fused.columns.get("v").unwrap().values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+                Scalar::Int64(200),
+                Scalar::Int64(201),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+            ]
+        );
     }
 
     #[test]

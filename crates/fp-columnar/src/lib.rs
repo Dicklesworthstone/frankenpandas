@@ -1563,6 +1563,27 @@ enum ScalarValues {
         total_len: usize,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Probe-order dense-cycle repeat lane for one-sided joins. Row order is
+    /// the probe side's original order; matched probe rows repeat once per
+    /// build-side duplicate and unmatched probe rows repeat once.
+    LazyDenseCycleProbeRepeatInt64 {
+        source: Arc<[i64]>,
+        probe_witness: Int64DenseCycleWitness,
+        build_witness: Int64DenseCycleWitness,
+        total_len: usize,
+        data: OnceLock<Vec<i64>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
+    /// Probe-order dense-cycle nullable build lane for one-sided joins.
+    /// Matched probe rows replay build-side positions in their original
+    /// duplicate order; unmatched probe rows materialize `Null`.
+    LazyNullableDenseCycleProbeBuildInt64 {
+        source: Arc<[i64]>,
+        probe_witness: Int64DenseCycleWitness,
+        build_witness: Int64DenseCycleWitness,
+        total_len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Source-position backed sibling of `LazyNullableRepeatValuesFloat64`.
     /// Each valid run reads `source[run_positions[k]] as f64` lazily; invalid
     /// runs materialize `Null(NaN)` under the same validity mask.
@@ -2070,6 +2091,39 @@ impl ScalarValues {
         }
     }
 
+    fn lazy_dense_cycle_probe_repeat_int64(
+        source: Arc<[i64]>,
+        probe_witness: Int64DenseCycleWitness,
+        build_witness: Int64DenseCycleWitness,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(source.len(), probe_witness.len);
+        Self::LazyDenseCycleProbeRepeatInt64 {
+            source,
+            probe_witness,
+            build_witness,
+            total_len,
+            data: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_dense_cycle_probe_build_int64(
+        source: Arc<[i64]>,
+        probe_witness: Int64DenseCycleWitness,
+        build_witness: Int64DenseCycleWitness,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(source.len(), build_witness.len);
+        Self::LazyNullableDenseCycleProbeBuildInt64 {
+            source,
+            probe_witness,
+            build_witness,
+            total_len,
+            values: OnceLock::new(),
+        }
+    }
+
     fn lazy_nullable_repeat_positions_i64_as_float64(
         source: Arc<[i64]>,
         run_positions: Arc<[usize]>,
@@ -2334,6 +2388,27 @@ impl ScalarValues {
                 .as_slice(),
             );
         }
+        if let Self::LazyDenseCycleProbeRepeatInt64 {
+            source,
+            probe_witness,
+            build_witness,
+            total_len,
+            data,
+            ..
+        } = self
+        {
+            return Some(
+                data.get_or_init(|| {
+                    Self::expand_dense_cycle_probe_repeat_i64(
+                        source,
+                        *probe_witness,
+                        *build_witness,
+                        *total_len,
+                    )
+                })
+                .as_slice(),
+            );
+        }
         None
     }
 
@@ -2353,6 +2428,34 @@ impl ScalarValues {
             );
         }
         None
+    }
+
+    fn dense_cycle_key_at(witness: Int64DenseCycleWitness, row: usize) -> i64 {
+        witness
+            .start
+            .checked_add(
+                i64::try_from(row % witness.period)
+                    .expect("dense-cycle period offset must fit in i64"),
+            )
+            .expect("dense-cycle key offset was prevalidated")
+    }
+
+    fn expand_dense_cycle_probe_repeat_i64(
+        source: &[i64],
+        probe_witness: Int64DenseCycleWitness,
+        build_witness: Int64DenseCycleWitness,
+        total_len: usize,
+    ) -> Vec<i64> {
+        let mut out = Vec::with_capacity(total_len);
+        for (probe_pos, &value) in source.iter().enumerate().take(probe_witness.len) {
+            let key = Self::dense_cycle_key_at(probe_witness, probe_pos);
+            let run_len = build_witness
+                .offset_count_for_key(key)
+                .map_or(1, |(_, count)| count);
+            out.resize(out.len() + run_len, value);
+        }
+        debug_assert_eq!(out.len(), total_len);
+        out
     }
 
     fn expand_strided_float64(data: &[f64], start: usize, step: usize, len: usize) -> Vec<f64> {
@@ -2810,6 +2913,52 @@ impl ScalarValues {
                     out
                 })
                 .as_slice(),
+            Self::LazyDenseCycleProbeRepeatInt64 {
+                source,
+                probe_witness,
+                build_witness,
+                total_len,
+                values,
+                ..
+            } => values
+                .get_or_init(|| {
+                    Self::expand_dense_cycle_probe_repeat_i64(
+                        source,
+                        *probe_witness,
+                        *build_witness,
+                        *total_len,
+                    )
+                    .into_iter()
+                    .map(Scalar::Int64)
+                    .collect()
+                })
+                .as_slice(),
+            Self::LazyNullableDenseCycleProbeBuildInt64 {
+                source,
+                probe_witness,
+                build_witness,
+                total_len,
+                values,
+            } => values
+                .get_or_init(|| {
+                    let mut out = Vec::with_capacity(*total_len);
+                    for probe_pos in 0..probe_witness.len {
+                        let key = Self::dense_cycle_key_at(*probe_witness, probe_pos);
+                        if let Some((mut build_pos, count)) =
+                            build_witness.offset_count_for_key(key)
+                        {
+                            for _ in 0..count {
+                                out.push(Scalar::Int64(source[build_pos]));
+                                build_pos += build_witness.period;
+                            }
+                        } else {
+                            out.push(Scalar::Null(NullKind::Null));
+                        }
+                    }
+                    debug_assert_eq!(out.len(), *total_len);
+                    out
+                })
+                .as_slice(),
             Self::LazyNullableRepeatPositionsI64AsFloat64 {
                 source,
                 run_positions,
@@ -2887,6 +3036,8 @@ impl ScalarValues {
             Self::LazyNullableRepeatedPositionsI64AsFloat64 { total_len, .. } => *total_len,
             Self::LazyNullableDenseCycleRightI64AsFloat64 { total_len, .. } => *total_len,
             Self::LazyNullableDenseCycleLeftI64AsFloat64 { total_len, .. } => *total_len,
+            Self::LazyDenseCycleProbeRepeatInt64 { total_len, .. } => *total_len,
+            Self::LazyNullableDenseCycleProbeBuildInt64 { total_len, .. } => *total_len,
             Self::LazyNullableRepeatPositionsI64AsFloat64 { total_len, .. } => *total_len,
             Self::LazyUtf8Slice { len, .. } => *len,
         }
@@ -3207,6 +3358,30 @@ impl Clone for ScalarValues {
                 *right_witness,
                 *min_key,
                 *span,
+                *total_len,
+            ),
+            Self::LazyDenseCycleProbeRepeatInt64 {
+                source,
+                probe_witness,
+                build_witness,
+                total_len,
+                ..
+            } => Self::lazy_dense_cycle_probe_repeat_int64(
+                Arc::clone(source),
+                *probe_witness,
+                *build_witness,
+                *total_len,
+            ),
+            Self::LazyNullableDenseCycleProbeBuildInt64 {
+                source,
+                probe_witness,
+                build_witness,
+                total_len,
+                ..
+            } => Self::lazy_nullable_dense_cycle_probe_build_int64(
+                Arc::clone(source),
+                *probe_witness,
+                *build_witness,
                 *total_len,
             ),
             Self::LazyNullableRepeatPositionsI64AsFloat64 {
@@ -4733,6 +4908,56 @@ impl Column {
                 right_witness,
                 min_key,
                 span,
+                total_len,
+            ),
+            validity,
+            data: None,
+        }
+    }
+
+    /// Probe-order dense-cycle repeat lane for one-sided joins. This is the
+    /// kept side of a LEFT/RIGHT join: row `p` from the probe side is repeated
+    /// once per matching build-side duplicate, or once when unmatched.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_i64_dense_cycle_probe_repeat(
+        source: Arc<[i64]>,
+        probe_witness: Int64DenseCycleWitness,
+        build_witness: Int64DenseCycleWitness,
+        total_len: usize,
+    ) -> Self {
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_dense_cycle_probe_repeat_int64(
+                source,
+                probe_witness,
+                build_witness,
+                total_len,
+            ),
+            validity: ValidityMask::all_valid(total_len),
+            data: None,
+        }
+    }
+
+    /// Probe-order dense-cycle nullable build lane for one-sided joins. Matched
+    /// rows replay the build side in stable duplicate order; unmatched probe
+    /// rows materialize `Null(NullKind::Null)` under the supplied sparse mask.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_i64_nullable_dense_cycle_probe_build_with_sparse_validity(
+        source: Arc<[i64]>,
+        probe_witness: Int64DenseCycleWitness,
+        build_witness: Int64DenseCycleWitness,
+        validity: ValidityMask,
+        total_len: usize,
+    ) -> Self {
+        debug_assert_eq!(validity.len(), total_len);
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_nullable_dense_cycle_probe_build_int64(
+                source,
+                probe_witness,
+                build_witness,
                 total_len,
             ),
             validity,
@@ -22636,6 +22861,83 @@ mod tests {
         assert_eq!(
             column.validity.invalid_ranges.as_deref(),
             Some(&[(2, 3)][..])
+        );
+    }
+
+    #[test]
+    fn dense_cycle_probe_repeat_int64_preserves_probe_order_yq96z() {
+        let probe = Column::from_i64_values(vec![0, 1, 2, 0, 1]);
+        let build = Column::from_i64_values(vec![1, 2, 1, 2]);
+        let probe_witness = probe
+            .int64_dense_cycle_witness()
+            .expect("probe dense cycle");
+        let build_witness = build
+            .int64_dense_cycle_witness()
+            .expect("build dense cycle");
+        let column = Column::from_i64_dense_cycle_probe_repeat(
+            Arc::from(vec![10, 11, 12, 13, 14]),
+            probe_witness,
+            build_witness,
+            8,
+        );
+
+        assert_eq!(column.dtype(), DType::Int64);
+        assert!(column.validity.all());
+        assert_eq!(
+            column.as_i64_slice(),
+            Some([10, 11, 11, 12, 12, 13, 14, 14].as_slice())
+        );
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(11),
+                Scalar::Int64(11),
+                Scalar::Int64(12),
+                Scalar::Int64(12),
+                Scalar::Int64(13),
+                Scalar::Int64(14),
+                Scalar::Int64(14),
+            ]
+        );
+    }
+
+    #[test]
+    fn nullable_dense_cycle_probe_build_int64_preserves_build_ties_yq96z() {
+        let probe = Column::from_i64_values(vec![0, 1, 2, 0, 1]);
+        let build = Column::from_i64_values(vec![1, 2, 1, 2]);
+        let probe_witness = probe
+            .int64_dense_cycle_witness()
+            .expect("probe dense cycle");
+        let build_witness = build
+            .int64_dense_cycle_witness()
+            .expect("build dense cycle");
+        let validity = ValidityMask::from_invalid_ranges(Arc::from(vec![(0, 1), (5, 1)]), 8);
+        let column = Column::from_i64_nullable_dense_cycle_probe_build_with_sparse_validity(
+            Arc::from(vec![100, 200, 101, 201]),
+            probe_witness,
+            build_witness,
+            validity,
+            8,
+        );
+
+        assert_eq!(column.dtype(), DType::Int64);
+        assert_eq!(
+            column.validity.invalid_ranges.as_deref(),
+            Some(&[(0, 1), (5, 1)][..])
+        );
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+                Scalar::Int64(200),
+                Scalar::Int64(201),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+            ]
         );
     }
 }
