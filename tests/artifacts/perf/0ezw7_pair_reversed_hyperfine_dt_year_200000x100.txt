@@ -1,0 +1,10 @@
+Benchmark 1: after
+  Time (mean +/- sigma): 728.6 ms +/- 16.6 ms    [User: 701.9 ms, System: 25.9 ms]
+  Range (min ... max):   705.8 ms ... 758.2 ms    10 runs
+
+Benchmark 2: baseline
+  Time (mean +/- sigma): 1.476 s +/- 0.053 s    [User: 1.445 s, System: 0.030 s]
+  Range (min ... max):   1.403 s ... 1.599 s    10 runs
+
+Summary
+  after ran 2.03 +/- 0.09 times faster than baseline

@@ -15,13 +15,13 @@
 //!   str_groupby_mean, str_groupby_count, str_groupby_min, str_groupby_max,
 //!   str_groupby_var, str_groupby_std, str_groupby_first, str_groupby_last,
 //!   str_groupby_prod, str_groupby_median, str_series_sort, str_sort_chain,
-//!   filter_bool, inner_join, series_add, series_add_same, series_add_align,
+//!   filter_bool, dt_year, inner_join, series_add, series_add_same, series_add_align,
 //!   csv_read, csv_read_options, csv_read_no_na_filter }
 
 use std::{collections::BTreeMap, fmt::Write as _, time::Instant};
 
 use fp_columnar::Column;
-use fp_frame::{DataFrame, Series};
+use fp_frame::{DataFrame, Series, to_datetime};
 use fp_index::{DuplicateKeep, Index, IndexLabel};
 use fp_io::{CsvReadOptions, read_csv_str, read_csv_with_options};
 use fp_join::{AsofDirection, JoinType, merge_asof, merge_dataframes};
@@ -105,6 +105,24 @@ fn build_str_series(n: usize) -> Series {
         })
         .collect();
     Series::from_values("s", labels, values).expect("str series")
+}
+
+fn build_datetime_string_series(n: usize) -> Series {
+    let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+    let values: Vec<Scalar> = (0..n)
+        .map(|i| {
+            let year = 2020 + (i % 5);
+            let month = (i % 12) + 1;
+            let day = (i % 28) + 1;
+            let hour = i % 24;
+            let minute = (i / 7) % 60;
+            let second = (i / 13) % 60;
+            Scalar::Utf8(format!(
+                "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
+            ))
+        })
+        .collect();
+    Series::from_values("ts", labels, values).expect("datetime string series")
 }
 
 /// Series of Float64 values with moderate cardinality (so rank tie-groups
@@ -882,6 +900,14 @@ fn run_golden(scenario: &str, n: usize) {
             let mask = build_every_other_bool_mask(frame.index(), n);
             frame.filter_rows(&mask).expect("filter")
         }
+        "dt_year" => {
+            let out = to_datetime(&build_datetime_string_series(n))
+                .expect("to datetime")
+                .dt()
+                .year()
+                .expect("dt year");
+            return print!("{}", golden_dump_series(&out));
+        }
         "str_filter" => {
             // Filter a text-heavy frame (4 contiguous-Utf8 columns): exercises
             // Column::take_positions' Utf8 gather (br-frankenpandas-nl1tw).
@@ -1489,6 +1515,13 @@ fn main() {
             let mask = build_every_other_bool_mask(frame.index(), n);
             for _ in 0..iters {
                 let out = frame.filter_rows(&mask).expect("filter");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "dt_year" => {
+            let parsed = to_datetime(&build_datetime_string_series(n)).expect("to datetime");
+            for _ in 0..iters {
+                let out = parsed.dt().year().expect("dt year");
                 sink = sink.wrapping_add(out.len());
             }
         }
