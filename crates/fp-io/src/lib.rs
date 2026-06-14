@@ -10746,6 +10746,9 @@ fn promote_column_to_index(frame: &DataFrame, col_name: &str) -> Result<DataFram
             Scalar::Float64(f) if !f.is_nan() => IndexLabel::Utf8(f.to_string()),
             Scalar::Bool(b) => IndexLabel::Utf8(if *b { "True" } else { "False" }.to_string()),
             Scalar::Timedelta64(ns) => IndexLabel::Timedelta64(*ns),
+            // A parse_dates column promoted to index becomes a DatetimeIndex
+            // (typed Datetime64[ns], br-frankenpandas-0ezw7) — not a "NaN" string.
+            Scalar::Datetime64(ns) => IndexLabel::Datetime64(*ns),
             _ => IndexLabel::Utf8("NaN".to_owned()),
         })
         .collect();
@@ -19298,11 +19301,12 @@ mod tests {
         .expect("read_sql_query with options");
 
         assert_eq!(frame.column_names(), vec!["ts", "value"]);
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             frame.column("ts").unwrap().values(),
             &[
-                Scalar::Utf8("2024-02-01 05:06:07".to_owned()),
-                Scalar::Utf8("2024-03-03 00:00:00".to_owned())
+                Scalar::Datetime64(1_706_763_967_000_000_000),
+                Scalar::Datetime64(1_709_424_000_000_000_000)
             ]
         );
         assert_eq!(
@@ -19401,11 +19405,12 @@ mod tests {
             &[IndexLabel::Int64(101), IndexLabel::Int64(102)]
         );
         assert_eq!(frame.column_names(), vec!["ts", "amount", "label"]);
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             frame.column("ts").unwrap().values(),
             &[
-                Scalar::Utf8("2024-01-15 00:00:00".to_owned()),
-                Scalar::Utf8("2024-01-16 00:00:00".to_owned())
+                Scalar::Datetime64(1_705_276_800_000_000_000),
+                Scalar::Datetime64(1_705_363_200_000_000_000)
             ]
         );
         assert_eq!(
@@ -19514,9 +19519,10 @@ mod tests {
         .expect("all chunks");
 
         assert_eq!(chunks.len(), 2);
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             chunks[0].column("ts").unwrap().values(),
-            &[Scalar::Utf8("2024-02-01 05:06:07".to_owned())]
+            &[Scalar::Datetime64(1_706_763_967_000_000_000)]
         );
         assert_eq!(
             chunks[0].column("amount").unwrap().values(),
@@ -19524,7 +19530,7 @@ mod tests {
         );
         assert_eq!(
             chunks[1].column("ts").unwrap().values(),
-            &[Scalar::Utf8("2024-03-03 00:00:00".to_owned())]
+            &[Scalar::Datetime64(1_709_424_000_000_000_000)]
         );
         assert_eq!(
             chunks[1].column("amount").unwrap().values(),
@@ -19695,9 +19701,10 @@ mod tests {
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].index().name(), Some("ts"));
+        // parse_dates column promoted to index → DatetimeIndex (br-frankenpandas-0ezw7).
         assert_eq!(
             chunks[0].index().labels(),
-            &[IndexLabel::Utf8("2024-02-01 05:06:07".to_owned())]
+            &[IndexLabel::Datetime64(1_706_763_967_000_000_000)]
         );
         assert!(chunks[0].column("ts").is_none());
         assert_eq!(
@@ -19706,7 +19713,7 @@ mod tests {
         );
         assert_eq!(
             chunks[1].index().labels(),
-            &[IndexLabel::Utf8("2024-03-03 00:00:00".to_owned())]
+            &[IndexLabel::Datetime64(1_709_424_000_000_000_000)]
         );
         assert_eq!(
             chunks[1].column("amount").unwrap().values(),
@@ -19860,11 +19867,12 @@ mod tests {
         .expect("read indexed query frame");
 
         assert_eq!(frame.index().name(), Some("ts"));
+        // parse_dates column promoted to index → DatetimeIndex (br-frankenpandas-0ezw7).
         assert_eq!(
             frame.index().labels(),
             &[
-                IndexLabel::Utf8("2024-02-01 05:06:07".to_owned()),
-                IndexLabel::Utf8("2024-03-03 00:00:00".to_owned())
+                IndexLabel::Datetime64(1_706_763_967_000_000_000),
+                IndexLabel::Datetime64(1_709_424_000_000_000_000)
             ]
         );
         assert!(frame.column("ts").is_none());
@@ -20121,11 +20129,12 @@ mod tests {
         )
         .expect("read table with options");
 
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             frame.column("ts").unwrap().values(),
             &[
-                Scalar::Utf8("2024-01-15 00:00:00".to_owned()),
-                Scalar::Utf8("2024-02-01 05:06:07".to_owned())
+                Scalar::Datetime64(1_705_276_800_000_000_000),
+                Scalar::Datetime64(1_706_763_967_000_000_000)
             ]
         );
         assert_eq!(
@@ -20170,11 +20179,12 @@ mod tests {
         .expect("all chunks");
 
         assert_eq!(chunks.len(), 2);
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             chunks[0].column("ts").unwrap().values(),
             &[
-                Scalar::Utf8("2024-03-01 00:00:00".to_owned()),
-                Scalar::Utf8("2024-03-02 00:00:00".to_owned())
+                Scalar::Datetime64(1_709_251_200_000_000_000),
+                Scalar::Datetime64(1_709_337_600_000_000_000)
             ]
         );
         assert_eq!(
@@ -20552,8 +20562,8 @@ mod tests {
         assert_eq!(
             frame.index().labels(),
             &[
-                IndexLabel::Utf8("2024-04-01 00:00:00".to_owned()),
-                IndexLabel::Utf8("2024-04-02 03:04:05".to_owned())
+                IndexLabel::Datetime64(1_711_929_600_000_000_000),
+                IndexLabel::Datetime64(1_712_027_045_000_000_000)
             ]
         );
         assert!(frame.column("ts").is_none());
@@ -20636,11 +20646,12 @@ mod tests {
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].index().name(), Some("ts"));
+        // parse_dates column promoted to index → DatetimeIndex (br-frankenpandas-0ezw7).
         assert_eq!(
             chunks[0].index().labels(),
             &[
-                IndexLabel::Utf8("2024-05-01 00:00:00".to_owned()),
-                IndexLabel::Utf8("2024-05-02 00:00:00".to_owned())
+                IndexLabel::Datetime64(1_714_521_600_000_000_000),
+                IndexLabel::Datetime64(1_714_608_000_000_000_000)
             ]
         );
         assert!(chunks[0].column("ts").is_none());
@@ -20650,7 +20661,7 @@ mod tests {
         );
         assert_eq!(
             chunks[1].index().labels(),
-            &[IndexLabel::Utf8("2024-05-03 00:00:00".to_owned())]
+            &[IndexLabel::Datetime64(1_714_694_400_000_000_000)]
         );
         assert_eq!(
             chunks[1].column("amount").unwrap().values(),
@@ -20760,13 +20771,14 @@ mod tests {
         )
         .expect("read sql with parse_dates");
 
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             frame.column("ts").unwrap().values()[0],
-            Scalar::Utf8("2024-01-15 00:00:00".into())
+            Scalar::Datetime64(1_705_276_800_000_000_000)
         );
         assert_eq!(
             frame.column("ts").unwrap().values()[1],
-            Scalar::Utf8("2024-02-01 05:06:07".into())
+            Scalar::Datetime64(1_706_763_967_000_000_000)
         );
         assert_eq!(frame.column("value").unwrap().values()[0], Scalar::Int64(1));
         assert_eq!(frame.column("value").unwrap().values()[1], Scalar::Int64(2));
@@ -21081,9 +21093,10 @@ mod tests {
         .expect("all chunks");
 
         assert_eq!(chunks.len(), 2);
+        // parse_dates now yields typed Datetime64[ns] (br-frankenpandas-0ezw7).
         assert_eq!(
             chunks[0].column("ts").unwrap().values(),
-            &[Scalar::Utf8("2024-02-01 05:06:07".to_owned())]
+            &[Scalar::Datetime64(1_706_763_967_000_000_000)]
         );
         assert_eq!(
             chunks[0].column("amount").unwrap().values(),
@@ -21091,7 +21104,7 @@ mod tests {
         );
         assert_eq!(
             chunks[1].column("ts").unwrap().values(),
-            &[Scalar::Utf8("2024-03-03 00:00:00".to_owned())]
+            &[Scalar::Datetime64(1_709_424_000_000_000_000)]
         );
         assert_eq!(
             chunks[1].column("amount").unwrap().values(),
@@ -22744,7 +22757,9 @@ mod tests {
         )
         .expect("read with parse_dates priority");
         let col = frame.column("ts").expect("ts");
-        assert_eq!(col.dtype(), DType::Utf8);
+        // parse_dates wins over the dtype override and yields typed
+        // Datetime64[ns] (br-frankenpandas-0ezw7).
+        assert_eq!(col.dtype(), DType::Datetime64);
     }
 
     // ── Schema probes (br-frankenpandas-6dk9 / fd90.13) ─────────────────
@@ -26848,13 +26863,12 @@ mod tests {
             },
         )
         .unwrap();
-        // Only id + ts surfaced; ts was reformatted by parse_dates
-        // (the project-then-coerce path emits the canonical
-        // 'YYYY-MM-DD HH:MM:SS' shape via Scalar::Utf8).
+        // Only id + ts surfaced; ts was coerced by parse_dates into a typed
+        // Datetime64[ns] column (br-frankenpandas-0ezw7).
         assert_eq!(frame.column_names(), vec!["id", "ts"]);
         assert_eq!(
             frame.column("ts").unwrap().values()[0],
-            Scalar::Utf8("2024-01-15 00:00:00".to_owned())
+            Scalar::Datetime64(1_705_276_800_000_000_000)
         );
     }
 
