@@ -361,6 +361,150 @@ impl PyDataFrame {
     fn to_csv(&self) -> String {
         self.inner.to_csv(',', false)
     }
+
+    /// Render the DataFrame as an HTML table (pandas `DataFrame.to_html`).
+    #[pyo3(signature = (index=true))]
+    fn to_html(&self, index: bool) -> String {
+        self.inner.to_html(index)
+    }
+
+    /// Render the DataFrame as a GitHub-flavored Markdown table
+    /// (pandas `DataFrame.to_markdown`).
+    #[pyo3(signature = (index=true))]
+    fn to_markdown(&self, index: bool) -> PyResult<String> {
+        self.inner
+            .to_markdown(index, None)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
+
+    /// Render the DataFrame as a plain-text table (pandas `DataFrame.to_string`).
+    #[pyo3(signature = (index=true))]
+    fn to_string(&self, index: bool) -> String {
+        self.inner.to_string_table(index)
+    }
+
+    /// Return a chainable Styler for HTML formatting (pandas `DataFrame.style`).
+    fn style(&self) -> PyStyler {
+        PyStyler {
+            df: self.inner.clone(),
+            ops: Vec::new(),
+        }
+    }
+}
+
+/// Recorded Styler directive, replayed onto a fresh `StyledDataFrame` at
+/// render time (the Rust Styler borrows its DataFrame, so the Python wrapper
+/// owns a clone and replays the chain instead of holding the borrow).
+#[derive(Clone)]
+enum StyleOp {
+    HighlightMax(String),
+    HighlightMin(String),
+    BackgroundGradient(String, String),
+    Format(String),
+    NaRep(String),
+    SetCaption(String),
+    SetProperties(Vec<(String, String)>),
+    Bar(String),
+    HideIndex,
+}
+
+/// Python wrapper for FrankenPandas DataFrame.style (Styler).
+///
+/// Builder methods return a new `Styler` so the chain composes exactly like
+/// pandas: `df.style().highlight_max("yellow").format("{:.2f}").to_html()`.
+#[pyclass(name = "Styler", from_py_object)]
+#[derive(Clone)]
+pub struct PyStyler {
+    df: DataFrame,
+    ops: Vec<StyleOp>,
+}
+
+impl PyStyler {
+    fn with_op(&self, op: StyleOp) -> PyStyler {
+        let mut next = self.clone();
+        next.ops.push(op);
+        next
+    }
+}
+
+#[pymethods]
+impl PyStyler {
+    fn __repr__(&self) -> String {
+        format!("Styler(directives={})", self.ops.len())
+    }
+
+    /// Highlight the per-column maximum cell(s) with `color`.
+    fn highlight_max(&self, color: &str) -> PyStyler {
+        self.with_op(StyleOp::HighlightMax(color.to_owned()))
+    }
+
+    /// Highlight the per-column minimum cell(s) with `color`.
+    fn highlight_min(&self, color: &str) -> PyStyler {
+        self.with_op(StyleOp::HighlightMin(color.to_owned()))
+    }
+
+    /// Shade numeric cells along a two-colour `#rrggbb` gradient.
+    fn background_gradient(&self, low: &str, high: &str) -> PyStyler {
+        self.with_op(StyleOp::BackgroundGradient(low.to_owned(), high.to_owned()))
+    }
+
+    /// Apply a Python-style numeric format spec, e.g. `"{:.2f}"`.
+    fn format(&self, fmt: &str) -> PyStyler {
+        self.with_op(StyleOp::Format(fmt.to_owned()))
+    }
+
+    /// Render missing/NaN cells with `placeholder` instead of `"NaN"`.
+    fn na_rep(&self, placeholder: &str) -> PyStyler {
+        self.with_op(StyleOp::NaRep(placeholder.to_owned()))
+    }
+
+    /// Set the table `<caption>`.
+    fn set_caption(&self, caption: &str) -> PyStyler {
+        self.with_op(StyleOp::SetCaption(caption.to_owned()))
+    }
+
+    /// Apply fixed CSS `{property: value}` pairs to every data cell.
+    fn set_properties(&self, props: &Bound<'_, PyDict>) -> PyResult<PyStyler> {
+        let mut pairs: Vec<(String, String)> = Vec::with_capacity(props.len());
+        for (k, v) in props.iter() {
+            pairs.push((k.extract::<String>()?, v.extract::<String>()?));
+        }
+        Ok(self.with_op(StyleOp::SetProperties(pairs)))
+    }
+
+    /// Draw an in-cell bar chart in each numeric cell.
+    fn bar(&self, color: &str) -> PyStyler {
+        self.with_op(StyleOp::Bar(color.to_owned()))
+    }
+
+    /// Omit the index column/header from the HTML render.
+    fn hide_index(&self) -> PyStyler {
+        self.with_op(StyleOp::HideIndex)
+    }
+
+    /// Render the styled table as HTML (pandas `Styler.to_html`).
+    #[pyo3(signature = (index=true))]
+    fn to_html(&self, index: bool) -> String {
+        let mut styled = self.df.style();
+        for op in &self.ops {
+            styled = match op {
+                StyleOp::HighlightMax(c) => styled.highlight_max(c),
+                StyleOp::HighlightMin(c) => styled.highlight_min(c),
+                StyleOp::BackgroundGradient(lo, hi) => styled.background_gradient(lo, hi),
+                StyleOp::Format(f) => styled.format(f),
+                StyleOp::NaRep(n) => styled.na_rep(n),
+                StyleOp::SetCaption(c) => styled.set_caption(c),
+                StyleOp::SetProperties(pairs) => {
+                    let refs: Vec<(&str, &str)> =
+                        pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                    styled.set_properties(&refs)
+                }
+                StyleOp::Bar(c) => styled.bar(c),
+                StyleOp::HideIndex => styled.hide_index(),
+            };
+        }
+        styled.to_html(index)
+    }
 }
 
 /// Python wrapper for FrankenPandas GroupBy.
@@ -447,6 +591,7 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySeries>()?;
     m.add_class::<PyDataFrame>()?;
     m.add_class::<PyGroupBy>()?;
+    m.add_class::<PyStyler>()?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
     Ok(())
 }
