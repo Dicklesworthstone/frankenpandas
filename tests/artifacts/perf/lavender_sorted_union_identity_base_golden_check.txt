@@ -1,0 +1,2 @@
+tests/artifacts/perf/lavender_sorted_union_identity_base_golden_series_add_align_1000.txt: OK
+tests/artifacts/perf/lavender_sorted_union_identity_base_golden_series_add_align_100000.txt: OK

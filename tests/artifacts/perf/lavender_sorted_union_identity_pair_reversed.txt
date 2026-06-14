@@ -1,0 +1,11 @@
+Benchmark 1: .rch-target-lavender-sorted-union-after/release-perf/examples/perf_profile series_add_align 100000 100
+  Time (mean ± σ):      73.8 ms ±   3.1 ms    [User: 63.0 ms, System: 10.7 ms]
+  Range (min … max):    66.4 ms …  77.1 ms    10 runs
+
+Benchmark 2: .rch-target-lavender-sorted-union-base/release-perf/examples/perf_profile series_add_align 100000 100
+  Time (mean ± σ):      72.3 ms ±   4.0 ms    [User: 61.9 ms, System: 10.2 ms]
+  Range (min … max):    66.3 ms …  78.8 ms    10 runs
+
+Summary
+  .rch-target-lavender-sorted-union-base/release-perf/examples/perf_profile series_add_align 100000 100 ran
+    1.02 ± 0.07 times faster than .rch-target-lavender-sorted-union-after/release-perf/examples/perf_profile series_add_align 100000 100
