@@ -310,6 +310,25 @@ impl PySeries {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PySeries { inner: r })
     }
+
+    /// Fill missing values with `value`, returning a new Series.
+    fn fillna(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let fill = py_to_scalar(py, value)?;
+        let r = self
+            .inner
+            .fillna(&fill)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Drop missing values, returning a new Series.
+    fn dropna(&self) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .dropna()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
 }
 
 /// Python wrapper for FrankenPandas DataFrame.
@@ -493,6 +512,44 @@ impl PyDataFrame {
             .max()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PySeries { inner: result })
+    }
+
+    /// Return the column-pair correlation matrix as a DataFrame.
+    fn corr(&self) -> PyResult<PyDataFrame> {
+        let result = self
+            .inner
+            .corr()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Fill missing values with `value`, returning a new DataFrame.
+    fn fillna(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let fill = py_to_scalar(py, value)?;
+        let result = self
+            .inner
+            .fillna(&fill)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Drop rows containing any missing value, returning a new DataFrame.
+    fn dropna(&self) -> PyResult<PyDataFrame> {
+        let result = self
+            .inner
+            .dropna()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Reset the index to a default integer range, returning a new DataFrame.
+    #[pyo3(signature = (drop=false))]
+    fn reset_index(&self, drop: bool) -> PyResult<PyDataFrame> {
+        let result = self
+            .inner
+            .reset_index(drop)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
     }
 
     /// Sort by a column.
