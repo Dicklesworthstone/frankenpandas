@@ -1,0 +1,13 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-vc4de-base/release-perf/examples/perf_profile df_dot 100000 5
+  Time (mean ± σ):     717.6 ms ±  61.6 ms    [User: 14677.9 ms, System: 616.6 ms]
+  Range (min … max):   664.6 ms … 878.3 ms    12 runs
+ 
+  Warning: Statistical outliers were detected. Consider re-running this benchmark on a quiet system without any interferences from other programs. It might help to use the '--warmup' or '--prepare' options.
+ 
+Benchmark 2: /data/projects/.scratch/cargo-target-lavender-vc4de-after/release-perf/examples/perf_profile df_dot 100000 5
+  Time (mean ± σ):     680.3 ms ±  75.3 ms    [User: 12934.6 ms, System: 369.8 ms]
+  Range (min … max):   623.8 ms … 815.0 ms    12 runs
+ 
+Summary
+  /data/projects/.scratch/cargo-target-lavender-vc4de-after/release-perf/examples/perf_profile df_dot 100000 5 ran
+    1.05 ± 0.15 times faster than /data/projects/.scratch/cargo-target-lavender-vc4de-base/release-perf/examples/perf_profile df_dot 100000 5
