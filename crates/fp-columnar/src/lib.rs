@@ -109,6 +109,46 @@ impl Utf8LowerHexSequence {
     }
 }
 
+#[derive(Debug)]
+struct Utf8FactorizeDefaultWitness {
+    codes: Arc<[i64]>,
+    unique_bytes: Arc<[u8]>,
+    unique_offsets: Arc<[usize]>,
+}
+
+fn build_utf8_factorize_default_witness(
+    bytes: &[u8],
+    offsets: &[usize],
+) -> Utf8FactorizeDefaultWitness {
+    let nrows = offsets.len().saturating_sub(1);
+    let mut idx_map: FxHashMap<&[u8], i64> = FxHashMap::default();
+    let mut codes: Vec<i64> = Vec::with_capacity(nrows);
+    let mut unique_bytes: Vec<u8> = Vec::new();
+    let mut unique_offsets: Vec<usize> = Vec::new();
+    unique_offsets.push(0);
+
+    for row in 0..nrows {
+        let span = &bytes[offsets[row]..offsets[row + 1]];
+        let code = match idx_map.get(span) {
+            Some(&code) => code,
+            None => {
+                let code = unique_offsets.len() as i64 - 1;
+                idx_map.insert(span, code);
+                unique_bytes.extend_from_slice(span);
+                unique_offsets.push(unique_bytes.len());
+                code
+            }
+        };
+        codes.push(code);
+    }
+
+    Utf8FactorizeDefaultWitness {
+        codes: Arc::from(codes),
+        unique_bytes: Arc::from(unique_bytes),
+        unique_offsets: Arc::from(unique_offsets),
+    }
+}
+
 #[derive(Debug, Clone, Eq)]
 pub struct ValidityMask {
     words: Vec<u64>,
@@ -1386,6 +1426,7 @@ enum ScalarValues {
         strictly_increasing: OnceLock<bool>,
         fixed_width: OnceLock<Option<usize>>,
         lower_hex_sequence: OnceLock<Option<Utf8LowerHexSequence>>,
+        factorize_default: OnceLock<Utf8FactorizeDefaultWitness>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Lazy fixed-width lowercase-hex Utf8 sequence
@@ -1841,6 +1882,7 @@ impl ScalarValues {
             strictly_increasing: OnceLock::new(),
             fixed_width: OnceLock::new(),
             lower_hex_sequence: OnceLock::new(),
+            factorize_default: OnceLock::new(),
             values: OnceLock::new(),
         }
     }
@@ -5622,6 +5664,51 @@ impl Column {
             }
             _ => None,
         }
+    }
+
+    /// Return cached default `factorize()` outputs for an all-valid contiguous
+    /// Utf8 column.
+    ///
+    /// This is intentionally narrower than the full pandas factorize surface:
+    /// it covers only `sort=false, use_na_sentinel=true` over immutable
+    /// all-valid contiguous Utf8 buffers. Other factorize modes keep the
+    /// existing scalar/fallback paths so missing buckets, sorting, and object
+    /// semantics remain unchanged.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn utf8_default_factorize_columns(&self) -> Option<(Self, Self)> {
+        if self.dtype != DType::Utf8 || !self.validity.all() {
+            return None;
+        }
+        let witness = match &self.values {
+            ScalarValues::LazyContiguousUtf8 {
+                bytes,
+                offsets,
+                factorize_default,
+                ..
+            } => factorize_default
+                .get_or_init(|| build_utf8_factorize_default_witness(bytes, offsets)),
+            _ => return None,
+        };
+
+        let codes_len = witness.codes.len();
+        let unique_len = witness.unique_offsets.len().saturating_sub(1);
+        let codes = Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_all_valid_int64_arc(Arc::clone(&witness.codes)),
+            validity: ValidityMask::all_valid(codes_len),
+            data: None,
+        };
+        let uniques = Self {
+            dtype: DType::Utf8,
+            values: ScalarValues::lazy_contiguous_utf8_arc(
+                Arc::clone(&witness.unique_bytes),
+                Arc::clone(&witness.unique_offsets),
+            ),
+            validity: ValidityMask::all_valid(unique_len),
+            data: None,
+        };
+        Some((codes, uniques))
     }
 
     /// Share the `Arc` contiguous-Utf8 backing plus the source-row offset of
@@ -12484,6 +12571,13 @@ impl Column {
         sort: bool,
         use_na_sentinel: bool,
     ) -> Result<(Self, Self), ColumnError> {
+        if !sort
+            && use_na_sentinel
+            && let Some(cached) = self.utf8_default_factorize_columns()
+        {
+            return Ok(cached);
+        }
+
         // Per br-frankenpandas-9433f: HashMap-based code lookup mirrors
         // fp-frame's Series::factorize fix (br-78d0c). fp-columnar can't
         // import fp-frame's ScalarKey (cycle), so define a local
@@ -19557,6 +19651,60 @@ mod tests {
                 &[
                     Scalar::Utf8("b".into()),
                     Scalar::Utf8("a".into()),
+                    Scalar::Utf8("c".into()),
+                ]
+            );
+        }
+
+        #[test]
+        fn factorize_lazy_contiguous_utf8_default_witness_preserves_order() {
+            let col = Column {
+                dtype: DType::Utf8,
+                values: ScalarValues::lazy_contiguous_utf8_arc(
+                    Arc::from(&b"baacaab"[..]),
+                    Arc::from([0_usize, 1, 3, 4, 6, 7]),
+                ),
+                validity: ValidityMask::all_valid(5),
+                data: None,
+            };
+
+            let (codes, uniques) = col.factorize().expect("factorize");
+            assert_eq!(
+                codes.values(),
+                &[
+                    Scalar::Int64(0),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(1),
+                    Scalar::Int64(0),
+                ]
+            );
+            assert_eq!(
+                uniques.values(),
+                &[
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("aa".into()),
+                    Scalar::Utf8("c".into()),
+                ]
+            );
+
+            let (sorted_codes, sorted_uniques) =
+                col.factorize_with_options(true, true).expect("factorize");
+            assert_eq!(
+                sorted_codes.values(),
+                &[
+                    Scalar::Int64(1),
+                    Scalar::Int64(0),
+                    Scalar::Int64(2),
+                    Scalar::Int64(0),
+                    Scalar::Int64(1),
+                ]
+            );
+            assert_eq!(
+                sorted_uniques.values(),
+                &[
+                    Scalar::Utf8("aa".into()),
+                    Scalar::Utf8("b".into()),
                     Scalar::Utf8("c".into()),
                 ]
             );
