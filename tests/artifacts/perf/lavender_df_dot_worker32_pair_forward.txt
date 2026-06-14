@@ -1,0 +1,11 @@
+Benchmark 1: .rch-target-lavender-current-profile/release-perf/examples/perf_profile df_dot 100000 6
+  Time (mean ± σ):     729.7 ms ±   8.9 ms    [User: 18007.8 ms, System: 726.4 ms]
+  Range (min … max):   721.4 ms … 743.5 ms    6 runs
+
+Benchmark 2: .rch-target-lavender-dfdot-worker32-after/release-perf/examples/perf_profile df_dot 100000 6
+  Time (mean ± σ):     803.2 ms ±  10.9 ms    [User: 10831.8 ms, System: 758.9 ms]
+  Range (min … max):   785.0 ms … 817.5 ms    6 runs
+
+Summary
+  .rch-target-lavender-current-profile/release-perf/examples/perf_profile df_dot 100000 6 ran
+    1.10 ± 0.02 times faster than .rch-target-lavender-dfdot-worker32-after/release-perf/examples/perf_profile df_dot 100000 6

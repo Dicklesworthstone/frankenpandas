@@ -1,0 +1,2 @@
+tests/artifacts/perf/lavender_df_dot_worker32_after_golden_2000.txt: OK
+tests/artifacts/perf/lavender_df_dot_worker32_after_golden_5000.txt: OK
