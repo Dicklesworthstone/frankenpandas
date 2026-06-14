@@ -685,6 +685,24 @@ impl Int64DenseCycleWitness {
     }
 }
 
+#[derive(Clone)]
+struct Float64Chunk {
+    data: Arc<[f64]>,
+    start: usize,
+    len: usize,
+}
+
+impl Float64Chunk {
+    fn new(data: Arc<[f64]>, start: usize, len: usize) -> Self {
+        debug_assert!(start.checked_add(len).is_some_and(|end| end <= data.len()));
+        Self { data, start, len }
+    }
+
+    fn as_slice(&self) -> &[f64] {
+        &self.data[self.start..self.start + self.len]
+    }
+}
+
 fn certify_int64_dense_cycle(data: &[i64]) -> Option<Int64DenseCycleWitness> {
     let (&start, rest) = data.split_first()?;
     let mut period = None;
@@ -1349,6 +1367,11 @@ enum ScalarValues {
         data: Arc<[f64]>,
         values: OnceLock<Vec<Scalar>>,
     },
+    LazyAllValidFloat64Chunks {
+        chunks: Arc<[Float64Chunk]>,
+        len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Zero-copy contiguous row-range view over an `Arc`-shared all-valid
     /// Float64 backing (br-frankenpandas-jbyuc.1.1.1.1). Row `i` is
     /// `data[start + i]`; `take_positions` returns this in O(1) when a large
@@ -1707,6 +1730,14 @@ impl ScalarValues {
     fn lazy_all_valid_float64_arc(data: Arc<[f64]>) -> Self {
         Self::LazyAllValidFloat64 {
             data,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_all_valid_float64_chunks(chunks: Arc<[Float64Chunk]>, len: usize) -> Self {
+        Self::LazyAllValidFloat64Chunks {
+            chunks,
+            len,
             values: OnceLock::new(),
         }
     }
@@ -2675,6 +2706,16 @@ impl ScalarValues {
             Self::LazyAllValidFloat64 { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
                 .as_slice(),
+            Self::LazyAllValidFloat64Chunks { chunks, values, .. } => values
+                .get_or_init(|| {
+                    chunks
+                        .iter()
+                        .flat_map(Float64Chunk::as_slice)
+                        .copied()
+                        .map(Scalar::Float64)
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyAllValidFloat64Slice {
                 data,
                 start,
@@ -3242,6 +3283,7 @@ impl ScalarValues {
             Self::Eager(values) => values.len(),
             Self::LazyAllValidInt64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
+            Self::LazyAllValidFloat64Chunks { len, .. } => *len,
             Self::LazyAllValidFloat64Slice { len, .. } => *len,
             Self::LazyStridedFloat64 { len, .. } => *len,
             Self::LazyNullableFloat64 { data, .. } => data.len(),
@@ -3420,6 +3462,9 @@ impl Clone for ScalarValues {
             }
             Self::LazyAllValidFloat64 { data, .. } => {
                 Self::lazy_all_valid_float64_arc(Arc::clone(data))
+            }
+            Self::LazyAllValidFloat64Chunks { chunks, len, .. } => {
+                Self::lazy_all_valid_float64_chunks(Arc::clone(chunks), *len)
             }
             Self::LazyAllValidFloat64Slice {
                 data, start, len, ..
@@ -5337,6 +5382,32 @@ impl Column {
             dtype: DType::Float64,
             values: ScalarValues::lazy_all_valid_float64(data),
             validity,
+            data: None,
+        }
+    }
+
+    /// Build an all-valid Float64 column from immutable chunks that are already
+    /// in output row order. The caller must have proven that every value in
+    /// every chunk is non-NaN; otherwise pandas missing-value semantics require
+    /// [`Self::from_f64_values`] instead.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_f64_all_valid_chunks(chunks: Vec<(Arc<[f64]>, usize, usize)>, len: usize) -> Self {
+        debug_assert_eq!(
+            chunks
+                .iter()
+                .map(|(_, _, chunk_len)| *chunk_len)
+                .sum::<usize>(),
+            len
+        );
+        let chunks: Vec<Float64Chunk> = chunks
+            .into_iter()
+            .map(|(data, start, chunk_len)| Float64Chunk::new(data, start, chunk_len))
+            .collect();
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_chunks(Arc::from(chunks), len),
+            validity: ValidityMask::all_valid(len),
             data: None,
         }
     }
@@ -16760,6 +16831,30 @@ mod tests {
         let clean = Column::from_f64_values(vec![1.0, 2.0, 3.0]);
         assert!(clean.validity().all());
         assert_eq!(clean.as_f64_slice(), Some([1.0, 2.0, 3.0].as_slice()));
+    }
+
+    #[test]
+    fn from_f64_all_valid_chunks_materializes_in_chunk_order() {
+        let first: Arc<[f64]> = Arc::from(vec![9.0, 1.0, 2.0, 8.0]);
+        let second: Arc<[f64]> = Arc::from(vec![3.0, 4.0, 5.0]);
+        let column = Column::from_f64_all_valid_chunks(
+            vec![(Arc::clone(&first), 1, 2), (Arc::clone(&second), 0, 3)],
+            5,
+        );
+
+        assert_eq!(column.len(), 5);
+        assert!(column.validity().all());
+        assert!(column.as_f64_slice().is_none());
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ]
+        );
     }
 
     #[test]
