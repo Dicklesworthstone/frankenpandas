@@ -1097,11 +1097,13 @@ def op_series_ewm_mean(pd, payload: dict[str, Any]) -> dict[str, Any]:
     ):
         raise OracleError("series_ewm_mean requires 0.0 < ewm_alpha <= 1.0")
     try:
+        # pandas defaults: adjust=True, ignore_na=False. The prior explicit
+        # adjust=False/ignore_na=True MASKED the parity — FrankenPandas' ewm was
+        # rewritten to the pandas default (br-frankenpandas-usdk2/cupvi), so the
+        # oracle must use the same defaults to stay faithful.
         out = series.ewm(
             span=None if span is None else float(span),
             alpha=None if alpha is None else float(alpha),
-            adjust=False,
-            ignore_na=True,
         ).mean()
     except Exception as exc:
         raise OracleError(f"series_ewm_mean failed: {exc}") from exc
