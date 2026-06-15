@@ -706,6 +706,23 @@ impl Float64Chunk {
     }
 }
 
+#[derive(Clone)]
+struct Float64DotInput {
+    data: Arc<[f64]>,
+    start: usize,
+}
+
+impl Float64DotInput {
+    fn new(data: Arc<[f64]>, start: usize, len: usize) -> Self {
+        debug_assert!(start.checked_add(len).is_some_and(|end| end <= data.len()));
+        Self { data, start }
+    }
+
+    fn value_at(&self, row: usize) -> f64 {
+        self.data[self.start + row]
+    }
+}
+
 fn certify_int64_dense_cycle(data: &[i64]) -> Option<Int64DenseCycleWitness> {
     let (&start, rest) = data.split_first()?;
     let mut period = None;
@@ -1396,6 +1413,19 @@ enum ScalarValues {
         len: usize,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Deferred all-valid Float64 output column for finite `DataFrame::dot`.
+    ///
+    /// Row `i` materializes the exact left-fold
+    /// `sum_l a_cols[l][i] * b_col[l]`, preserving the eager dot kernel's
+    /// per-cell operand order while avoiding output allocation when callers
+    /// only inspect shape/metadata.
+    LazyAllValidFloat64Dot {
+        a_cols: Arc<[Float64DotInput]>,
+        b_col: Arc<[f64]>,
+        len: usize,
+        data: OnceLock<Vec<f64>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Arithmetic-progression view over shared all-valid Float64 data.
     ///
     /// Semantically identical to gathering `data[start + i * step]` for
@@ -1796,6 +1826,21 @@ impl ScalarValues {
             data,
             start,
             len,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_all_valid_float64_dot(
+        a_cols: Arc<[Float64DotInput]>,
+        b_col: Arc<[f64]>,
+        len: usize,
+    ) -> Self {
+        debug_assert_eq!(a_cols.len(), b_col.len());
+        Self::LazyAllValidFloat64Dot {
+            a_cols,
+            b_col,
+            len,
+            data: OnceLock::new(),
             values: OnceLock::new(),
         }
     }
@@ -2745,6 +2790,36 @@ impl ScalarValues {
         None
     }
 
+    fn materialize_float64_dot(a_cols: &[Float64DotInput], b_col: &[f64], len: usize) -> Vec<f64> {
+        debug_assert_eq!(a_cols.len(), b_col.len());
+        let mut out = Vec::with_capacity(len);
+        for row in 0..len {
+            let mut acc = 0.0_f64;
+            for (a_col, &b) in a_cols.iter().zip(b_col.iter()) {
+                acc += a_col.value_at(row) * b;
+            }
+            out.push(acc);
+        }
+        out
+    }
+
+    fn dot_float64_data(&self) -> Option<&[f64]> {
+        if let Self::LazyAllValidFloat64Dot {
+            a_cols,
+            b_col,
+            len,
+            data,
+            ..
+        } = self
+        {
+            return Some(
+                data.get_or_init(|| Self::materialize_float64_dot(a_cols, b_col, *len))
+                    .as_slice(),
+            );
+        }
+        None
+    }
+
     fn as_slice(&self) -> &[Scalar] {
         match self {
             Self::Eager(values) => values,
@@ -2772,6 +2847,21 @@ impl ScalarValues {
             } => values
                 .get_or_init(|| {
                     data[*start..*start + *len]
+                        .iter()
+                        .copied()
+                        .map(Scalar::Float64)
+                        .collect()
+                })
+                .as_slice(),
+            Self::LazyAllValidFloat64Dot {
+                a_cols,
+                b_col,
+                len,
+                data,
+                values,
+            } => values
+                .get_or_init(|| {
+                    data.get_or_init(|| Self::materialize_float64_dot(a_cols, b_col, *len))
                         .iter()
                         .copied()
                         .map(Scalar::Float64)
@@ -3356,6 +3446,7 @@ impl ScalarValues {
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64Chunks { len, .. } => *len,
             Self::LazyAllValidFloat64Slice { len, .. } => *len,
+            Self::LazyAllValidFloat64Dot { len, .. } => *len,
             Self::LazyStridedFloat64 { len, .. } => *len,
             Self::LazyNullableFloat64 { data, .. } => data.len(),
             Self::LazyAllValidBool { data, .. } => data.len(),
@@ -3546,6 +3637,9 @@ impl Clone for ScalarValues {
             Self::LazyAllValidFloat64Slice {
                 data, start, len, ..
             } => Self::lazy_all_valid_float64_slice(Arc::clone(data), *start, *len),
+            Self::LazyAllValidFloat64Dot {
+                a_cols, b_col, len, ..
+            } => Self::lazy_all_valid_float64_dot(Arc::clone(a_cols), Arc::clone(b_col), *len),
             Self::LazyStridedFloat64 {
                 data,
                 start,
@@ -5509,6 +5603,32 @@ impl Column {
         }
     }
 
+    /// Build an all-valid Float64 column whose values are the dot product of
+    /// all-valid finite input columns with one finite right-hand column.
+    ///
+    /// The caller must prove every operand is finite, so every output slot is
+    /// valid and NaN-free. Materialization preserves the eager dot kernel's
+    /// `l = 0..k` accumulation order for each row.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_f64_all_valid_dot_product(
+        a_cols: Vec<(Arc<[f64]>, usize)>,
+        b_col: Arc<[f64]>,
+        len: usize,
+    ) -> Self {
+        debug_assert_eq!(a_cols.len(), b_col.len());
+        let a_cols: Vec<Float64DotInput> = a_cols
+            .into_iter()
+            .map(|(data, start)| Float64DotInput::new(data, start, len))
+            .collect();
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_dot(Arc::from(a_cols), b_col, len),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
     /// Public (hidden) for fp-join's fused dense outer-merge builder
     /// (br-frankenpandas-343ho); invalid slots carry the 0.0-datum convention
     /// and materialize `Scalar::Null(NullKind::NaN)`.
@@ -5786,6 +5906,9 @@ impl Column {
                 let end = start.checked_add(*len)?;
                 return data.get(*start..end);
             }
+            if let Some(data) = self.values.dot_float64_data() {
+                return Some(data);
+            }
             if let Some(data) = self.values.strided_float64_data() {
                 return Some(data);
             }
@@ -5993,8 +6116,19 @@ impl Column {
             ScalarValues::LazyAllValidFloat64Slice { data, start, .. } => {
                 Some((Arc::clone(data), *start))
             }
-            _ => None,
+            _ => match &self.data {
+                Some(ColumnData::Float64(data)) => Some((Arc::clone(data), 0)),
+                _ => None,
+            },
         }
+    }
+
+    /// Return an all-valid Float64 column's shared contiguous backing and row
+    /// start offset when the column is represented as an immutable Arc view.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn as_f64_arc_view_source(&self) -> Option<(Arc<[f64]>, usize)> {
+        self.float64_arc_view_source()
     }
 
     /// Borrow the contiguous Utf8 backing only when its byte spans are already
@@ -17038,6 +17172,30 @@ mod tests {
                 Scalar::Float64(3.0),
                 Scalar::Float64(4.0),
                 Scalar::Float64(5.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn from_f64_all_valid_dot_product_materializes_left_fold_rows() {
+        let a0: Arc<[f64]> = Arc::from(vec![99.0, 1.0, 3.0, 5.0]);
+        let a1: Arc<[f64]> = Arc::from(vec![2.0, 4.0, 6.0]);
+        let b: Arc<[f64]> = Arc::from(vec![10.0, 0.5]);
+        let column = Column::from_f64_all_valid_dot_product(
+            vec![(Arc::clone(&a0), 1), (Arc::clone(&a1), 0)],
+            b,
+            3,
+        );
+
+        assert_eq!(column.len(), 3);
+        assert!(column.validity().all());
+        assert_eq!(column.as_f64_slice(), Some([11.0, 32.0, 53.0].as_slice()));
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Float64(11.0),
+                Scalar::Float64(32.0),
+                Scalar::Float64(53.0),
             ]
         );
     }
