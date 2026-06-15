@@ -1,0 +1,12 @@
+binary=/data/projects/.scratch/cargo-target-lavender-uza04134-after/release-perf/examples/perf_profile
+## golden df_dot 2000
+ddbde1c39c4856c19700fe90a29f6acce2a742a98a298585f896b0b02cdbb535  -
+## golden df_dot 5000
+04af7c2bb0e772d23ed69b3733da0778c3693ba1e67557c0126fcbd4458fdb3d  -
+## internal after
+perf_profile: scenario=df_dot n=100000 iters=5
+perf_profile: done 5 iters in 0.568s (113.680 ms/iter), sink=500000
+## hyperfine after
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-uza04134-after/release-perf/examples/perf_profile df_dot 100000 5
+  Time (mean ± σ):     611.5 ms ±  20.3 ms    [User: 12337.6 ms, System: 683.1 ms]
+  Range (min … max):   586.3 ms … 640.7 ms    12 runs

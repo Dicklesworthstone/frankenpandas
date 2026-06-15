@@ -1,0 +1,364 @@
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:3834:
+                 Some(fp_columnar::radix_argsort_f64(&data, true))
+             } else {
+                 let mut keyed: Vec<(usize, f64)> = data.into_iter().enumerate().collect();
+-                keyed.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
++                keyed
++                    .sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
+                 Some(keyed.into_iter().map(|(position, _)| position).collect())
+             }
+         }
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:30763:
+     date: NaiveDate,
+     anchor: Weekday,
+ ) -> Result<(NaiveDate, NaiveDate), FrameError> {
+-    let days_to_end = i64::from(
+-        (7 + anchor.num_days_from_monday() - date.weekday().num_days_from_monday()) % 7,
+-    );
++    let days_to_end =
++        i64::from((7 + anchor.num_days_from_monday() - date.weekday().num_days_from_monday()) % 7);
+     let end = add_period_label_days(date, days_to_end)?;
+     let start = add_period_label_days(end, -6)?;
+     Ok((start, end))
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:30906:
+ /// fiscal year — and thus Q4 — ENDS in this month). `None` for the default
+ /// `Q`/`Q-DEC` (canonical `PeriodFreq::Quarterly`) and non-quarterly aliases.
+ fn quarterly_anchor_month(freq: &str) -> Option<u32> {
+-    let suffix = freq.trim().to_ascii_uppercase().strip_prefix("Q-")?.to_owned();
++    let suffix = freq
++        .trim()
++        .to_ascii_uppercase()
++        .strip_prefix("Q-")?
++        .to_owned();
+     match month_from_code(&suffix)? {
+         12 => None, // Q-DEC is the default quarterly axis.
+         m => Some(m),
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:30971:
+     // the month after the anchor, in the prior calendar year.
+     let fiscal_start_total = (label_year - 1) * 12 + anchor as i32;
+     let quarter_start_total = fiscal_start_total + 3 * (quarter - 1);
+-    let (start_year, start_month0) = (quarter_start_total.div_euclid(12), quarter_start_total.rem_euclid(12));
++    let (start_year, start_month0) = (
++        quarter_start_total.div_euclid(12),
++        quarter_start_total.rem_euclid(12),
++    );
+     let datetime = if how == PeriodTimestampHow::Start {
+-        let date = NaiveDate::from_ymd_opt(start_year, start_month0 as u32 + 1, 1)
+-            .ok_or_else(|| FrameError::CompatibilityRejected("to_timestamp date overflow".into()))?;
++        let date =
++            NaiveDate::from_ymd_opt(start_year, start_month0 as u32 + 1, 1).ok_or_else(|| {
++                FrameError::CompatibilityRejected("to_timestamp date overflow".into())
++            })?;
+         period_datetime_at(date, 0, 0, 0, 0)?
+     } else {
+         let end_total = quarter_start_total + 2;
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:30981:
+         let (end_year, end_month0) = (end_total.div_euclid(12), end_total.rem_euclid(12));
+         let end_month = end_month0 as u32 + 1;
+-        let last = period_last_day_of_month(end_year, end_month)
+-            .ok_or_else(|| FrameError::CompatibilityRejected("to_timestamp date overflow".into()))?;
+-        let date = NaiveDate::from_ymd_opt(end_year, end_month, last)
+-            .ok_or_else(|| FrameError::CompatibilityRejected("to_timestamp date overflow".into()))?;
++        let last = period_last_day_of_month(end_year, end_month).ok_or_else(|| {
++            FrameError::CompatibilityRejected("to_timestamp date overflow".into())
++        })?;
++        let date = NaiveDate::from_ymd_opt(end_year, end_month, last).ok_or_else(|| {
++            FrameError::CompatibilityRejected("to_timestamp date overflow".into())
++        })?;
+         period_datetime_at(date, 23, 59, 59, 999_999_999)?
+     };
+     datetime64_label_from_naive(datetime)
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:33978:
+         let spec = fmt[open + 1..close].trim_start_matches(':');
+
+         let thousands = spec.contains(',');
+-        let type_char = spec.chars().last().filter(|c| c.is_ascii_alphabetic() || *c == '%');
++        let type_char = spec
++            .chars()
++            .last()
++            .filter(|c| c.is_ascii_alphabetic() || *c == '%');
+         let precision = spec
+             .split('.')
+             .nth(1)
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:34012:
+     /// Insert `,` group separators into the integer part of a formatted number.
+     fn insert_thousands_separators(s: &str) -> String {
+         let (sign, rest) = s.strip_prefix('-').map_or(("", s), |r| ("-", r));
+-        let (int_part, frac_part) = rest.split_once('.').map_or((rest, None), |(i, f)| (i, Some(f)));
++        let (int_part, frac_part) = rest
++            .split_once('.')
++            .map_or((rest, None), |(i, f)| (i, Some(f)));
+         let mut grouped = String::new();
+         let bytes = int_part.as_bytes();
+         for (i, ch) in int_part.char_indices() {
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:34033:
+     fn format_cell(&self, scalar: &Scalar) -> String {
+         let is_missing =
+             matches!(scalar, Scalar::Null(_)) || matches!(scalar, Scalar::Float64(v) if v.is_nan());
+-        if is_missing
+-            && let Some(na) = &self.directives.na_rep
+-        {
++        if is_missing && let Some(na) = &self.directives.na_rep {
+             return Self::escape_html_text(na);
+         }
+         if let Some(fmt) = &self.directives.number_format
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:34122:
+                 let span = col_max - col_min;
+                 for (row_idx, value) in numeric.iter().enumerate() {
+                     if let Some(v) = value {
+-                        let t = if span > 0.0 { (v - col_min) / span } else { 0.0 };
++                        let t = if span > 0.0 {
++                            (v - col_min) / span
++                        } else {
++                            0.0
++                        };
+                         let lerp = |lo: u8, hi: u8| {
+                             (f64::from(lo) + t * (f64::from(hi) - f64::from(lo))).round() as u8
+                         };
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:35717:
+         // `take_positions` is already typed; only the owning thread differs, so
+         // the gathered columns are byte-identical. Shared by boolean-filter /
+         // loc_bool / positional take.
+-        let col_refs: Vec<&Column> =
+-            self.column_order.iter().map(|name| &self.columns[name]).collect();
++        let col_refs: Vec<&Column> = self
++            .column_order
++            .iter()
++            .map(|name| &self.columns[name])
++            .collect();
+         let build_col = |column: &Column| -> Column {
+             if let Some(certificate) = certificate {
+                 column.take_positions_with_affine_certificate(
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:35767:
+                     slots[i] = Some(c);
+                 }
+             }
+-            slots.into_iter().map(|s| s.expect("every column gathered")).collect()
++            slots
++                .into_iter()
++                .map(|s| s.expect("every column gathered"))
++                .collect()
+         } else {
+             col_refs.iter().map(|c| build_col(c)).collect()
+         };
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:43883:
+         // 100k×10 reindex that was ~58x slower than pandas. Resolve each new
+         // label to `Some(row)`/`None` ONCE, shared across all columns.
+         let new_len = new_labels.len();
+-        let positions: Vec<Option<usize>> = if let Some((start, len)) =
+-            self.index.int64_unit_range_labels()
+-        {
+-            // Unit-range Int64 index (the pandas RangeIndex default): a label
+-            // Int64(v) maps to position v-start arithmetically — O(1) per label,
+-            // NO hashmap build/probe (br-frankenpandas-uza04.112). The unit range
+-            // is strictly unique, so this matches the `or_insert` first-seen map
+-            // exactly; a non-Int64 / out-of-range label is absent (None), same as
+-            // a hashmap miss against an all-Int64 index.
+-            new_labels
+-                .iter()
+-                .map(|label| match label {
+-                    IndexLabel::Int64(v) => {
+-                        let off = v.wrapping_sub(start);
+-                        if off >= 0 && (off as u64) < len as u64 {
+-                            Some(off as usize)
+-                        } else {
+-                            None
++        let positions: Vec<Option<usize>> =
++            if let Some((start, len)) = self.index.int64_unit_range_labels() {
++                // Unit-range Int64 index (the pandas RangeIndex default): a label
++                // Int64(v) maps to position v-start arithmetically — O(1) per label,
++                // NO hashmap build/probe (br-frankenpandas-uza04.112). The unit range
++                // is strictly unique, so this matches the `or_insert` first-seen map
++                // exactly; a non-Int64 / out-of-range label is absent (None), same as
++                // a hashmap miss against an all-Int64 index.
++                new_labels
++                    .iter()
++                    .map(|label| match label {
++                        IndexLabel::Int64(v) => {
++                            let off = v.wrapping_sub(start);
++                            if off >= 0 && (off as u64) < len as u64 {
++                                Some(off as usize)
++                            } else {
++                                None
++                            }
+                         }
+-                    }
+-                    _ => None,
+-                })
+-                .collect()
+-        } else {
+-            let mut old_lookup: FxHashMap<&IndexLabel, usize> =
+-                FxHashMap::with_capacity_and_hasher(self.index.len(), Default::default());
+-            for (i, label) in self.index.labels().iter().enumerate() {
+-                old_lookup.entry(label).or_insert(i);
+-            }
+-            new_labels.iter().map(|label| old_lookup.get(label).copied()).collect()
+-        };
++                        _ => None,
++                    })
++                    .collect()
++            } else {
++                let mut old_lookup: FxHashMap<&IndexLabel, usize> =
++                    FxHashMap::with_capacity_and_hasher(self.index.len(), Default::default());
++                for (i, label) in self.index.labels().iter().enumerate() {
++                    old_lookup.entry(label).or_insert(i);
++                }
++                new_labels
++                    .iter()
++                    .map(|label| old_lookup.get(label).copied())
++                    .collect()
++            };
+
+         // Gather each output column from the shared `positions`. The per-column
+         // gather is the reindex hot phase (10 cols × new_len); columns are
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:45594:
+                     Scalar::Datetime64(v) => {
+                         out.push_str(&quote_str(&format_datetime_ns(*v), false))
+                     }
+-                    Scalar::Period(v) if v.ordinal == i64::MIN => out.push_str(&quote_str(na_rep, false)),
++                    Scalar::Period(v) if v.ordinal == i64::MIN => {
++                        out.push_str(&quote_str(na_rep, false))
++                    }
+                     Scalar::Period(v) => out.push_str(&quote_str(&v.calendar_string(), false)),
+                     Scalar::Interval(interval) => {
+                         out.push_str(&quote_str(&format!("{interval}"), false))
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:107862:
+
+         // background_gradient: column a min(1.0)->#000000, max(3.0)->#ffffff;
+         // the minimum cell gets the low endpoint, the maximum the high endpoint.
+-        let grad = df.style().background_gradient("#000000", "#ffffff").to_html(false);
++        let grad = df
++            .style()
++            .background_gradient("#000000", "#ffffff")
++            .to_html(false);
+         assert!(grad.contains("<td style=\"background-color: #000000;\">1.0</td>"));
+         assert!(grad.contains("<td style=\"background-color: #ffffff;\">3.0</td>"));
+         // Midpoint 2.0 -> t=0.5 -> #808080 (128 rounded).
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:107874:
+         assert!(fmt.contains("<td>30.00</td>"));
+
+         // Thousands separators + prefix.
+-        let money = DataFrame::from_dict(
+-            &["x"],
+-            vec![("x", vec![Scalar::Float64(1234567.5)])],
+-        )?;
++        let money = DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Float64(1234567.5)])])?;
+         let money_html = money.style().format("${:,.2f}").to_html(false);
+         assert!(money_html.contains("<td>$1,234,567.50</td>"));
+
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:107926:
+             .set_properties(&[("color", "white"), ("font-weight", "bold")])
+             .to_html(false);
+         assert_eq!(
+-            props.matches("<td style=\"color: white;font-weight: bold;\">")
++            props
++                .matches("<td style=\"color: white;font-weight: bold;\">")
+                 .count(),
+             3
+         );
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:125380:
+         let f64s = |s: &Series| -> Vec<Option<f64>> {
+             s.values()
+                 .iter()
+-                .map(|v| if v.is_missing() { None } else { v.to_f64().ok() })
++                .map(|v| {
++                    if v.is_missing() {
++                        None
++                    } else {
++                        v.to_f64().ok()
++                    }
++                })
+                 .collect()
+         };
+
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:125394:
+         )
+         .unwrap();
+         let msum = m.resample("M").sum().unwrap();
+-        assert_eq!(labels(&msum), vec!["2024-01", "2024-02", "2024-03", "2024-04"]);
+-        assert_eq!(f64s(&msum), vec![Some(1.0), Some(0.0), Some(0.0), Some(2.0)]);
+         assert_eq!(
++            labels(&msum),
++            vec!["2024-01", "2024-02", "2024-03", "2024-04"]
++        );
++        assert_eq!(
++            f64s(&msum),
++            vec![Some(1.0), Some(0.0), Some(0.0), Some(2.0)]
++        );
++        assert_eq!(
+             f64s(&m.resample("M").mean().unwrap()),
+             vec![Some(1.0), None, None, Some(2.0)]
+         );
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:125447:
+         let f64s = |s: &Series| -> Vec<Option<f64>> {
+             s.values()
+                 .iter()
+-                .map(|v| if v.is_missing() { None } else { v.to_f64().ok() })
++                .map(|v| {
++                    if v.is_missing() {
++                        None
++                    } else {
++                        v.to_f64().ok()
++                    }
++                })
+                 .collect()
+         };
+
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:125456:
+             labels(&d2),
+             vec!["2024-01-01", "2024-01-03", "2024-01-05", "2024-01-07"]
+         );
+-        assert_eq!(f64s(&d2), vec![Some(10.0), Some(0.0), Some(0.0), Some(80.0)]);
+         assert_eq!(
++            f64s(&d2),
++            vec![Some(10.0), Some(0.0), Some(0.0), Some(80.0)]
++        );
++        assert_eq!(
+             f64s(&s.resample("2D").mean().unwrap()),
+             vec![Some(10.0), None, None, Some(80.0)]
+         );
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:125592:
+                 })
+                 .collect()
+         };
+-        let vals = |s: &Series| -> Vec<f64> {
+-            s.values().iter().map(|v| v.to_f64().unwrap()).collect()
+-        };
++        let vals =
++            |s: &Series| -> Vec<f64> { s.values().iter().map(|v| v.to_f64().unwrap()).collect() };
+
+         let s2 = s.resample("2W").sum().unwrap();
+         assert_eq!(labels(&s2), vec!["2024-01-07", "2024-01-21", "2024-02-04"]);
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:125645:
+             ]
+         );
+         assert_eq!(
+-            sum.values().iter().map(|v| v.to_f64().unwrap()).collect::<Vec<_>>(),
++            sum.values()
++                .iter()
++                .map(|v| v.to_f64().unwrap())
++                .collect::<Vec<_>>(),
+             vec![10.0, 0.0, 0.0, 0.0, 20.0]
+         );
+
+Diff in /data/projects/.scratch/frankenpandas-lavender-uza04134-push/crates/fp-frame/src/lib.rs:125653:
+         let mean_vals: Vec<Option<f64>> = mean
+             .values()
+             .iter()
+-            .map(|v| if v.is_missing() { None } else { Some(v.to_f64().unwrap()) })
++            .map(|v| {
++                if v.is_missing() {
++                    None
++                } else {
++                    Some(v.to_f64().unwrap())
++                }
++            })
+             .collect();
+-        assert_eq!(
+-            mean_vals,
+-            vec![Some(10.0), None, None, None, Some(20.0)]
+-        );
++        assert_eq!(mean_vals, vec![Some(10.0), None, None, None, Some(20.0)]);
+     }
+
+     #[test]
