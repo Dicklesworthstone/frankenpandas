@@ -172,10 +172,12 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                     let _ = gframe.groupby(&["key"]).expect("groupby").mean().expect("mean");
                 }),
                 _ => time_us(|| {
+                    // pandas: df.groupby("key").agg({"col_1": ["sum","mean","std"]})
+                    // — one multi-agg call. Mirror it with the canonical agg API
+                    // instead of three separate gb.sum()/mean()/std() calls so the
+                    // workload measures the path br-frankenpandas-m0gcq will fuse.
                     let gb = gframe.groupby(&["key"]).expect("groupby");
-                    let _ = gb.sum().expect("sum");
-                    let _ = gb.mean().expect("mean");
-                    let _ = gb.std().expect("std");
+                    let _ = gb.agg(&["sum", "mean", "std"]).expect("agg");
                 }),
             }
         }
