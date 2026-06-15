@@ -396,6 +396,25 @@ impl PySeries {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PySeries { inner: r })
     }
+
+    /// Sort by the index, returning a new Series.
+    #[pyo3(signature = (ascending=true))]
+    fn sort_index(&self, ascending: bool) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .sort_index(ascending)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
+
+    /// Return a copy of the Series renamed to `name`.
+    fn rename(&self, name: &str) -> PyResult<PySeries> {
+        let r = self
+            .inner
+            .rename(name)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: r })
+    }
 }
 
 /// Python wrapper for FrankenPandas DataFrame.
@@ -612,6 +631,50 @@ impl PyDataFrame {
         let result = self
             .inner
             .reset_index(drop)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Sort by the row index, returning a new DataFrame.
+    #[pyo3(signature = (ascending=true))]
+    fn sort_index(&self, ascending: bool) -> PyResult<PyDataFrame> {
+        let result = self
+            .inner
+            .sort_index(ascending)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Transpose: swap rows and columns, returning a new DataFrame.
+    fn transpose(&self) -> PyResult<PyDataFrame> {
+        let result = self
+            .inner
+            .transpose()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Drop the named columns, returning a new DataFrame (pandas
+    /// `DataFrame.drop(columns=...)`).
+    fn drop(&self, columns: Vec<String>) -> PyResult<PyDataFrame> {
+        let refs: Vec<&str> = columns.iter().map(String::as_str).collect();
+        let result = self
+            .inner
+            .drop_columns(&refs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    /// Rename columns via an `{old: new}` mapping, returning a new DataFrame.
+    fn rename(&self, mapping: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
+        let mut pairs: Vec<(String, String)> = Vec::with_capacity(mapping.len());
+        for (k, v) in mapping.iter() {
+            pairs.push((k.extract::<String>()?, v.extract::<String>()?));
+        }
+        let refs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let result = self
+            .inner
+            .rename(&refs)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PyDataFrame { inner: result })
     }
