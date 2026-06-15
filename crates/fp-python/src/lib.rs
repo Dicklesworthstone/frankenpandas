@@ -707,6 +707,43 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: result })
     }
 
+    /// Merge with another DataFrame on key column(s) (pandas `DataFrame.merge`).
+    /// `on` is a column name or list of names; `how` is one of
+    /// inner/left/right/outer/cross.
+    #[pyo3(signature = (other, on, how="inner"))]
+    fn merge(
+        &self,
+        other: &PyDataFrame,
+        on: &Bound<'_, PyAny>,
+        how: &str,
+    ) -> PyResult<PyDataFrame> {
+        let on_cols: Vec<String> = if let Ok(s) = on.extract::<String>() {
+            vec![s]
+        } else {
+            on.extract::<Vec<String>>().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>("`on` must be a str or list of str")
+            })?
+        };
+        let join_type = match how {
+            "inner" => fp_join::JoinType::Inner,
+            "left" => fp_join::JoinType::Left,
+            "right" => fp_join::JoinType::Right,
+            "outer" => fp_join::JoinType::Outer,
+            "cross" => fp_join::JoinType::Cross,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "unknown how={other:?}; expected inner/left/right/outer/cross"
+                )));
+            }
+        };
+        let on_refs: Vec<&str> = on_cols.iter().map(String::as_str).collect();
+        let merged = fp_join::merge_dataframes_on(&self.inner, &other.inner, &on_refs, join_type)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let frame = DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: frame })
+    }
+
     /// Return a boolean DataFrame marking missing values (pandas `DataFrame.isna`).
     fn isna(&self) -> PyResult<PyDataFrame> {
         let result = self

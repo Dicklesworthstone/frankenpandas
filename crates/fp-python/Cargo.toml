@@ -20,6 +20,7 @@ crate-type = ["cdylib"]
 fp-columnar = { path = "../fp-columnar", version = "0.1.0" }
 fp-frame = { path = "../fp-frame", version = "0.1.0" }
 fp-index = { path = "../fp-index", version = "0.1.0" }
+fp-join = { path = "../fp-join", version = "0.1.0" }
 fp-io = { path = "../fp-io", version = "0.1.0", default-features = false, features = ["sql-sqlite"] }
 fp-types = { path = "../fp-types", version = "0.1.0" }
 pyo3 = { workspace = true }
