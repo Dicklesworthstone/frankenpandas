@@ -2052,8 +2052,25 @@ fn readme_type_coercion_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     let _ = df.convert_dtypes()?;
     let _ = df.infer_objects()?;
 
-    // Coerce to numeric — Utf8 strings parsed; non-parseable → NaN.
-    let str_series = Series::from_values(
+    // to_numeric — Utf8 strings parsed to numbers. The bare module-level fn
+    // mirrors pandas' `errors='raise'` DEFAULT: a clean column parses, but an
+    // unparseable value is rejected (NOT silently coerced to NaN — that needs
+    // `errors='coerce'`). Verified vs pandas 2.2.3:
+    //   pd.to_numeric(pd.Series(['1.5','not_a_number','3.0']))
+    //     -> ValueError: Unable to parse string "not_a_number" at position 1
+    let clean = Series::from_values(
+        "s",
+        labels.clone(),
+        vec![
+            Scalar::Utf8("1.5".into()),
+            Scalar::Utf8("2".into()),
+            Scalar::Utf8("3.0".into()),
+        ],
+    )?;
+    let numeric = to_numeric(&clean)?;
+    assert_eq!(numeric.len(), 3);
+
+    let unparseable = Series::from_values(
         "s",
         labels,
         vec![
@@ -2062,8 +2079,10 @@ fn readme_type_coercion_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
             Scalar::Utf8("3.0".into()),
         ],
     )?;
-    let numeric = to_numeric(&str_series)?;
-    assert_eq!(numeric.len(), 3);
+    assert!(
+        to_numeric(&unparseable).is_err(),
+        "bare to_numeric defaults to errors='raise', matching pandas"
+    );
     Ok(())
 }
 
@@ -4985,14 +5004,19 @@ fn readme_display_impls() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(format!("{}", IntervalClosed::Neither), "neither");
 
     // ── Interval Display (pandas str() parity per docstring) ───
+    // FrankenPandas stores only `interval[float64]`, so endpoints render with
+    // Python `str(float)` semantics — whole numbers KEEP ".0", matching
+    // `str(pd.Interval(0.0, 5.0, 'right')) == "(0.0, 5.0]"` (br-5xw1b, verified
+    // vs pandas 2.2.3). The scalar repr does NOT trim ".0" the way an
+    // IntervalIndex/cut array display does.
     let iv = Interval::new(0.0, 5.0, IntervalClosed::Right);
-    assert_eq!(format!("{iv}"), "(0, 5]");
+    assert_eq!(format!("{iv}"), "(0.0, 5.0]");
     let iv_left = Interval::new(0.0, 5.0, IntervalClosed::Left);
-    assert_eq!(format!("{iv_left}"), "[0, 5)");
+    assert_eq!(format!("{iv_left}"), "[0.0, 5.0)");
     let iv_both = Interval::new(0.0, 5.0, IntervalClosed::Both);
-    assert_eq!(format!("{iv_both}"), "[0, 5]");
+    assert_eq!(format!("{iv_both}"), "[0.0, 5.0]");
     let iv_neither = Interval::new(0.0, 5.0, IntervalClosed::Neither);
-    assert_eq!(format!("{iv_neither}"), "(0, 5)");
+    assert_eq!(format!("{iv_neither}"), "(0.0, 5.0)");
 
     // ── Timestamp Display ───────────────────────────────────────
     let ts = Timestamp::from_nanos(1_700_000_000_000_000_000);
