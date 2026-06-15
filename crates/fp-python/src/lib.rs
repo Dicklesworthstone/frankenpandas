@@ -948,6 +948,48 @@ fn read_csv(path: &str) -> PyResult<PyDataFrame> {
     Ok(PyDataFrame { inner: df })
 }
 
+/// Map a pandas `orient=` string to the fp-io `JsonOrient` enum.
+fn parse_json_orient(orient: &str) -> PyResult<fp_io::JsonOrient> {
+    match orient {
+        "records" => Ok(fp_io::JsonOrient::Records),
+        "columns" => Ok(fp_io::JsonOrient::Columns),
+        "index" => Ok(fp_io::JsonOrient::Index),
+        "split" => Ok(fp_io::JsonOrient::Split),
+        "values" => Ok(fp_io::JsonOrient::Values),
+        other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "unknown JSON orient {other:?}; expected one of records/columns/index/split/values"
+        ))),
+    }
+}
+
+/// Read a JSON file into a DataFrame (pandas `read_json`). `orient` is one of
+/// records/columns/index/split/values.
+#[pyfunction]
+#[pyo3(signature = (path, orient="records"))]
+fn read_json(path: &str, orient: &str) -> PyResult<PyDataFrame> {
+    let orient = parse_json_orient(orient)?;
+    let df = fp_io::read_json(std::path::Path::new(path), orient)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    Ok(PyDataFrame { inner: df })
+}
+
+/// Read a line-delimited JSON file into a DataFrame (pandas
+/// `read_json(lines=True)`).
+#[pyfunction]
+fn read_jsonl(path: &str) -> PyResult<PyDataFrame> {
+    let df = fp_io::read_jsonl(std::path::Path::new(path))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    Ok(PyDataFrame { inner: df })
+}
+
+/// Read a Parquet file into a DataFrame (pandas `read_parquet`).
+#[pyfunction]
+fn read_parquet(path: &str) -> PyResult<PyDataFrame> {
+    let df = fp_io::read_parquet(std::path::Path::new(path))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    Ok(PyDataFrame { inner: df })
+}
+
 /// FrankenPandas Python module.
 #[pymodule]
 fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -956,5 +998,8 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGroupBy>()?;
     m.add_class::<PyStyler>()?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
+    m.add_function(wrap_pyfunction!(read_json, m)?)?;
+    m.add_function(wrap_pyfunction!(read_jsonl, m)?)?;
+    m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
     Ok(())
 }
