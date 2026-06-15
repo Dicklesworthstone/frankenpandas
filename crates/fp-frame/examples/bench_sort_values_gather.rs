@@ -111,7 +111,10 @@ fn main() {
         // stable `fp_columnar::radix_argsort_i64`. One process => reliable ratio
         // despite variable rch worker speed; the per-iter equality assert is the
         // isomorphism proof on 2M random values WITH heavy ties (modulo 1e6).
-        let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+        let n: usize = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000_000);
         let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(15);
         let vals = gen_i64(n, 1_000_000);
         let (mut cmp_ns, mut rad_ns) = (0u128, 0u128);

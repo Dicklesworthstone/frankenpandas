@@ -148,7 +148,9 @@ fn main() {
             let rows: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(250_000);
             let series_n: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8);
             let iters: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(20);
-            let series: Vec<Series> = (0..series_n).map(|k| build_series(rows, k as u64)).collect();
+            let series: Vec<Series> = (0..series_n)
+                .map(|k| build_series(rows, k as u64))
+                .collect();
             let refs: Vec<&Series> = series.iter().collect();
             let start = std::time::Instant::now();
             let mut sink = 0usize;
@@ -167,7 +169,9 @@ fn main() {
             let rows: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(500_000);
             let series_n: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8);
             let iters: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
-            let series: Vec<Series> = (0..series_n).map(|k| build_series(rows, k as u64)).collect();
+            let series: Vec<Series> = (0..series_n)
+                .map(|k| build_series(rows, k as u64))
+                .collect();
             let refs: Vec<&Series> = series.iter().collect();
             // Interleave eager/lazy iterations to share any thermal/cache drift.
             let (mut eager_ns, mut lazy_ns, mut sink) = (0u128, 0u128, 0usize);
