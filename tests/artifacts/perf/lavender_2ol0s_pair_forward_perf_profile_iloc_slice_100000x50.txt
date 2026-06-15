@@ -1,11 +1,11 @@
 Benchmark 1: /data/projects/.scratch/cargo-target-lavender-2ol0s-base/release-perf/examples/perf_profile iloc_slice 100000 50
   Time (mean ± σ):      25.7 ms ±   1.8 ms    [User: 13.9 ms, System: 11.8 ms]
   Range (min … max):    21.8 ms …  28.4 ms    20 runs
- 
+
 Benchmark 2: /data/projects/.scratch/cargo-target-lavender-2ol0s-candidate/release-perf/examples/perf_profile iloc_slice 100000 50
   Time (mean ± σ):      17.1 ms ±   1.8 ms    [User: 5.6 ms, System: 11.3 ms]
   Range (min … max):    14.4 ms …  21.6 ms    20 runs
- 
+
 Summary
   /data/projects/.scratch/cargo-target-lavender-2ol0s-candidate/release-perf/examples/perf_profile iloc_slice 100000 50 ran
     1.50 ± 0.19 times faster than /data/projects/.scratch/cargo-target-lavender-2ol0s-base/release-perf/examples/perf_profile iloc_slice 100000 50
