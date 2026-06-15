@@ -1,0 +1,2 @@
+perf_profile: scenario=iloc_slice n=100000 iters=10
+perf_profile: done 10 iters in 0.018s (1.774 ms/iter), sink=500000

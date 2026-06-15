@@ -569,6 +569,24 @@ impl Int64StridedLabels {
     }
 }
 
+#[derive(Debug, Clone)]
+struct MaterializedLabelSlice {
+    labels: Arc<Vec<IndexLabel>>,
+    start: usize,
+    len: usize,
+}
+
+impl MaterializedLabelSlice {
+    fn new(labels: Arc<Vec<IndexLabel>>, start: usize, len: usize) -> Option<Self> {
+        start.checked_add(len).filter(|end| *end <= labels.len())?;
+        Some(Self { labels, start, len })
+    }
+
+    fn as_slice(&self) -> &[IndexLabel] {
+        &self.labels[self.start..self.start + self.len]
+    }
+}
+
 struct IndexLabels {
     /// Shared immutable label vector (br-frankenpandas-idxclone). Behind `Arc`
     /// so cloning an `Index` is an O(1) refcount bump instead of an O(n)
@@ -576,6 +594,7 @@ struct IndexLabels {
     /// (`a + b` re-uses the operand index). Set once, never mutated, so sharing
     /// is observationally identical to a private copy.
     materialized: OnceLock<Arc<Vec<IndexLabel>>>,
+    materialized_slice: Option<Arc<MaterializedLabelSlice>>,
     int64_unit_range: Option<Int64UnitRangeLabels>,
     int64_affine: Option<Int64AffineLabels>,
     int64_strided: Option<Int64StridedLabels>,
@@ -601,6 +620,7 @@ impl IndexLabels {
         let _ = materialized.set(Arc::new(labels));
         Self {
             materialized,
+            materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
             int64_strided: None,
@@ -612,6 +632,7 @@ impl IndexLabels {
     fn new_int64_unit_range(start: i64, len: usize) -> Option<Self> {
         Some(Self {
             materialized: OnceLock::new(),
+            materialized_slice: None,
             int64_unit_range: Some(Int64UnitRangeLabels::new(start, len)?),
             int64_affine: None,
             int64_strided: None,
@@ -626,6 +647,7 @@ impl IndexLabels {
         }
         Some(Self {
             materialized: OnceLock::new(),
+            materialized_slice: None,
             int64_unit_range: None,
             int64_affine: Some(Int64AffineLabels::new(start, step, len)?),
             int64_strided: None,
@@ -642,6 +664,7 @@ impl IndexLabels {
     ) -> Option<Self> {
         Some(Self {
             materialized: OnceLock::new(),
+            materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
             int64_strided: Some(Int64StridedLabels::new(values, start, step, len)?),
@@ -655,6 +678,7 @@ impl IndexLabels {
         let _ = int64_typed.set(Some(values));
         Self {
             materialized: OnceLock::new(),
+            materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
             int64_strided: None,
@@ -668,6 +692,7 @@ impl IndexLabels {
         debug_assert_eq!(*offsets.last().expect("non-empty"), bytes.len());
         Self {
             materialized: OnceLock::new(),
+            materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
             int64_strided: None,
@@ -677,6 +702,9 @@ impl IndexLabels {
     }
 
     fn as_slice(&self) -> &[IndexLabel] {
+        if let Some(slice) = &self.materialized_slice {
+            return slice.as_slice();
+        }
         self.materialized
             .get_or_init(|| {
                 if let Some(range) = self.int64_unit_range {
@@ -713,6 +741,9 @@ impl IndexLabels {
     }
 
     fn len(&self) -> usize {
+        if let Some(slice) = &self.materialized_slice {
+            return slice.len;
+        }
         if let Some(range) = self.int64_unit_range {
             return range.len;
         }
@@ -732,6 +763,79 @@ impl IndexLabels {
             return values.len();
         }
         self.as_slice().len()
+    }
+
+    fn slice(&self, start: usize, len: usize) -> Self {
+        let total_len = self.len();
+        let start = start.min(total_len);
+        let end = start.saturating_add(len).min(total_len);
+        let len = end - start;
+
+        if let Some(range) = self.int64_unit_range {
+            let offset = i64::try_from(start).expect("start within index length");
+            if let Some(next_start) = range.start.checked_add(offset)
+                && let Some(labels) = Self::new_int64_unit_range(next_start, len)
+            {
+                return labels;
+            }
+        }
+
+        if let Some(range) = self.int64_affine {
+            let offset = i64::try_from(start).expect("start within index length");
+            if let Some(delta) = range.step.checked_mul(offset)
+                && let Some(next_start) = range.start.checked_add(delta)
+                && let Some(labels) = Self::new_int64_affine(next_start, range.step, len)
+            {
+                return labels;
+            }
+        }
+
+        if let Some(strided) = &self.int64_strided
+            && let Some(offset) = strided.step.checked_mul(start)
+            && let Some(next_start) = strided.start.checked_add(offset)
+            && let Some(labels) =
+                Self::new_int64_strided(Arc::clone(&strided.values), next_start, strided.step, len)
+        {
+            return labels;
+        }
+
+        if let Some(Some(values)) = self.int64_typed.get()
+            && let Some(labels) = Self::new_int64_strided(Arc::clone(values), start, 1, len)
+        {
+            return labels;
+        }
+
+        if let Some(slice) = &self.materialized_slice
+            && let Some(next_start) = slice.start.checked_add(start)
+            && let Some(view) =
+                MaterializedLabelSlice::new(Arc::clone(&slice.labels), next_start, len)
+        {
+            return Self {
+                materialized: OnceLock::new(),
+                materialized_slice: Some(Arc::new(view)),
+                int64_unit_range: None,
+                int64_affine: None,
+                int64_strided: None,
+                int64_typed: OnceLock::new(),
+                utf8_contiguous: None,
+            };
+        }
+
+        if let Some(labels) = self.materialized.get()
+            && let Some(view) = MaterializedLabelSlice::new(Arc::clone(labels), start, len)
+        {
+            return Self {
+                materialized: OnceLock::new(),
+                materialized_slice: Some(Arc::new(view)),
+                int64_unit_range: None,
+                int64_affine: None,
+                int64_strided: None,
+                int64_typed: OnceLock::new(),
+                utf8_contiguous: None,
+            };
+        }
+
+        Self::new(self.as_slice()[start..end].to_vec())
     }
 
     fn is_empty(&self) -> bool {
@@ -777,6 +881,17 @@ impl IndexLabels {
                 if let Some(strided) = self.int64_strided.clone() {
                     return Some(Arc::new(strided.materialize_i64()));
                 }
+                if let Some(slice) = &self.materialized_slice {
+                    let labels = slice.as_slice();
+                    let mut values = Vec::with_capacity(labels.len());
+                    for label in labels {
+                        match label {
+                            IndexLabel::Int64(value) => values.push(*value),
+                            _ => return None,
+                        }
+                    }
+                    return Some(Arc::new(values));
+                }
                 let labels = self.materialized.get()?;
                 let mut values = Vec::with_capacity(labels.len());
                 for label in labels.iter() {
@@ -809,6 +924,7 @@ impl Clone for IndexLabels {
         let has_lazy_backing = self.int64_unit_range.is_some()
             || self.int64_affine.is_some()
             || self.int64_strided.is_some()
+            || self.materialized_slice.is_some()
             || self.utf8_contiguous.is_some()
             || matches!(int64_typed.get(), Some(Some(_)));
         if !has_lazy_backing && let Some(labels) = self.materialized.get() {
@@ -816,6 +932,7 @@ impl Clone for IndexLabels {
         }
         Self {
             materialized,
+            materialized_slice: self.materialized_slice.clone(),
             int64_unit_range: self.int64_unit_range,
             int64_affine: self.int64_affine,
             int64_strided: self.int64_strided.clone(),
@@ -1287,8 +1404,7 @@ impl Index {
     /// For unsorted indexes, falls back to linear scan (O(n)).
     #[must_use]
     pub fn position(&self, needle: &IndexLabel) -> Option<usize> {
-        if let (Some(range), IndexLabel::Int64(target)) =
-            (self.labels.int64_affine_range(), needle)
+        if let (Some(range), IndexLabel::Int64(target)) = (self.labels.int64_affine_range(), needle)
         {
             return range.position(*target);
         }
@@ -1691,9 +1807,14 @@ impl Index {
 
     #[must_use]
     pub fn slice(&self, start: usize, len: usize) -> Self {
-        let start = start.min(self.labels.len());
-        let end = start.saturating_add(len).min(self.labels.len());
-        self.propagate_name(Self::new(self.labels[start..end].to_vec()))
+        self.propagate_name(Self {
+            labels: self.labels.slice(start, len),
+            name: None,
+            label_identity: next_index_label_identity(),
+            duplicate_cache: OnceLock::new(),
+            sort_order_cache: OnceLock::new(),
+            semantic_fingerprint_cache: OnceLock::new(),
+        })
     }
 
     #[must_use]
@@ -12986,7 +13107,8 @@ impl MultiIndex {
             // Dedup to DISTINCT values first (O(n) hash), then sort only those
             // (O(d log d)); sorting all n refs would cost as much as the tuple
             // sort we are replacing.
-            let mut sorted: Vec<&IndexLabel> = col.iter().collect::<FxHashSet<_>>().into_iter().collect();
+            let mut sorted: Vec<&IndexLabel> =
+                col.iter().collect::<FxHashSet<_>>().into_iter().collect();
             sorted.sort_unstable();
             let radix = sorted.len() as u64;
             let mut rank: FxHashMap<&IndexLabel, u64> =
@@ -13105,8 +13227,10 @@ impl MultiIndex {
         }
 
         if let Some((src_keys, tgt_keys)) = self.factorize_packed_keys(target) {
-            let mut positions =
-                FxHashMap::<u64, Vec<usize>>::with_capacity_and_hasher(self.len(), Default::default());
+            let mut positions = FxHashMap::<u64, Vec<usize>>::with_capacity_and_hasher(
+                self.len(),
+                Default::default(),
+            );
             for (row, &key) in src_keys.iter().enumerate() {
                 positions.entry(key).or_default().push(row);
             }
@@ -13170,10 +13294,8 @@ impl MultiIndex {
         }
 
         if let Some((src_keys, tgt_keys)) = self.factorize_packed_keys(target) {
-            let mut positions = FxHashMap::<u64, isize>::with_capacity_and_hasher(
-                self.len(),
-                Default::default(),
-            );
+            let mut positions =
+                FxHashMap::<u64, isize>::with_capacity_and_hasher(self.len(), Default::default());
             for (row, &key) in src_keys.iter().enumerate() {
                 positions
                     .entry(key)
@@ -13575,8 +13697,7 @@ impl MultiIndex {
         // SipHash HashMap<Vec<IndexLabel>>. Keep self rows whose key is in other,
         // deduped first-seen, then gather those positions. Bijective on tuple
         // identity ⇒ same kept rows, same order.
-        if let Some((self_keys, other_keys)) = self.factorize_packed_keys(other)
-        {
+        if let Some((self_keys, other_keys)) = self.factorize_packed_keys(other) {
             let other_set: FxHashSet<u64> = other_keys.into_iter().collect();
             let mut seen: FxHashSet<u64> =
                 FxHashSet::with_capacity_and_hasher(self_keys.len(), Default::default());
@@ -13628,8 +13749,7 @@ impl MultiIndex {
         self.ensure_same_nlevels(other)?;
         // Packed-key fast path (br-frankenpandas-misetop): keep self rows whose
         // key is NOT in other, deduped first-seen. See intersection.
-        if let Some((self_keys, other_keys)) = self.factorize_packed_keys(other)
-        {
+        if let Some((self_keys, other_keys)) = self.factorize_packed_keys(other) {
             let other_set: FxHashSet<u64> = other_keys.into_iter().collect();
             let mut seen: FxHashSet<u64> =
                 FxHashSet::with_capacity_and_hasher(self_keys.len(), Default::default());
@@ -14284,13 +14404,15 @@ mod tests {
                 .filter(|l| seen.insert((*l).clone()))
                 .cloned()
                 .collect();
-            assert_eq!(idx.unique().labels(), ref_unique.as_slice(), "unique {labels:?}");
+            assert_eq!(
+                idx.unique().labels(),
+                ref_unique.as_slice(),
+                "unique {labels:?}"
+            );
 
             let mut seen_f = std::collections::HashSet::new();
-            let ref_dup_first: Vec<bool> = labels
-                .iter()
-                .map(|l| !seen_f.insert(l.clone()))
-                .collect();
+            let ref_dup_first: Vec<bool> =
+                labels.iter().map(|l| !seen_f.insert(l.clone())).collect();
             assert_eq!(
                 idx.duplicated(DuplicateKeep::First),
                 ref_dup_first,
@@ -14312,14 +14434,17 @@ mod tests {
         // strictly ascending) or the hash path runs (any side unsorted).
         let s = |v: &[i64]| v.iter().map(|x| IndexLabel::Int64(*x)).collect::<Vec<_>>();
         let pairs: Vec<(Vec<IndexLabel>, Vec<IndexLabel>)> = vec![
-            (s(&[1, 2, 3, 5]), s(&[2, 3, 4])),       // both sorted, overlap
-            (s(&[1, 2, 3]), s(&[4, 5, 6])),          // both sorted, disjoint
-            (s(&[1, 2, 3]), s(&[1, 2, 3])),          // identical
-            (s(&[1, 2, 3]), vec![]),                 // empty other
-            (vec![], s(&[1, 2, 3])),                 // empty self
-            (s(&[3, 1, 2]), s(&[2, 3])),             // self unsorted -> hash path
-            (s(&[1, 2, 3]), s(&[3, 1])),             // other unsorted -> hash path
-            (vec!["a".into(), "c".into(), "e".into()], vec!["b".into(), "c".into()]), // utf8 sorted
+            (s(&[1, 2, 3, 5]), s(&[2, 3, 4])), // both sorted, overlap
+            (s(&[1, 2, 3]), s(&[4, 5, 6])),    // both sorted, disjoint
+            (s(&[1, 2, 3]), s(&[1, 2, 3])),    // identical
+            (s(&[1, 2, 3]), vec![]),           // empty other
+            (vec![], s(&[1, 2, 3])),           // empty self
+            (s(&[3, 1, 2]), s(&[2, 3])),       // self unsorted -> hash path
+            (s(&[1, 2, 3]), s(&[3, 1])),       // other unsorted -> hash path
+            (
+                vec!["a".into(), "c".into(), "e".into()],
+                vec!["b".into(), "c".into()],
+            ), // utf8 sorted
             (
                 vec![1_i64.into(), 2_i64.into()],
                 vec!["a".into(), "b".into()],
@@ -14369,8 +14494,16 @@ mod tests {
             let td = TimedeltaIndex::new(nanos.clone());
             for q in [10_i64, 20, 30, 40, 50, 0, 99] {
                 let expected = nanos.iter().position(|n| *n == q);
-                assert_eq!(dt.get_loc(q).ok(), expected, "datetime nanos={nanos:?} q={q}");
-                assert_eq!(td.get_loc(q).ok(), expected, "timedelta nanos={nanos:?} q={q}");
+                assert_eq!(
+                    dt.get_loc(q).ok(),
+                    expected,
+                    "datetime nanos={nanos:?} q={q}"
+                );
+                assert_eq!(
+                    td.get_loc(q).ok(),
+                    expected,
+                    "timedelta nanos={nanos:?} q={q}"
+                );
             }
         }
     }
@@ -14381,16 +14514,16 @@ mod tests {
         // FxHashMap fallback must all equal a first-occurrence reference.
         let s = |v: &[i64]| v.iter().map(|x| IndexLabel::Int64(*x)).collect::<Vec<_>>();
         let cases: Vec<(Vec<IndexLabel>, Vec<IndexLabel>)> = vec![
-            (s(&[1, 2, 3, 4, 5]), s(&[2, 4, 6])),     // both sorted
-            (s(&[1, 2, 3, 4, 5]), s(&[5, 1, 3, 9])),  // self sorted, target unsorted
-            (s(&[3, 1, 5, 2]), s(&[1, 2, 3])),        // self unsorted -> hash path
-            (s(&[1, 2, 3]), vec![]),                  // empty target
-            (vec![], s(&[1, 2])),                     // empty self
+            (s(&[1, 2, 3, 4, 5]), s(&[2, 4, 6])),    // both sorted
+            (s(&[1, 2, 3, 4, 5]), s(&[5, 1, 3, 9])), // self sorted, target unsorted
+            (s(&[3, 1, 5, 2]), s(&[1, 2, 3])),       // self unsorted -> hash path
+            (s(&[1, 2, 3]), vec![]),                 // empty target
+            (vec![], s(&[1, 2])),                    // empty self
             (
                 vec!["a".into(), "c".into(), "e".into()],
                 vec!["c".into(), "z".into(), "a".into()],
             ), // utf8, target unsorted
-            (s(&[1, 2, 3]), vec!["a".into()]), // mixed type sorted, no match
+            (s(&[1, 2, 3]), vec!["a".into()]),       // mixed type sorted, no match
         ];
         for (a, b) in cases {
             let ia = Index::new(a.clone());
@@ -15514,6 +15647,24 @@ mod tests {
                 IndexLabel::Int64(30),
                 IndexLabel::Int64(40),
             ]
+        );
+    }
+
+    #[test]
+    fn slice_of_materialized_index_keeps_shared_label_view() {
+        let index = Index::new(vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+        ]);
+        let sliced = index.slice(1, 2);
+
+        assert!(sliced.labels.materialized_slice.is_some());
+        assert!(sliced.labels.materialized.get().is_none());
+        assert_eq!(
+            sliced.labels(),
+            &[IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into()),]
         );
     }
 
@@ -17791,15 +17942,23 @@ mod tests {
         let mut l0 = Vec::with_capacity(n);
         let mut l1 = Vec::with_capacity(n);
         for _ in 0..n {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             l0.push(IndexLabel::Utf8(format!("g{}", (state >> 40) % 6)));
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             l1.push(IndexLabel::Int64(((state >> 40) % 5) as i64));
         }
         let mi = MultiIndex::from_arrays(vec![l0, l1]).unwrap();
         let rows = mi.to_list();
 
-        for keep in [DuplicateKeep::First, DuplicateKeep::Last, DuplicateKeep::None] {
+        for keep in [
+            DuplicateKeep::First,
+            DuplicateKeep::Last,
+            DuplicateKeep::None,
+        ] {
             let mut want = vec![false; n];
             match keep {
                 DuplicateKeep::First => {
@@ -17854,9 +18013,13 @@ mod tests {
         let mut l0 = Vec::with_capacity(n);
         let mut l1 = Vec::with_capacity(n);
         for _ in 0..n {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let a = (state >> 33) % 7; // low cardinality -> duplicate tuples
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let b = (state >> 33) % 5;
             l0.push(IndexLabel::Utf8(format!("g{a}")));
             l1.push(IndexLabel::Int64(b as i64));
@@ -17869,7 +18032,10 @@ mod tests {
         want.sort_by(|&a, &b| rows[a].cmp(&rows[b]).then(a.cmp(&b)));
 
         assert_eq!(mi.argsort(), want, "argsort");
-        assert_eq!(mi.sort_values().to_list(), mi.take_existing_positions(&want).to_list());
+        assert_eq!(
+            mi.sort_values().to_list(),
+            mi.take_existing_positions(&want).to_list()
+        );
         // min/max derive from argsort and must match the reference ends.
         assert_eq!(mi.min(), Some(rows[want[0]].clone()));
         assert_eq!(mi.max(), Some(rows[want[n - 1]].clone()));
@@ -17889,7 +18055,15 @@ mod tests {
             .unwrap()
         };
         let source = mk(&[("a", 1), ("a", 2), ("b", 1), ("a", 1), ("c", 5), ("b", 2)]);
-        let target = mk(&[("b", 1), ("z", 9), ("a", 1), ("a", 2), ("c", 5), ("q", 0), ("b", 2)]);
+        let target = mk(&[
+            ("b", 1),
+            ("z", 9),
+            ("a", 1),
+            ("a", 2),
+            ("c", 5),
+            ("q", 0),
+            ("b", 2),
+        ]);
         let src_rows = source.to_list();
         let tgt_rows = target.to_list();
 

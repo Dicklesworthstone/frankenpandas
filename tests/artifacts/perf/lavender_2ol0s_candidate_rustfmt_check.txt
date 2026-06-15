@@ -1,0 +1,70 @@
+Diff in /data/projects/frankenpandas/crates/fp-conformance/examples/perf_profile.rs:240:
+ fn build_groupby_cum_pair(n: usize, num_groups: usize) -> (Series, Series) {
+     let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+     let keys: Vec<i64> = (0..n).map(|i| (i % num_groups) as i64).collect();
+[31m-    let vals: Vec<f64> = (0..n).map(|i| (i.wrapping_mul(37) % 9973) as f64 * 0.25).collect();
+[m[32m+    let vals: Vec<f64> = (0..n)
+[m[32m+        .map(|i| (i.wrapping_mul(37) % 9973) as f64 * 0.25)
+[m[32m+        .collect();
+[m     let value = Series::new(
+         "v".to_string(),
+         Index::new(labels.clone()),
+Diff in /data/projects/frankenpandas/crates/fp-conformance/examples/perf_profile.rs:712:
+     let mut names: Vec<String> = Vec::with_capacity(ncols + 1);
+     names.push("id".to_string());
+     let mut cols: Vec<(String, Vec<Scalar>)> = Vec::with_capacity(ncols + 1);
+[31m-    let keys: Vec<Scalar> = (0..n as i64).map(|row| Scalar::Int64(row + key_offset)).collect();
+[m[32m+    let keys: Vec<Scalar> = (0..n as i64)
+[m[32m+        .map(|row| Scalar::Int64(row + key_offset))
+[m[32m+        .collect();
+[m     cols.push(("id".to_string(), keys));
+     for c in 0..ncols {
+         let name = format!("{value_prefix}{c}");
+Diff in /data/projects/frankenpandas/crates/fp-conformance/examples/perf_profile.rs:832:
+             .expect("cumsum"),
+         "groupby_diff" => {
+             let (value, key) = build_groupby_cum_pair(n, 100);
+[31m-            let out = value
+[m[31m-                .groupby(&key)
+[m[31m-                .expect("groupby")
+[m[31m-                .diff(1)
+[m[31m-                .expect("diff");
+[m[32m+            let out = value.groupby(&key).expect("groupby").diff(1).expect("diff");
+[m             return print!("{}", golden_dump_series(&out));
+         }
+         "df_groupby_diff" => build_transform_frame(n, 100, 4)
+Diff in /data/projects/frankenpandas/crates/fp-conformance/examples/perf_profile.rs:1140:
+             let mut idx: Vec<i64> = (0..n as i64).collect();
+             let mut state: u64 = 0x243F_6A88_85A3_08D3;
+             for i in (1..n).rev() {
+[31m-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+[m[32m+                state = state
+[m[32m+                    .wrapping_mul(6364136223846793005)
+[m[32m+                    .wrapping_add(1442695040888963407);
+[m                 let j = (state >> 33) as usize % (i + 1);
+                 idx.swap(i, j);
+             }
+Diff in /data/projects/frankenpandas/crates/fp-conformance/examples/perf_profile.rs:1368:
+         "groupby_diff" => {
+             let (value, key) = build_groupby_cum_pair(n, 100);
+             for _ in 0..iters {
+[31m-                let out = value
+[m[31m-                    .groupby(&key)
+[m[31m-                    .expect("groupby")
+[m[31m-                    .diff(1)
+[m[31m-                    .expect("diff");
+[m[32m+                let out = value.groupby(&key).expect("groupby").diff(1).expect("diff");
+[m                 sink = sink.wrapping_add(out.len());
+             }
+         }
+Diff in /data/projects/frankenpandas/crates/fp-conformance/examples/perf_profile.rs:1838:
+             let mut idx: Vec<i64> = (0..n as i64).collect();
+             let mut state: u64 = 0x243F_6A88_85A3_08D3;
+             for i in (1..n).rev() {
+[31m-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+[m[32m+                state = state
+[m[32m+                    .wrapping_mul(6364136223846793005)
+[m[32m+                    .wrapping_add(1442695040888963407);
+[m                 let j = (state >> 33) as usize % (i + 1);
+                 idx.swap(i, j);
+             }

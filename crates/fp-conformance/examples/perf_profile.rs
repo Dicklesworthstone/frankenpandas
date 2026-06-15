@@ -240,7 +240,9 @@ fn build_groupby_frame(n: usize, num_groups: usize) -> DataFrame {
 fn build_groupby_cum_pair(n: usize, num_groups: usize) -> (Series, Series) {
     let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
     let keys: Vec<i64> = (0..n).map(|i| (i % num_groups) as i64).collect();
-    let vals: Vec<f64> = (0..n).map(|i| (i.wrapping_mul(37) % 9973) as f64 * 0.25).collect();
+    let vals: Vec<f64> = (0..n)
+        .map(|i| (i.wrapping_mul(37) % 9973) as f64 * 0.25)
+        .collect();
     let value = Series::new(
         "v".to_string(),
         Index::new(labels.clone()),
@@ -712,7 +714,9 @@ fn build_join_frame_utf8_wide(
     let mut names: Vec<String> = Vec::with_capacity(ncols + 1);
     names.push("id".to_string());
     let mut cols: Vec<(String, Vec<Scalar>)> = Vec::with_capacity(ncols + 1);
-    let keys: Vec<Scalar> = (0..n as i64).map(|row| Scalar::Int64(row + key_offset)).collect();
+    let keys: Vec<Scalar> = (0..n as i64)
+        .map(|row| Scalar::Int64(row + key_offset))
+        .collect();
     cols.push(("id".to_string(), keys));
     for c in 0..ncols {
         let name = format!("{value_prefix}{c}");
@@ -812,8 +816,9 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("dedup"),
         "iloc_slice" => {
             let frame = build_numeric_frame(n, 10);
-            let positions: Vec<i64> = ((n / 4) as i64..(3 * n / 4) as i64).collect();
-            frame.iloc(&positions).expect("iloc")
+            frame
+                .iloc_slice(Some((n / 4) as i64), Some((3 * n / 4) as i64))
+                .expect("iloc_slice")
         }
         "groupby_cumsum" => {
             let (value, key) = build_groupby_cum_pair(n, 100);
@@ -831,11 +836,7 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("cumsum"),
         "groupby_diff" => {
             let (value, key) = build_groupby_cum_pair(n, 100);
-            let out = value
-                .groupby(&key)
-                .expect("groupby")
-                .diff(1)
-                .expect("diff");
+            let out = value.groupby(&key).expect("groupby").diff(1).expect("diff");
             return print!("{}", golden_dump_series(&out));
         }
         "df_groupby_diff" => build_transform_frame(n, 100, 4)
@@ -1139,7 +1140,9 @@ fn run_golden(scenario: &str, n: usize) {
             let mut idx: Vec<i64> = (0..n as i64).collect();
             let mut state: u64 = 0x243F_6A88_85A3_08D3;
             for i in (1..n).rev() {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let j = (state >> 33) as usize % (i + 1);
                 idx.swap(i, j);
             }
@@ -1313,9 +1316,10 @@ fn main() {
         }
         "iloc_slice" => {
             let frame = build_numeric_frame(n, 10);
-            let positions: Vec<i64> = ((n / 4) as i64..(3 * n / 4) as i64).collect();
             for _ in 0..iters {
-                let out = frame.iloc(&positions).expect("iloc");
+                let out = frame
+                    .iloc_slice(Some((n / 4) as i64), Some((3 * n / 4) as i64))
+                    .expect("iloc_slice");
                 sink = sink.wrapping_add(out.len());
             }
         }
@@ -1366,11 +1370,7 @@ fn main() {
         "groupby_diff" => {
             let (value, key) = build_groupby_cum_pair(n, 100);
             for _ in 0..iters {
-                let out = value
-                    .groupby(&key)
-                    .expect("groupby")
-                    .diff(1)
-                    .expect("diff");
+                let out = value.groupby(&key).expect("groupby").diff(1).expect("diff");
                 sink = sink.wrapping_add(out.len());
             }
         }
@@ -1836,7 +1836,9 @@ fn main() {
             let mut idx: Vec<i64> = (0..n as i64).collect();
             let mut state: u64 = 0x243F_6A88_85A3_08D3;
             for i in (1..n).rev() {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let j = (state >> 33) as usize % (i + 1);
                 idx.swap(i, j);
             }
