@@ -1,0 +1,3 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-vj4mq-base/release-perf/examples/perf_profile iloc_slice 100000 5000
+  Time (mean ± σ):      30.4 ms ±   3.1 ms    [User: 18.8 ms, System: 11.5 ms]
+  Range (min … max):    25.3 ms …  35.4 ms    10 runs
