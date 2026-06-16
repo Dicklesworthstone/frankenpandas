@@ -11478,9 +11478,78 @@ pub fn align_left(left: &Index, right: &Index) -> AlignmentPlan {
     }
 }
 
+/// Typed all-Int64 union alignment over raw `i64` keys (both inputs unique, per
+/// the `align_union` `has_duplicates` guard). Produces the SAME union order as
+/// the generic path — left labels in order, then right-only labels in right
+/// order — and the same per-side position vectors, but with INLINE `i64` map
+/// keys instead of `FxHashMap<&IndexLabel>` pointers into the enum vector (two
+/// position maps + two position lookups per union label, each otherwise paying
+/// a pointer-chase cache miss). Returns `(union_values, left_positions,
+/// right_positions)`.
+#[allow(clippy::type_complexity)]
+fn align_union_i64(
+    left_vals: &[i64],
+    right_vals: &[i64],
+) -> (Vec<i64>, Vec<Option<usize>>, Vec<Option<usize>>) {
+    // `left` is unique, so its labels occupy union positions `0..n` in order:
+    // `left_positions[i] = Some(i)` there and `None` for the right-only tail —
+    // no map lookup needed. A membership SET of `left` filters the right tail;
+    // a `right` position MAP serves `right_positions`.
+    let mut left_set: FxHashSet<i64> =
+        FxHashSet::with_capacity_and_hasher(left_vals.len(), Default::default());
+    for &v in left_vals {
+        left_set.insert(v);
+    }
+    let mut right_pos: FxHashMap<i64, usize> =
+        FxHashMap::with_capacity_and_hasher(right_vals.len(), Default::default());
+    for (i, &v) in right_vals.iter().enumerate() {
+        right_pos.entry(v).or_insert(i);
+    }
+
+    let mut union_vals = Vec::with_capacity(left_vals.len() + right_vals.len());
+    union_vals.extend_from_slice(left_vals);
+    for &v in right_vals {
+        if !left_set.contains(&v) {
+            union_vals.push(v);
+        }
+    }
+
+    let n = left_vals.len();
+    let mut left_positions = Vec::with_capacity(union_vals.len());
+    left_positions.extend((0..n).map(Some));
+    left_positions.extend(std::iter::repeat_n(None, union_vals.len() - n));
+    let right_positions = union_vals
+        .iter()
+        .map(|v| right_pos.get(v).copied())
+        .collect();
+    (union_vals, left_positions, right_positions)
+}
+
 pub fn align_union(left: &Index, right: &Index) -> AlignmentPlan {
     if left.has_duplicates() || right.has_duplicates() {
         return align_non_unique(left, right, AlignMode::Outer);
+    }
+
+    // Typed all-Int64 fast path: inline `i64` position maps instead of the
+    // pointer-keyed `FxHashMap<&IndexLabel>`. Bit-identical union order and
+    // position vectors; the union index keeps the typed Int64 backing.
+    if let (Some(left_vals), Some(right_vals)) =
+        (left.labels.int64_view(), right.labels.int64_view())
+    {
+        let (union_vals, left_positions, right_positions) =
+            align_union_i64(&left_vals, &right_vals);
+        let shared_name = if left.name() == right.name() {
+            left.name().map(str::to_owned)
+        } else {
+            None
+        };
+        let mut union_index = Index::from_i64(union_vals);
+        union_index.name = shared_name;
+        return AlignmentPlan {
+            union_index,
+            left_positions,
+            right_positions,
+        };
     }
 
     let left_positions_map = left.position_map_first_ref();
