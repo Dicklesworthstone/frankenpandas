@@ -47,6 +47,7 @@ CATEGORIES = {
     "rolling": 0.10,
     "indexing": 0.10,
     "strings": 0.10,
+    "linalg": 0.10,
 }
 
 SIZE_CONFIGS = {
@@ -299,6 +300,13 @@ def bench_str_groupby_sum_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: f.groupby("key")["val"].sum())
 
 
+def bench_df_dot_pandas(df: pd.DataFrame) -> list[float]:
+    import math
+    dim = math.isqrt(len(df))
+    m = pd.DataFrame(np.random.default_rng(7).random((dim, dim)))
+    return time_operation(lambda: m.dot(m))
+
+
 PANDAS_WORKLOADS = {
     "io": {
         "csv_read": bench_csv_read_pandas,
@@ -339,6 +347,9 @@ PANDAS_WORKLOADS = {
         "str_sort": bench_str_sort_pandas,
         "str_value_counts": bench_str_value_counts_pandas,
         "str_groupby_sum": bench_str_groupby_sum_pandas,
+    },
+    "linalg": {
+        "df_dot": bench_df_dot_pandas,
     },
 }
 

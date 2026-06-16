@@ -173,6 +173,23 @@ fn build_str_frame(n: usize) -> DataFrame {
     .expect("fp-bench string frame")
 }
 
+/// Build a square `dim x dim` all-finite Float64 frame for the df.dot GEMM
+/// workload (col_0..col_{dim-1}), mirroring the pandas `_build_square_frame`.
+fn build_square_f64_frame(dim: usize) -> DataFrame {
+    let mut rng = SplitMix64(0x1234_5678_9abc_def0);
+    let index = Index::new_known_unique_int64_unit_range(0, dim);
+    let mut columns = BTreeMap::new();
+    let mut column_order = Vec::with_capacity(dim);
+    for c in 0..dim {
+        let name = format!("col_{c}");
+        let data: Vec<f64> = (0..dim).map(|_| rng.unit()).collect();
+        columns.insert(name.clone(), Column::from_f64_values(data));
+        column_order.push(name);
+    }
+    DataFrame::new_with_column_order(index, columns, column_order)
+        .expect("fp-bench square frame")
+}
+
 /// Time a closure `ITERS` times after `WARMUP` warmups; return per-iter µs.
 fn time_us<F: FnMut()>(mut op: F) -> Vec<f64> {
     for _ in 0..WARMUP {
@@ -387,6 +404,16 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                     })
                 }
             }
+        }
+        // df.dot GEMM (br no-gaps flagship): square (dim x dim).(dim x dim) where
+        // dim = isqrt(rows). pandas df.dot delegates to numpy/OpenBLAS; fp uses
+        // its own safe-Rust kernel.
+        ("linalg", "df_dot") => {
+            let dim = (rows as f64).sqrt() as usize;
+            let frame = build_square_f64_frame(dim);
+            time_us(|| {
+                let _ = frame.dot(&frame).expect("dot");
+            })
         }
         _ => return None,
     };
