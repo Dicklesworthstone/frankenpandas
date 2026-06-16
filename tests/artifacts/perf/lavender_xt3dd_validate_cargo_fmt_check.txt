@@ -1,0 +1,362 @@
+Diff in /data/projects/frankenpandas/crates/fp-bench/src/main.rs:186:
+         columns.insert(name.clone(), Column::from_f64_values(data));
+         column_order.push(name);
+     }
+[31m-    DataFrame::new_with_column_order(index, columns, column_order)
+[m[31m-        .expect("fp-bench square frame")
+[m[32m+    DataFrame::new_with_column_order(index, columns, column_order).expect("fp-bench square frame")
+[m }
+
+ /// Time a closure `ITERS` times after `WARMUP` warmups; return per-iter µs.
+Diff in /data/projects/frankenpandas/crates/fp-bench/src/main.rs:540:
+             let left = build(1, "left_val");
+             let right = build(2, "right_val");
+             time_us(|| {
+[31m-                let _ = merge_dataframes_on_with(&left, &right, &["key"], &["key"], JoinType::Inner)
+[m[31m-                    .expect("merge");
+[m[32m+                let _ =
+[m[32m+                    merge_dataframes_on_with(&left, &right, &["key"], &["key"], JoinType::Inner)
+[m[32m+                        .expect("merge");
+[m             })
+         }
+         // String-column ops (the rest of the matrix is numeric-only). pandas:
+Diff in /data/projects/frankenpandas/crates/fp-bench/src/main.rs:612:
+         // 2000-01-01. pandas: s.dt.floor("D").
+         ("datetime", "dt_floor") => {
+             let base: i64 = 946_684_800_000_000_000; // 2000-01-01 00:00:00 UTC, ns
+[31m-            let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 37_000_000_000).collect();
+[m[32m+            let nanos: Vec<i64> = (0..rows as i64)
+[m[32m+                .map(|i| base + i * 37_000_000_000)
+[m[32m+                .collect();
+[m             let index = Index::new_known_unique_int64_unit_range(0, rows);
+             let series = Series::new(
+                 "d".to_string(),
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/bench_multiindex_dedup.rs:8:
+ //! forces the Vec<IndexLabel>-key baseline; the printed `chk` (FNV digest of the
+ //! duplicated mask + kept count) must match between the two runs.
+
+[31m-use std::hint::black_box;
+[m[31m-use std::time::Instant;
+[m[32m+use std::{hint::black_box, time::Instant};
+[m
+ use fp_index::{DuplicateKeep, IndexLabel, MultiIndex};
+
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/bench_multiindex_dedup.rs:16:
+ fn main() {
+     let args: Vec<String> = std::env::args().collect();
+[31m-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+[m[32m+    let n: usize = args
+[m[32m+        .get(1)
+[m[32m+        .and_then(|s| s.parse().ok())
+[m[32m+        .unwrap_or(1_000_000);
+[m     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
+
+     // ~50% duplicate tuples: low-cardinality 2 Utf8 levels.
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/bench_multiindex_dedup.rs:22:
+[31m-    let l0: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Utf8(format!("g{}", i % 700))).collect();
+[m[31m-    let l1: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Utf8(format!("h{}", (i / 7) % 700))).collect();
+[m[32m+    let l0: Vec<IndexLabel> = (0..n)
+[m[32m+        .map(|i| IndexLabel::Utf8(format!("g{}", i % 700)))
+[m[32m+        .collect();
+[m[32m+    let l1: Vec<IndexLabel> = (0..n)
+[m[32m+        .map(|i| IndexLabel::Utf8(format!("h{}", (i / 7) % 700)))
+[m[32m+        .collect();
+[m     let mi = MultiIndex::from_arrays(vec![l0, l1]).expect("mi");
+
+     let mask = mi.duplicated(DuplicateKeep::First);
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/bench_multiindex_get_indexer.rs:8:
+ //! the Vec<IndexLabel>-key baseline; the printed `chk` (FNV digest of the
+ //! indexer) must match between the two runs.
+
+[31m-use std::hint::black_box;
+[m[31m-use std::time::Instant;
+[m[32m+use std::{hint::black_box, time::Instant};
+[m
+ use fp_index::{IndexLabel, MultiIndex};
+
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/bench_multiindex_get_indexer.rs:16:
+ fn main() {
+     let args: Vec<String> = std::env::args().collect();
+[31m-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+[m[32m+    let n: usize = args
+[m[32m+        .get(1)
+[m[32m+        .and_then(|s| s.parse().ok())
+[m[32m+        .unwrap_or(1_000_000);
+[m     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+     let k = 1000usize; // k * (n/k) unique 2-level tuples
+
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/bench_multiindex_get_indexer.rs:22:
+[31m-    let l0: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Utf8(format!("a{}", i / k))).collect();
+[m[31m-    let l1: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Utf8(format!("b{}", i % k))).collect();
+[m[32m+    let l0: Vec<IndexLabel> = (0..n)
+[m[32m+        .map(|i| IndexLabel::Utf8(format!("a{}", i / k)))
+[m[32m+        .collect();
+[m[32m+    let l1: Vec<IndexLabel> = (0..n)
+[m[32m+        .map(|i| IndexLabel::Utf8(format!("b{}", i % k)))
+[m[32m+        .collect();
+[m     let source = MultiIndex::from_arrays(vec![l0, l1]).expect("source");
+     // Target = same tuples reversed (all present) -> full lookup, all hits.
+[31m-    let t0: Vec<IndexLabel> = (0..n).rev().map(|i| IndexLabel::Utf8(format!("a{}", i / k))).collect();
+[m[31m-    let t1: Vec<IndexLabel> = (0..n).rev().map(|i| IndexLabel::Utf8(format!("b{}", i % k))).collect();
+[m[32m+    let t0: Vec<IndexLabel> = (0..n)
+[m[32m+        .rev()
+[m[32m+        .map(|i| IndexLabel::Utf8(format!("a{}", i / k)))
+[m[32m+        .collect();
+[m[32m+    let t1: Vec<IndexLabel> = (0..n)
+[m[32m+        .rev()
+[m[32m+        .map(|i| IndexLabel::Utf8(format!("b{}", i % k)))
+[m[32m+        .collect();
+[m     let target = MultiIndex::from_arrays(vec![t0, t1]).expect("target");
+
+     let indexer = source.get_indexer(&target).expect("get_indexer");
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/bench_multiindex_setop.rs:8:
+ //! `FP_NO_MISETOP=1` forces the to_list baseline; the printed `chk` (FNV digest
+ //! of the result tuples) must match between the two runs.
+
+[31m-use std::hint::black_box;
+[m[31m-use std::time::Instant;
+[m[32m+use std::{hint::black_box, time::Instant};
+[m
+ use fp_index::{IndexLabel, MultiIndex};
+
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/bench_multiindex_setop.rs:16:
+ fn mk(n: usize, off: usize) -> MultiIndex {
+[31m-    let l0: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Utf8(format!("g{}", (i + off) % 700))).collect();
+[m[31m-    let l1: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Utf8(format!("h{}", ((i + off) / 7) % 700))).collect();
+[m[32m+    let l0: Vec<IndexLabel> = (0..n)
+[m[32m+        .map(|i| IndexLabel::Utf8(format!("g{}", (i + off) % 700)))
+[m[32m+        .collect();
+[m[32m+    let l1: Vec<IndexLabel> = (0..n)
+[m[32m+        .map(|i| IndexLabel::Utf8(format!("h{}", ((i + off) / 7) % 700)))
+[m[32m+        .collect();
+[m     MultiIndex::from_arrays(vec![l0, l1]).expect("mi")
+ }
+
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/bench_multiindex_setop.rs:24:
+     for tuple in mi.to_list() {
+         for lbl in tuple {
+             let h = match lbl {
+[31m-                IndexLabel::Utf8(s) => s.bytes().fold(1469598103934665603u64, |a, b| (a ^ b as u64).wrapping_mul(0x100000001b3)),
+[m[32m+                IndexLabel::Utf8(s) => s.bytes().fold(1469598103934665603u64, |a, b| {
+[m[32m+                    (a ^ b as u64).wrapping_mul(0x100000001b3)
+[m[32m+                }),
+[m                 IndexLabel::Int64(v) => v as u64,
+                 _ => 0xDEAD,
+             };
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/bench_multiindex_setop.rs:36:
+
+ fn main() {
+     let args: Vec<String> = std::env::args().collect();
+[31m-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+[m[32m+    let n: usize = args
+[m[32m+        .get(1)
+[m[32m+        .and_then(|s| s.parse().ok())
+[m[32m+        .unwrap_or(1_000_000);
+[m     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
+     let a = mk(n, 0);
+     let b = mk(n, n / 3); // ~partial overlap
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/bench_multiindex_setop.rs:43:
+
+[31m-    let chk = digest(&a.intersection(&b).unwrap()) ^ digest(&a.difference(&b).unwrap()).rotate_left(1);
+[m[32m+    let chk =
+[m[32m+        digest(&a.intersection(&b).unwrap()) ^ digest(&a.difference(&b).unwrap()).rotate_left(1);
+[m
+     let mut sink = 0usize;
+     let start = Instant::now();
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/bench_multiindex_sort.rs:7:
+ //! tuple-comparison baseline; the printed `chk` (FNV digest of the argsort
+ //! permutation) must match between the two runs.
+
+[31m-use std::hint::black_box;
+[m[31m-use std::time::Instant;
+[m[32m+use std::{hint::black_box, time::Instant};
+[m
+ use fp_index::{IndexLabel, MultiIndex};
+
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/bench_multiindex_sort.rs:15:
+ fn main() {
+     let args: Vec<String> = std::env::args().collect();
+[31m-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+[m[32m+    let n: usize = args
+[m[32m+        .get(1)
+[m[32m+        .and_then(|s| s.parse().ok())
+[m[32m+        .unwrap_or(1_000_000);
+[m     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
+     let k = 1000usize;
+
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/datetime_get_loc_bench.rs:5:
+ //! keeps the linear path — the baseline for what every datetime get_loc did
+ //! before.
+
+[32m+use std::{hint::black_box, time::Instant};
+[m[32m+
+[m use fp_index::DatetimeIndex;
+[31m-use std::hint::black_box;
+[m[31m-use std::time::Instant;
+[m
+ fn main() {
+     let args: Vec<String> = std::env::args().collect();
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/datetime_get_loc_bench.rs:14:
+[31m-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+[m[32m+    let n: usize = args
+[m[32m+        .get(1)
+[m[32m+        .and_then(|s| s.parse().ok())
+[m[32m+        .unwrap_or(1_000_000);
+[m     let queries: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2_000);
+
+     let sorted: Vec<i64> = (0..n).map(|i| i as i64 * 1000).collect();
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/datetime_get_loc_bench.rs:25:
+         .collect();
+
+     let mode = args.get(3).map(String::as_str).unwrap_or("sorted");
+[31m-    let target = if mode == "linear" { &dt_unsorted } else { &dt_sorted };
+[m[32m+    let target = if mode == "linear" {
+[m[32m+        &dt_unsorted
+[m[32m+    } else {
+[m[32m+        &dt_sorted
+[m[32m+    };
+[m
+     let mut sink = 0usize;
+     let start = Instant::now();
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/get_indexer_bench.rs:4:
+ //!
+ //! `FP_NO_IDXDUP=1` forces the old FxHashMap path for the baseline measurement.
+
+[32m+use std::{hint::black_box, time::Instant};
+[m[32m+
+[m use fp_index::{Index, IndexLabel};
+[31m-use std::hint::black_box;
+[m[31m-use std::time::Instant;
+[m
+ fn main() {
+     let args: Vec<String> = std::env::args().collect();
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/get_indexer_bench.rs:13:
+[31m-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+[m[32m+    let n: usize = args
+[m[32m+        .get(1)
+[m[32m+        .and_then(|s| s.parse().ok())
+[m[32m+        .unwrap_or(1_000_000);
+[m     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
+
+     // Sorted self and sorted target with ~50% overlap.
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/get_indexer_bench.rs:17:
+     let a: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64 * 2)).collect();
+[31m-    let t: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64 * 2 + 1)).collect();
+[m[32m+    let t: Vec<IndexLabel> = (0..n)
+[m[32m+        .map(|i| IndexLabel::Int64(i as i64 * 2 + 1))
+[m[32m+        .collect();
+[m     let ia = Index::new(a);
+     let target = Index::new(t);
+
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/has_duplicates_bench.rs:5:
+ //!
+ //! `FP_NO_IDXDUP=1` forces the old FxHashMap path for the baseline measurement.
+
+[32m+use std::{hint::black_box, time::Instant};
+[m[32m+
+[m use fp_index::{Index, IndexLabel};
+[31m-use std::hint::black_box;
+[m[31m-use std::time::Instant;
+[m
+ fn main() {
+     let args: Vec<String> = std::env::args().collect();
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/has_duplicates_bench.rs:14:
+[31m-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+[m[32m+    let n: usize = args
+[m[32m+        .get(1)
+[m[32m+        .and_then(|s| s.parse().ok())
+[m[32m+        .unwrap_or(1_000_000);
+[m     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
+
+     // Strictly ascending, gapped (so it is a materialized label vector, not a
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/intersection_bench.rs:4:
+ //!
+ //! `FP_NO_IDXDUP=1` forces the old FxHashMap path for the baseline measurement.
+
+[32m+use std::{hint::black_box, time::Instant};
+[m[32m+
+[m use fp_index::{Index, IndexLabel};
+[31m-use std::hint::black_box;
+[m[31m-use std::time::Instant;
+[m
+ fn main() {
+     let args: Vec<String> = std::env::args().collect();
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/intersection_bench.rs:13:
+[31m-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+[m[32m+    let n: usize = args
+[m[32m+        .get(1)
+[m[32m+        .and_then(|s| s.parse().ok())
+[m[32m+        .unwrap_or(1_000_000);
+[m     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
+
+     // Two strictly-ascending Int64 indexes with ~50% overlap.
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/unique_bench.rs:5:
+ //!
+ //! `FP_NO_IDXDUP=1` forces the old FxHashMap path for the baseline measurement.
+
+[32m+use std::{hint::black_box, time::Instant};
+[m[32m+
+[m use fp_index::{Index, IndexLabel};
+[31m-use std::hint::black_box;
+[m[31m-use std::time::Instant;
+[m
+ fn main() {
+     let args: Vec<String> = std::env::args().collect();
+Diff in /data/projects/frankenpandas/crates/fp-index/examples/unique_bench.rs:14:
+[31m-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+[m[32m+    let n: usize = args
+[m[32m+        .get(1)
+[m[32m+        .and_then(|s| s.parse().ok())
+[m[32m+        .unwrap_or(1_000_000);
+[m     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
+
+     let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64 * 2)).collect();
+Diff in /data/projects/frankenpandas/crates/fp-python/src/lib.rs:758:
+         for (k, v) in mapping.iter() {
+             pairs.push((k.extract::<String>()?, v.extract::<String>()?));
+         }
+[31m-        let refs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+[m[32m+        let refs: Vec<(&str, &str)> = pairs
+[m[32m+            .iter()
+[m[32m+            .map(|(k, v)| (k.as_str(), v.as_str()))
+[m[32m+            .collect();
+[m         let result = self
+             .inner
+             .rename(&refs)
+Diff in /data/projects/frankenpandas/crates/fp-python/src/lib.rs:798:
+         let on_refs: Vec<&str> = on_cols.iter().map(String::as_str).collect();
+         let merged = fp_join::merge_dataframes_on(&self.inner, &other.inner, &on_refs, join_type)
+             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+[31m-        let frame = DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+[m[31m-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+[m[32m+        let frame =
+[m[32m+            DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+[m[32m+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+[m         Ok(PyDataFrame { inner: frame })
+     }
+
+Diff in /data/projects/frankenpandas/crates/fp-python/src/lib.rs:1068:
+                 StyleOp::NaRep(n) => styled.na_rep(n),
+                 StyleOp::SetCaption(c) => styled.set_caption(c),
+                 StyleOp::SetProperties(pairs) => {
+[31m-                    let refs: Vec<(&str, &str)> =
+[m[31m-                        pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+[m[32m+                    let refs: Vec<(&str, &str)> = pairs
+[m[32m+                        .iter()
+[m[32m+                        .map(|(k, v)| (k.as_str(), v.as_str()))
+[m[32m+                        .collect();
+[m                     styled.set_properties(&refs)
+                 }
+                 StyleOp::Bar(c) => styled.bar(c),
+Diff in /data/projects/frankenpandas/crates/fp-types/src/lib.rs:6485:
+     #[test]
+     fn period_display_is_pandas_calendar_string() {
+         // Ordinal 216 on the quarterly axis (1970Q1 == 0) is 1970 + 54y = 2024Q1.
+[31m-        assert_eq!(Period::new(216, PeriodFreq::Quarterly).to_string(), "2024Q1");
+[m[32m+        assert_eq!(
+[m[32m+            Period::new(216, PeriodFreq::Quarterly).to_string(),
+[m[32m+            "2024Q1"
+[m[32m+        );
+[m         // 1970 + 54 == 2024 on the annual axis.
+         assert_eq!(Period::new(54, PeriodFreq::Annual).to_string(), "2024");
+         // 1970-01 == 0 -> 2024-03 is 54*12 + 2 == 650 months.

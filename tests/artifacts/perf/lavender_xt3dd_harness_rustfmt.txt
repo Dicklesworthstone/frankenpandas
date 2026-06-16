@@ -1,0 +1,10 @@
+Diff in /data/projects/frankenpandas/crates/fp-conformance/examples/perf_profile.rs:347:
+     columns.insert("k1".to_string(), Column::from_i64_values(k1));
+     columns.insert("v".to_string(), Column::from_f64_values(vals));
+     let column_order = vec!["k0".to_string(), "k1".to_string(), "v".to_string()];
+[31m-    DataFrame::new_with_column_order(index, columns, column_order)
+[m[31m-        .expect("multi-int groupby frame")
+[m[32m+    DataFrame::new_with_column_order(index, columns, column_order).expect("multi-int groupby frame")
+[m }
+
+ /// String-keyed frame whose grouping/sort key is stored as one contiguous

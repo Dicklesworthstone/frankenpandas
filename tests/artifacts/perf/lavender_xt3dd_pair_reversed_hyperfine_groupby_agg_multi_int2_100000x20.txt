@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-post-gowx2-local/release-perf/examples/perf_profile groupby_agg_multi_int2 100000 20
+  Time (mean ± σ):      72.8 ms ±   8.7 ms    [User: 59.8 ms, System: 8.0 ms]
+  Range (min … max):    56.7 ms …  89.7 ms    10 runs
+
+Benchmark 2: /data/projects/.scratch/lavender_xt3dd_bins/perf_profile_base_78952a1 groupby_agg_multi_int2 100000 20
+  Time (mean ± σ):     191.2 ms ±  14.3 ms    [User: 167.6 ms, System: 24.0 ms]
+  Range (min … max):   171.1 ms … 223.6 ms    10 runs
+
+Summary
+  /data/projects/.scratch/cargo-target-lavender-post-gowx2-local/release-perf/examples/perf_profile groupby_agg_multi_int2 100000 20 ran
+    2.63 ± 0.37 times faster than /data/projects/.scratch/lavender_xt3dd_bins/perf_profile_base_78952a1 groupby_agg_multi_int2 100000 20

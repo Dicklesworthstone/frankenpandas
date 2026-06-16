@@ -16,7 +16,8 @@
 //!   str_groupby_var, str_groupby_std, str_groupby_first, str_groupby_last,
 //!   str_groupby_prod, str_groupby_median, str_series_sort, str_sort_chain,
 //!   filter_bool, dt_year, inner_join, series_add, series_add_same, series_add_align,
-//!   csv_read, csv_read_options, csv_read_no_na_filter, csv_parse_dates_dt_year }
+//!   groupby_agg_multi_int2, csv_read, csv_read_options, csv_read_no_na_filter,
+//!   csv_parse_dates_dt_year }
 
 use std::{collections::BTreeMap, fmt::Write as _, time::Instant};
 
@@ -329,6 +330,24 @@ fn build_transform_frame(n: usize, num_groups: usize, ncols: usize) -> DataFrame
         column_order.push(name);
     }
     DataFrame::new_with_column_order(index, columns, column_order).expect("transform frame")
+}
+
+fn build_multi_int_groupby_frame(n: usize, key_cardinality: usize) -> DataFrame {
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let index = Index::new(labels);
+    let k0: Vec<i64> = (0..n).map(|i| (i % key_cardinality) as i64).collect();
+    let k1: Vec<i64> = (0..n)
+        .map(|i| ((i / key_cardinality) % key_cardinality) as i64)
+        .collect();
+    let vals: Vec<f64> = (0..n)
+        .map(|i| (i.wrapping_mul(37) % 9973) as f64 * 0.125)
+        .collect();
+    let mut columns = BTreeMap::new();
+    columns.insert("k0".to_string(), Column::from_i64_values(k0));
+    columns.insert("k1".to_string(), Column::from_i64_values(k1));
+    columns.insert("v".to_string(), Column::from_f64_values(vals));
+    let column_order = vec!["k0".to_string(), "k1".to_string(), "v".to_string()];
+    DataFrame::new_with_column_order(index, columns, column_order).expect("multi-int groupby frame")
 }
 
 /// String-keyed frame whose grouping/sort key is stored as one contiguous
@@ -942,6 +961,11 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("groupby")
             .agg_list(&["sum", "mean", "std"])
             .expect("agg multi"),
+        "groupby_agg_multi_int2" => build_multi_int_groupby_frame(n, 100)
+            .groupby(&["k0", "k1"])
+            .expect("groupby")
+            .agg_list(&["sum", "mean", "std"])
+            .expect("multi int agg"),
         "value_counts_nan50" => {
             let out = build_nullable_f64_value_counts_series(n)
                 .value_counts()
@@ -1533,6 +1557,17 @@ fn main() {
                     .expect("groupby")
                     .agg_list(&["sum", "mean", "std"])
                     .expect("agg multi");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "groupby_agg_multi_int2" => {
+            let frame = build_multi_int_groupby_frame(n, 100);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k0", "k1"])
+                    .expect("groupby")
+                    .agg_list(&["sum", "mean", "std"])
+                    .expect("multi int agg");
                 sink = sink.wrapping_add(out.len());
             }
         }
