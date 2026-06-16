@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-9l6yv-base/release-perf/join-bench --ordered-unique --rows 1000000 --right-rows 1000000 --join-type left --warmup 0 --iters 1
+  Time (mean ± σ):     227.5 ms ±  11.2 ms    [User: 106.6 ms, System: 120.6 ms]
+  Range (min … max):   213.3 ms … 251.6 ms    10 runs
+
+Benchmark 2: /data/projects/.scratch/cargo-target-lavender-9l6yv-candidate/release-perf/join-bench --ordered-unique --rows 1000000 --right-rows 1000000 --join-type left --warmup 0 --iters 1
+  Time (mean ± σ):     229.3 ms ±  14.0 ms    [User: 110.9 ms, System: 118.0 ms]
+  Range (min … max):   208.7 ms … 252.8 ms    10 runs
+
+Summary
+  /data/projects/.scratch/cargo-target-lavender-9l6yv-base/release-perf/join-bench --ordered-unique --rows 1000000 --right-rows 1000000 --join-type left --warmup 0 --iters 1 ran
+    1.01 ± 0.08 times faster than /data/projects/.scratch/cargo-target-lavender-9l6yv-candidate/release-perf/join-bench --ordered-unique --rows 1000000 --right-rows 1000000 --join-type left --warmup 0 --iters 1

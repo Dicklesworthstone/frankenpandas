@@ -5654,6 +5654,28 @@ fn build_single_key_ordered_unique_outer_merge_output(
                 left_key_col,
                 right_key_col,
             } => {
+                if let (Some(left_keys), Some(right_keys)) =
+                    (left_key_col.as_i64_slice(), right_key_col.as_i64_slice())
+                {
+                    let mut data = Vec::with_capacity(left_positions.len());
+                    let mut all_positions_valid = true;
+                    for (left_pos, right_pos) in left_positions.iter().zip(right_positions.iter()) {
+                        match (*left_pos, *right_pos) {
+                            (Some(pos), _) if pos < left_keys.len() => data.push(left_keys[pos]),
+                            (None, Some(pos)) if pos < right_keys.len() => {
+                                data.push(right_keys[pos])
+                            }
+                            _ => {
+                                all_positions_valid = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_positions_valid {
+                        return Ok(Column::from_i64_values(data));
+                    }
+                }
+
                 let values = left_positions
                     .iter()
                     .zip(right_positions.iter())
