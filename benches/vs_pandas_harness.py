@@ -46,6 +46,7 @@ CATEGORIES = {
     "joins": 0.15,
     "rolling": 0.10,
     "indexing": 0.10,
+    "strings": 0.10,
 }
 
 SIZE_CONFIGS = {
@@ -274,6 +275,30 @@ def bench_join_outer_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: left.merge(right, on="key", how="outer"))
 
 
+def _build_str_frame(n: int) -> pd.DataFrame:
+    # Mirrors fp-bench build_str_frame: key = ~1000-distinct group label,
+    # name = unique ~15-byte id (sort key), val = float64.
+    keys = [f"g{i % 1000:04d}" for i in range(n)]
+    names = [f"item_{i:010d}" for i in range(n)]
+    return pd.DataFrame({
+        "key": keys,
+        "name": names,
+        "val": np.arange(n, dtype=np.float64),
+    })
+
+def bench_str_sort_pandas(df: pd.DataFrame) -> list[float]:
+    f = _build_str_frame(len(df))
+    return time_operation(lambda: f.sort_values("name"))
+
+def bench_str_value_counts_pandas(df: pd.DataFrame) -> list[float]:
+    f = _build_str_frame(len(df))
+    return time_operation(lambda: f["key"].value_counts())
+
+def bench_str_groupby_sum_pandas(df: pd.DataFrame) -> list[float]:
+    f = _build_str_frame(len(df))
+    return time_operation(lambda: f.groupby("key")["val"].sum())
+
+
 PANDAS_WORKLOADS = {
     "io": {
         "csv_read": bench_csv_read_pandas,
@@ -309,6 +334,11 @@ PANDAS_WORKLOADS = {
         "join_inner": bench_join_inner_pandas,
         "join_left": bench_join_left_pandas,
         "join_outer": bench_join_outer_pandas,
+    },
+    "strings": {
+        "str_sort": bench_str_sort_pandas,
+        "str_value_counts": bench_str_value_counts_pandas,
+        "str_groupby_sum": bench_str_groupby_sum_pandas,
     },
 }
 

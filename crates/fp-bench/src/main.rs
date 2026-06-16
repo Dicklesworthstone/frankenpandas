@@ -133,6 +133,44 @@ fn build_join_frames(n: usize) -> (DataFrame, DataFrame) {
     (left, right)
 }
 
+/// Build a string-column frame for the strings category — mirrors the pandas
+/// `_build_str_frame`: `key` is a ~1000-distinct group label (g0000..g0999),
+/// `name` is a unique ~15-byte id (for the sort key), `val` is a Float64.
+fn build_str_frame(n: usize) -> DataFrame {
+    let mut key_bytes = Vec::new();
+    let mut key_off = Vec::with_capacity(n + 1);
+    key_off.push(0usize);
+    let mut name_bytes = Vec::new();
+    let mut name_off = Vec::with_capacity(n + 1);
+    name_off.push(0usize);
+    for i in 0..n {
+        let key = format!("g{:04}", i % 1000);
+        key_bytes.extend_from_slice(key.as_bytes());
+        key_off.push(key_bytes.len());
+        let name = format!("item_{i:010}");
+        name_bytes.extend_from_slice(name.as_bytes());
+        name_off.push(name_bytes.len());
+    }
+    let vals: Vec<f64> = (0..n).map(|i| i as f64).collect();
+    let index = Index::new_known_unique_int64_unit_range(0, n);
+    let mut cols = BTreeMap::new();
+    cols.insert(
+        "key".to_string(),
+        Column::from_utf8_contiguous(key_bytes, key_off),
+    );
+    cols.insert(
+        "name".to_string(),
+        Column::from_utf8_contiguous(name_bytes, name_off),
+    );
+    cols.insert("val".to_string(), Column::from_f64_values(vals));
+    DataFrame::new_with_column_order(
+        index,
+        cols,
+        vec!["key".to_string(), "name".to_string(), "val".to_string()],
+    )
+    .expect("fp-bench string frame")
+}
+
 /// Time a closure `ITERS` times after `WARMUP` warmups; return per-iter µs.
 fn time_us<F: FnMut()>(mut op: F) -> Vec<f64> {
     for _ in 0..WARMUP {
@@ -304,6 +342,30 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = merge_dataframes_on_with(&left, &right, &["key"], &["key"], join_type)
                     .expect("merge");
             })
+        }
+        // String-column ops (the rest of the matrix is numeric-only). pandas:
+        // f.sort_values("name") / f["key"].value_counts() / f.groupby("key")
+        // ["val"].sum(). The numeric `df` built above is unused here.
+        ("strings", "str_sort" | "str_value_counts" | "str_groupby_sum") => {
+            let frame = build_str_frame(rows);
+            match workload {
+                "str_sort" => time_us(|| {
+                    let _ = frame.sort_values("name", true).expect("str sort");
+                }),
+                "str_value_counts" => {
+                    let series = frame.get_column("key");
+                    time_us(|| {
+                        let _ = series.value_counts().expect("str value_counts");
+                    })
+                }
+                _ => time_us(|| {
+                    let _ = frame
+                        .groupby(&["key"])
+                        .expect("groupby")
+                        .sum()
+                        .expect("sum");
+                }),
+            }
         }
         _ => return None,
     };
