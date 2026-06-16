@@ -1357,6 +1357,11 @@ impl Index {
             if !matches!(self.sort_order(), SortOrder::Unsorted) {
                 return false;
             }
+            // Typed all-Int64 fast path: inline `i64` duplicate detection with
+            // early exit instead of the pointer-keyed `FxHashMap<&IndexLabel>`.
+            if let Some(vals) = self.labels.int64_view() {
+                return Self::has_duplicates_i64(&vals);
+            }
             detect_duplicates(self.labels())
         })
     }
@@ -1729,6 +1734,36 @@ impl Index {
             None => {
                 let set: FxHashSet<i64> = needles.iter().copied().collect();
                 haystack.iter().map(|&v| set.contains(&v)).collect()
+            }
+        }
+    }
+
+    /// Whether `vals` contains any duplicate, over raw `i64` keys with an
+    /// early exit. Bit-identical to `detect_duplicates` for all-Int64 indexes,
+    /// with inline keys (dense bitset when bounded, else `FxHashSet<i64>`).
+    fn has_duplicates_i64(vals: &[i64]) -> bool {
+        match Self::i64_dense_span(vals) {
+            Some((min, span)) => {
+                let mut bits = vec![0u64; span.div_ceil(64)];
+                for &v in vals {
+                    let s = (v - min) as usize;
+                    let (w, bit) = (s >> 6, 1u64 << (s & 63));
+                    if bits[w] & bit != 0 {
+                        return true;
+                    }
+                    bits[w] |= bit;
+                }
+                false
+            }
+            None => {
+                let mut seen: FxHashSet<i64> =
+                    FxHashSet::with_capacity_and_hasher(vals.len(), Default::default());
+                for &v in vals {
+                    if !seen.insert(v) {
+                        return true;
+                    }
+                }
+                false
             }
         }
     }
