@@ -864,6 +864,11 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("groupby")
             .quantile(0.5)
             .expect("quantile"),
+        "groupby_agg_multi" => build_transform_frame(n, 100, 1)
+            .groupby(&["k"])
+            .expect("groupby")
+            .agg_list(&["sum", "mean", "std"])
+            .expect("agg multi"),
         "str_transform_mean" => build_str_key_frame_repeated(n, 64)
             .groupby(&["k"])
             .expect("groupby")
@@ -1426,6 +1431,17 @@ fn main() {
                     .expect("groupby")
                     .quantile(0.5)
                     .expect("quantile");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "groupby_agg_multi" => {
+            let frame = build_transform_frame(n, 100, 1);
+            for _ in 0..iters {
+                let out = frame
+                    .groupby(&["k"])
+                    .expect("groupby")
+                    .agg_list(&["sum", "mean", "std"])
+                    .expect("agg multi");
                 sink = sink.wrapping_add(out.len());
             }
         }
