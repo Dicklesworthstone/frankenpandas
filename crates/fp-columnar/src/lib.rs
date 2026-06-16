@@ -2164,18 +2164,6 @@ impl ScalarValues {
         }
     }
 
-    fn bool_once_lock(value: Option<bool>) -> OnceLock<bool> {
-        let lock = OnceLock::new();
-        if let Some(value) = value {
-            let _ = lock.set(value);
-        }
-        lock
-    }
-
-    fn lazy_all_valid_float64_with_finite(data: Vec<f64>, all_finite: Option<bool>) -> Self {
-        Self::lazy_all_valid_float64_arc_with_finite(Arc::from(data), all_finite)
-    }
-
     /// Share an existing `Arc` f64 buffer in O(1) (used by `Clone`).
     fn lazy_all_valid_float64_arc(data: Arc<[f64]>) -> Self {
         Self::lazy_all_valid_float64_arc_with_finite(data, None)
