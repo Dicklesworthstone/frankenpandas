@@ -12,8 +12,7 @@
 //! /ewm map to more setup-heavy harnesses and are filed as follow-up; the Python
 //! side simply reports those FP workloads as INCOMPLETE until added here.
 
-use std::collections::BTreeMap;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
@@ -102,7 +101,10 @@ fn build_frame(rows: usize, cols: usize, dtype: &str) -> (DataFrame, Vec<Vec<f64
 fn build_join_frames(n: usize) -> (DataFrame, DataFrame) {
     let left_index = Index::new_known_unique_int64_unit_range(0, n);
     let mut left_cols = BTreeMap::new();
-    left_cols.insert("key".to_string(), Column::from_i64_values((0..n as i64).collect()));
+    left_cols.insert(
+        "key".to_string(),
+        Column::from_i64_values((0..n as i64).collect()),
+    );
     left_cols.insert(
         "left_val".to_string(),
         Column::from_f64_values((0..n).map(|i| i as f64).collect()),
@@ -243,10 +245,18 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             .expect("fp-bench groupby frame");
             match workload {
                 "groupby_sum_int64" => time_us(|| {
-                    let _ = gframe.groupby(&["key"]).expect("groupby").sum().expect("sum");
+                    let _ = gframe
+                        .groupby(&["key"])
+                        .expect("groupby")
+                        .sum()
+                        .expect("sum");
                 }),
                 "groupby_mean_float64" => time_us(|| {
-                    let _ = gframe.groupby(&["key"]).expect("groupby").mean().expect("mean");
+                    let _ = gframe
+                        .groupby(&["key"])
+                        .expect("groupby")
+                        .mean()
+                        .expect("mean");
                 }),
                 _ => time_us(|| {
                     // pandas: df.groupby("key").agg({"col_1": ["sum","mean","std"]})
@@ -300,8 +310,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         }
         ("indexing", "loc_labels") => {
             // pandas: df.loc[list(range(n/4, 3n/4))]
-            let labels: Vec<IndexLabel> =
-                ((rows / 4) as i64..(3 * rows / 4) as i64).map(IndexLabel::Int64).collect();
+            let labels: Vec<IndexLabel> = ((rows / 4) as i64..(3 * rows / 4) as i64)
+                .map(IndexLabel::Int64)
+                .collect();
             time_us(|| {
                 let _ = df.loc(&labels).expect("loc");
             })
@@ -322,8 +333,10 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         }
         ("indexing", "reindex") => {
             // pandas: df.reindex(Index(range(0, n*2, 2)))
-            let new_labels: Vec<IndexLabel> =
-                (0..(rows * 2) as i64).step_by(2).map(IndexLabel::Int64).collect();
+            let new_labels: Vec<IndexLabel> = (0..(rows * 2) as i64)
+                .step_by(2)
+                .map(IndexLabel::Int64)
+                .collect();
             time_us(|| {
                 let _ = df.reindex(new_labels.clone()).expect("reindex");
             })
@@ -393,7 +406,9 @@ fn main() {
             println!("{{\"times_us\": [{}]}}", body.join(", "));
         }
         None => {
-            eprintln!("fp-bench: unsupported {category}/{workload} (v1 coverage: dataframe_ops, groupby, rolling)");
+            eprintln!(
+                "fp-bench: unsupported {category}/{workload} (v1 coverage: dataframe_ops, groupby, rolling)"
+            );
             std::process::exit(2);
         }
     }

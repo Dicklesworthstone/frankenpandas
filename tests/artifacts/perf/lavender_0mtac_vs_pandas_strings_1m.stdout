@@ -1,0 +1,14 @@
+=== vs-pandas Benchmark Harness ===
+Timestamp: 2026-06-16T03:32:50.009272+00:00
+Categories: strings
+Sizes: 1M
+Dtypes: float64
+pandas version: 2.2.3
+
+
+[STRINGS] (weight: 0.1)
+  [strings] str_sort @ 1M/float64... DROPPED_HIGH_CV (N/A)
+  [strings] str_value_counts @ 1M/float64... DROPPED_HIGH_CV (N/A)
+  [strings] str_groupby_sum @ 1M/float64... DROPPED_HIGH_CV (N/A)
+
+Results written to: tests/artifacts/perf/lavender_0mtac_vs_pandas_strings_1m.json

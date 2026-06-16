@@ -448,6 +448,45 @@ fn build_str_key_frame_repeated(n: usize, cardinality: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, column_order).expect("str key repeated frame")
 }
 
+/// String frame matching fp-bench's `strings/str_groupby_sum` input and the
+/// pandas `df.groupby("key")["val"].sum()` shape in benches/vs_pandas_harness.
+fn build_fpbench_str_frame(n: usize) -> DataFrame {
+    let mut key_bytes = Vec::new();
+    let mut key_offsets = Vec::with_capacity(n + 1);
+    key_offsets.push(0);
+    let mut name_bytes = Vec::new();
+    let mut name_offsets = Vec::with_capacity(n + 1);
+    name_offsets.push(0);
+    for row in 0..n {
+        let key = format!("g{:04}", row % 1000);
+        key_bytes.extend_from_slice(key.as_bytes());
+        key_offsets.push(key_bytes.len());
+
+        let name = format!("item_{row:010}");
+        name_bytes.extend_from_slice(name.as_bytes());
+        name_offsets.push(name_bytes.len());
+    }
+
+    let values: Vec<f64> = (0..n).map(|row| row as f64).collect();
+    let index = Index::new_known_unique_int64_unit_range(0, n);
+    let mut columns = BTreeMap::new();
+    columns.insert(
+        "key".to_string(),
+        Column::from_utf8_contiguous(key_bytes, key_offsets),
+    );
+    columns.insert(
+        "name".to_string(),
+        Column::from_utf8_contiguous(name_bytes, name_offsets),
+    );
+    columns.insert("val".to_string(), Column::from_f64_values(values));
+    DataFrame::new_with_column_order(
+        index,
+        columns,
+        vec!["key".to_string(), "name".to_string(), "val".to_string()],
+    )
+    .expect("fp-bench string frame")
+}
+
 /// Frame with a deterministically-shuffled all-Int64 index (so sort_index must
 /// actually reorder) + a couple Float64 value columns — for the radix
 /// sort_index benchmark (br-frankenpandas-y5s15).
@@ -949,6 +988,13 @@ fn run_golden(scenario: &str, n: usize) {
             .expect("str sort"),
         "str_groupby_sum" => build_str_key_frame(n, 4096)
             .groupby(&["k"])
+            .expect("str groupby")
+            .sum()
+            .expect("str groupby sum"),
+        "str_groupby_sum_fpbench_valonly" => build_fpbench_str_frame(n)
+            .select_columns(&["key", "val"])
+            .expect("str groupby value subset")
+            .groupby(&["key"])
             .expect("str groupby")
             .sum()
             .expect("str groupby sum"),

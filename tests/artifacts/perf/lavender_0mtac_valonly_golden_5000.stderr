@@ -1,0 +1,112 @@
+[RCH] Cargo target sync active; forcing worker CARGO_TARGET_DIR to an isolated remote target and syncing back to /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/target
+[RCH] local (no admissible workers: insufficient_slots=1,hard_preflight=9)
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-index/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-runtime/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-frame/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-groupby/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-conformance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-expr/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-columnar/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-bench/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/frankenpandas/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-frankentui/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-join/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-types/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-python/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+   Compiling getrandom v0.3.4
+   Compiling wait-timeout v0.2.1
+   Compiling page_size v0.6.0
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.150
+   Compiling csv v1.4.0
+   Compiling getrandom v0.4.2
+   Compiling ppv-lite86 v0.2.21
+   Compiling flatbuffers v25.12.19
+   Compiling alloca v0.4.0
+   Compiling ciborium-ll v0.2.2
+   Compiling selectors v0.38.0
+   Compiling rusqlite v0.40.1
+   Compiling ahash v0.8.12
+   Compiling rand_core v0.9.5
+   Compiling tempfile v3.27.0
+   Compiling arrow-array v58.3.0
+   Compiling rand v0.9.4
+   Compiling rand_xorshift v0.4.0
+   Compiling rand_chacha v0.9.0
+   Compiling rusty-fork v0.3.1
+   Compiling fp-types v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-types)
+   Compiling serde-pickle v1.2.0
+   Compiling calamine v0.35.0
+   Compiling raptorq v2.0.1
+   Compiling ciborium v0.2.2
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling proptest v1.11.0
+   Compiling fp-runtime v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-runtime)
+   Compiling tinytemplate v1.2.1
+   Compiling scraper v0.27.0
+   Compiling criterion v0.8.2
+   Compiling fp-columnar v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-columnar)
+   Compiling fp-index v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-index)
+   Compiling arrow-select v58.3.0
+   Compiling arrow-row v58.3.0
+   Compiling arrow-arith v58.3.0
+   Compiling fp-frame v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-frame)
+   Compiling arrow-ord v58.3.0
+   Compiling arrow-ipc v58.3.0
+   Compiling arrow-string v58.3.0
+   Compiling parquet v58.3.0
+   Compiling arrow-cast v58.3.0
+   Compiling arrow-json v58.3.0
+   Compiling arrow-csv v58.3.0
+   Compiling arrow v58.3.0
+   Compiling orc-rust v0.8.0
+   Compiling fp-expr v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-expr)
+   Compiling fp-io v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-io)
+   Compiling fp-join v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-join)
+   Compiling fp-groupby v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-groupby)
+   Compiling fp-conformance v0.1.0 (/data/projects/.scratch/frankenpandas-lavender-s2i37-vc-final-20260616T022527Z/crates/fp-conformance)
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 1m 43s
+     Running `target/release-perf/examples/perf_profile golden str_groupby_sum_fpbench_valonly 5000`
