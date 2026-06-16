@@ -7,8 +7,7 @@
 //!
 //! Run: cargo run -p fp-conformance --example bench_csv_write --release
 
-use std::collections::BTreeMap;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
@@ -38,7 +37,9 @@ fn build(n: usize) -> DataFrame {
         order.push(name);
     }
     for c in 0..2 {
-        let v: Vec<i64> = (0..n as i64).map(|i| i.wrapping_mul(31 + c) % 9973).collect();
+        let v: Vec<i64> = (0..n as i64)
+            .map(|i| i.wrapping_mul(31 + c) % 9973)
+            .collect();
         let name = format!("i{c}");
         cols.insert(name.clone(), Column::from_i64_values(v));
         order.push(name);
@@ -53,7 +54,10 @@ fn build(n: usize) -> DataFrame {
         bytes.extend_from_slice(samples[i % samples.len()].as_bytes());
         offsets.push(bytes.len());
     }
-    cols.insert("s".to_string(), Column::from_utf8_contiguous(bytes, offsets));
+    cols.insert(
+        "s".to_string(),
+        Column::from_utf8_contiguous(bytes, offsets),
+    );
     order.push("s".to_string());
     DataFrame::new_with_column_order(index, cols, order).expect("frame")
 }
@@ -73,7 +77,19 @@ fn main() {
     let s = write_csv_string(&small).expect("csv");
     println!("SMALL_FNV {:016x} len={}", fnv1a64(&s), s.len());
     // show the first line's terminator bytes
-    let head: String = s.chars().take(40).map(|c| if c == '\n' { '|' } else if c == '\r' { '^' } else { c }).collect();
+    let head: String = s
+        .chars()
+        .take(40)
+        .map(|c| {
+            if c == '\n' {
+                '|'
+            } else if c == '\r' {
+                '^'
+            } else {
+                c
+            }
+        })
+        .collect();
     println!("HEAD {head}");
 
     let frame = build(n);

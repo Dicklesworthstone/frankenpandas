@@ -42,7 +42,9 @@ fn shuffled_index_frame(n: usize, cols: usize) -> DataFrame {
     // Deterministic shuffle of the Int64 index so sort_index does real work.
     let mut labels: Vec<IndexLabel> = (0..n)
         .map(|i| {
-            let mixed = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(17)
+            let mixed = (i as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left(17)
                 ^ (i as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
             IndexLabel::Int64((mixed % (n as u64 * 4)) as i64)
         })
@@ -54,7 +56,9 @@ fn shuffled_index_frame(n: usize, cols: usize) -> DataFrame {
     let mut order = Vec::new();
     for c in 0..cols {
         let name = format!("c{c}");
-        let v: Vec<f64> = (0..n).map(|i| ((i * (c + 1)) % 9973) as f64 * 0.25).collect();
+        let v: Vec<f64> = (0..n)
+            .map(|i| ((i * (c + 1)) % 9973) as f64 * 0.25)
+            .collect();
         columns.insert(name.clone(), Column::from_f64_values(v));
         order.push(name);
     }
@@ -67,7 +71,9 @@ fn int_frame(n: usize, cols: usize) -> DataFrame {
     let mut order = Vec::new();
     for c in 0..cols {
         let name = format!("c{c}");
-        let v: Vec<i64> = (0..n).map(|i| ((i * (c + 1)) % 9973) as i64 - 4000).collect();
+        let v: Vec<i64> = (0..n)
+            .map(|i| ((i * (c + 1)) % 9973) as i64 - 4000)
+            .collect();
         columns.insert(name.clone(), Column::from_i64_values(v));
         order.push(name);
     }
@@ -115,7 +121,10 @@ fn main() {
         // combine_first: nullable self over nullable other (overlapping nulls),
         // and nullable self over all-valid other.
         let other_null = numeric_frame(5000, 4, true);
-        print!("{}", golden_dump(&fnull.combine_first(&other_null).unwrap()));
+        print!(
+            "{}",
+            golden_dump(&fnull.combine_first(&other_null).unwrap())
+        );
         print!("{}", golden_dump(&fnull.combine_first(&f).unwrap()));
         // ffill / bfill (carry fills) over a nullable frame, with and without limit.
         print!("{}", golden_dump(&fnull.ffill(None).unwrap()));
@@ -124,8 +133,25 @@ fn main() {
         print!("{}", golden_dump(&fnull.bfill(Some(2)).unwrap()));
         // corrwith: all-valid self over nullable other (pairs dropped), and
         // nullable self over nullable other.
-        print!("{}", golden_dump(&f.corrwith(&other_null).unwrap().to_frame(Some("c")).unwrap()));
-        print!("{}", golden_dump(&fnull.corrwith(&other_null).unwrap().to_frame(Some("c")).unwrap()));
+        print!(
+            "{}",
+            golden_dump(
+                &f.corrwith(&other_null)
+                    .unwrap()
+                    .to_frame(Some("c"))
+                    .unwrap()
+            )
+        );
+        print!(
+            "{}",
+            golden_dump(
+                &fnull
+                    .corrwith(&other_null)
+                    .unwrap()
+                    .to_frame(Some("c"))
+                    .unwrap()
+            )
+        );
         // interpolate: interior gaps linear-filled, trailing carried, leading NaN.
         print!("{}", golden_dump(&fnull.interpolate().unwrap()));
         // apply_per_column family (round/cumsum/cumprod/abs) — all route through
@@ -150,32 +176,65 @@ fn main() {
         for method in ["average", "min", "max", "first", "dense"] {
             print!("{}", golden_dump(&f.rank(method, true, "keep").unwrap()));
             print!("{}", golden_dump(&f.rank(method, false, "keep").unwrap()));
-            print!("{}", golden_dump(&fnull.rank(method, true, "keep").unwrap()));
+            print!(
+                "{}",
+                golden_dump(&fnull.rank(method, true, "keep").unwrap())
+            );
         }
         // duplicated / drop_duplicates: n>9973 gives real period-9973 row dups;
         // nullable variant exercises missing-equality. All keep modes.
         let dup = numeric_frame(20000, 3, false);
         let dupn = numeric_frame(20000, 3, true);
-        for keep in [DuplicateKeep::First, DuplicateKeep::Last, DuplicateKeep::None] {
+        for keep in [
+            DuplicateKeep::First,
+            DuplicateKeep::Last,
+            DuplicateKeep::None,
+        ] {
             print!(
                 "{}",
-                golden_dump(&dup.duplicated(None, keep).unwrap().to_frame(Some("d")).unwrap())
+                golden_dump(
+                    &dup.duplicated(None, keep)
+                        .unwrap()
+                        .to_frame(Some("d"))
+                        .unwrap()
+                )
             );
             print!(
                 "{}",
-                golden_dump(&dupn.duplicated(None, keep).unwrap().to_frame(Some("d")).unwrap())
+                golden_dump(
+                    &dupn
+                        .duplicated(None, keep)
+                        .unwrap()
+                        .to_frame(Some("d"))
+                        .unwrap()
+                )
             );
-            print!("{}", golden_dump(&dup.drop_duplicates(None, keep, false).unwrap()));
-            print!("{}", golden_dump(&dupn.drop_duplicates(None, keep, false).unwrap()));
+            print!(
+                "{}",
+                golden_dump(&dup.drop_duplicates(None, keep, false).unwrap())
+            );
+            print!(
+                "{}",
+                golden_dump(&dupn.drop_duplicates(None, keep, false).unwrap())
+            );
         }
         // clip: two-sided, nullable, reversed-bound swap (GH2747), one-sided.
         print!("{}", golden_dump(&f.clip(Some(0.0), Some(1000.0)).unwrap()));
-        print!("{}", golden_dump(&fnull.clip(Some(100.0), Some(500.0)).unwrap()));
+        print!(
+            "{}",
+            golden_dump(&fnull.clip(Some(100.0), Some(500.0)).unwrap())
+        );
         print!("{}", golden_dump(&f.clip(Some(7.0), Some(3.0)).unwrap()));
         print!("{}", golden_dump(&fnull.clip(None, Some(400.0)).unwrap()));
         // fillna: nullable filled with a finite constant; all-valid is a no-op.
-        print!("{}", golden_dump(&fnull.fillna(&Scalar::Float64(0.0)).unwrap()));
-        print!("{}", golden_dump(&fnull.fillna(&Scalar::Float64(-1.5)).unwrap()));
+        print!(
+            "{}",
+            golden_dump(&fnull.fillna(&Scalar::Float64(0.0)).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.fillna(&Scalar::Float64(-1.5)).unwrap())
+        );
         print!("{}", golden_dump(&f.fillna(&Scalar::Float64(9.0)).unwrap()));
         // frame-vs-frame comparison: all-valid vs nullable (result has nulls),
         // and all-valid vs all-valid (all-valid Bool result).
@@ -187,9 +246,22 @@ fn main() {
         // where_cond / mask: cond has nulls (from gt vs nullable); self all-valid
         // and nullable; finite fill and the default (None) fill.
         let cond = f.gt(&other_null).unwrap();
-        print!("{}", golden_dump(&f.where_cond(&cond, Some(&Scalar::Float64(0.0))).unwrap()));
-        print!("{}", golden_dump(&f.mask(&cond, Some(&Scalar::Float64(-1.0))).unwrap()));
-        print!("{}", golden_dump(&fnull.where_cond(&cond, Some(&Scalar::Float64(7.0))).unwrap()));
+        print!(
+            "{}",
+            golden_dump(&f.where_cond(&cond, Some(&Scalar::Float64(0.0))).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&f.mask(&cond, Some(&Scalar::Float64(-1.0))).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(
+                &fnull
+                    .where_cond(&cond, Some(&Scalar::Float64(7.0)))
+                    .unwrap()
+            )
+        );
         print!("{}", golden_dump(&f.where_cond(&cond, None).unwrap()));
         // frame-vs-frame arithmetic: missing propagation (nullable other) and a
         // NaN op result (div by self: 0.0/0.0 at row 0 -> Float64(NaN)).
@@ -203,43 +275,104 @@ fn main() {
         print!(
             "{}",
             golden_dump(
-                &f.isin(&[Scalar::Float64(1.0), Scalar::Float64(2.5), Scalar::Float64(100.0)])
-                    .unwrap()
+                &f.isin(&[
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.5),
+                    Scalar::Float64(100.0)
+                ])
+                .unwrap()
             )
         );
-        print!("{}", golden_dump(&f.isin(&[Scalar::Int64(0), Scalar::Int64(250)]).unwrap()));
-        print!("{}", golden_dump(&fnull.isin(&[Scalar::Float64(f64::NAN)]).unwrap()));
+        print!(
+            "{}",
+            golden_dump(&f.isin(&[Scalar::Int64(0), Scalar::Int64(250)]).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.isin(&[Scalar::Float64(f64::NAN)]).unwrap())
+        );
         // quantile: several q over all-valid and nullable (nulls filtered) frames.
         for q in [0.0, 0.25, 0.5, 0.9, 1.0] {
-            print!("{}", golden_dump(&f.quantile(q).unwrap().to_frame(Some("q")).unwrap()));
-            print!("{}", golden_dump(&fnull.quantile(q).unwrap().to_frame(Some("q")).unwrap()));
+            print!(
+                "{}",
+                golden_dump(&f.quantile(q).unwrap().to_frame(Some("q")).unwrap())
+            );
+            print!(
+                "{}",
+                golden_dump(&fnull.quantile(q).unwrap().to_frame(Some("q")).unwrap())
+            );
         }
         // nunique: distinct counts (all-valid + nullable), and dropna=false which
         // counts the missing bucket as one extra distinct value.
-        print!("{}", golden_dump(&f.nunique().unwrap().to_frame(Some("nu")).unwrap()));
-        print!("{}", golden_dump(&fnull.nunique().unwrap().to_frame(Some("nu")).unwrap()));
         print!(
             "{}",
-            golden_dump(&fnull.nunique_with_dropna(false).unwrap().to_frame(Some("nu")).unwrap())
+            golden_dump(&f.nunique().unwrap().to_frame(Some("nu")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.nunique().unwrap().to_frame(Some("nu")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(
+                &fnull
+                    .nunique_with_dropna(false)
+                    .unwrap()
+                    .to_frame(Some("nu"))
+                    .unwrap()
+            )
         );
         // describe: count/mean/std/min/25%/50%/75%/max over all-valid + nullable.
         print!("{}", golden_dump(&f.describe().unwrap()));
         print!("{}", golden_dump(&fnull.describe().unwrap()));
         // skew / kurtosis: two/four-moment reductions via numeric_values.
-        print!("{}", golden_dump(&f.skew().unwrap().to_frame(Some("sk")).unwrap()));
-        print!("{}", golden_dump(&fnull.skew().unwrap().to_frame(Some("sk")).unwrap()));
-        print!("{}", golden_dump(&f.kurtosis_agg().unwrap().to_frame(Some("ku")).unwrap()));
-        print!("{}", golden_dump(&fnull.kurtosis_agg().unwrap().to_frame(Some("ku")).unwrap()));
+        print!(
+            "{}",
+            golden_dump(&f.skew().unwrap().to_frame(Some("sk")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.skew().unwrap().to_frame(Some("sk")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&f.kurtosis_agg().unwrap().to_frame(Some("ku")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.kurtosis_agg().unwrap().to_frame(Some("ku")).unwrap())
+        );
         // sem / var / std / median / prod: the rest of the per-column reduction
         // family (all route through reduce_numeric, the column-parallel helper);
         // f is 5000x4 (>=16384 values) so the parallel reduce path is exercised.
-        print!("{}", golden_dump(&f.sem().unwrap().to_frame(Some("se")).unwrap()));
-        print!("{}", golden_dump(&fnull.sem().unwrap().to_frame(Some("se")).unwrap()));
-        print!("{}", golden_dump(&f.var().unwrap().to_frame(Some("va")).unwrap()));
-        print!("{}", golden_dump(&f.std().unwrap().to_frame(Some("sd")).unwrap()));
-        print!("{}", golden_dump(&f.median().unwrap().to_frame(Some("me")).unwrap()));
-        print!("{}", golden_dump(&f.prod().unwrap().to_frame(Some("pr")).unwrap()));
-        print!("{}", golden_dump(&fnull.var().unwrap().to_frame(Some("va")).unwrap()));
+        print!(
+            "{}",
+            golden_dump(&f.sem().unwrap().to_frame(Some("se")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.sem().unwrap().to_frame(Some("se")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&f.var().unwrap().to_frame(Some("va")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&f.std().unwrap().to_frame(Some("sd")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&f.median().unwrap().to_frame(Some("me")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&f.prod().unwrap().to_frame(Some("pr")).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fnull.var().unwrap().to_frame(Some("va")).unwrap())
+        );
         // mode: repeated-value frame (period-9973 dups at n=20000 -> real modes)
         // all-valid and nullable; plus an all-distinct frame (every value a mode).
         print!("{}", golden_dump(&dup.mode().unwrap()));
@@ -269,12 +402,24 @@ fn main() {
         print!("{}", golden_dump(&fi.diff(-2).unwrap()));
         // Int64 clip: integer bounds (preserves Int64), fractional bound (-> Float64),
         // reversed-bound swap (GH2747), one-sided.
-        print!("{}", golden_dump(&fi.clip(Some(-1000.0), Some(1000.0)).unwrap()));
-        print!("{}", golden_dump(&fi.clip(Some(-1000.5), Some(1000.0)).unwrap()));
-        print!("{}", golden_dump(&fi.clip(Some(500.0), Some(-500.0)).unwrap()));
+        print!(
+            "{}",
+            golden_dump(&fi.clip(Some(-1000.0), Some(1000.0)).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fi.clip(Some(-1000.5), Some(1000.0)).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fi.clip(Some(500.0), Some(-500.0)).unwrap())
+        );
         print!("{}", golden_dump(&fi.clip(None, Some(800.0)).unwrap()));
         // Int64 nunique: dense direct-address distinct count (bounded all-valid).
-        print!("{}", golden_dump(&fi.nunique().unwrap().to_frame(Some("nu")).unwrap()));
+        print!(
+            "{}",
+            golden_dump(&fi.nunique().unwrap().to_frame(Some("nu")).unwrap())
+        );
         // Int64 frame arithmetic -> Float64 output (incl div-by-zero NaN via fi/fi).
         print!("{}", golden_dump(&fi.add_df(&fi2).unwrap()));
         print!("{}", golden_dump(&fi.sub_df(&fi2).unwrap()));
@@ -298,16 +443,25 @@ fn main() {
             }
             DataFrame::new_with_column_order(Index::new(labels), columns, order).unwrap()
         };
-        print!("{}", golden_dump(&fi.where_cond(&cond_b, Some(&Scalar::Int64(0))).unwrap()));
-        print!("{}", golden_dump(&fi.where_cond(&cond_b, Some(&Scalar::Int64(-7))).unwrap()));
-        print!("{}", golden_dump(&fi.mask(&cond_b, Some(&Scalar::Int64(0))).unwrap()));
-        print!("{}", golden_dump(&fi.mask(&cond_b, Some(&Scalar::Int64(99))).unwrap()));
+        print!(
+            "{}",
+            golden_dump(&fi.where_cond(&cond_b, Some(&Scalar::Int64(0))).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fi.where_cond(&cond_b, Some(&Scalar::Int64(-7))).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fi.mask(&cond_b, Some(&Scalar::Int64(0))).unwrap())
+        );
+        print!(
+            "{}",
+            golden_dump(&fi.mask(&cond_b, Some(&Scalar::Int64(99))).unwrap())
+        );
         return;
     }
-    let n: usize = args
-        .get(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(200_000);
+    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(200_000);
     let cols = 8;
     println!("gap_hunt n={n} cols={cols}");
 
@@ -317,7 +471,9 @@ fn main() {
     let shuf = shuffled_index_frame(n, cols);
 
     time_it("drop_duplicates(all cols)", 1, 10, || {
-        let _ = f.drop_duplicates(None, DuplicateKeep::First, false).unwrap();
+        let _ = f
+            .drop_duplicates(None, DuplicateKeep::First, false)
+            .unwrap();
     });
     time_it("duplicated(all cols)", 1, 10, || {
         let _ = f.duplicated(None, DuplicateKeep::First).unwrap();
@@ -401,7 +557,11 @@ fn main() {
     });
     time_it("isin", 1, 20, || {
         let _ = f
-            .isin(&[Scalar::Float64(1.0), Scalar::Float64(2.5), Scalar::Float64(100.0)])
+            .isin(&[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.5),
+                Scalar::Float64(100.0),
+            ])
             .unwrap();
     });
     time_it("add_scalar(1)", 1, 20, || {

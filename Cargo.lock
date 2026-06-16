@@ -1283,6 +1283,7 @@ dependencies = [
  "fp-frame",
  "fp-index",
  "fp-io",
+ "fp-join",
 ]
 
 [[package]]
@@ -1447,6 +1448,7 @@ dependencies = [
  "fp-frame",
  "fp-index",
  "fp-io",
+ "fp-join",
  "fp-types",
  "pyo3",
 ]
