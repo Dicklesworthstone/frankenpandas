@@ -6542,15 +6542,35 @@ impl Column {
             };
         }
 
-        // Typed nullable Float64 gather: when the source carries a contiguous
-        // f64 buffer with a validity mask (LazyNullableFloat64), gather the data
-        // and the validity bits directly instead of cloning a Scalar per row.
-        // Bit-identical: that variant materializes Float64(data[i]) when
-        // valid-or-NaN and Null(NaN) otherwise, so the missingness of slot `pos`
-        // is `validity.get(pos) && !data[pos].is_nan()`; carrying that exact bit
-        // (and the raw datum) into from_f64_values_with_validity reproduces the
-        // same Scalar at every slot, while skipping the 32 B/elem Vec<Scalar>.
-        if let ScalarValues::LazyNullableFloat64 { data: src, .. } = &self.values {
+        // Typed nullable Float64 gather (br-frankenpandas-s2i37): any typed
+        // Float64 backing carrying a contiguous f64 buffer (`LazyNullableFloat64`,
+        // OR `LazyAllValidFloat64`/`ColumnData::Float64` paired with a
+        // not-all-valid mask — the shape `from_f64_values` produces for a column
+        // with NaN) gathers the data and validity bits directly instead of
+        // cloning a Scalar per row. Previously only `LazyNullableFloat64` was
+        // routed here, so a NaN-bearing `from_f64_values` column (values =
+        // LazyAllValidFloat64 + NaN-derived mask) fell to the generic per-row
+        // Scalar gather below — the residual cost behind nullable sort/iloc/dedup
+        // row reorders. Bit-identical: each such backing materializes
+        // `Float64(data[i])` when present and `Null(NaN)` when missing, so a
+        // slot's presence is `validity.get(pos) && !data[pos].is_nan()` (NaN at a
+        // valid slot normalizes to missing, exactly the generic path's
+        // `normalize_missing_for_dtype` then `is_missing()`); carrying that bit +
+        // the raw datum into `from_f64_values_with_validity` reproduces the same
+        // Scalar at every slot, skipping the 32 B/elem `Vec<Scalar>`.
+        // Gate on the `values` VARIANT (not `as_f64_slice_with_validity`, which
+        // also matches a `ColumnData::Float64` paired with NullKind-preserving
+        // Eager `values`): only the lazy typed Float64 backings canonicalize a
+        // missing slot to `Null(NaN)` in `values()`, matching
+        // `from_f64_values_with_validity`. A Float64 column legally holding
+        // `Null(NaT)`/`Null(Null)` keeps Eager values and must use the generic
+        // NullKind-faithful gather below.
+        let typed_f64: Option<&[f64]> = match &self.values {
+            ScalarValues::LazyNullableFloat64 { data, .. } => Some(data.as_slice()),
+            ScalarValues::LazyAllValidFloat64 { data, .. } => Some(data.as_ref()),
+            _ => None,
+        };
+        if let Some(src) = typed_f64 {
             let mut data = Vec::with_capacity(n);
             let mut words = vec![0_u64; n.div_ceil(64)];
             for (out_idx, &pos) in positions.iter().enumerate() {
