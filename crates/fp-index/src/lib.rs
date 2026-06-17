@@ -911,6 +911,13 @@ impl IndexLabels {
         self.int64_typed.get().cloned()
     }
 
+    fn has_lazy_int64_backing(&self) -> bool {
+        self.int64_unit_range.is_some()
+            || self.int64_affine.is_some()
+            || self.int64_strided.is_some()
+            || matches!(self.int64_typed.get(), Some(Some(_)))
+    }
+
     fn take_i64_values(&self, indices: &[usize]) -> Option<Vec<i64>> {
         let mut out = Vec::with_capacity(indices.len());
 
@@ -2549,6 +2556,11 @@ impl Index {
     /// converted to the target type representation.
     #[must_use]
     pub fn astype_int(&self) -> Self {
+        if self.labels.has_lazy_int64_backing()
+            && let Some(values) = self.labels.int64_view()
+        {
+            return self.propagate_name(Self::from_i64_values(values.as_ref().clone()));
+        }
         self.propagate_name(Self::new(
             self.labels
                 .iter()
@@ -17093,6 +17105,40 @@ mod tests {
         let int_idx = idx.astype_int();
         assert_eq!(int_idx.labels()[0], IndexLabel::Int64(10));
         assert_eq!(int_idx.labels()[1], IndexLabel::Int64(20));
+    }
+
+    #[test]
+    fn typed_int64_astype_int_avoids_label_materialization_ntqtf() {
+        let index = Index::from_i64_values(vec![7, 5, 7]).set_name("rows");
+        assert!(index.labels.materialized.get().is_none());
+
+        let cast = index.astype_int();
+
+        assert_eq!(cast.name(), Some("rows"));
+        assert_eq!(cast.labels.int64_view().unwrap().as_slice(), &[7, 5, 7]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            cast.labels.materialized.get().is_none(),
+            "already-Int64 astype_int should keep typed output backing"
+        );
+    }
+
+    #[test]
+    fn affine_int64_astype_int_avoids_label_materialization_ntqtf() {
+        let index = Index::new_known_unique_int64_affine_range(2, 4, 3)
+            .unwrap()
+            .set_name("axis");
+        assert!(index.labels.materialized.get().is_none());
+
+        let cast = index.astype_int();
+
+        assert_eq!(cast.name(), Some("axis"));
+        assert_eq!(cast.labels.int64_view().unwrap().as_slice(), &[2, 6, 10]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            cast.labels.materialized.get().is_none(),
+            "affine Int64 astype_int should keep typed output backing"
+        );
     }
 
     #[test]
