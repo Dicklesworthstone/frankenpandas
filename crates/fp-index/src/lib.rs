@@ -3019,6 +3019,9 @@ impl Index {
     /// true are removed. The name (if any) is preserved.
     #[must_use]
     pub fn dropna(&self) -> Self {
+        if self.labels.has_lazy_int64_backing() {
+            return self.clone();
+        }
         self.propagate_name(Self::new(
             self.labels
                 .iter()
@@ -3099,6 +3102,9 @@ impl Index {
     /// Matches `pd.Index.fillna(value)`.
     #[must_use]
     pub fn fillna(&self, value: &IndexLabel) -> Self {
+        if self.labels.has_lazy_int64_backing() {
+            return self.clone();
+        }
         self.propagate_name(Self::new(
             self.labels
                 .iter()
@@ -3116,12 +3122,18 @@ impl Index {
     /// Matches `pd.Index.isna()`.
     #[must_use]
     pub fn isna(&self) -> Vec<bool> {
+        if self.labels.has_lazy_int64_backing() {
+            return vec![false; self.labels.len()];
+        }
         self.labels.iter().map(IndexLabel::is_missing).collect()
     }
 
     /// Matches `pd.Index.notna()`.
     #[must_use]
     pub fn notna(&self) -> Vec<bool> {
+        if self.labels.has_lazy_int64_backing() {
+            return vec![true; self.labels.len()];
+        }
         self.labels
             .iter()
             .map(|label| !label.is_missing())
@@ -17161,6 +17173,66 @@ mod tests {
         let idx = Index::new(vec![1_i64.into(), 2_i64.into()]);
         assert_eq!(idx.isna(), vec![false, false]);
         assert_eq!(idx.notna(), vec![true, true]);
+    }
+
+    #[test]
+    fn typed_int64_missing_helpers_avoid_label_materialization_zyoot() {
+        let index = Index::from_i64_values(vec![1, 0, -4]).set_name("rows");
+        assert!(index.labels.materialized.get().is_none());
+
+        assert_eq!(index.isna(), vec![false, false, false]);
+        assert_eq!(index.notna(), vec![true, true, true]);
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "isna/notna should not materialize typed Int64 labels"
+        );
+
+        let dropped = index.dropna();
+        assert_eq!(dropped.name(), Some("rows"));
+        assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[1, 0, -4]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            dropped.labels.materialized.get().is_none(),
+            "dropna should preserve typed Int64 backing"
+        );
+
+        let filled = index.fillna(&IndexLabel::Utf8("missing".into()));
+        assert_eq!(filled.name(), Some("rows"));
+        assert_eq!(filled.labels.int64_view().unwrap().as_slice(), &[1, 0, -4]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            filled.labels.materialized.get().is_none(),
+            "fillna should preserve typed Int64 backing when there are no missing labels"
+        );
+    }
+
+    #[test]
+    fn affine_int64_missing_helpers_avoid_label_materialization_zyoot() {
+        let index = Index::new_known_unique_int64_affine_range(4, -2, 3)
+            .unwrap()
+            .set_name("axis");
+        assert!(index.labels.materialized.get().is_none());
+
+        assert_eq!(index.isna(), vec![false, false, false]);
+        assert_eq!(index.notna(), vec![true, true, true]);
+        assert!(index.labels.materialized.get().is_none());
+
+        let dropped = index.dropna();
+        assert_eq!(dropped.name(), Some("axis"));
+        assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[4, 2, 0]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            dropped.labels.materialized.get().is_none(),
+            "dropna should preserve affine Int64 backing"
+        );
+
+        let empty = Index::new_known_unique_int64_affine_range(0, 0, 0).unwrap();
+        assert_eq!(empty.isna(), Vec::<bool>::new());
+        assert_eq!(empty.notna(), Vec::<bool>::new());
+        let filled_empty = empty.fillna(&IndexLabel::Int64(99));
+        assert!(filled_empty.labels.int64_view().unwrap().is_empty());
+        assert!(empty.labels.materialized.get().is_none());
+        assert!(filled_empty.labels.materialized.get().is_none());
     }
 
     #[test]
