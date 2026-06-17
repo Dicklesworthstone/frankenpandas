@@ -1,0 +1,6 @@
+Benchmark 1: base
+  Time (mean ± σ):     235.9 ms ±  10.2 ms    [User: 136.5 ms, System: 99.1 ms]
+  Range (min … max):   217.9 ms … 253.8 ms    10 runs
+ 
+Benchmark 2: candidate
+Error: Command terminated with non-zero exit code 127 in the first warmup run. Use the '-i'/'--ignore-failure' option if you want to ignore this. Alternatively, use the '--show-output' option to debug what went wrong.

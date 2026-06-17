@@ -1,0 +1,38 @@
+2026-06-16T16:53:50-04:00
+78952a12579bf72188749a473a503563eaf2049e
+
+## df_dot 100000 3
+perf_profile: scenario=df_dot n=100000 iters=3
+perf_profile: done 3 iters in 0.225s (75.120 ms/iter), sink=300000
+
+## csv_parse_dates_dt_year 100000 5
+perf_profile: scenario=csv_parse_dates_dt_year n=100000 iters=5
+perf_profile: done 5 iters in 0.374s (74.709 ms/iter), sink=500000
+
+## str_outer_join 100000 5
+perf_profile: scenario=str_outer_join n=100000 iters=5
+perf_profile: done 5 iters in 0.184s (36.767 ms/iter), sink=750000
+
+## str_left_join 100000 5
+perf_profile: scenario=str_left_join n=100000 iters=5
+perf_profile: done 5 iters in 0.164s (32.895 ms/iter), sink=500000
+
+## df_corr 100000 3
+perf_profile: scenario=df_corr n=100000 iters=3
+perf_profile: done 3 iters in 0.088s (29.193 ms/iter), sink=192
+
+## df_cov 100000 3
+perf_profile: scenario=df_cov n=100000 iters=3
+perf_profile: done 3 iters in 0.085s (28.171 ms/iter), sink=192
+
+## value_counts_nan50 1000000 10
+perf_profile: scenario=value_counts_nan50 n=1000000 iters=10
+perf_profile: done 10 iters in 0.625s (62.522 ms/iter), sink=2500000
+
+## drop_duplicates 1000000 10
+perf_profile: scenario=drop_duplicates n=1000000 iters=10
+perf_profile: done 10 iters in 0.310s (30.950 ms/iter), sink=10000000
+
+## groupby_agg_multi 100000 20
+perf_profile: scenario=groupby_agg_multi n=100000 iters=20
+perf_profile: done 20 iters in 0.012s (0.583 ms/iter), sink=2000

@@ -1,0 +1,21 @@
+Benchmark 1: /data/projects/.scratch/cargo-target-lavender-uza04142-base/release-perf/examples/perf_profile str_left_join 100000 5
+  Time (mean ± σ):     206.8 ms ±  23.9 ms    [User: 142.0 ms, System: 64.1 ms]
+  Range (min … max):   171.1 ms … 278.9 ms    30 runs
+ 
+Benchmark 2: /data/projects/.scratch/cargo-target-lavender-uza04142-candidate/release-perf/examples/perf_profile str_left_join 100000 5
+  Time (mean ± σ):     184.6 ms ±  14.3 ms    [User: 125.1 ms, System: 59.3 ms]
+  Range (min … max):   164.8 ms … 217.2 ms    30 runs
+ 
+Benchmark 3: /data/projects/.scratch/cargo-target-lavender-uza04142-base/release-perf/examples/perf_profile str_outer_join 100000 5
+  Time (mean ± σ):     223.8 ms ±   7.6 ms    [User: 213.3 ms, System: 100.0 ms]
+  Range (min … max):   209.3 ms … 236.9 ms    30 runs
+ 
+Benchmark 4: /data/projects/.scratch/cargo-target-lavender-uza04142-candidate/release-perf/examples/perf_profile str_outer_join 100000 5
+  Time (mean ± σ):     216.5 ms ±   7.8 ms    [User: 148.5 ms, System: 76.8 ms]
+  Range (min … max):   193.3 ms … 230.6 ms    30 runs
+ 
+Summary
+  /data/projects/.scratch/cargo-target-lavender-uza04142-candidate/release-perf/examples/perf_profile str_left_join 100000 5 ran
+    1.12 ± 0.16 times faster than /data/projects/.scratch/cargo-target-lavender-uza04142-base/release-perf/examples/perf_profile str_left_join 100000 5
+    1.17 ± 0.10 times faster than /data/projects/.scratch/cargo-target-lavender-uza04142-candidate/release-perf/examples/perf_profile str_outer_join 100000 5
+    1.21 ± 0.10 times faster than /data/projects/.scratch/cargo-target-lavender-uza04142-base/release-perf/examples/perf_profile str_outer_join 100000 5

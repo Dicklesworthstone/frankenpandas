@@ -1,0 +1,30 @@
+=== df_dot 100000 3 ===
+perf_profile: scenario=df_dot n=100000 iters=3
+perf_profile: done 3 iters in 0.233s (77.775 ms/iter), sink=300000
+=== csv_parse_dates_dt_year 100000 5 ===
+perf_profile: scenario=csv_parse_dates_dt_year n=100000 iters=5
+perf_profile: done 5 iters in 0.268s (53.591 ms/iter), sink=500000
+=== value_counts_nan50 1000000 10 ===
+perf_profile: scenario=value_counts_nan50 n=1000000 iters=10
+perf_profile: done 10 iters in 0.666s (66.562 ms/iter), sink=2500000
+=== df_corr 100000 1 ===
+perf_profile: scenario=df_corr n=100000 iters=1
+perf_profile: done 1 iters in 0.076s (75.621 ms/iter), sink=64
+=== df_cov 100000 1 ===
+perf_profile: scenario=df_cov n=100000 iters=1
+perf_profile: done 1 iters in 0.065s (64.650 ms/iter), sink=64
+=== str_left_join 100000 5 ===
+perf_profile: scenario=str_left_join n=100000 iters=5
+perf_profile: done 5 iters in 0.172s (34.468 ms/iter), sink=500000
+=== str_outer_join 100000 5 ===
+perf_profile: scenario=str_outer_join n=100000 iters=5
+perf_profile: done 5 iters in 0.180s (35.947 ms/iter), sink=750000
+=== groupby_agg_multi_int2 100000 20 ===
+perf_profile: scenario=groupby_agg_multi_int2 n=100000 iters=20
+perf_profile: done 20 iters in 0.047s (2.372 ms/iter), sink=200000
+=== str_sort_chain 100000 10 ===
+perf_profile: scenario=str_sort_chain n=100000 iters=10
+perf_profile: done 10 iters in 0.136s (13.637 ms/iter), sink=1000000
+=== inner_join 100000 5 ===
+perf_profile: scenario=inner_join n=100000 iters=5
+perf_profile: done 5 iters in 0.039s (7.783 ms/iter), sink=97656800

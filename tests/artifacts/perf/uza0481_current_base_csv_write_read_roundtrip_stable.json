@@ -1,0 +1,6 @@
+{
+  "checksum": 62503875000.0,
+  "io_payload_bytes": 8611370,
+  "name": "csv_write_read_roundtrip",
+  "rows_out": 100000
+}

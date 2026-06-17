@@ -1,5 +1,5 @@
 ℹ Preparing shadow workspace for 1 specified file(s)
-ℹ Scanning shadow workspace at /data/tmp/tmp.tBcHtMyc4b/files_scan
+ℹ Scanning shadow workspace at /data/tmp/tmp.lMmkHXFp2s/files_scan
 
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗              ║
@@ -35,7 +35,7 @@
 ║                     “We see bugs before you do.”                             ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
-UBS Meta-Runner v5.3.2  2026-06-17 03:09:10
+UBS Meta-Runner v5.3.2  2026-06-17 03:15:31
 Project: /data/projects/frankenpandas
 Format:  text
 Detected: rust
@@ -44,41 +44,41 @@ Finished rust (70s)
 
 ──────── rust ────────
 
-╔═══════════════════════════════════════════════════════════════════╗
-║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗   ║
-║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝   ║
-║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗     ║
-║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝     ║
-║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗   ║
-║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝   ║
-║                                            /\                     ║
-║  ██████╗ ██╗   ██╗ ██████╗                ( /   @ @    ()         ║
-║  ██╔══██╗██║   ██║██╔════╝                 \  __| |__  /          ║
-║  ██████╔╝██║   ██║██║  ███╗                 -/   "   \-           ║
-║  ██╔══██╗██║   ██║██║   ██║                /-|       |-\          ║
-║  ██████╔╝╚██████╔╝╚██████╔╝               / /-\     /-\ \         ║
-║  ╚═════╝  ╚═════╝  ╚═════╝                 / /-`---'-\\ \          ║
-║                                             /         \           ║
-║                                                                   ║
-║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗   ║
-║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗  ║
-║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝  ║
-║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗  ║
-║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║  ║
-║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝       ║
-║                                                                   ║
-║  Rust module • ownership sanity, unsafe & async spotlights        ║
-║  UBS module: rust • cargo-aware targeting, low-noise caching      ║
-║  ASCII homage: Ferris crab (ASCII Art Archive)                    ║
-║  Run standalone: modules/ubs-rust.sh --help                       ║
-║                                                                   ║
-║  Night Owl QA                                                     ║
-║  “We see bugs before you do.”                                     ║
-╚═══════════════════════════════════════════════════════════════════╝
-
+╔═══════════════════════════════════════════════════════════════════╗ 
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗   ║ 
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝   ║ 
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗     ║ 
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝     ║ 
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗   ║ 
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝   ║ 
+║                                            /\                     ║ 
+║  ██████╗ ██╗   ██╗ ██████╗                ( /   @ @    ()         ║ 
+║  ██╔══██╗██║   ██║██╔════╝                 \  __| |__  /          ║ 
+║  ██████╔╝██║   ██║██║  ███╗                 -/   "   \-           ║ 
+║  ██╔══██╗██║   ██║██║   ██║                /-|       |-\          ║ 
+║  ██████╔╝╚██████╔╝╚██████╔╝               / /-\     /-\ \         ║ 
+║  ╚═════╝  ╚═════╝  ╚═════╝                 / /-`---'-\\ \          ║ 
+║                                             /         \           ║ 
+║                                                                   ║ 
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗   ║ 
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗  ║ 
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝  ║ 
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗  ║ 
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║  ║ 
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝       ║ 
+║                                                                   ║ 
+║  Rust module • ownership sanity, unsafe & async spotlights        ║ 
+║  UBS module: rust • cargo-aware targeting, low-noise caching      ║ 
+║  ASCII homage: Ferris crab (ASCII Art Archive)                    ║ 
+║  Run standalone: modules/ubs-rust.sh --help                       ║ 
+║                                                                   ║ 
+║  Night Owl QA                                                     ║ 
+║  “We see bugs before you do.”                                     ║ 
+╚═══════════════════════════════════════════════════════════════════╝ 
+                                                                      
 
 Project:  /data/projects/frankenpandas
-Started:  2026-06-17 03:09:11
+Started:  2026-06-17 03:15:31
 Files:    1 source files (rs)
 
 ✓ ast-grep available (ast-grep) - full AST analysis enabled
@@ -101,30 +101,30 @@ Panic-prone and debug macros frequently leak into production and cause crashes
   ⚠ Warning (3689 found)
     Potential panics via unwrap/expect
     Prefer `?` or match to propagate/handle errors
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:15408 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L15408)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:15408 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L15408)
               let frame = DataFrame::new_with_column_order(
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:15409 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L15409)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:15409 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L15409)
                   Index::new(vec![
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:15410 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L15410)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:15410 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L15410)
                       IndexLabel::Int64(0),
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:15411 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L15411)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:15411 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L15411)
                       IndexLabel::Int64(1),
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:15412 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L15412)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:15412 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L15412)
                       IndexLabel::Int64(2),
 
 • panic!/unreachable!/todo!/unimplemented!
   🔥 CRITICAL (11 found)
     panic! macro(s) present
     Avoid panic! in library code
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:17239 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L17239)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:17239 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L17239)
                   other => panic!("unexpected read_clipboard result: {other:?}"),
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:17265 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L17265)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:17265 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L17265)
                   other => panic!("unexpected to_clipboard result: {other:?}"),
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:17294 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L17294)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:17294 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L17294)
                   other => panic!("unexpected series to_clipboard result: {other:?}"),
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:29892 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L29892)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:29892 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L29892)
                   _ => panic!("column dtype diverged for token {token:?}"),
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:29999 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L29999)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:29999 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L29999)
                   CsvTypedColumnValues::Int64(_) => panic!("expected Float64 column"),
   ⚠ Warning (6 found)
     unreachable! may panic if reached
@@ -190,11 +190,11 @@ Numeric bugs cause subtle logic errors or panics in debug builds (overflow)
   ℹ Info (9 found)
     Float equality/inequality check
     Consider epsilon comparisons
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:1797 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L1797)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:1797 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L1797)
               || scaled.fract().to_bits() != 0.0f64.to_bits()
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:2317 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L2317)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:2317 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L2317)
                   } else if value.fract() == 0.0 {
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:7160 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L7160)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:7160 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L7160)
                   } else if v.fract() == 0.0 && *v >= i64::MIN as f64 && *v <= i64::MAX as f64 {
 
 • Division/modulo by variable (verify non-zero)
@@ -213,29 +213,29 @@ Iterator misuse often leads to unnecessary allocations or slow paths
 • clone() occurrences & clone() in loops
   ℹ Info (166 found)
     clone() usages - audit for necessity
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:500 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L500)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:500 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L500)
                   Ok(specs.clone())
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:554 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L554)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:554 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L554)
               na_values: options.na_values.clone(),
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:557 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L557)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:557 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L557)
               index_col: options.index_col.clone(),
   ⚠ Warning (64 found)
     clone() inside loops - potential perf hit
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:500 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L500)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:500 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L500)
       Ok(specs.clone())
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:554 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L554)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:554 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L554)
       na_values: options.na_values.clone(),
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:557 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L557)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:557 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L557)
       index_col: options.index_col.clone(),
 
 • collect::<Vec<_>>() then for
   ℹ Info (146 found)
     collect::<Vec<_>>() usage - consider streaming
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:2021 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L2021)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:2021 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L2021)
           let headers = frame
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:2022 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L2022)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:2022 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L2022)
               .column_names()
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:2023 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L2023)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:2023 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L2023)
               .into_iter()
 
 • nth(0) → next()
@@ -265,9 +265,9 @@ I/O misuse or command construction from untrusted input can be risky
 • std::process::Command usage
   ℹ Info (2 found)
     Command::new detected - ensure args are sanitized and errors handled
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5161 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L5161)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5161 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L5161)
               match std::process::Command::new(cmd).args(*args).output() {
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5177 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L5177)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5177 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L5177)
               let spawned = std::process::Command::new(cmd)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -289,14 +289,14 @@ Security misconfigurations can lead to credential leaks, command injection, and 
   🔥 CRITICAL (14 found)
     Secret, signature, or token compared with ==/!=
     Use subtle::ConstantTimeEq, ring::constant_time::verify_slices_are_equal, crypto_memcmp, or a reviewed constant-time helper for bearer tokens, HMACs, CSRF values, reset secrets, API keys, and signatures
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:925 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L925)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:925 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L925)
       let relative_newline = data[end..].iter().position(|byte| *byte == b'
 ')?;
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:966 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L966)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:966 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L966)
       Some(b'
 ') if data.get(idx + 1).copied() != Some(b'
 ') => return None,
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:2760 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L2760)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:2760 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L2760)
       if !(first == '_' || first.is_ascii_alphabetic()) {
 
 • JWT decode, validation bypass, or missing claim binding
@@ -309,16 +309,16 @@ Security misconfigurations can lead to credential leaks, command injection, and 
   🔥 CRITICAL (2 found)
     Command executable from untrusted-looking value
     Use a fixed executable allowlist; pass user data only as argv after validation
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5161 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L5161)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5161 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L5161)
       match std::process::Command::new(cmd).args(*args).output() {
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5177 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L5177)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5177 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L5177)
       let spawned = std::process::Command::new(cmd)
 
 • Path join/push with untrusted-looking segment
   ⚠ Warning (1 found)
     Path join/push with untrusted-looking segment
     Reject absolute paths and '..' components; canonicalize and verify the result stays under the intended root
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:11887 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L11887)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:11887 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L11887)
       out.push(name);
 
 • Archive entry paths joined into extraction destination
@@ -327,11 +327,11 @@ Security misconfigurations can lead to credential leaks, command injection, and 
   ⚠ Warning (22 found)
     Predictable temp-file write race
     Use tempfile::NamedTempFile/tempfile::Builder or OpenOptions::create_new(true) with unpredictable names
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5033 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L5033)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5033 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L5033)
       std::fs::write(path, content)?;
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5270 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L5270)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5270 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L5270)
       std::fs::write(path, content)?;
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5286 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L5286)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:5286 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L5286)
       std::fs::write(path, content)?;
 
 • Request-derived open redirects
@@ -381,11 +381,11 @@ Overly broad visibility complicates API stability and encapsulation
 • Wildcard imports (use crate::* or ::*)
   ℹ Info (5 found)
     Wildcard imports found; prefer explicit names
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:10164 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L10164)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:10164 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L10164)
               use mysql::prelude::*;
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:10203 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L10203)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:10203 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L10203)
               use mysql::prelude::*;
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:10213 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L10213)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:10213 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L10213)
               use mysql::prelude::*;
 
 • pub use re-exports (inventory)
@@ -524,11 +524,11 @@ Panics in destructors or UB hints can crash/abort in subtle ways; these can slip
   ⚠ Warning (85 found)
     Direct indexing/slicing may panic
     Use get()/get_mut(), checked ranges, or prior bounds checks when indexes can come from input
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:533 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L533)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:533 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L533)
                       chars[start..real_end].iter().collect()
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:787 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L787)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:787 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L787)
               let magnitude = mantissa as f64 / FUSED_DECIMAL_POW10[frac_digits];
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:925 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L925)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:925 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L925)
                   let relative_newline = data[end..].iter().position(|byte| *byte == b'
 ')?;
 
@@ -545,11 +545,11 @@ Panics in destructors or UB hints can crash/abort in subtle ways; these can slip
   ℹ Info (52 found)
     `as` casts present (possible truncation/sign bugs)
     Prefer TryFrom/TryInto for correctness or document invariants
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:1836 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L1836)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:1836 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L1836)
               buf[start] = b'0' + (whole % 10) as u8;
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:7854 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L7854)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:7854 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L7854)
                       .write_string(0, data_col_offset + col_idx as u16, name.as_str())
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:7877 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L7877)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:7877 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L7877)
                           data_col_offset + col_idx as u16,
 
 • len()/count() narrowed via `as`
@@ -569,11 +569,11 @@ Parsing and decoding failures often happen in prod on edge inputs; unwrap/expect
   ⚠ Warning (8 found)
     serde/toml deserialization unwrap/expect
     Add context, validation, and schema checks; avoid panics on malformed data
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:16926 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L16926)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:16926 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L16926)
               let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:16965 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L16965)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:16965 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L16965)
                   serde_json::from_str(&write_json_string(&frame, JsonOrient::Columns).unwrap()).unwrap();
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:16969 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L16969)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:16969 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L16969)
                   serde_json::from_str(&write_json_string(&frame, JsonOrient::Index).unwrap()).unwrap();
 
 • env::var(...).unwrap()/expect()
@@ -594,15 +594,15 @@ Some perf pitfalls become DoS risks on large inputs or hot paths; these often ev
   ⚠ Warning (260 found)
     String allocation inside loop
     Consider preallocating buffers, using write!, or restructuring to reduce allocations
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:440 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L440)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:440 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L440)
       "cannot infer fixed-width colspecs from empty input".to_owned(),
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:478 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L478)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:478 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L478)
       "cannot infer fixed-width colspecs from whitespace-only input".to_owned(),
-      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:490 (https://github.com/Dicklesworthstone/frankenpandas/blob/350335630aca742d3d8c99607bcb33de2adb199a/crates/fp-io/src/lib.rs#L490)
+      /data/projects/frankenpandas/crates/fp-io/src/lib.rs:490 (https://github.com/Dicklesworthstone/frankenpandas/blob/ba0b457348b6ca279197d168704c0115ba639b65/crates/fp-io/src/lib.rs#L490)
       "You must specify only one of 'widths' and 'colspecs'".to_owned(),
 
 ═══════════════════════════════════════════════════════════════════════════
-                    🎯 SCAN COMPLETE 🎯
+                    🎯 SCAN COMPLETE 🎯                                  
 ═══════════════════════════════════════════════════════════════════════════
 
 Summary Statistics:
@@ -619,7 +619,7 @@ Priority Actions:
   ℹ Consider INFO suggestions
   Code quality improvements and best practices
 
-Scan completed at: 2026-06-17 03:10:21
+Scan completed at: 2026-06-17 03:16:40
 
 Tip: Run with -v/--verbose for more code samples per finding.
 Add to CI: ./ubs --ci --fail-on-warning . > rust-bug-scan.txt
@@ -630,4 +630,3 @@ Files: 1
 Critical: 27
 Warning: 5813
 Info: 719
-UBS_EXIT=1

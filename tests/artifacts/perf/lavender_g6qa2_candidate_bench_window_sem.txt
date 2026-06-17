@@ -1,0 +1,3 @@
+n=100000 window=50
+rolling sem  OLD     6.484 ms -> NEW     2.294 ms = 2.83x
+expanding sem OLD  7330.599 ms -> NEW     1.404 ms = 5220.11x

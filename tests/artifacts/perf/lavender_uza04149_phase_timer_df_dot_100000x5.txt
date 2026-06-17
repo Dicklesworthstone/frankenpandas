@@ -1,0 +1,7 @@
+perf_profile: scenario=df_dot n=100000 iters=5
+FP_DOT_PROFILE m=100000 k=256 n=256 collect_a=26.56µs loop=374.56µs b_extract=29.826µs column_build=268.053µs insert=56.259µs total_before_return=401.862µs
+FP_DOT_PROFILE m=100000 k=256 n=256 collect_a=20.248µs loop=355.975µs b_extract=27.984µs column_build=256.322µs insert=51.752µs total_before_return=376.413µs
+FP_DOT_PROFILE m=100000 k=256 n=256 collect_a=17.934µs loop=356.175µs b_extract=26.586µs column_build=257.22µs insert=52.218µs total_before_return=374.349µs
+FP_DOT_PROFILE m=100000 k=256 n=256 collect_a=15.419µs loop=360.754µs b_extract=25.763µs column_build=264.428µs insert=50.689µs total_before_return=376.323µs
+FP_DOT_PROFILE m=100000 k=256 n=256 collect_a=14.026µs loop=350.635µs b_extract=24.746µs column_build=256.126µs insert=49.612µs total_before_return=364.791µs
+perf_profile: done 5 iters in 0.256s (51.139 ms/iter), sink=500000

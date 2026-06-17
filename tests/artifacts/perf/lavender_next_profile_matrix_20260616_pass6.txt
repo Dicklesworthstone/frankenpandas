@@ -1,0 +1,51 @@
+=== csv_read 100000 1 ===
+perf_profile: scenario=csv_read n=100000 iters=1
+perf_profile: done 1 iters in 0.060s (59.692 ms/iter), sink=100000
+=== csv_parse_dates_dt_year 100000 1 ===
+perf_profile: scenario=csv_parse_dates_dt_year n=100000 iters=1
+perf_profile: done 1 iters in 0.100s (100.326 ms/iter), sink=100000
+=== df_dot 100000 1 ===
+perf_profile: scenario=df_dot n=100000 iters=1
+perf_profile: done 1 iters in 0.251s (250.880 ms/iter), sink=100000
+=== df_kendall 20000 1 ===
+perf_profile: scenario=df_kendall n=20000 iters=1
+perf_profile: done 1 iters in 0.020s (20.080 ms/iter), sink=32
+=== groupby_transform_median 100000 3 ===
+perf_profile: scenario=groupby_transform_median n=100000 iters=3
+perf_profile: done 3 iters in 0.017s (5.693 ms/iter), sink=300000
+=== groupby_quantile 100000 3 ===
+perf_profile: scenario=groupby_quantile n=100000 iters=3
+perf_profile: done 3 iters in 0.016s (5.419 ms/iter), sink=300
+=== groupby_rank_f64 100000 3 ===
+perf_profile: scenario=groupby_rank_f64 n=100000 iters=3
+perf_profile: done 3 iters in 0.021s (7.105 ms/iter), sink=300000
+=== str_series_take 100000 3 ===
+perf_profile: scenario=str_series_take n=100000 iters=3
+perf_profile: done 3 iters in 0.049s (16.214 ms/iter), sink=300000
+=== str_sort_chain 100000 3 ===
+perf_profile: scenario=str_sort_chain n=100000 iters=3
+perf_profile: done 3 iters in 0.065s (21.717 ms/iter), sink=300000
+=== series_add_align 100000 5 ===
+perf_profile: scenario=series_add_align n=100000 iters=5
+perf_profile: done 5 iters in 0.021s (4.178 ms/iter), sink=500005
+=== str_inner_join 100000 1 ===
+perf_profile: scenario=str_inner_join n=100000 iters=1
+perf_profile: done 1 iters in 0.014s (13.803 ms/iter), sink=10000
+=== asof_join 100000 1 ===
+perf_profile: scenario=asof_join n=100000 iters=1
+perf_profile: done 1 iters in 0.021s (21.312 ms/iter), sink=100000
+=== f64_inner_join 100000 1 ===
+perf_profile: scenario=f64_inner_join n=100000 iters=1
+perf_profile: done 1 iters in 0.045s (44.588 ms/iter), sink=19531360
+=== value_counts_nan50 100000 3 ===
+perf_profile: scenario=value_counts_nan50 n=100000 iters=3
+perf_profile: done 3 iters in 0.016s (5.266 ms/iter), sink=75000
+=== sort_multi 100000 3 ===
+perf_profile: scenario=sort_multi n=100000 iters=3
+perf_profile: done 3 iters in 0.027s (8.881 ms/iter), sink=300000
+=== rank_avg 100000 3 ===
+perf_profile: scenario=rank_avg n=100000 iters=3
+perf_profile: done 3 iters in 0.018s (6.127 ms/iter), sink=300000
+=== series_sort_index 100000 3 ===
+perf_profile: scenario=series_sort_index n=100000 iters=3
+perf_profile: done 3 iters in 0.016s (5.282 ms/iter), sink=300000

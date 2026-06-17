@@ -1,0 +1,7 @@
+  [2m2026-06-13T00:43:09.905652Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: hyperfine --warmup 2 --runs 10 --export-json tests/artifacts/perf/0dm7c_base_seq_hyperfine_df_kendall_50000x3.json '/data/projects/.scratch/cargo-target-orangepeak-0dm7c-base/release-perf/examples/perf_profile df_kendall 50000 3'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Benchmark 1: /data/projects/.scratch/cargo-target-orangepeak-0dm7c-base/release-perf/examples/perf_profile df_kendall 50000 3
+  Time (mean ± σ):     444.6 ms ±  12.7 ms    [User: 2771.4 ms, System: 207.5 ms]
+  Range (min … max):   428.6 ms … 465.3 ms    10 runs
+ 
