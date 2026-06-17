@@ -3307,6 +3307,9 @@ impl Index {
         if self.labels.is_empty() {
             return "empty";
         }
+        if self.labels.has_lazy_int64_backing() {
+            return "integer";
+        }
         let mut non_missing = self.labels.iter().filter(|label| !label.is_missing());
         let Some(first) = non_missing.next() else {
             return "empty";
@@ -3419,6 +3422,9 @@ impl Index {
     /// Whether all non-missing labels are Int64 labels.
     #[must_use]
     pub fn is_integer(&self) -> bool {
+        if self.labels.has_lazy_int64_backing() {
+            return !self.labels.is_empty();
+        }
         !self.labels.is_empty()
             && self
                 .labels
@@ -17898,6 +17904,44 @@ mod tests {
         assert_eq!(mixed.infer_objects(), mixed);
         assert!(ints.is_(&ints));
         assert!(!ints.is_(&Index::from_i64(vec![1, 2, 3])));
+    }
+
+    #[test]
+    fn int64_dtype_predicates_avoid_label_materialization_gzi1i() {
+        let typed = Index::from_i64_values(vec![4, 0, -2]);
+        assert!(typed.labels.materialized.get().is_none());
+        assert_eq!(typed.inferred_type(), "integer");
+        assert_eq!(typed.dtype(), "int64");
+        assert_eq!(typed.dtypes(), vec!["int64"]);
+        assert!(typed.holds_integer());
+        assert!(typed.is_integer());
+        assert!(typed.is_numeric());
+        assert!(!typed.is_object());
+        assert!(
+            typed.labels.materialized.get().is_none(),
+            "dtype predicates should not materialize typed Int64 labels"
+        );
+
+        let affine = Index::new_known_unique_int64_affine_range(12, -4, 4).unwrap();
+        assert!(affine.labels.materialized.get().is_none());
+        assert_eq!(affine.inferred_type(), "integer");
+        assert_eq!(affine.dtype(), "int64");
+        assert!(affine.is_integer());
+        assert!(affine.is_numeric());
+        assert!(!affine.is_object());
+        assert!(
+            affine.labels.materialized.get().is_none(),
+            "dtype predicates should not materialize affine Int64 labels"
+        );
+
+        let empty = Index::from_i64_values(Vec::new());
+        assert!(empty.labels.materialized.get().is_none());
+        assert_eq!(empty.inferred_type(), "empty");
+        assert_eq!(empty.dtype(), "object");
+        assert!(!empty.is_integer());
+        assert!(!empty.is_numeric());
+        assert!(empty.is_object());
+        assert!(empty.labels.materialized.get().is_none());
     }
 
     #[test]
