@@ -3699,6 +3699,32 @@ impl Index {
     /// Matches `pd.Index.asof_locs(where, mask)` for monotonic flat indexes.
     #[must_use]
     pub fn asof_locs(&self, where_index: &Self, mask: Option<&[bool]>) -> Vec<Option<usize>> {
+        if self.labels.has_lazy_int64_backing()
+            && where_index.labels.has_lazy_int64_backing()
+            && let (Some(source), Some(keys)) =
+                (self.labels.int64_view(), where_index.labels.int64_view())
+        {
+            return keys
+                .iter()
+                .map(|&key| {
+                    let mut best = None;
+                    for (position, &label) in source.iter().enumerate() {
+                        if mask
+                            .and_then(|values| values.get(position))
+                            .is_some_and(|include| !include)
+                        {
+                            continue;
+                        }
+                        if label <= key {
+                            best = Some(position);
+                        } else {
+                            break;
+                        }
+                    }
+                    best
+                })
+                .collect();
+        }
         where_index
             .labels
             .iter()
@@ -17876,6 +17902,30 @@ mod tests {
         assert!(
             affine.labels.materialized.get().is_none(),
             "asof should not materialize affine Int64 labels"
+        );
+    }
+
+    #[test]
+    fn int64_asof_locs_avoids_label_materialization_4jr8s() {
+        let source = Index::from_i64_values(vec![1, 3, 5, 7]);
+        let probes = Index::from_i64_values(vec![0, 4, 7, 10]);
+        assert!(source.labels.materialized.get().is_none());
+        assert!(probes.labels.materialized.get().is_none());
+        assert_eq!(
+            source.asof_locs(&probes, None),
+            vec![None, Some(1), Some(3), Some(3)]
+        );
+        assert_eq!(
+            source.asof_locs(&probes, Some(&[true, false, true, true])),
+            vec![None, Some(0), Some(3), Some(3)]
+        );
+        assert!(
+            source.labels.materialized.get().is_none(),
+            "asof_locs should not materialize source Int64 labels"
+        );
+        assert!(
+            probes.labels.materialized.get().is_none(),
+            "asof_locs should not materialize probe Int64 labels"
         );
     }
 
