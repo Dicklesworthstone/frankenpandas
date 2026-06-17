@@ -1962,6 +1962,53 @@ fn ordered_unique_int64_outer_positions(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<OptionalJoinPositions> {
+    // Typed fast path (see ordered_unique_int64_left_match_positions): merge the
+    // ordered union over raw &[i64] when both keys carry a contiguous Int64
+    // backing, skipping the Vec<Scalar> materialization (32 B/elem, ~64 MB per
+    // merge at 1M rows). Bit-identical: same strictly-increasing gate and the
+    // same three-way merge emitting the same (Option,Option) position pairs and
+    // the same drain order.
+    if let (Some(left_values), Some(right_values)) = (
+        strictly_increasing_i64_slice(left_key),
+        strictly_increasing_i64_slice(right_key),
+    ) {
+        let cap = left_values.len().saturating_add(right_values.len());
+        let mut left_positions = Vec::<Option<usize>>::with_capacity(cap);
+        let mut right_positions = Vec::<Option<usize>>::with_capacity(cap);
+        let (mut left_idx, mut right_idx) = (0usize, 0usize);
+        while left_idx < left_values.len() && right_idx < right_values.len() {
+            match left_values[left_idx].cmp(&right_values[right_idx]) {
+                Ordering::Equal => {
+                    left_positions.push(Some(left_idx));
+                    right_positions.push(Some(right_idx));
+                    left_idx += 1;
+                    right_idx += 1;
+                }
+                Ordering::Less => {
+                    left_positions.push(Some(left_idx));
+                    right_positions.push(None);
+                    left_idx += 1;
+                }
+                Ordering::Greater => {
+                    left_positions.push(None);
+                    right_positions.push(Some(right_idx));
+                    right_idx += 1;
+                }
+            }
+        }
+        while left_idx < left_values.len() {
+            left_positions.push(Some(left_idx));
+            right_positions.push(None);
+            left_idx += 1;
+        }
+        while right_idx < right_values.len() {
+            left_positions.push(None);
+            right_positions.push(Some(right_idx));
+            right_idx += 1;
+        }
+        return Some((left_positions, right_positions));
+    }
+
     let left_values = strictly_increasing_int64_key_values(left_key)?;
     let right_values = strictly_increasing_int64_key_values(right_key)?;
 
