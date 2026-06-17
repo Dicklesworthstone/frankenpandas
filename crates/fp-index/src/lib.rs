@@ -2953,6 +2953,11 @@ impl Index {
     /// Result is a `Vec<String>` in index order.
     #[must_use]
     pub fn format(&self) -> Vec<String> {
+        if self.labels.has_lazy_int64_backing()
+            && let Some(values) = self.labels.int64_view()
+        {
+            return values.iter().map(ToString::to_string).collect();
+        }
         self.labels.iter().map(IndexLabel::to_string).collect()
     }
 
@@ -17553,6 +17558,30 @@ mod tests {
             IndexLabel::Int64(-5),
         ]);
         assert_eq!(idx.format(), vec!["10", "abc", "-5"]);
+    }
+
+    #[test]
+    fn typed_int64_format_avoids_label_materialization_ye9dl() {
+        let index = Index::from_i64_values(vec![10, -5, 0]);
+        assert!(index.labels.materialized.get().is_none());
+
+        assert_eq!(index.format(), vec!["10", "-5", "0"]);
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "format should read typed Int64 values without materializing labels"
+        );
+    }
+
+    #[test]
+    fn affine_int64_format_avoids_label_materialization_ye9dl() {
+        let index = Index::new_known_unique_int64_affine_range(10, -3, 4).unwrap();
+        assert!(index.labels.materialized.get().is_none());
+
+        assert_eq!(index.format(), vec!["10", "7", "4", "1"]);
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "format should read affine Int64 values without materializing labels"
+        );
     }
 
     #[test]
