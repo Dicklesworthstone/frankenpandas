@@ -2007,10 +2007,96 @@ fn dense_int64_right_positions(
     Some((left_positions, right_positions))
 }
 
+/// Direct-address unique-key fast path for a bounded-span Int64 full-outer join.
+/// When BOTH key sides are unique within the joint span, two compact `u32`
+/// tables (`pos+1`, `0` == empty) plus a single ascending scan over `0..span`
+/// replace the CSR's `Vec<Vec<usize>>` (one heap `Vec` per bucket — `span`
+/// allocations) and the `Vec<Scalar>` materialization. Bails (caller falls back
+/// to the bucket-list CSR) on a duplicate key on either side, non-contiguous
+/// backing, oversized span, or `u32` row overflow.
+///
+/// Bit-identical for unique keys: the CSR emits one row per bucket in ascending
+/// key (bucket) order — matched `(Some,Some)`, left-only `(Some,None)`,
+/// right-only `(None,Some)` — which is exactly the per-bucket scan here.
+fn dense_int64_unique_outer_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left_values = left_key.as_i64_slice()?;
+    let right_values = right_key.as_i64_slice()?;
+    if left_values.len() > u32::MAX as usize || right_values.len() > u32::MAX as usize {
+        return None;
+    }
+
+    let mut min_key = i64::MAX;
+    let mut max_key = i64::MIN;
+    let mut any = false;
+    for &key in left_values.iter().chain(right_values.iter()) {
+        min_key = min_key.min(key);
+        max_key = max_key.max(key);
+        any = true;
+    }
+    if !any {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    let span = i128::from(max_key)
+        .checked_sub(i128::from(min_key))?
+        .checked_add(1)?;
+    let row_count = left_values.len().saturating_add(right_values.len());
+    let max_dense_span = row_count.saturating_mul(4).max(1024);
+    if span > max_dense_span as i128 {
+        return None;
+    }
+    let span = usize::try_from(span).ok()?;
+
+    let mut left_table = vec![0u32; span];
+    let mut right_table = vec![0u32; span];
+    for (pos, &key) in left_values.iter().enumerate() {
+        let bucket = usize::try_from(i128::from(key) - i128::from(min_key)).ok()?;
+        if left_table[bucket] != 0 {
+            return None;
+        }
+        left_table[bucket] = (pos as u32).checked_add(1)?;
+    }
+    for (pos, &key) in right_values.iter().enumerate() {
+        let bucket = usize::try_from(i128::from(key) - i128::from(min_key)).ok()?;
+        if right_table[bucket] != 0 {
+            return None;
+        }
+        right_table[bucket] = (pos as u32).checked_add(1)?;
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::new();
+    let mut right_positions = Vec::<Option<usize>>::new();
+    for bucket in 0..span {
+        match (left_table[bucket], right_table[bucket]) {
+            (0, 0) => {}
+            (l, 0) => {
+                left_positions.push(Some(l as usize - 1));
+                right_positions.push(None);
+            }
+            (0, r) => {
+                left_positions.push(None);
+                right_positions.push(Some(r as usize - 1));
+            }
+            (l, r) => {
+                left_positions.push(Some(l as usize - 1));
+                right_positions.push(Some(r as usize - 1));
+            }
+        }
+    }
+
+    Some((left_positions, right_positions))
+}
+
 fn dense_int64_outer_positions(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<OptionalJoinPositions> {
+    if let Some(direct) = dense_int64_unique_outer_positions(left_key, right_key) {
+        return Some(direct);
+    }
     let left_values = all_valid_int64_key_values(left_key)?;
     let right_values = all_valid_int64_key_values(right_key)?;
 
