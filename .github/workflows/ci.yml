@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    # br-frankenpandas-edn3q: periodically catch workspace-wide test rot
+    # that crate-scoped swarm validation can miss.
+    - cron: "37 8 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -136,8 +141,11 @@ jobs:
       - name: Install pinned pandas oracle dependency
         run: python -m pip install --upgrade pip -r crates/fp-conformance/oracle/requirements.txt
 
-      - name: Workspace tests
-        run: cargo test --workspace
+      - name: Workspace tests (--no-fail-fast)
+        # br-frankenpandas-edn3q: keep collecting failures across all
+        # workspace targets so stray examples and stale integration tests
+        # are visible in a single gate run.
+        run: cargo test --workspace --no-fail-fast
 
       - name: Doctest (--doc)
         # Per br-frankenpandas-ddox: `cargo test --workspace` does NOT
