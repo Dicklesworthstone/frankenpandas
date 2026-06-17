@@ -1780,6 +1780,25 @@ impl Index {
         (codes, uniques)
     }
 
+    /// Stable ascending argsort over raw Int64 labels. Equivalent to sorting
+    /// positions by `IndexLabel::Int64(value).cmp(...)`, but avoids enum
+    /// materialization/comparison for indexes that already carry typed Int64
+    /// backing. `sort_by_key` is stable, so duplicate labels keep their
+    /// original order just like the generic `IndexLabel` comparator path.
+    fn argsort_i64(vals: &[i64]) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..vals.len()).collect();
+        indices.sort_by_key(|&idx| vals[idx]);
+        indices
+    }
+
+    fn argsort_int64_affine(range: Int64AffineLabels) -> Vec<usize> {
+        if range.len <= 1 || range.step > 0 {
+            (0..range.len).collect()
+        } else {
+            (0..range.len).rev().collect()
+        }
+    }
+
     /// Whether `vals` contains any duplicate, over raw `i64` keys with an
     /// early exit. Bit-identical to `detect_duplicates` for all-Int64 indexes,
     /// with inline keys (dense bitset when bounded, else `FxHashSet<i64>`).
@@ -2294,6 +2313,12 @@ impl Index {
 
     #[must_use]
     pub fn argsort(&self) -> Vec<usize> {
+        if let Some(range) = self.labels.int64_affine_range() {
+            return Self::argsort_int64_affine(range);
+        }
+        if let Some(vals) = self.labels.int64_view() {
+            return Self::argsort_i64(&vals);
+        }
         let mut indices: Vec<usize> = (0..self.labels.len()).collect();
         indices.sort_by(|&a, &b| self.labels[a].cmp(&self.labels[b]));
         indices
@@ -2301,6 +2326,25 @@ impl Index {
 
     #[must_use]
     pub fn sort_values(&self) -> Self {
+        if let Some(range) = self.labels.int64_affine_range() {
+            if range.len <= 1 || range.step > 0 {
+                return self.clone();
+            }
+            let last_offset =
+                i64::try_from(range.len - 1).expect("validated Int64 affine range length");
+            if let Some(delta) = range.step.checked_mul(last_offset)
+                && let Some(start) = range.start.checked_add(delta)
+                && let Some(sorted) =
+                    Self::new_known_unique_int64_affine_range(start, -range.step, range.len)
+            {
+                return self.propagate_name(sorted);
+            }
+        }
+        if let Some(vals) = self.labels.int64_view() {
+            let order = Self::argsort_i64(&vals);
+            let sorted = order.iter().map(|&idx| vals[idx]).collect();
+            return self.propagate_name(Self::from_i64_values(sorted));
+        }
         let order = self.argsort();
         self.propagate_name(Self::new(
             order.iter().map(|&i| self.labels[i].clone()).collect(),
@@ -16322,10 +16366,68 @@ mod tests {
     }
 
     #[test]
+    fn int64_argsort_is_stable_and_keeps_typed_backing_6ubrp() {
+        let index = Index::from_i64_values(vec![3, 1, 2, 1, 3]);
+        assert!(index.labels.materialized.get().is_none());
+        assert_eq!(index.argsort(), vec![1, 3, 2, 0, 4]);
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "typed Int64 argsort should not materialize IndexLabel values"
+        );
+    }
+
+    #[test]
+    fn descending_int64_affine_argsort_does_not_materialize_6ubrp() {
+        let index = Index::new_known_unique_int64_affine_range(10, -2, 4).unwrap();
+        assert!(index.labels.materialized.get().is_none());
+        assert_eq!(index.argsort(), vec![3, 2, 1, 0]);
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "affine Int64 argsort should not materialize IndexLabel values"
+        );
+    }
+
+    #[test]
     fn sort_values_produces_sorted_index() {
         let index = Index::new(vec!["c".into(), "a".into(), "b".into()]);
         let sorted = index.sort_values();
         assert_eq!(sorted.labels(), &["a".into(), "b".into(), "c".into()]);
+    }
+
+    #[test]
+    fn int64_sort_values_preserves_name_and_stable_duplicates_6ubrp() {
+        let index = Index::from_i64_values(vec![3, 1, 2, 1, 3]).set_name("rows");
+        let sorted = index.sort_values();
+        assert_eq!(sorted.name(), Some("rows"));
+        assert_eq!(
+            sorted.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn descending_int64_affine_sort_values_reuses_affine_backing_6ubrp() {
+        let index = Index::new_known_unique_int64_affine_range(10, -2, 4)
+            .unwrap()
+            .set_name("axis");
+        let sorted = index.sort_values();
+        assert_eq!(sorted.name(), Some("axis"));
+        assert_eq!(
+            sorted.labels(),
+            &[
+                IndexLabel::Int64(4),
+                IndexLabel::Int64(6),
+                IndexLabel::Int64(8),
+                IndexLabel::Int64(10),
+            ]
+        );
+        assert_eq!(sorted.int64_unit_range_labels(), None);
     }
 
     #[test]
