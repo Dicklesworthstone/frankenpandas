@@ -2908,6 +2908,9 @@ impl Index {
     /// accounts for each Utf8 string's byte length.
     #[must_use]
     pub fn memory_usage(&self, deep: bool) -> usize {
+        if self.labels.has_lazy_int64_backing() {
+            return self.labels.len() * 8;
+        }
         self.labels
             .iter()
             .map(|label| match label {
@@ -17809,6 +17812,36 @@ mod tests {
         assert_eq!(shallow, 24); // 3 * 8
         // deep is identical for fixed-width types.
         assert_eq!(idx.memory_usage(true), 24);
+    }
+
+    #[test]
+    fn int64_memory_usage_avoids_label_materialization_bqfj0() {
+        let typed = Index::from_i64_values(vec![1, 2, 3, 4]);
+        assert!(typed.labels.materialized.get().is_none());
+        assert_eq!(typed.memory_usage(false), 32);
+        assert_eq!(typed.memory_usage(true), 32);
+        assert_eq!(typed.nbytes(), 32);
+        assert!(
+            typed.labels.materialized.get().is_none(),
+            "memory_usage should not materialize typed Int64 labels"
+        );
+
+        let affine = Index::new_known_unique_int64_affine_range(10, -2, 5).unwrap();
+        assert!(affine.labels.materialized.get().is_none());
+        assert_eq!(affine.memory_usage(false), 40);
+        assert_eq!(affine.memory_usage(true), 40);
+        assert_eq!(affine.nbytes(), 40);
+        assert!(
+            affine.labels.materialized.get().is_none(),
+            "memory_usage should not materialize affine Int64 labels"
+        );
+
+        let empty = Index::from_i64_values(Vec::new());
+        assert!(empty.labels.materialized.get().is_none());
+        assert_eq!(empty.memory_usage(false), 0);
+        assert_eq!(empty.memory_usage(true), 0);
+        assert_eq!(empty.nbytes(), 0);
+        assert!(empty.labels.materialized.get().is_none());
     }
 
     #[test]
