@@ -910,6 +910,57 @@ impl IndexLabels {
     fn cached_int64_view(&self) -> Option<Option<Arc<Vec<i64>>>> {
         self.int64_typed.get().cloned()
     }
+
+    fn take_i64_values(&self, indices: &[usize]) -> Option<Vec<i64>> {
+        let mut out = Vec::with_capacity(indices.len());
+
+        if let Some(range) = self.int64_unit_range {
+            for &idx in indices {
+                if idx >= range.len {
+                    return None;
+                }
+                let offset = i64::try_from(idx).ok()?;
+                out.push(range.start.checked_add(offset)?);
+            }
+            return Some(out);
+        }
+
+        if let Some(range) = self.int64_affine {
+            for &idx in indices {
+                if idx >= range.len {
+                    return None;
+                }
+                let offset = i64::try_from(idx).ok()?;
+                let delta = range.step.checked_mul(offset)?;
+                out.push(range.start.checked_add(delta)?);
+            }
+            return Some(out);
+        }
+
+        if let Some(strided) = &self.int64_strided {
+            for &idx in indices {
+                if idx >= strided.len {
+                    return None;
+                }
+                let offset = strided.step.checked_mul(idx)?;
+                let pos = strided.start.checked_add(offset)?;
+                out.push(*strided.values.get(pos)?);
+            }
+            return Some(out);
+        }
+
+        if let Some(Some(values)) = self.int64_typed.get() {
+            for &idx in indices {
+                if idx >= values.len() {
+                    return None;
+                }
+                out.push(*values.get(idx)?);
+            }
+            return Some(out);
+        }
+
+        None
+    }
 }
 
 impl Clone for IndexLabels {
@@ -2353,6 +2404,9 @@ impl Index {
 
     #[must_use]
     pub fn take(&self, indices: &[usize]) -> Self {
+        if let Some(values) = self.labels.take_i64_values(indices) {
+            return self.propagate_name(Self::from_i64_values(values));
+        }
         self.propagate_name(Self::new(
             indices.iter().map(|&i| self.labels[i].clone()).collect(),
         ))
@@ -16452,6 +16506,40 @@ mod tests {
                 IndexLabel::Int64(10),
                 IndexLabel::Int64(30),
             ]
+        );
+    }
+
+    #[test]
+    fn int64_take_preserves_typed_backing_without_materializing_vbmsv() {
+        let index = Index::from_i64_values(vec![10, 20, 30, 40]).set_name("rows");
+        assert!(index.labels.materialized.get().is_none());
+
+        let taken = index.take(&[2, 0, 2]);
+
+        assert_eq!(taken.name(), Some("rows"));
+        assert_eq!(taken.labels.int64_view().unwrap().as_slice(), &[30, 10, 30]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            taken.labels.materialized.get().is_none(),
+            "typed Int64 take should keep typed output backing"
+        );
+    }
+
+    #[test]
+    fn affine_int64_take_gathers_raw_values_without_materializing_vbmsv() {
+        let index = Index::new_known_unique_int64_affine_range(5, 3, 4)
+            .unwrap()
+            .set_name("axis");
+        assert!(index.labels.materialized.get().is_none());
+
+        let taken = index.take(&[3, 1]);
+
+        assert_eq!(taken.name(), Some("axis"));
+        assert_eq!(taken.labels.int64_view().unwrap().as_slice(), &[14, 8]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            taken.labels.materialized.get().is_none(),
+            "affine Int64 take should gather into typed output backing"
         );
     }
 
