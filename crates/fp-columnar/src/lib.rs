@@ -9765,34 +9765,33 @@ impl Column {
         // Bit-identical to scalar_compare's same-dtype arm (the identical `a <op>
         // b`); all-valid inputs mean no Null branch, and the comparisons never
         // see a NaN (as_f64_slice excludes it).
+        // Hoist `op` out of the element loop into six monomorphic branchless
+        // closures so each comparison auto-vectorizes (a per-element `match op`
+        // is opaque to the vectorizer and serializes the loop — the same lever
+        // as `Series::between`). Bit-identical: the comparison performed per
+        // element is unchanged, only the control flow that selects it moves out.
         if let (Some(l), Some(r)) = (self.as_f64_slice(), right.as_f64_slice()) {
-            let bools: Vec<bool> = l
-                .iter()
-                .zip(r)
-                .map(|(&a, &b)| match op {
-                    ComparisonOp::Gt => a > b,
-                    ComparisonOp::Lt => a < b,
-                    ComparisonOp::Eq => a == b,
-                    ComparisonOp::Ne => a != b,
-                    ComparisonOp::Ge => a >= b,
-                    ComparisonOp::Le => a <= b,
-                })
-                .collect();
+            let zip = || l.iter().zip(r);
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => zip().map(|(&a, &b)| a > b).collect(),
+                ComparisonOp::Lt => zip().map(|(&a, &b)| a < b).collect(),
+                ComparisonOp::Eq => zip().map(|(&a, &b)| a == b).collect(),
+                ComparisonOp::Ne => zip().map(|(&a, &b)| a != b).collect(),
+                ComparisonOp::Ge => zip().map(|(&a, &b)| a >= b).collect(),
+                ComparisonOp::Le => zip().map(|(&a, &b)| a <= b).collect(),
+            };
             return Ok(Self::from_bool_values(bools));
         }
         if let (Some(l), Some(r)) = (self.as_i64_slice(), right.as_i64_slice()) {
-            let bools: Vec<bool> = l
-                .iter()
-                .zip(r)
-                .map(|(&a, &b)| match op {
-                    ComparisonOp::Gt => a > b,
-                    ComparisonOp::Lt => a < b,
-                    ComparisonOp::Eq => a == b,
-                    ComparisonOp::Ne => a != b,
-                    ComparisonOp::Ge => a >= b,
-                    ComparisonOp::Le => a <= b,
-                })
-                .collect();
+            let zip = || l.iter().zip(r);
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => zip().map(|(&a, &b)| a > b).collect(),
+                ComparisonOp::Lt => zip().map(|(&a, &b)| a < b).collect(),
+                ComparisonOp::Eq => zip().map(|(&a, &b)| a == b).collect(),
+                ComparisonOp::Ne => zip().map(|(&a, &b)| a != b).collect(),
+                ComparisonOp::Ge => zip().map(|(&a, &b)| a >= b).collect(),
+                ComparisonOp::Le => zip().map(|(&a, &b)| a <= b).collect(),
+            };
             return Ok(Self::from_bool_values(bools));
         }
 
