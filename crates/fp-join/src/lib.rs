@@ -1504,10 +1504,49 @@ fn ordered_unique_utf8_inner_positions(
         .map(InnerPositionPlan::into_positions)
 }
 
+/// Strictly-increasing check over a column's contiguous `&[i64]` backing,
+/// returning the raw slice. The typed analogue of
+/// `strictly_increasing_int64_key_values` that skips the `Vec<Scalar>`
+/// materialization (32 B/elem) — `as_i64_slice` is `Some` only for an
+/// all-valid contiguous Int64 column, the same gate as the Scalar version
+/// (dtype Int64 + `validity().all()` + every value `Scalar::Int64`).
+fn strictly_increasing_i64_slice(column: &Column) -> Option<&[i64]> {
+    let data = column.as_i64_slice()?;
+    if data.windows(2).any(|pair| pair[1] <= pair[0]) {
+        return None;
+    }
+    Some(data)
+}
+
 fn ordered_unique_int64_left_match_positions(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<Vec<Option<usize>>> {
+    // Typed fast path: both keys carry a contiguous Int64 backing, so run the
+    // ordered two-pointer match over raw `&[i64]` (8 B/elem, cache-friendly)
+    // instead of materializing two `Vec<Scalar>` (32 B/elem — ~32 MB per side
+    // at 1M rows, the tax that left-join paid but the typed inner path did
+    // not). Bit-identical: same strictly-increasing gate and the same
+    // monotone walk producing the same `right_idx` per left row.
+    if let (Some(left_values), Some(right_values)) = (
+        strictly_increasing_i64_slice(left_key),
+        strictly_increasing_i64_slice(right_key),
+    ) {
+        let mut right_positions = Vec::<Option<usize>>::with_capacity(left_values.len());
+        let mut right_idx = 0usize;
+        for &left_value in left_values {
+            while right_idx < right_values.len() && right_values[right_idx] < left_value {
+                right_idx += 1;
+            }
+            let matched = match right_values.get(right_idx) {
+                Some(&right_value) if right_value == left_value => Some(right_idx),
+                _ => None,
+            };
+            right_positions.push(matched);
+        }
+        return Some(right_positions);
+    }
+
     let left_values = strictly_increasing_int64_key_values(left_key)?;
     let right_values = strictly_increasing_int64_key_values(right_key)?;
 
