@@ -1838,10 +1838,75 @@ fn dense_int64_left_positions(
     Some((left_positions, right_positions))
 }
 
+/// Direct-address unique-key fast path for a bounded-span Int64 right join —
+/// the mirror of [`dense_int64_unique_right_left_positions`]. When the *left*
+/// (build-side) keys are unique within their span, a single fill + single probe
+/// over one compact `u32` table replaces the CSR. Keeps every right row; bails
+/// (caller falls back to the CSR path) on a duplicate left key, non-contiguous
+/// backing, empty left, oversized span, or `u32` row overflow.
+fn dense_int64_unique_left_right_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left_values = left_key.as_i64_slice()?;
+    let right_values = right_key.as_i64_slice()?;
+    if left_values.is_empty() || left_values.len() > u32::MAX as usize {
+        return None;
+    }
+
+    let mut min_key = i64::MAX;
+    let mut max_key = i64::MIN;
+    for &key in left_values {
+        min_key = min_key.min(key);
+        max_key = max_key.max(key);
+    }
+
+    let span = i128::from(max_key)
+        .checked_sub(i128::from(min_key))?
+        .checked_add(1)?;
+    let row_count = left_values.len().saturating_add(right_values.len());
+    let max_dense_span = row_count.saturating_mul(4).max(1024);
+    if span > max_dense_span as i128 {
+        return None;
+    }
+    let span = usize::try_from(span).ok()?;
+    let span_i128 = i128::try_from(span).ok()?;
+
+    let mut table = vec![0u32; span];
+    for (pos, &key) in left_values.iter().enumerate() {
+        let bucket = usize::try_from(i128::from(key) - i128::from(min_key)).ok()?;
+        if table[bucket] != 0 {
+            return None;
+        }
+        table[bucket] = (pos as u32).checked_add(1)?;
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(right_values.len());
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(right_values.len());
+    for (right_pos, &key) in right_values.iter().enumerate() {
+        let offset = i128::from(key) - i128::from(min_key);
+        let matched = if (0..span_i128).contains(&offset) {
+            match table[offset as usize] {
+                0 => None,
+                slot => Some(slot as usize - 1),
+            }
+        } else {
+            None
+        };
+        left_positions.push(matched);
+        right_positions.push(Some(right_pos));
+    }
+
+    Some((left_positions, right_positions))
+}
+
 fn dense_int64_right_positions(
     left_key: &Column,
     right_key: &Column,
 ) -> Option<OptionalJoinPositions> {
+    if let Some(direct) = dense_int64_unique_left_right_positions(left_key, right_key) {
+        return Some(direct);
+    }
     let left_values = all_valid_int64_key_values(left_key)?;
     let right_values = all_valid_int64_key_values(right_key)?;
 
