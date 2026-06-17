@@ -4008,7 +4008,7 @@ fn validate_parse_date_combinations(
     }
 }
 
-fn apply_parse_dates(
+fn apply_parse_dates_to_scalar_columns(
     headers: &[String],
     columns: &mut [Vec<Scalar>],
     parse_dates: &[String],
@@ -4030,6 +4030,130 @@ fn apply_parse_dates(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_csv_parse_dates(
+    headers: &[String],
+    columns: &mut [Vec<Scalar>],
+    raw_columns: &[Vec<String>],
+    deferred_parse_date_columns: &[bool],
+    parse_dates: &[String],
+    options: &CsvReadOptions,
+    na_set: &HashSet<&str>,
+    true_set: &HashSet<&str>,
+    false_set: &HashSet<&str>,
+) -> Result<(), IoError> {
+    if parse_dates.is_empty() {
+        return Ok(());
+    }
+
+    validate_parse_dates(headers, parse_dates)?;
+
+    for column_name in parse_dates {
+        let Some(column_idx) = headers.iter().position(|header| header == column_name) else {
+            continue;
+        };
+
+        let parsed = if deferred_parse_date_columns
+            .get(column_idx)
+            .copied()
+            .unwrap_or(false)
+        {
+            if let Some(parsed) = parse_csv_fixed_naive_datetime_fields(
+                &raw_columns[column_idx],
+                options.na_filter,
+                options.keep_default_na,
+                na_set,
+            ) {
+                Some(parsed)
+            } else {
+                columns[column_idx] = parse_csv_scalar_fields_with_options(
+                    &raw_columns[column_idx],
+                    options,
+                    na_set,
+                    true_set,
+                    false_set,
+                );
+                parse_csv_datetime_values(&columns[column_idx])?
+            }
+        } else {
+            parse_csv_datetime_values(&columns[column_idx])?
+        };
+
+        if let Some(parsed) = parsed {
+            columns[column_idx] = parsed;
+        }
+    }
+
+    Ok(())
+}
+
+fn deferred_parse_date_column_mask(headers: &[String], options: &CsvReadOptions) -> Vec<bool> {
+    let Some(parse_dates) = options.parse_dates.as_deref() else {
+        return vec![false; headers.len()];
+    };
+    if parse_dates.is_empty()
+        || options.parse_date_combinations.is_some()
+        || options.parse_date_combinations_named.is_some()
+    {
+        return vec![false; headers.len()];
+    }
+
+    headers
+        .iter()
+        .map(|header| parse_dates.iter().any(|name| name == header))
+        .collect()
+}
+
+fn parse_csv_fixed_naive_datetime_fields(
+    fields: &[String],
+    na_filter: bool,
+    keep_default_na: bool,
+    na_set: &HashSet<&str>,
+) -> Option<Vec<Scalar>> {
+    let mut parsed = Vec::with_capacity(fields.len());
+    let mut saw_datetime = false;
+
+    for field in fields {
+        if na_filter
+            && ((keep_default_na && is_pandas_default_na(field)) || na_set.contains(field.as_str()))
+        {
+            parsed.push(Scalar::Datetime64(Timestamp::NAT));
+            continue;
+        }
+
+        parsed.push(Scalar::Datetime64(parse_fixed_naive_csv_datetime_nanos(
+            field,
+        )?));
+        saw_datetime = true;
+    }
+
+    saw_datetime.then_some(parsed)
+}
+
+fn parse_csv_scalar_fields_with_options(
+    fields: &[String],
+    options: &CsvReadOptions,
+    na_set: &HashSet<&str>,
+    true_set: &HashSet<&str>,
+    false_set: &HashSet<&str>,
+) -> Vec<Scalar> {
+    fields
+        .iter()
+        .map(|field| {
+            parse_scalar_with_options(
+                field,
+                options.na_filter,
+                options.keep_default_na,
+                na_set,
+                true_set,
+                false_set,
+                options.decimal,
+                options.thousands,
+            )
+        })
+        .collect()
 }
 
 fn parse_sql_float_text(text: &str) -> Option<f64> {
@@ -4398,6 +4522,7 @@ fn apply_parse_date_combinations_named(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_csv_record(
     columns: &mut [Vec<Scalar>],
     raw_columns: &mut [Vec<String>],
@@ -4406,19 +4531,28 @@ fn append_csv_record(
     na_set: &HashSet<&str>,
     true_set: &HashSet<&str>,
     false_set: &HashSet<&str>,
+    deferred_parse_date_columns: &[bool],
 ) {
     for (idx, col) in columns.iter_mut().enumerate() {
         let field = record.get(idx).unwrap_or_default();
-        col.push(parse_scalar_with_options(
-            field,
-            options.na_filter,
-            options.keep_default_na,
-            na_set,
-            true_set,
-            false_set,
-            options.decimal,
-            options.thousands,
-        ));
+        if deferred_parse_date_columns
+            .get(idx)
+            .copied()
+            .unwrap_or(false)
+        {
+            col.push(Scalar::Null(NullKind::Null));
+        } else {
+            col.push(parse_scalar_with_options(
+                field,
+                options.na_filter,
+                options.keep_default_na,
+                na_set,
+                true_set,
+                false_set,
+                options.decimal,
+                options.thousands,
+            ));
+        }
         // Keep the verbatim field so an object-fallback column can preserve the
         // original literal like pandas (see build_csv_object_aware_column).
         raw_columns[idx].push(field.to_owned());
@@ -4589,65 +4723,63 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     // raw_columns shadows columns with each cell's verbatim text so an
     // object-fallback column can preserve original literals (see the final
     // build step and build_csv_object_aware_column).
-    let (headers, mut columns, mut raw_columns) = if options.has_headers {
-        let headers_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
-        if headers_record.is_empty() {
-            return Err(IoError::MissingHeaders);
-        }
+    let (headers, mut columns, mut raw_columns, deferred_parse_date_columns) =
+        if options.has_headers {
+            let headers_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
+            if headers_record.is_empty() {
+                return Err(IoError::MissingHeaders);
+            }
 
-        let header_count = headers_record.len();
-        let row_hint = input.len() / (header_count * 8).max(1);
-        let columns: Vec<Vec<Scalar>> = (0..header_count)
-            .map(|_| Vec::with_capacity(row_hint))
-            .collect();
-        let raw_columns: Vec<Vec<String>> = (0..header_count)
-            .map(|_| Vec::with_capacity(row_hint))
-            .collect();
-
-        (
-            headers_record
+            let header_count = headers_record.len();
+            let row_hint = input.len() / (header_count * 8).max(1);
+            let headers = headers_record
                 .iter()
                 .map(ToOwned::to_owned)
-                .collect::<Vec<_>>(),
-            columns,
-            raw_columns,
-        )
-    } else {
-        let first_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
-        if first_record.is_empty() {
-            return Err(IoError::MissingHeaders);
-        }
+                .collect::<Vec<_>>();
+            let columns: Vec<Vec<Scalar>> = (0..header_count)
+                .map(|_| Vec::with_capacity(row_hint))
+                .collect();
+            let raw_columns: Vec<Vec<String>> = (0..header_count)
+                .map(|_| Vec::with_capacity(row_hint))
+                .collect();
+            let deferred_parse_date_columns = deferred_parse_date_column_mask(&headers, options);
 
-        let header_count = first_record.len();
-        let row_hint = input.len() / (header_count * 8).max(1);
-        let mut columns: Vec<Vec<Scalar>> = (0..header_count)
-            .map(|_| Vec::with_capacity(row_hint))
-            .collect();
-        let mut raw_columns: Vec<Vec<String>> = (0..header_count)
-            .map(|_| Vec::with_capacity(row_hint))
-            .collect();
+            (headers, columns, raw_columns, deferred_parse_date_columns)
+        } else {
+            let first_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
+            if first_record.is_empty() {
+                return Err(IoError::MissingHeaders);
+            }
 
-        if (row_count as usize) < max_rows {
-            append_csv_record(
-                &mut columns,
-                &mut raw_columns,
-                &first_record,
-                options,
-                &na_set,
-                &true_set,
-                &false_set,
-            );
-            row_count += 1;
-        }
-
-        (
-            (0..header_count)
+            let header_count = first_record.len();
+            let row_hint = input.len() / (header_count * 8).max(1);
+            let headers = (0..header_count)
                 .map(|idx| format!("column_{idx}"))
-                .collect(),
-            columns,
-            raw_columns,
-        )
-    };
+                .collect::<Vec<_>>();
+            let mut columns: Vec<Vec<Scalar>> = (0..header_count)
+                .map(|_| Vec::with_capacity(row_hint))
+                .collect();
+            let mut raw_columns: Vec<Vec<String>> = (0..header_count)
+                .map(|_| Vec::with_capacity(row_hint))
+                .collect();
+            let deferred_parse_date_columns = deferred_parse_date_column_mask(&headers, options);
+
+            if (row_count as usize) < max_rows {
+                append_csv_record(
+                    &mut columns,
+                    &mut raw_columns,
+                    &first_record,
+                    options,
+                    &na_set,
+                    &true_set,
+                    &false_set,
+                    &deferred_parse_date_columns,
+                );
+                row_count += 1;
+            }
+
+            (headers, columns, raw_columns, deferred_parse_date_columns)
+        };
 
     for row in records {
         if (row_count as usize) >= max_rows {
@@ -4665,6 +4797,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             &na_set,
             &true_set,
             &false_set,
+            &deferred_parse_date_columns,
         );
         row_count += 1;
     }
@@ -4689,21 +4822,29 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     }
 
     // Apply usecols filter: keep only selected columns.
-    let (mut headers, mut columns, raw_columns) = if let Some(ref usecols) = options.usecols {
-        let mut fh = Vec::new();
-        let mut fc = Vec::new();
-        let mut fr = Vec::new();
-        for ((h, c), r) in headers.into_iter().zip(columns).zip(raw_columns) {
-            if usecols.contains(&h) {
-                fh.push(h);
-                fc.push(c);
-                fr.push(r);
+    let (mut headers, mut columns, raw_columns, deferred_parse_date_columns) =
+        if let Some(ref usecols) = options.usecols {
+            let mut fh = Vec::new();
+            let mut fc = Vec::new();
+            let mut fr = Vec::new();
+            let mut fd = Vec::new();
+            for (((h, c), r), d) in headers
+                .into_iter()
+                .zip(columns)
+                .zip(raw_columns)
+                .zip(deferred_parse_date_columns)
+            {
+                if usecols.contains(&h) {
+                    fh.push(h);
+                    fc.push(c);
+                    fr.push(r);
+                    fd.push(d);
+                }
             }
-        }
-        (fh, fc, fr)
-    } else {
-        (headers, columns, raw_columns)
-    };
+            (fh, fc, fr, fd)
+        } else {
+            (headers, columns, raw_columns, deferred_parse_date_columns)
+        };
 
     if let Some(ref parse_date_combinations) = options.parse_date_combinations {
         apply_parse_date_combinations(&mut headers, &mut columns, parse_date_combinations)?;
@@ -4714,7 +4855,17 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     }
 
     if let Some(ref parse_dates) = options.parse_dates {
-        apply_parse_dates(&headers, &mut columns, parse_dates)?;
+        apply_csv_parse_dates(
+            &headers,
+            &mut columns,
+            &raw_columns,
+            &deferred_parse_date_columns,
+            parse_dates,
+            options,
+            &na_set,
+            &true_set,
+            &false_set,
+        )?;
     }
 
     apply_pandas_csv_numeric_promotions(&mut columns);
@@ -10602,7 +10753,7 @@ fn sql_query_to_columns<C: SqlConnection + ?Sized>(
     }
 
     if let Some(ref parse_dates) = options.parse_dates {
-        apply_parse_dates(&headers, &mut columns, parse_dates)?;
+        apply_parse_dates_to_scalar_columns(&headers, &mut columns, parse_dates)?;
     }
     if options.coerce_float {
         apply_sql_coerce_float(&mut columns);
@@ -22075,6 +22226,79 @@ mod tests {
                 "{rejected:?} must use the general parse_dates path"
             );
         }
+    }
+
+    #[test]
+    fn csv_parse_dates_raw_fast_path_preserves_na_semantics() {
+        let input = "ts,value\nMISSING,1\n2024-01-15 10:30:00,2\n";
+        let opts = CsvReadOptions {
+            parse_dates: Some(vec!["ts".to_owned()]),
+            na_values: vec!["MISSING".to_owned()],
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(
+            frame.column("ts").unwrap().values(),
+            &[
+                Scalar::Datetime64(Timestamp::NAT),
+                Scalar::Datetime64(1_705_314_600_000_000_000),
+            ]
+        );
+        assert_eq!(
+            frame.column("value").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn csv_parse_dates_deferred_fallback_replays_scalar_inference() {
+        let input = "ts,value\n2024-01-15 10:30:00,1\nnot-a-date,2\n";
+        let opts = CsvReadOptions {
+            parse_dates: Some(vec!["ts".to_owned()]),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(
+            frame.column("ts").unwrap().values(),
+            &[
+                Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
+                Scalar::Utf8("not-a-date".to_owned()),
+            ]
+        );
+
+        let keep_na_literal = CsvReadOptions {
+            parse_dates: Some(vec!["ts".to_owned()]),
+            keep_default_na: false,
+            ..Default::default()
+        };
+        let frame = read_csv_with_options("ts\nNA\n2024-01-15\n", &keep_na_literal).expect("parse");
+        assert_eq!(
+            frame.column("ts").unwrap().values(),
+            &[
+                Scalar::Utf8("NA".to_owned()),
+                Scalar::Utf8("2024-01-15".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn csv_parse_dates_deferred_mask_tracks_usecols_and_headerless() {
+        let input = "2024-01-15 10:30:00,10\n2024-01-16 11:45:30,20\n";
+        let opts = CsvReadOptions {
+            has_headers: false,
+            parse_dates: Some(vec!["column_0".to_owned()]),
+            usecols: Some(vec!["column_0".to_owned()]),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(frame.column_names(), vec!["column_0"]);
+        assert_eq!(
+            frame.column("column_0").unwrap().values(),
+            &[
+                Scalar::Datetime64(1_705_314_600_000_000_000),
+                Scalar::Datetime64(1_705_405_530_000_000_000),
+            ]
+        );
     }
 
     #[test]
