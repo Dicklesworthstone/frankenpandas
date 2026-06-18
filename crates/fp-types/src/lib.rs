@@ -5042,6 +5042,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cast_scalar_bool_int_roundtrip_6w07b() {
+        use super::cast_scalar;
+        // Property (br-frankenpandas-6w07b): Bool<->Int64 cast. Seeded LCG, no mocks.
+        assert_eq!(cast_scalar(&Scalar::Bool(true), DType::Int64).unwrap(), Scalar::Int64(1));
+        assert_eq!(cast_scalar(&Scalar::Bool(false), DType::Int64).unwrap(), Scalar::Int64(0));
+        assert_eq!(cast_scalar(&Scalar::Int64(0), DType::Bool).unwrap(), Scalar::Bool(false));
+        let mut st: u64 = 0x4b07_0b1c_2d3e_4f50;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for _ in 0..2000u32 {
+            let v = (next() % 21) as i64 - 10;
+            assert_eq!(cast_scalar(&Scalar::Int64(v), DType::Bool).unwrap(), Scalar::Bool(v != 0), "int->bool v={v}");
+        }
+    }
+
     /// br-frankenpandas-6a83t: cast_scalar is the scalar dtype-coercion path
     #[test]
     fn cast_scalar_float_to_int_truncates_toward_zero_u9lec() {
