@@ -8807,6 +8807,138 @@ mod tests {
         assert_eq!(bins.last().unwrap().right, 1.0);
     }
 
+    #[test]
+    fn interval_range_matches_seeded_arithmetic_oracle_t9ozf() {
+        // Differential vs independent interval edge oracles
+        // (br-frankenpandas-t9ozf). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            *seed
+        }
+
+        fn closed_for(raw: u64) -> IntervalClosed {
+            match raw % 4 {
+                0 => IntervalClosed::Left,
+                1 => IntervalClosed::Right,
+                2 => IntervalClosed::Both,
+                _ => IntervalClosed::Neither,
+            }
+        }
+
+        fn assert_interval(
+            case: usize,
+            kind: &str,
+            pos: usize,
+            actual: &Interval,
+            expected: &Interval,
+        ) {
+            assert!(
+                (actual.left - expected.left).abs() < 1e-12,
+                "case={case} kind={kind} pos={pos}: expected left {}, got {}",
+                expected.left,
+                actual.left
+            );
+            assert!(
+                (actual.right - expected.right).abs() < 1e-12,
+                "case={case} kind={kind} pos={pos}: expected right {}, got {}",
+                expected.right,
+                actual.right
+            );
+            assert_eq!(
+                actual.closed, expected.closed,
+                "case={case} kind={kind} pos={pos}: closed mismatch"
+            );
+        }
+
+        fn expected_by_periods(
+            start: f64,
+            end: f64,
+            periods: usize,
+            closed: IntervalClosed,
+        ) -> Vec<Interval> {
+            if periods == 0 || !start.is_finite() || !end.is_finite() || start >= end {
+                return Vec::new();
+            }
+            let step = (end - start) / periods as f64;
+            (0..periods)
+                .map(|pos| {
+                    let left = start + step * pos as f64;
+                    let right = if pos + 1 == periods {
+                        end
+                    } else {
+                        start + step * (pos + 1) as f64
+                    };
+                    Interval::new(left, right, closed)
+                })
+                .collect()
+        }
+
+        fn expected_by_step(
+            start: f64,
+            end: f64,
+            step: f64,
+            closed: IntervalClosed,
+        ) -> Vec<Interval> {
+            if start >= end {
+                return Vec::new();
+            }
+            let count = ((end - start) / step).round() as usize;
+            (0..count)
+                .map(|pos| {
+                    let left = start + step * pos as f64;
+                    let right = if pos + 1 == count {
+                        end
+                    } else {
+                        start + step * (pos + 1) as f64
+                    };
+                    Interval::new(left, right, closed)
+                })
+                .collect()
+        }
+
+        assert!(interval_range_by_periods(5.0, 5.0, 4, IntervalClosed::Right).is_empty());
+        assert!(interval_range_by_periods(5.0, 4.0, 4, IntervalClosed::Right).is_empty());
+        assert!(interval_range_by_step(5.0, 5.0, 1.0, IntervalClosed::Right)
+            .expect("zero span")
+            .is_empty());
+
+        let mut seed = 0x171e_7a11_c0de_5eed_u64;
+        for case in 0..220 {
+            let start = (next(&mut seed) % 2_001) as f64 / 10.0 - 100.0;
+            let periods = (next(&mut seed) % 24 + 1) as usize;
+            let width = (next(&mut seed) % 1_000 + 1) as f64 / 4.0;
+            let end = start + width;
+            let closed = closed_for(next(&mut seed));
+
+            let actual = interval_range_by_periods(start, end, periods, closed);
+            let expected = expected_by_periods(start, end, periods, closed);
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "case={case} periods: length mismatch"
+            );
+            for (pos, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert_interval(case, "periods", pos, actual, expected);
+            }
+
+            let step_count = (next(&mut seed) % 20 + 1) as usize;
+            let step = (next(&mut seed) % 25 + 1) as f64;
+            let step_end = start + step * step_count as f64;
+            let actual = interval_range_by_step(start, step_end, step, closed).expect("divides");
+            let expected = expected_by_step(start, step_end, step, closed);
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "case={case} step: length mismatch"
+            );
+            for (pos, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert_interval(case, "step", pos, actual, expected);
+            }
+        }
+    }
+
     // ── Timedelta arithmetic tests (br-frankenpandas-4r56 Phase 1) ──────
 
     use super::Timedelta;
