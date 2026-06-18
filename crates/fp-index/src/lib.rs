@@ -9744,7 +9744,15 @@ impl RangeIndex {
 
     #[must_use]
     pub fn equals(&self, other: &Self) -> bool {
-        self.values() == other.values()
+        let len = self.len();
+        if len != other.len() {
+            return false;
+        }
+        match len {
+            0 => true,
+            1 => self.start == other.start,
+            _ => self.start == other.start && self.step == other.step,
+        }
     }
 
     #[must_use]
@@ -24575,6 +24583,24 @@ mod tests {
 
         let empty = super::RangeIndex::new(5, 5, 1).unwrap();
         assert!(empty.values().is_empty());
+    }
+
+    #[test]
+    fn range_index_equals_compares_sequence_shape_x7tr6() {
+        let empty_a = super::RangeIndex::new(5, 5, 1).unwrap();
+        let empty_b = super::RangeIndex::new(10, 0, 2).unwrap();
+        assert!(empty_a.equals(&empty_b));
+
+        let singleton_a = super::RangeIndex::new(7, 8, 1).unwrap();
+        let singleton_b = super::RangeIndex::new(7, 100, 93).unwrap();
+        assert!(singleton_a.equals(&singleton_b));
+
+        let same_values_a = super::RangeIndex::new(0, 5, 2).unwrap();
+        let same_values_b = super::RangeIndex::new(0, 6, 2).unwrap();
+        assert!(same_values_a.equals(&same_values_b));
+
+        let different_step = super::RangeIndex::new(0, 6, 3).unwrap();
+        assert!(!same_values_a.equals(&different_step));
     }
 
     #[test]
