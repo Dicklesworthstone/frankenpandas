@@ -6222,6 +6222,35 @@ mod tests {
     }
 
     #[test]
+    fn query_str_string_equality_x2nfn() {
+        // br-frankenpandas-x2nfn: query string-literal equality on a Utf8 column.
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let s = |v: &str| Scalar::Utf8(v.to_owned());
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "s",
+                (0..4i64).map(Into::into).collect::<Vec<_>>(),
+                vec![s("a"), s("b"), s("b"), s("c")],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let kept = |q: &str, ledger: &mut EvidenceLedger| -> Vec<String> {
+            super::query_str(q, &frame, &policy, ledger)
+                .unwrap()
+                .column("s")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| match v { Scalar::Utf8(x) => x.clone(), _ => String::new() })
+                .collect()
+        };
+        assert_eq!(kept("s == 'b'", &mut ledger), vec!["b".to_string(), "b".to_string()], "eq");
+        assert_eq!(kept("s != 'b'", &mut ledger), vec!["a".to_string(), "c".to_string()], "ne");
+    }
+
+    #[test]
     fn query_str_boolean_not_negation_flrzd() {
         // br-frankenpandas-flrzd: query 'not' negation.
         let policy = RuntimePolicy::hardened(Some(100));
