@@ -10110,12 +10110,13 @@ impl RangeIndex {
     /// `None` for fewer than two values.
     #[must_use]
     pub fn var(&self) -> Option<f64> {
-        let values: Vec<f64> = self.values().into_iter().map(|v| v as f64).collect();
-        if values.len() < 2 {
+        let len = self.len();
+        if len < 2 {
             return None;
         }
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        Some(values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() as f64 - 1.0))
+        let n = len as f64;
+        let step = self.step as f64;
+        Some(step * step * n * (n + 1.0) / 12.0)
     }
 
     /// Sample standard deviation (ddof=1), matching `pd.RangeIndex.std()`.
@@ -10129,7 +10130,8 @@ impl RangeIndex {
     #[must_use]
     pub fn prod(&self) -> i64 {
         let mut total: i128 = 1;
-        for v in self.values() {
+        for position in 0..self.len() {
+            let v = self.value_at(position);
             total = total.saturating_mul(i128::from(v));
         }
         i64::try_from(total).unwrap_or(if total > 0 { i64::MAX } else { i64::MIN })
@@ -23303,6 +23305,21 @@ mod tests {
         // Includes zero → prod = 0.
         let with_zero = super::RangeIndex::new(0, 5, 1).unwrap();
         assert_eq!(with_zero.prod(), 0);
+    }
+
+    #[test]
+    fn range_index_var_prod_use_direct_values_tzvt3() {
+        let descending = super::RangeIndex::new(9, 0, -4).unwrap();
+        assert_eq!(descending.var(), Some(16.0));
+        assert_eq!(descending.std(), Some(4.0));
+        assert_eq!(descending.prod(), 45);
+
+        let negative_step = super::RangeIndex::new(2, -7, -3).unwrap();
+        assert_eq!(negative_step.var(), Some(9.0));
+        assert_eq!(negative_step.prod(), 8);
+
+        let overflow = super::RangeIndex::new(i64::MAX, i64::MAX - 2, -1).unwrap();
+        assert_eq!(overflow.prod(), i64::MAX);
     }
 
     #[test]
