@@ -5002,6 +5002,42 @@ mod tests {
 
     /// br-frankenpandas-6a83t: cast_scalar is the scalar dtype-coercion path
     #[test]
+    fn nan_reduction_kernels_skip_correctness_1uagc() {
+        use super::{nanmax, nanmedian, nanmin, nansum};
+        // br-frankenpandas-1uagc: nansum/nanmin/nanmax/nanmedian skip NaN and match
+        // finite-only oracles. Seeded LCG, no mocks.
+        let mut s: u64 = 0x4e1a_0b2c_2d3e_4f50;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let val = |sc: Scalar| -> f64 { sc.to_f64().unwrap_or(f64::NAN) };
+        for iter in 0..1000u32 {
+            let n = (next() % 12) as usize + 1;
+            let raw: Vec<f64> = (0..n)
+                .map(|_| if next() % 4 == 0 { f64::NAN } else { (next() % 200) as f64 - 100.0 })
+                .collect();
+            let mut finite: Vec<f64> = raw.iter().copied().filter(|x| !x.is_nan()).collect();
+            if finite.is_empty() {
+                continue;
+            }
+            let scalars: Vec<Scalar> = raw.iter().map(|&x| Scalar::Float64(x)).collect();
+            let sum: f64 = finite.iter().sum();
+            let mn = finite.iter().copied().fold(f64::INFINITY, f64::min);
+            let mx = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            finite.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let m = finite.len();
+            let med = if m % 2 == 1 { finite[m / 2] } else { (finite[m / 2 - 1] + finite[m / 2]) / 2.0 };
+            assert!((val(nansum(&scalars)) - sum).abs() < 1e-7, "nansum iter={iter}");
+            assert!((val(nanmin(&scalars)) - mn).abs() < 1e-9, "nanmin iter={iter}");
+            assert!((val(nanmax(&scalars)) - mx).abs() < 1e-9, "nanmax iter={iter}");
+            assert!((val(nanmedian(&scalars)) - med).abs() < 1e-9, "nanmedian iter={iter}");
+        }
+    }
+
+    #[test]
     fn nanvar_ddof_nanstd_nan_skip_p00ag() {
         use super::{nanmean, nanstd, nanvar};
         // br-frankenpandas-p00ag: nanmean/nanvar/nanstd skip NaN; ddof picks the
