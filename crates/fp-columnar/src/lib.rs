@@ -22762,6 +22762,85 @@ mod tests {
         }
 
         #[test]
+        fn finite_predicates_match_scalar_oracle_dknku() {
+            // Differential vs scalar predicate oracle (br-frankenpandas-dknku).
+            // Seeded LCG, no mocks.
+            fn next(seed: &mut u64) -> u64 {
+                *seed = seed
+                    .wrapping_mul(1442695040888963407)
+                    .wrapping_add(6364136223846793005);
+                *seed
+            }
+
+            fn oracle(value: &Scalar) -> (bool, bool, bool) {
+                let isfinite = match value {
+                    Scalar::Float64(v) => v.is_finite(),
+                    Scalar::Int64(_) => true,
+                    _ if value.is_missing() => false,
+                    _ => true,
+                };
+                let isinf = matches!(value, Scalar::Float64(v) if v.is_infinite());
+                let isnan = match value {
+                    Scalar::Float64(v) => v.is_nan(),
+                    Scalar::Null(NullKind::NaN) => true,
+                    _ => false,
+                };
+                (isfinite, isinf, isnan)
+            }
+
+            let mut seed = 0xd1ff_1e5d_f1a7_00c5_u64;
+            for case in 0..240 {
+                let len = (next(&mut seed) % 71 + 1) as usize;
+                let mut values = Vec::with_capacity(len);
+                for pos in 0..len {
+                    let raw = (next(&mut seed) % 1_000_001) as i64 - 500_000;
+                    let frac = (next(&mut seed) % 10_000) as f64 / 10_000.0;
+                    values.push(match next(&mut seed) % 9 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        2 => Scalar::Float64(f64::NAN),
+                        3 => Scalar::Float64(f64::INFINITY),
+                        4 => Scalar::Float64(f64::NEG_INFINITY),
+                        5 => Scalar::Int64(raw),
+                        6 => Scalar::Utf8(format!("s{case}_{pos}")),
+                        _ => Scalar::Float64(raw as f64 / 37.0 + frac),
+                    });
+                }
+
+                let input = Column::from_values(values.clone()).expect("column");
+                let finite = input.isfinite().expect("isfinite");
+                let infinite = input.isinf().expect("isinf");
+                let nan = input.isnan().expect("isnan");
+
+                assert_eq!(finite.dtype(), DType::Bool);
+                assert_eq!(infinite.dtype(), DType::Bool);
+                assert_eq!(nan.dtype(), DType::Bool);
+                assert_eq!(finite.values().len(), values.len());
+                assert_eq!(infinite.values().len(), values.len());
+                assert_eq!(nan.values().len(), values.len());
+
+                for (pos, value) in values.iter().enumerate() {
+                    let (expected_finite, expected_inf, expected_nan) = oracle(value);
+                    assert_eq!(
+                        finite.values()[pos],
+                        Scalar::Bool(expected_finite),
+                        "case={case} pos={pos}: isfinite mismatch for {value:?}"
+                    );
+                    assert_eq!(
+                        infinite.values()[pos],
+                        Scalar::Bool(expected_inf),
+                        "case={case} pos={pos}: isinf mismatch for {value:?}"
+                    );
+                    assert_eq!(
+                        nan.values()[pos],
+                        Scalar::Bool(expected_nan),
+                        "case={case} pos={pos}: isnan mismatch for {value:?}"
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn logical_bool_ops_use_raw_buffers_without_scalar_materialization_el0g2() {
             let left = Column {
                 dtype: DType::Bool,
