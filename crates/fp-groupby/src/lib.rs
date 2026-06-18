@@ -2745,6 +2745,79 @@ mod tests {
     }
 
     #[test]
+    fn groupby_median_matches_sorted_middle_oracle_k3awo() {
+        use std::collections::BTreeMap;
+
+        // Oracle differential (br-frankenpandas-k3awo): groupby_median == per-group
+        // sorted-middle (odd -> middle, even -> mean of two middles), ascending
+        // keys. Deterministic seeded LCG, no mocks.
+        let mut st: u64 = 0x6ed1_a40c_3b2a_1908;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for iter in 0..1000u32 {
+            let n = (next() % 12) as usize + 1;
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let key_vals: Vec<i64> = (0..n).map(|_| (next() % 4) as i64 - 1).collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 21) as i64 - 10).collect();
+            let keys = Series::from_values(
+                "k",
+                idx.clone(),
+                key_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let values = Series::from_values(
+                "v",
+                idx,
+                val_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+            let mut groups: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (k, v) in key_vals.iter().zip(val_vals.iter()) {
+                groups.entry(*k).or_default().push(*v);
+            }
+            let exp_keys: Vec<IndexLabel> = groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
+            let exp_median: Vec<f64> = groups
+                .values()
+                .map(|vs| {
+                    let mut s = vs.clone();
+                    s.sort_unstable();
+                    let m = s.len() / 2;
+                    if s.len() % 2 == 1 {
+                        s[m] as f64
+                    } else {
+                        (s[m - 1] + s[m]) as f64 / 2.0
+                    }
+                })
+                .collect();
+
+            let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
+            let mut led = EvidenceLedger::new();
+            let out = groupby_median(
+                &keys,
+                &values,
+                GroupByOptions::default(),
+                &RuntimePolicy::strict(),
+                &mut led,
+            )
+            .expect("median");
+            assert_eq!(out.index().labels(), exp_keys, "median keys {ctx}");
+            for (i, got) in out.values().iter().enumerate() {
+                let g = match got {
+                    Scalar::Float64(x) => *x,
+                    Scalar::Int64(x) => *x as f64,
+                    _ => f64::NAN,
+                };
+                assert!((g - exp_median[i]).abs() < 1e-9, "median val {ctx} i={i}: {g} vs {}", exp_median[i]);
+            }
+        }
+    }
+
+    #[test]
     fn dense_int64_groupby_sparse_keys_matches_oracle_u4c5a() {
         use std::collections::BTreeMap;
 
