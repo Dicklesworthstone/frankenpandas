@@ -13100,6 +13100,36 @@ mod tests {
     };
 
     #[test]
+    fn csv_quoting_round_trip_special_chars_1h8ar() {
+        // RFC4180 escaping (br-frankenpandas-1h8ar): quoted fields parse to their
+        // unescaped value, and write->read round-trips them (write must re-quote).
+        // (csv_field_as_written, expected_parsed_value)
+        let cases: [(&str, &str); 4] = [
+            ("\"x,y\"", "x,y"),        // comma requires quoting
+            ("\"a\"\"b\"", "a\"b"),    // embedded quote -> doubled
+            ("plain", "plain"),         // no quoting needed
+            ("\" sp \"", " sp "),      // preserved leading/trailing spaces
+        ];
+        for (field, expected) in cases {
+            let input = format!("col\n{field}\n");
+            let f1 = read_csv_str(&input).expect("read1");
+            assert_eq!(
+                f1.column("col").expect("col").values()[0],
+                Scalar::Utf8(expected.to_string()),
+                "parse field={field:?}"
+            );
+            // write then re-read must preserve the value (correct re-quoting).
+            let s2 = write_csv_string(&f1).expect("write");
+            let f2 = read_csv_str(&s2).expect("read2");
+            assert_eq!(
+                f2.column("col").expect("col2").values()[0],
+                Scalar::Utf8(expected.to_string()),
+                "round-trip field={field:?} written={s2:?}"
+            );
+        }
+    }
+
+    #[test]
     fn csv_read_write_read_idempotent_5gfjz() {
         // Round-trip fixed point (br-frankenpandas-5gfjz): read -> write -> read
         // yields an identical frame. Simple cells (ints + single letters, no
