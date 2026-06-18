@@ -2767,13 +2767,13 @@ impl Timestamp {
         if let Some(stripped) = s.strip_suffix('Z') {
             (stripped, Some("UTC".to_string()))
         } else if let Some(idx) = s.rfind('+') {
-            if idx > 10 {
+            if idx > 10 && Self::is_timezone_offset(&s[idx..]) {
                 (&s[..idx], Some(s[idx..].to_string()))
             } else {
                 (s, None)
             }
         } else if let Some(idx) = s.rfind('-') {
-            if idx > 10 && s[idx..].contains(':') {
+            if idx > 10 && Self::is_timezone_offset(&s[idx..]) {
                 (&s[..idx], Some(s[idx..].to_string()))
             } else {
                 (s, None)
@@ -2781,6 +2781,21 @@ impl Timestamp {
         } else {
             (s, None)
         }
+    }
+
+    fn is_timezone_offset(s: &str) -> bool {
+        let bytes = s.as_bytes();
+        if bytes.len() != 6 || !matches!(bytes[0], b'+' | b'-') || bytes[3] != b':' {
+            return false;
+        }
+        if !bytes[1..3].iter().all(u8::is_ascii_digit)
+            || !bytes[4..6].iter().all(u8::is_ascii_digit)
+        {
+            return false;
+        }
+        let hour = u32::from(bytes[1] - b'0') * 10 + u32::from(bytes[2] - b'0');
+        let minute = u32::from(bytes[4] - b'0') * 10 + u32::from(bytes[5] - b'0');
+        hour <= 23 && minute <= 59
     }
 
     fn parse_date(s: &str) -> Option<(i64, u32, u32)> {
@@ -10091,6 +10106,18 @@ mod tests {
     fn timestamp_parse_offset_timezone() {
         let ts = Timestamp::parse("2024-01-15T10:30:45+05:30").unwrap();
         assert_eq!(ts.tz, Some("+05:30".to_string()));
+
+        let ts = Timestamp::parse("2024-01-15T10:30:45-05:30").unwrap();
+        assert_eq!(ts.tz, Some("-05:30".to_string()));
+    }
+
+    #[test]
+    fn timestamp_parse_rejects_invalid_timezone_offsets_0v676() {
+        assert!(Timestamp::parse("2024-01-15T10:30:45+bad").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45+0500").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45+24:00").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45+05:60").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45-25:00").is_err());
     }
 
     #[test]
