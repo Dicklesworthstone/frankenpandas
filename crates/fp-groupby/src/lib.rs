@@ -2745,6 +2745,31 @@ mod tests {
     }
 
     #[test]
+    fn groupby_size_sum_equals_n_5cb23() {
+        // Invariant (br-frankenpandas-5cb23): sum of groupby_size == n (all-valid keys).
+        // Seeded LCG, no mocks.
+        let mut s: u64 = 0x4c0b_0c2d_2d3e_4f50;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let pol = RuntimePolicy::strict();
+        for iter in 0..400u32 {
+            let n = (next() % 20) as usize + 1;
+            let keys: Vec<i64> = (0..n).map(|_| (next() % 4) as i64).collect();
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let ks = Series::from_values("k", idx.clone(), keys.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>()).unwrap();
+            let vs = Series::from_values("v", idx, (0..n).map(|i| Scalar::Int64(i as i64)).collect::<Vec<_>>()).unwrap();
+            let mut l = EvidenceLedger::new();
+            let size = groupby_size(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap();
+            let total: i64 = size.values().iter().map(|c| match c { Scalar::Int64(x) => *x, Scalar::Float64(x) => *x as i64, _ => 0 }).sum();
+            assert_eq!(total, n as i64, "sum(size)==n iter={iter}");
+        }
+    }
+
+    #[test]
     fn groupby_min_le_mean_le_max_3obe6() {
         // Metamorphic (br-frankenpandas-3obe6): per group, min<=mean<=max. Seeded LCG.
         let mut s: u64 = 0x4c0b_0b2c_2d3e_4f50;
