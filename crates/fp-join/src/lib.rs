@@ -8909,6 +8909,37 @@ mod tests {
     }
 
     #[test]
+    fn join_row_count_lattice_n8npw() {
+        // Invariant (br-frankenpandas-n8npw): inner<=left<=outer and inner<=right<=outer
+        // by row count. Seeded LCG, no mocks.
+        let mut s: u64 = 0x4e57_0b1c_2d3e_4f55;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        for iter in 0..300u32 {
+            let ln = (next() % 6) as usize + 1;
+            let rn = (next() % 6) as usize + 1;
+            let lk: Vec<Scalar> = (0..ln).map(|_| Scalar::Int64((next() % 4) as i64)).collect();
+            let rk: Vec<Scalar> = (0..rn).map(|_| Scalar::Int64((next() % 4) as i64)).collect();
+            let left = DataFrame::from_dict(&["k", "lv"], vec![("k", lk), ("lv", (0..ln).map(|i| Scalar::Int64(i as i64)).collect())]).unwrap();
+            let right = DataFrame::from_dict(&["k", "rv"], vec![("k", rk), ("rv", (0..rn).map(|i| Scalar::Int64(i as i64)).collect())]).unwrap();
+            let rows = |jt| {
+                let m = merge_dataframes(&left, &right, "k", jt).unwrap();
+                merged_values(&m, "k").unwrap().len()
+            };
+            let inner = rows(JoinType::Inner);
+            let lj = rows(JoinType::Left);
+            let rj = rows(JoinType::Right);
+            let outer = rows(JoinType::Outer);
+            assert!(inner <= lj && lj <= outer, "inner<=left<=outer iter={iter}: {inner} {lj} {outer}");
+            assert!(inner <= rj && rj <= outer, "inner<=right<=outer iter={iter}: {inner} {rj} {outer}");
+        }
+    }
+
+    #[test]
     fn right_join_null_fill_multiset_7je8m() {
         use std::collections::HashMap;
         // Differential (br-frankenpandas-7je8m): RIGHT join preserves every right row;
