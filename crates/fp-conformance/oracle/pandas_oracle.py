@@ -4883,11 +4883,12 @@ def required_groupby_columns(payload: dict[str, Any], op_name: str) -> list[str]
 
 
 def format_groupby_resample_bucket_label(value: Any, freq: str) -> str:
-    if freq == "M" and hasattr(value, "strftime"):
+    strftime = getattr(value, "strftime", None)
+    if callable(strftime):
         try:
-            return value.strftime("%Y-%m")
-        except Exception:
-            pass
+            return strftime("%Y-%m-%d")
+        except (AttributeError, OverflowError, TypeError, ValueError):
+            return str(value)
     return str(value)
 
 
