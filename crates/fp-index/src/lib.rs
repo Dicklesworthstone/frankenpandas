@@ -10206,7 +10206,7 @@ impl RangeIndex {
     /// `pd.RangeIndex.to_flat_index()`.
     #[must_use]
     pub fn to_flat_index(&self) -> Index {
-        let mut idx = Index::from_i64_values(self.values());
+        let mut idx = Index::from_range(self.start, self.stop, self.step);
         if let Some(name) = self.name() {
             idx = idx.set_name(name);
         }
@@ -25145,6 +25145,14 @@ mod tests {
             flat.labels.materialized.get().is_none(),
             "RangeIndex::to_flat_index should keep typed Int64 output backing"
         );
+
+        let positive = super::RangeIndex::new(2, 11, 3).unwrap().to_flat_index();
+        assert_eq!(positive.labels.int64_view().unwrap().as_slice(), &[2, 5, 8]);
+        assert!(positive.labels.materialized.get().is_none());
+
+        let empty = super::RangeIndex::new(5, 5, 1).unwrap().to_flat_index();
+        assert!(empty.is_empty());
+        assert!(empty.labels.materialized.get().is_none());
     }
 
     #[test]
