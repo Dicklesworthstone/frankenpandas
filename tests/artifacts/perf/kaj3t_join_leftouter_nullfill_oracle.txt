@@ -1,0 +1,31 @@
+br-frankenpandas-kaj3t — value oracle for fp-join LEFT/OUTER null-fill semantics
+================================================================================
+
+Extends 5foyp (inner-join value matching) to LEFT and OUTER joins — whose
+null-FILL semantics for unmatched rows are the subtlest join behavior.
+
+Harness (test fp-join: left_outer_join_nullfill_value_oracle_kaj3t): deterministic
+seeded LCG (no rand crate, no mocks). For 1500 iterations it builds random
+many-to-many Int64-key left/right DataFrames with distinct per-row payloads, then
+asserts the multiset of output (key, left_payload, right_payload) triples equals
+an independent oracle:
+  LEFT  = { (k, lp, rp) matched } ∪ { (k, lp, NULL) : left key has no right match }
+  OUTER = LEFT ∪ { (k, NULL, rp) : right key has no left match }  (key coalesced)
+NULL is the i64::MIN sentinel (payloads/keys never collide with it).
+
+NOTE — pandas-parity upcast discovered/confirmed: when null-fill introduces
+missing values, fp (correctly, like pandas) UPCASTS the Int64 payload column to
+Float64 (Int64 cannot hold NaN). The first draft of this oracle only extracted
+Scalar::Int64 and so read every null-filled column as NUL; the FAILURE surfaced
+the upcast, confirming fp's behavior is correct. The extractor now also accepts
+finite Scalar::Float64 (payloads are small whole numbers => f64->i64 exact),
+mapping only NULL/NaN to the sentinel.
+
+Result: PASS (1 passed; 1500 iterations × LEFT + OUTER). fp's left/outer null-fill
+row composition, key coalescing, and Int64->Float64 upcast all match the oracle.
+
+Verification (rch, RCH_REQUIRE_REMOTE=0):
+  cargo test -p fp-join left_outer_join_nullfill_value_oracle_kaj3t -> 1 passed
+  cargo test -p fp-join (full)   -> exit 0 (all passed)
+  ubs crates/fp-join/src/lib.rs  -> only pre-existing cat-8 FPs; none reference the
+                                    new test lines.

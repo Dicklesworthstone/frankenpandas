@@ -9068,6 +9068,185 @@ mod tests {
         }
     }
 
+    #[test]
+    fn left_outer_join_nullfill_value_oracle_kaj3t() {
+        use std::collections::BTreeMap;
+
+        // Value oracle for LEFT/OUTER null-fill (br-frankenpandas-kaj3t): unmatched
+        // rows get NULL-filled on the absent side — the subtlest join behavior.
+        // NULL is represented by the i64::MIN sentinel (payloads are 0..n and keys
+        // 0..3, so a sentinel never collides with a real value). Deterministic
+        // seeded LCG — no rand crate, no mocks.
+        const NUL: i64 = i64::MIN;
+        let mut state: u64 = 0xfeed_face_cafe_b0ba;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        let build = |keys: &[i64], pname: &str| {
+            let n = keys.len();
+            DataFrame::from_dict(
+                &["k", pname],
+                vec![
+                    ("k", keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>()),
+                    (pname, (0..n as i64).map(Scalar::Int64).collect::<Vec<_>>()),
+                ],
+            )
+            .expect("frame")
+        };
+        // Int64 -> value. Left/outer joins upcast Int64 payload columns to
+        // Float64 when null-fill introduces missing values (pandas parity: Int64
+        // can't hold NaN), so accept finite Float64 too. NULL / NaN -> NUL
+        // sentinel. Payloads are small whole numbers, so f64 -> i64 is exact.
+        let geti = |s: &Scalar| match s {
+            Scalar::Int64(v) => *v,
+            Scalar::Float64(v) if v.is_finite() => *v as i64,
+            _ => NUL,
+        };
+
+        for iter in 0..1500u32 {
+            let nl = (next() % 9) as usize + 1;
+            let nr = (next() % 9) as usize + 1;
+            let lk: Vec<i64> = (0..nl).map(|_| (next() % 4) as i64).collect();
+            let rk: Vec<i64> = (0..nr).map(|_| (next() % 4) as i64).collect();
+            let left = build(&lk, "lv");
+            let right = build(&rk, "rv");
+
+            // Right rows grouped by key (payload = row index).
+            let mut rg: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (j, &k) in rk.iter().enumerate() {
+                rg.entry(k).or_default().push(j as i64);
+            }
+            let lkeys: std::collections::BTreeSet<i64> = lk.iter().copied().collect();
+
+            let read = |jt: JoinType| -> Vec<(i64, i64, i64)> {
+                let merged = merge_dataframes(&left, &right, "k", jt).expect("merge");
+                let ks = merged_values(&merged, "k").expect("k");
+                let lvs = merged_values(&merged, "lv").expect("lv");
+                let rvs = merged_values(&merged, "rv").expect("rv");
+                let mut got: Vec<(i64, i64, i64)> = (0..ks.len())
+                    .map(|i| (geti(&ks[i]), geti(&lvs[i]), geti(&rvs[i])))
+                    .collect();
+                got.sort_unstable();
+                got
+            };
+
+            // LEFT oracle: every left row appears; matched -> one row per right
+            // match, unmatched -> NULL right payload (key still the left key).
+            let mut exp_left: Vec<(i64, i64, i64)> = Vec::new();
+            for (i, &k) in lk.iter().enumerate() {
+                match rg.get(&k) {
+                    Some(rps) => {
+                        for &j in rps {
+                            exp_left.push((k, i as i64, j));
+                        }
+                    }
+                    None => exp_left.push((k, i as i64, NUL)),
+                }
+            }
+            exp_left.sort_unstable();
+            assert_eq!(
+                read(JoinType::Left),
+                exp_left,
+                "left join value oracle iter={iter} lk={lk:?} rk={rk:?}"
+            );
+
+            // OUTER oracle: LEFT plus right-only rows (no left match) with NULL
+            // left payload and the coalesced key.
+            let mut exp_outer = exp_left.clone();
+            for (j, &k) in rk.iter().enumerate() {
+                if !lkeys.contains(&k) {
+                    exp_outer.push((k, NUL, j as i64));
+                }
+            }
+            exp_outer.sort_unstable();
+            assert_eq!(
+                read(JoinType::Outer),
+                exp_outer,
+                "outer join value oracle iter={iter} lk={lk:?} rk={rk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn left_join_value_multiset_matches_unmatched_oracle_gp0ik() {
+        use std::collections::BTreeMap;
+
+        // Value-level LEFT join oracle (br-frankenpandas-gp0ik): matched keys
+        // emit the left/right cross product; unmatched left rows emit exactly one
+        // row with a missing right payload. Ordering-independent sorted multiset.
+        let mut state: u64 = 0x51de_cafe_2026_0618;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        let build = |keys: &[i64], pname: &str| {
+            let n = keys.len();
+            DataFrame::from_dict(
+                &["k", pname],
+                vec![
+                    ("k", keys.iter().copied().map(Scalar::Int64).collect::<Vec<_>>()),
+                    (pname, (0..n as i64).map(Scalar::Int64).collect::<Vec<_>>()),
+                ],
+            )
+            .expect("frame")
+        };
+        let geti = |s: &Scalar| match s {
+            Scalar::Int64(v) => *v,
+            _ => i64::MIN,
+        };
+        let get_optional_i64 = |s: &Scalar| match s {
+            Scalar::Int64(v) => Some(*v),
+            value if value.is_missing() => None,
+            _ => Some(i64::MIN),
+        };
+
+        for iter in 0..1500u32 {
+            let nl = (next() % 9) as usize + 1;
+            let nr = (next() % 9) as usize + 1;
+            let lk: Vec<i64> = (0..nl).map(|_| (next() % 5) as i64).collect();
+            let rk: Vec<i64> = (0..nr).map(|_| (next() % 3) as i64).collect();
+            let left = build(&lk, "lv");
+            let right = build(&rk, "rv");
+
+            let merged = merge_dataframes(&left, &right, "k", JoinType::Left).expect("merge");
+            let ks = merged_values(&merged, "k").expect("k");
+            let lvs = merged_values(&merged, "lv").expect("lv");
+            let rvs = merged_values(&merged, "rv").expect("rv");
+            let mut got: Vec<(i64, i64, Option<i64>)> = (0..ks.len())
+                .map(|i| (geti(&ks[i]), geti(&lvs[i]), get_optional_i64(&rvs[i])))
+                .collect();
+            got.sort_unstable();
+
+            let mut rg: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (i, &k) in rk.iter().enumerate() {
+                rg.entry(k).or_default().push(i as i64);
+            }
+            let mut exp: Vec<(i64, i64, Option<i64>)> = Vec::new();
+            for (left_pos, &k) in lk.iter().enumerate() {
+                if let Some(right_positions) = rg.get(&k) {
+                    for &right_pos in right_positions {
+                        exp.push((k, left_pos as i64, Some(right_pos)));
+                    }
+                } else {
+                    exp.push((k, left_pos as i64, None));
+                }
+            }
+            exp.sort_unstable();
+
+            assert_eq!(
+                got, exp,
+                "left join value multiset iter={iter} lk={lk:?} rk={rk:?}"
+            );
+        }
+    }
+
     fn merged_values<'a>(
         merged: &'a MergedDataFrame,
         name: &str,

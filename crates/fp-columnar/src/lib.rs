@@ -11111,6 +11111,26 @@ impl Column {
     ///
     /// Matches `pd.Series.isna()` / `isnull()`.
     pub fn isnull(&self) -> Result<Self, ColumnError> {
+        if self.dtype == DType::Float64 {
+            if let Some((data, validity)) = self.as_f64_slice_with_validity() {
+                let out: Vec<bool> = data
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, value)| !validity.get(idx) || value.is_nan())
+                    .collect();
+                return Ok(Self::from_bool_values(out));
+            }
+            if let Some(data) = self.as_f64_slice() {
+                let out: Vec<bool> = data.iter().map(|value| value.is_nan()).collect();
+                return Ok(Self::from_bool_values(out));
+            }
+        }
+
+        if self.missingness_is_validity_only() {
+            let out: Vec<bool> = self.validity.bits().map(|valid| !valid).collect();
+            return Ok(Self::from_bool_values(out));
+        }
+
         let out: Vec<Scalar> = self
             .values
             .iter()
@@ -11128,6 +11148,26 @@ impl Column {
     ///
     /// Matches `pd.Series.notna()` / `notnull()`.
     pub fn notnull(&self) -> Result<Self, ColumnError> {
+        if self.dtype == DType::Float64 {
+            if let Some((data, validity)) = self.as_f64_slice_with_validity() {
+                let out: Vec<bool> = data
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, value)| validity.get(idx) && !value.is_nan())
+                    .collect();
+                return Ok(Self::from_bool_values(out));
+            }
+            if let Some(data) = self.as_f64_slice() {
+                let out: Vec<bool> = data.iter().map(|value| !value.is_nan()).collect();
+                return Ok(Self::from_bool_values(out));
+            }
+        }
+
+        if self.missingness_is_validity_only() {
+            let out: Vec<bool> = self.validity.bits().collect();
+            return Ok(Self::from_bool_values(out));
+        }
+
         let out: Vec<Scalar> = self
             .values
             .iter()
@@ -11139,6 +11179,18 @@ impl Column {
     /// Alias for [`notnull`](Self::notnull), matching `pd.Series.notna()`.
     pub fn notna(&self) -> Result<Self, ColumnError> {
         self.notnull()
+    }
+
+    fn missingness_is_validity_only(&self) -> bool {
+        matches!(
+            self.dtype,
+            DType::Bool
+                | DType::BoolNullable
+                | DType::Int64
+                | DType::Int64Nullable
+                | DType::Utf8
+                | DType::Interval
+        )
     }
 
     /// Per-row check for finite values (not NaN or infinity).
@@ -22293,6 +22345,74 @@ mod tests {
                 &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true),]
             );
             assert_eq!(col.notna(), col.notnull());
+        }
+
+        #[test]
+        fn isnull_notnull_use_nullable_int64_validity_without_scalar_materialization_nakgb() {
+            let validity = ValidityMask::from_invalid_ranges(Arc::from(vec![(1, 2), (5, 1)]), 6);
+            let col = Column::from_i64_values_with_validity((0_i64..6).collect(), validity);
+
+            let is_null = col.isnull().expect("isnull");
+            let not_null = col.notnull().expect("notnull");
+
+            assert_eq!(
+                is_null.values(),
+                &[
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                ]
+            );
+            assert_eq!(
+                not_null.values(),
+                &[
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                ]
+            );
+            assert!(matches!(
+                &col.values,
+                ScalarValues::LazyNullableInt64 { .. }
+            ));
+            if let ScalarValues::LazyNullableInt64 { values, .. } = &col.values {
+                assert!(values.get().is_none());
+            }
+        }
+
+        #[test]
+        fn isnull_notnull_float64_raw_path_checks_nan_without_scalar_materialization_nakgb() {
+            let col = Column {
+                dtype: DType::Float64,
+                values: ScalarValues::lazy_all_valid_float64(vec![1.0, f64::NAN, f64::INFINITY]),
+                validity: ValidityMask::all_valid(3),
+                data: None,
+            };
+
+            let is_null = col.isnull().expect("isnull");
+            let not_null = col.notnull().expect("notnull");
+
+            assert_eq!(
+                is_null.values(),
+                &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false),]
+            );
+            assert_eq!(
+                not_null.values(),
+                &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true),]
+            );
+            assert!(matches!(
+                &col.values,
+                ScalarValues::LazyAllValidFloat64 { .. }
+            ));
+            if let ScalarValues::LazyAllValidFloat64 { values, .. } = &col.values {
+                assert!(values.get().is_none());
+            }
         }
 
         #[test]
