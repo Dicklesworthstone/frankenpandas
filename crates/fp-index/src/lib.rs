@@ -2957,8 +2957,23 @@ impl Index {
         if len == 0 || periods == 0 {
             return self.clone();
         }
-        let mut out: Vec<IndexLabel> = Vec::with_capacity(len);
         let abs = periods.unsigned_abs() as usize;
+        if let Some(values) = self.labels.int64_view()
+            && let IndexLabel::Int64(fill_value) = &fill
+        {
+            let mut out: Vec<i64> = Vec::with_capacity(len);
+            if abs >= len {
+                out.resize(len, *fill_value);
+            } else if periods > 0 {
+                out.resize(abs, *fill_value);
+                out.extend_from_slice(&values[..len - abs]);
+            } else {
+                out.extend_from_slice(&values[abs..]);
+                out.resize(len, *fill_value);
+            }
+            return self.propagate_name(Self::from_i64_values(out));
+        }
+        let mut out: Vec<IndexLabel> = Vec::with_capacity(len);
         if abs >= len {
             for _ in 0..len {
                 out.push(fill.clone());
@@ -18286,6 +18301,62 @@ mod tests {
                 IndexLabel::Int64(-1),
                 IndexLabel::Int64(-1),
             ]
+        );
+    }
+
+    #[test]
+    fn typed_int64_shift_preserves_typed_backing_codb() {
+        let index = Index::from_i64_values(vec![1, 2, 3, 4]).set_name("k");
+        assert!(index.labels.materialized.get().is_none());
+
+        let shifted = index.shift(2, IndexLabel::Int64(-1));
+
+        assert_eq!(shifted.name(), Some("k"));
+        assert_eq!(
+            shifted.labels.int64_view().unwrap().as_slice(),
+            &[-1, -1, 1, 2]
+        );
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            shifted.labels.materialized.get().is_none(),
+            "typed Int64 shift should keep typed output backing"
+        );
+
+        let materialized = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(4),
+        ])
+        .set_name("k");
+        assert_eq!(
+            shifted.labels(),
+            materialized.shift(2, IndexLabel::Int64(-1)).labels()
+        );
+
+        let filled = index.shift(10, IndexLabel::Int64(0));
+        assert_eq!(filled.labels.int64_view().unwrap().as_slice(), &[0, 0, 0, 0]);
+        assert!(index.labels.materialized.get().is_none());
+    }
+
+    #[test]
+    fn affine_int64_shift_preserves_typed_backing_codb() {
+        let index = Index::new_known_unique_int64_affine_range(10, -2, 4)
+            .unwrap()
+            .set_name("axis");
+        assert!(index.labels.materialized.get().is_none());
+
+        let shifted = index.shift(-1, IndexLabel::Int64(99));
+
+        assert_eq!(shifted.name(), Some("axis"));
+        assert_eq!(
+            shifted.labels.int64_view().unwrap().as_slice(),
+            &[8, 6, 4, 99]
+        );
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            shifted.labels.materialized.get().is_none(),
+            "affine Int64 shift should gather raw values into typed output"
         );
     }
 
