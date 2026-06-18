@@ -1501,6 +1501,86 @@ fn try_groupby_median_dense_int64(
     Some((out_index, out_values))
 }
 
+/// Counter-only generic path for `groupby.count()` and `groupby.size()`.
+///
+/// The full generic aggregation fallback stores every non-missing group value
+/// in a per-group `Vec<Scalar>` before calling `nancount` or reading the total
+/// row count. Count/size do not need those values: they only need the same
+/// group-key map, first-source index, non-missing counter, and total counter.
+///
+/// Bit-identical to the value-vector path because it uses the same
+/// `GroupKeyRef` equality, the same first-seen ordering vector, the same
+/// `compare_group_labels` sort, and the same label reconstruction from the
+/// first source row. The only removed work is cloning unused values.
+fn try_groupby_count_size_counter(
+    keys: &[Scalar],
+    values: &[Scalar],
+    func: AggFunc,
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if !matches!(func, AggFunc::Count | AggFunc::Size) {
+        return None;
+    }
+
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, (usize, i64, i64)>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, 0, 0)
+        });
+
+        if !value.is_missing() {
+            entry.1 += 1;
+        }
+        entry.2 += 1;
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let (source_idx, non_missing, total) = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[*source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(Scalar::Int64(if matches!(func, AggFunc::Count) {
+            *non_missing
+        } else {
+            *total
+        }));
+    }
+
+    Some((out_index, out_values))
+}
+
 pub fn groupby_agg(
     keys: &Series,
     values: &Series,
@@ -1552,6 +1632,16 @@ pub fn groupby_agg(
     // each group's values without hashing or collecting a per-group Vec).
     if let Some((out_index, out_values)) =
         try_groupby_agg_dense_int64(key_vals, val_vals, func, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key count and size only need counters, not cloned
+    // per-group values. Keep this after the dense Int64 path so existing typed
+    // direct-address count/size behavior stays unchanged.
+    if let Some((out_index, out_values)) =
+        try_groupby_count_size_counter(key_vals, val_vals, func, options.dropna, options.sort)
     {
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
@@ -5179,5 +5269,78 @@ mod tests {
         // count excludes nulls, size includes nulls
         assert_eq!(count_result.values()[0], Scalar::Int64(1)); // 1 non-null
         assert_eq!(size_result.values()[0], Scalar::Int64(2)); // 2 total
+    }
+
+    #[test]
+    fn groupby_count_size_utf8_counter_path_preserves_null_and_order_semantics() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..6).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            (0..6).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(5),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+
+        let count = groupby_count(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        let size = groupby_size(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(count.index().labels(), &["a".into(), "b".into(), "c".into()]);
+        assert_eq!(
+            count.values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(0)]
+        );
+        assert_eq!(
+            size.values(),
+            &[Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(1)]
+        );
+
+        let first_seen = GroupByOptions {
+            dropna: true,
+            sort: false,
+        };
+        let first_seen_size =
+            groupby_size(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
+        assert_eq!(
+            first_seen_size.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            first_seen_size.values(),
+            &[Scalar::Int64(3), Scalar::Int64(2), Scalar::Int64(1)]
+        );
     }
 }

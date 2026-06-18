@@ -87,14 +87,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key_cardinality = parse_arg("key-cardinality", 512usize);
     let iters = parse_arg("iters", 25usize);
     let agg = parse_arg("agg", "mean".to_string());
+    let key_kind = parse_arg("key-kind", "int64".to_string());
     let golden = has_flag("golden");
 
     let mut index_labels = Vec::with_capacity(rows);
     let mut key_values = Vec::with_capacity(rows);
     let mut value_values = Vec::with_capacity(rows);
+    let utf8_keys = if key_kind == "utf8" {
+        (0..key_cardinality)
+            .map(|key| format!("key_{key:06}"))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     for i in 0..rows {
         index_labels.push((i as i64).into());
-        key_values.push(Scalar::Int64((i % key_cardinality) as i64));
+        key_values.push(match key_kind.as_str() {
+            "int64" => Scalar::Int64((i % key_cardinality) as i64),
+            "utf8" => Scalar::Utf8(utf8_keys[i % key_cardinality].clone()),
+            other => return Err(format!("unknown key-kind '{other}'").into()),
+        });
         // Sprinkle nulls to exercise the skipna fold paths.
         if i % 37 == 0 {
             value_values.push(Scalar::Null(fp_types::NullKind::NaN));
@@ -108,7 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if golden {
         let out = run_agg(&agg, &keys, &values)?;
         println!(
-            "groupby_golden agg={agg} rows={rows} key_cardinality={key_cardinality} out_rows={} digest={:016x}",
+            "groupby_golden agg={agg} key_kind={key_kind} rows={rows} key_cardinality={key_cardinality} out_rows={} digest={:016x}",
             out.len(),
             digest(&out)
         );
@@ -125,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mean_ms = (total_ns as f64) / (iters as f64) / 1_000_000.0;
     println!(
-        "groupby_bench agg={agg} rows={rows} key_cardinality={key_cardinality} iters={iters} mean_ms={mean_ms:.3} checksum={checksum:.3}"
+        "groupby_bench agg={agg} key_kind={key_kind} rows={rows} key_cardinality={key_cardinality} iters={iters} mean_ms={mean_ms:.3} checksum={checksum:.3}"
     );
     Ok(())
 }
