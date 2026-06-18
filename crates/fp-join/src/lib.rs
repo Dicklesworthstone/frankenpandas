@@ -13186,6 +13186,56 @@ mod tests {
     }
 
     #[test]
+    fn merge_cross_validate_mode_contract_ohb5f() {
+        let left = DataFrame::from_dict(
+            &["l"],
+            vec![("l", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["r"],
+            vec![("r", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+        )
+        .expect("right");
+
+        let many_to_many = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["missing_left_key"],
+            &["missing_right_key"],
+            JoinType::Cross,
+            MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::ManyToMany),
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect("cross merge validate=many_to_many");
+        assert_eq!(many_to_many.index.len(), 4);
+
+        for validate_mode in [
+            MergeValidateMode::OneToOne,
+            MergeValidateMode::OneToMany,
+            MergeValidateMode::ManyToOne,
+        ] {
+            let err = merge_dataframes_on_with_options(
+                &left,
+                &right,
+                &["missing_left_key"],
+                &["missing_right_key"],
+                JoinType::Cross,
+                MergeExecutionOptions {
+                    validate_mode: Some(validate_mode),
+                    ..MergeExecutionOptions::default()
+                },
+            )
+            .expect_err("enforcing validate modes are not meaningful for cross joins");
+            let message = format!("{err}");
+            assert!(message.contains(validate_mode.as_str()));
+            assert!(message.contains("not supported for cross join"));
+        }
+    }
+
+    #[test]
     fn merge_validate_one_to_one_rejects_duplicate_left_keys() {
         let left = DataFrame::from_dict(
             &["id", "left_v"],
