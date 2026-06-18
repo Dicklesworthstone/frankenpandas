@@ -10000,16 +10000,16 @@ impl RangeIndex {
     /// `pd.RangeIndex.take()`. Out-of-bounds positions raise
     /// [`IndexError::OutOfBounds`].
     pub fn take(&self, positions: &[usize]) -> Result<Index, IndexError> {
-        let values = self.values();
+        let len = self.len();
         for &p in positions {
-            if p >= values.len() {
+            if p >= len {
                 return Err(IndexError::OutOfBounds {
                     position: p,
-                    length: values.len(),
+                    length: len,
                 });
             }
         }
-        let labels: Vec<i64> = positions.iter().map(|&p| values[p]).collect();
+        let labels: Vec<i64> = positions.iter().map(|&p| self.value_at(p)).collect();
         let mut idx = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             idx = idx.set_name(name);
@@ -10023,7 +10023,8 @@ impl RangeIndex {
     #[must_use]
     pub fn repeat(&self, repeats: usize) -> Index {
         let mut labels = Vec::with_capacity(self.len() * repeats);
-        for value in self.values() {
+        for position in 0..self.len() {
+            let value = self.value_at(position);
             for _ in 0..repeats {
                 labels.push(value);
             }
@@ -24692,6 +24693,41 @@ mod tests {
         assert!(
             repeated.labels.materialized.get().is_none(),
             "RangeIndex::repeat should keep typed Int64 output backing"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn range_index_take_repeat_use_direct_values_86gwy() -> Result<(), super::IndexError> {
+        let range = super::RangeIndex::new(9, 0, -4).unwrap().set_name("r");
+
+        let taken = range.take(&[2, 0])?;
+        assert_eq!(taken.name(), Some("r"));
+        assert_eq!(taken.labels.int64_view().unwrap().as_slice(), &[1, 9]);
+        assert!(
+            taken.labels.materialized.get().is_none(),
+            "RangeIndex::take should gather direct i64 labels into typed backing"
+        );
+
+        let oob = range.take(&[3]).unwrap_err();
+        assert!(matches!(
+            oob,
+            super::IndexError::OutOfBounds {
+                position: 3,
+                length: 3
+            }
+        ));
+
+        let repeated = range.repeat(2);
+        assert_eq!(repeated.name(), Some("r"));
+        assert_eq!(
+            repeated.labels.int64_view().unwrap().as_slice(),
+            &[9, 9, 5, 5, 1, 1]
+        );
+        assert!(
+            repeated.labels.materialized.get().is_none(),
+            "RangeIndex::repeat should emit direct i64 labels into typed backing"
         );
 
         Ok(())
