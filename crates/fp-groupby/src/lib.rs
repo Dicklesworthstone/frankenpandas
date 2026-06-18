@@ -2359,6 +2359,85 @@ mod tests {
     }
 
     #[test]
+    fn dense_int64_groupby_matches_handcomputed_oracle_k3zcv() {
+        use std::collections::BTreeMap;
+
+        // Oracle differential (br-frankenpandas-k3zcv): the dense Int64-key
+        // groupby fast paths (sum 1432b615, count/min/max dense streaming) must
+        // equal an INDEPENDENT hand-computed grouping. Deterministic seeded LCG —
+        // no rand crate, no mocks.
+        let mut state: u64 = 0x1234_5678_9abc_def1;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for iter in 0..1200u32 {
+            let n = (next() % 14) as usize + 1;
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let key_vals: Vec<i64> = (0..n).map(|_| (next() % 5) as i64 - 2).collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 21) as i64 - 10).collect();
+
+            let keys = Series::from_values(
+                "k",
+                idx.clone(),
+                key_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .expect("keys");
+            let values = Series::from_values(
+                "v",
+                idx,
+                val_vals.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .expect("values");
+
+            // Independent oracle: group rows by key, sorted ascending (pandas
+            // default). BTreeMap gives ascending key order.
+            let mut groups: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for (k, v) in key_vals.iter().zip(val_vals.iter()) {
+                groups.entry(*k).or_default().push(*v);
+            }
+            let exp_keys: Vec<IndexLabel> = groups.keys().map(|&k| IndexLabel::Int64(k)).collect();
+            let exp_sum: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(vs.iter().sum()))
+                .collect();
+            let exp_count: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(vs.len() as i64))
+                .collect();
+            let exp_min: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(*vs.iter().min().unwrap()))
+                .collect();
+            let exp_max: Vec<Scalar> = groups
+                .values()
+                .map(|vs| Scalar::Int64(*vs.iter().max().unwrap()))
+                .collect();
+
+            let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
+            let opts = || GroupByOptions::default();
+            let pol = RuntimePolicy::strict();
+            let mut led = EvidenceLedger::new();
+
+            let s = groupby_sum(&keys, &values, opts(), &pol, &mut led).expect("sum");
+            assert_eq!(s.index().labels(), exp_keys, "sum keys {ctx}");
+            assert_eq!(s.values(), exp_sum.as_slice(), "sum vals {ctx}");
+
+            let c = groupby_count(&keys, &values, opts(), &pol, &mut led).expect("count");
+            assert_eq!(c.values(), exp_count.as_slice(), "count vals {ctx}");
+
+            let mn = groupby_min(&keys, &values, opts(), &pol, &mut led).expect("min");
+            assert_eq!(mn.values(), exp_min.as_slice(), "min vals {ctx}");
+
+            let mx = groupby_max(&keys, &values, opts(), &pol, &mut led).expect("max");
+            assert_eq!(mx.values(), exp_max.as_slice(), "max vals {ctx}");
+        }
+    }
+
+    #[test]
     fn groupby_sum_concatenates_string_values_like_pandas() {
         // pandas df.groupby(k)['s'].sum() concatenates object/string values per
         // group (skipna), matching Series::sum (br-f031e). Previously the f64
