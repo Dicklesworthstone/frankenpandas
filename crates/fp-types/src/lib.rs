@@ -4704,6 +4704,32 @@ mod tests {
     /// sentinels (i64::MIN). semantic_cmp treats NAT as degenerate (Equal to all
     /// same-dtype), which is why temporal ordering ops must treat NAT as missing.
     #[test]
+    fn semantic_cmp_cross_numeric_int_float_cdpai() {
+        // Property (br-frankenpandas-cdpai): semantic_cmp compares Int64 vs Float64
+        // as f64, antisymmetric across the operand order. Seeded LCG, no mocks.
+        use std::cmp::Ordering;
+        let mut st: u64 = 0xc205_a1b2_c3d4_e5f6;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for _ in 0..3000u32 {
+            let i = (next() % 21) as i64 - 10;
+            let f = (next() % 400) as f64 / 20.0 - 10.0; // finite
+            let exp = (i as f64).partial_cmp(&f).unwrap();
+            assert_eq!(Scalar::Int64(i).semantic_cmp(&Scalar::Float64(f)), exp);
+            assert_eq!(Scalar::Float64(f).semantic_cmp(&Scalar::Int64(i)), exp.reverse());
+        }
+        // Exact int/float equality compares Equal in both directions.
+        assert_eq!(Scalar::Int64(5).semantic_cmp(&Scalar::Float64(5.0)), Ordering::Equal);
+        assert_eq!(Scalar::Float64(5.0).semantic_cmp(&Scalar::Int64(5)), Ordering::Equal);
+        assert_eq!(Scalar::Int64(3).semantic_cmp(&Scalar::Float64(3.5)), Ordering::Less);
+        assert_eq!(Scalar::Int64(4).semantic_cmp(&Scalar::Float64(3.5)), Ordering::Greater);
+    }
+
+    #[test]
     fn semantic_cmp_nat_degeneracy_temporal_767ak() {
         use std::cmp::Ordering;
         const NAT: i64 = i64::MIN;
