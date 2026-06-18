@@ -20083,6 +20083,83 @@ mod tests {
         }
 
         #[test]
+        fn floor_ceil_trunc_match_scalar_oracle_61try() {
+            // Differential vs scalar f64 oracles (br-frankenpandas-61try).
+            // Seeded LCG, no mocks.
+            fn next(seed: &mut u64) -> u64 {
+                *seed = seed
+                    .wrapping_mul(3202034522624059733)
+                    .wrapping_add(4354685564936845319);
+                *seed
+            }
+
+            fn floor_oracle(v: f64) -> f64 {
+                v.floor()
+            }
+
+            fn ceil_oracle(v: f64) -> f64 {
+                v.ceil()
+            }
+
+            fn trunc_oracle(v: f64) -> f64 {
+                v.trunc()
+            }
+
+            let mut seed = 0x61d1_ff10_0ce1_cafe_u64;
+            for case in 0..240 {
+                let len = (next(&mut seed) % 59 + 1) as usize;
+                let mut values = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let selector = next(&mut seed) % 37;
+                    let whole = (next(&mut seed) % 500_001) as i64 - 250_000;
+                    let frac = (next(&mut seed) % 100_000) as f64 / 100_000.0;
+                    let sign = if next(&mut seed) & 1 == 0 { 1.0 } else { -1.0 };
+                    let value = sign * (whole as f64 / 13.0 + frac);
+                    values.push(match selector {
+                        0 => Scalar::Null(NullKind::NaN),
+                        1 => Scalar::Float64(f64::NAN),
+                        _ => Scalar::Float64(value),
+                    });
+                }
+
+                let input = Column::from_values(values.clone()).expect("column");
+                let outputs: [(&str, Column, fn(f64) -> f64); 3] = [
+                    ("floor", input.floor().expect("floor"), floor_oracle),
+                    ("ceil", input.ceil().expect("ceil"), ceil_oracle),
+                    ("trunc", input.trunc().expect("trunc"), trunc_oracle),
+                ];
+
+                for (op, output, oracle) in outputs {
+                    assert_eq!(output.dtype(), DType::Float64, "{op} dtype drift");
+                    assert_eq!(output.values().len(), values.len(), "{op} length drift");
+                    for (pos, (before, after)) in values.iter().zip(output.values()).enumerate() {
+                        if before.is_missing() {
+                            assert!(
+                                after.is_missing(),
+                                "{op} case={case} pos={pos}: missing became {after:?}"
+                            );
+                            continue;
+                        }
+
+                        let expected = match before {
+                            Scalar::Float64(v) => oracle(*v),
+                            other => panic!("{op} unexpected non-float value: {other:?}"),
+                        };
+                        match after {
+                            Scalar::Float64(got) => assert_eq!(
+                                *got, expected,
+                                "{op} case={case} pos={pos}: got {got}, expected {expected}"
+                            ),
+                            other => panic!(
+                                "{op} case={case} pos={pos}: expected Float64, got {other:?}"
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
         fn isin_returns_bool_column() {
             let col = Column::from_values(vec![
                 Scalar::Int64(1),
