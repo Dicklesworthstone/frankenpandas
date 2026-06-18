@@ -4,6 +4,41 @@ Purpose: record every cod-b optimization attempt in the new performance campaign
 including dead ends, so future agents do not retry failed levers without a concrete
 retry predicate.
 
+## 2026-06-18 - br-frankenpandas-uza04.200 - CategoricalIndex value_counts rank counts
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: replace `CategoricalIndex::value_counts()` per-label hash counting
+  with rank-indexed count vectors for bounded category domains plus invalid-label
+  fallback counts.
+- Baseline comparator: current `value_counts` hashes every label string into a
+  full-label map while preserving first-seen order in a side vector, even when
+  valid categorical labels can be counted by dictionary rank.
+- Graveyard mapping: counting-sort style semantic compression: use the
+  categorical dictionary as a dense identity space, store counts in cache-local
+  `Vec<usize>`, and retain hash counting only for impossible deserialized labels
+  or oversized sparse category universes.
+- Alien-artifact proof obligation: pre-sort pair order remains first-seen label
+  order, so stable descending-count sorting preserves pandas-observable tie
+  order. Valid labels count by first category rank; invalid labels count by
+  string value; unused categories never appear; oversized metadata falls back to
+  direct label hashing.
+- Guard added: `categorical_index_value_counts_use_rank_counts_uza04200`,
+  checking descending count order, first-seen tie order, invalid-label fallback,
+  unused categories, and oversized-category fallback against a local first-seen
+  count oracle.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is focused
+  criterion for `CategoricalIndex::value_counts` on repeated low-cardinality
+  realistic categorical indexes versus the legacy pandas original and a
+  pre-patch full-label hash-counting baseline.
+- Retry predicate if rejected: only retry if same-host profiling shows
+  categorical value counts above 0.1% self-time and allocation profiling proves
+  per-label hash counting, not final pair construction or stable sort, is the
+  residual.
+
 ## 2026-06-18 - br-frankenpandas-uza04.199 - CategoricalIndex unique/drop_duplicates rank bitset
 
 - Status: implemented, benchmark verdict pending batch-test.

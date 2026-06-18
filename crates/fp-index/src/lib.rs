@@ -11390,6 +11390,60 @@ impl CategoricalIndex {
         uniques
     }
 
+    fn value_counts_by_hash(&self) -> Vec<(String, usize)> {
+        let mut order = Vec::<&str>::new();
+        let mut counts = FxHashMap::<&str, usize>::default();
+        for label in &self.labels {
+            let label = label.as_str();
+            let entry = counts.entry(label).or_insert_with(|| {
+                order.push(label);
+                0
+            });
+            *entry += 1;
+        }
+        let mut pairs: Vec<(String, usize)> = order
+            .iter()
+            .map(|label| {
+                let label = *label;
+                (label.to_owned(), counts[label])
+            })
+            .collect();
+        pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        pairs
+    }
+
+    fn value_counts_by_category_rank(&self) -> Vec<(String, usize)> {
+        let map = self.category_index_map();
+        let mut counts = vec![0usize; self.categories.len()];
+        let mut invalid_counts = FxHashMap::<&str, usize>::default();
+        let mut order = Vec::<&str>::new();
+        for label in &self.labels {
+            let label = label.as_str();
+            if let Some(rank) = map.get(label).copied() {
+                if counts[rank] == 0 {
+                    order.push(label);
+                }
+                counts[rank] += 1;
+            } else {
+                let entry = invalid_counts.entry(label).or_insert_with(|| {
+                    order.push(label);
+                    0
+                });
+                *entry += 1;
+            }
+        }
+        let mut pairs = Vec::with_capacity(order.len());
+        for label in order {
+            if let Some(rank) = map.get(label).copied() {
+                pairs.push((self.categories[rank].clone(), counts[rank]));
+            } else {
+                pairs.push((label.to_owned(), invalid_counts[label]));
+            }
+        }
+        pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        pairs
+    }
+
     fn duplicated_by_hash(&self, keep: DuplicateKeep) -> Vec<bool> {
         let n = self.labels.len();
         let mut result = vec![false; n];
@@ -12484,20 +12538,10 @@ impl CategoricalIndex {
     /// CategoricalIndex labels are non-null so the total equals `len()`.
     #[must_use]
     pub fn value_counts(&self) -> Vec<(String, usize)> {
-        let mut order = Vec::<&String>::new();
-        let mut counts = FxHashMap::<&String, usize>::default();
-        for label in &self.labels {
-            let entry = counts.entry(label).or_insert_with(|| {
-                order.push(label);
-                0
-            });
-            *entry += 1;
+        if self.category_rank_unique_scan_is_bounded() {
+            return self.value_counts_by_category_rank();
         }
-        let mut pairs: Vec<(String, usize)> =
-            order.iter().map(|s| ((*s).clone(), counts[*s])).collect();
-        // Pandas sorts descending by count for value_counts.
-        pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
-        pairs
+        self.value_counts_by_hash()
     }
 
     /// Factorize, matching `pd.CategoricalIndex.factorize()`. Returns
@@ -27188,6 +27232,126 @@ mod tests {
         };
         assert!(!sparse.category_rank_unique_scan_is_bounded());
         assert_unique_matches_oracle(&sparse);
+    }
+
+    #[test]
+    fn categorical_index_value_counts_use_rank_counts_uza04200() {
+        fn value_counts_oracle(labels: &[String]) -> Vec<(String, usize)> {
+            let mut order = Vec::<&str>::new();
+            let mut counts = std::collections::HashMap::<&str, usize>::new();
+            for label in labels {
+                let label = label.as_str();
+                let entry = counts.entry(label).or_insert_with(|| {
+                    order.push(label);
+                    0
+                });
+                *entry += 1;
+            }
+            let mut pairs: Vec<(String, usize)> = order
+                .iter()
+                .map(|label| {
+                    let label = *label;
+                    (label.to_owned(), counts[label])
+                })
+                .collect();
+            pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+            pairs
+        }
+
+        fn assert_value_counts_matches_oracle(index: &super::CategoricalIndex) {
+            assert_eq!(index.value_counts(), value_counts_oracle(index.labels()));
+        }
+
+        let categories = vec![
+            "low".to_owned(),
+            "med".to_owned(),
+            "high".to_owned(),
+            "unused".to_owned(),
+        ];
+        let repeated = super::CategoricalIndex::with_categories(
+            vec![
+                "low".to_owned(),
+                "high".to_owned(),
+                "low".to_owned(),
+                "med".to_owned(),
+                "high".to_owned(),
+                "low".to_owned(),
+            ],
+            categories,
+            true,
+        )
+        .expect("categorical index");
+        assert!(repeated.category_rank_unique_scan_is_bounded());
+        assert_eq!(
+            repeated.value_counts(),
+            vec![
+                ("low".to_owned(), 3),
+                ("high".to_owned(), 2),
+                ("med".to_owned(), 1),
+            ]
+        );
+        assert_value_counts_matches_oracle(&repeated);
+
+        let tied = super::CategoricalIndex::with_categories(
+            vec![
+                "b".to_owned(),
+                "a".to_owned(),
+                "b".to_owned(),
+                "a".to_owned(),
+                "c".to_owned(),
+            ],
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            false,
+        )
+        .expect("categorical index");
+        assert_eq!(
+            tied.value_counts(),
+            vec![
+                ("b".to_owned(), 2),
+                ("a".to_owned(), 2),
+                ("c".to_owned(), 1),
+            ]
+        );
+        assert_value_counts_matches_oracle(&tied);
+
+        let invalid = super::CategoricalIndex {
+            labels: vec![
+                "ghost".to_owned(),
+                "low".to_owned(),
+                "ghost".to_owned(),
+                "other".to_owned(),
+                "low".to_owned(),
+            ],
+            categories: vec!["low".to_owned()],
+            ordered: false,
+            name: None,
+        };
+        assert!(invalid.category_rank_unique_scan_is_bounded());
+        assert_eq!(
+            invalid.value_counts(),
+            vec![
+                ("ghost".to_owned(), 2),
+                ("low".to_owned(), 2),
+                ("other".to_owned(), 1),
+            ]
+        );
+        assert_value_counts_matches_oracle(&invalid);
+
+        let mut large_categories = vec!["a".to_owned(), "b".to_owned()];
+        large_categories.extend((0..50).map(|value| format!("unused-{value}")));
+        let sparse = super::CategoricalIndex {
+            labels: vec![
+                "a".to_owned(),
+                "b".to_owned(),
+                "a".to_owned(),
+                "b".to_owned(),
+            ],
+            categories: large_categories,
+            ordered: false,
+            name: None,
+        };
+        assert!(!sparse.category_rank_unique_scan_is_bounded());
+        assert_value_counts_matches_oracle(&sparse);
     }
 
     #[test]
