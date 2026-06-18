@@ -8909,6 +8909,54 @@ mod tests {
     }
 
     #[test]
+    fn inner_join_utf8_value_multiset_fr4ns() {
+        use std::collections::HashMap;
+        // Differential (br-frankenpandas-fr4ns): inner join on Utf8 keys; the (key,
+        // lv, rv) multiset == per-key cross-product (5foyp was int/dense; jlf8d a
+        // single case). Seeded LCG, no mocks.
+        let mut s: u64 = 0x4e57_0b1c_2d3e_4f51;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let key = |n: u32| Scalar::Utf8(format!("{}", (b'a' + (n % 4) as u8) as char));
+        for iter in 0..300u32 {
+            let ln = (next() % 6) as usize + 1;
+            let rn = (next() % 6) as usize + 1;
+            let lk: Vec<Scalar> = (0..ln).map(|_| key(next())).collect();
+            let lv: Vec<i64> = (0..ln).map(|i| i as i64).collect();
+            let rk: Vec<Scalar> = (0..rn).map(|_| key(next())).collect();
+            let rv: Vec<i64> = (0..rn).map(|i| 100 + i as i64).collect();
+            let left = DataFrame::from_dict(&["k", "lv"], vec![("k", lk.clone()), ("lv", lv.iter().map(|&x| Scalar::Int64(x)).collect())]).unwrap();
+            let right = DataFrame::from_dict(&["k", "rv"], vec![("k", rk.clone()), ("rv", rv.iter().map(|&x| Scalar::Int64(x)).collect())]).unwrap();
+            let merged = merge_dataframes(&left, &right, "k", JoinType::Inner).unwrap();
+
+            let ks = merged_values(&merged, "k").unwrap();
+            let lvs = merged_values(&merged, "lv").unwrap();
+            let rvs = merged_values(&merged, "rv").unwrap();
+            let kstr = |v: &Scalar| -> String { match v { Scalar::Utf8(x) => x.clone(), _ => String::new() } };
+            let ki = |v: &Scalar| -> i64 { match v { Scalar::Int64(x) => *x, _ => i64::MIN } };
+            let mut got: Vec<(String, i64, i64)> = (0..ks.len()).map(|i| (kstr(&ks[i]), ki(&lvs[i]), ki(&rvs[i]))).collect();
+            // Oracle: per-key cross product.
+            let mut lby: HashMap<String, Vec<i64>> = HashMap::new();
+            for i in 0..ln { lby.entry(kstr(&lk[i])).or_default().push(lv[i]); }
+            let mut rby: HashMap<String, Vec<i64>> = HashMap::new();
+            for i in 0..rn { rby.entry(kstr(&rk[i])).or_default().push(rv[i]); }
+            let mut exp: Vec<(String, i64, i64)> = Vec::new();
+            for (k, lvals) in &lby {
+                if let Some(rvals) = rby.get(k) {
+                    for &a in lvals { for &b in rvals { exp.push((k.clone(), a, b)); } }
+                }
+            }
+            got.sort();
+            exp.sort();
+            assert_eq!(got, exp, "inner Utf8 multiset iter={iter}");
+        }
+    }
+
+    #[test]
     fn inner_join_utf8_keys_jlf8d() {
         use std::collections::HashMap;
         // br-frankenpandas-jlf8d: inner join on Utf8 keys (general/hash path).
