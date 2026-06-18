@@ -3681,6 +3681,17 @@ impl Index {
     #[must_use]
     pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
         let mut groups = HashMap::<IndexLabel, Vec<usize>>::new();
+        if self.labels.has_lazy_int64_backing()
+            && let Some(values) = self.labels.int64_view()
+        {
+            for (position, &value) in values.iter().enumerate() {
+                groups
+                    .entry(IndexLabel::Int64(value))
+                    .or_default()
+                    .push(position);
+            }
+            return groups;
+        }
         for (position, label) in self.labels.iter().enumerate() {
             groups.entry(label.clone()).or_default().push(position);
         }
@@ -18399,6 +18410,20 @@ mod tests {
         assert_eq!(
             datetimes.diff(1),
             vec![None, Some(IndexLabel::Timedelta64(15))]
+        );
+    }
+
+    #[test]
+    fn int64_groupby_avoids_label_materialization_xk18v() {
+        let idx = Index::from_i64_values(vec![2, 1, 2, 3, 1]);
+        assert!(idx.labels.materialized.get().is_none());
+        let grouped = idx.groupby();
+        assert_eq!(grouped[&IndexLabel::Int64(1)], vec![1, 4]);
+        assert_eq!(grouped[&IndexLabel::Int64(2)], vec![0, 2]);
+        assert_eq!(grouped[&IndexLabel::Int64(3)], vec![3]);
+        assert!(
+            idx.labels.materialized.get().is_none(),
+            "groupby should not materialize source Int64 labels"
         );
     }
 
