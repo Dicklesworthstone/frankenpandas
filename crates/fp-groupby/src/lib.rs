@@ -2630,6 +2630,87 @@ mod tests {
     }
 
     #[test]
+    fn groupby_order_invariant_aggregations_q60t7() {
+        // Metamorphic (br-frankenpandas-q60t7): order-insensitive aggregations
+        // must be invariant to input row order. Compute each on the original rows
+        // and on the row-reversed rows; assert identical index + values.
+        // Deterministic seeded LCG — no rand, no mocks.
+        let mut s: u64 = 0x0d2e_4c91_a17a_5e7f;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+
+        use super::GroupByError;
+        type GbFn = fn(
+            &Series,
+            &Series,
+            GroupByOptions,
+            &RuntimePolicy,
+            &mut EvidenceLedger,
+        ) -> Result<Series, GroupByError>;
+        let aggs: [(&str, GbFn); 5] = [
+            ("sum", groupby_sum),
+            ("count", groupby_count),
+            ("min", groupby_min),
+            ("max", groupby_max),
+            ("prod", groupby_prod),
+        ];
+
+        for iter in 0..1000u32 {
+            let n = (next() % 12) as usize + 1;
+            let key_vals: Vec<i64> = (0..n).map(|_| (next() % 5) as i64 - 2).collect();
+            let val_vals: Vec<i64> = (0..n).map(|_| (next() % 3) as i64).collect();
+
+            let mk = |keyv: &[i64], valv: &[i64]| {
+                let idx: Vec<IndexLabel> =
+                    (0..keyv.len() as i64).map(IndexLabel::Int64).collect();
+                let k = Series::from_values(
+                    "k",
+                    idx.clone(),
+                    keyv.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                )
+                .unwrap();
+                let v = Series::from_values(
+                    "v",
+                    idx,
+                    valv.iter().copied().map(Scalar::Int64).collect::<Vec<_>>(),
+                )
+                .unwrap();
+                (k, v)
+            };
+
+            let (k1, v1) = mk(&key_vals, &val_vals);
+            let mut rk = key_vals.clone();
+            let mut rv = val_vals.clone();
+            rk.reverse();
+            rv.reverse();
+            let (k2, v2) = mk(&rk, &rv);
+
+            for (name, f) in aggs {
+                let mut l1 = EvidenceLedger::new();
+                let mut l2 = EvidenceLedger::new();
+                let a = f(&k1, &v1, GroupByOptions::default(), &RuntimePolicy::strict(), &mut l1)
+                    .expect("agg orig");
+                let b = f(&k2, &v2, GroupByOptions::default(), &RuntimePolicy::strict(), &mut l2)
+                    .expect("agg rev");
+                assert_eq!(
+                    a.index().labels(),
+                    b.index().labels(),
+                    "{name} keys order-invariance iter={iter} keys={key_vals:?}"
+                );
+                assert_eq!(
+                    a.values(),
+                    b.values(),
+                    "{name} vals order-invariance iter={iter} keys={key_vals:?} vals={val_vals:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn groupby_sum_concatenates_string_values_like_pandas() {
         // pandas df.groupby(k)['s'].sum() concatenates object/string values per
         // group (skipna), matching Series::sum (br-f031e). Previously the f64
