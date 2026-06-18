@@ -9683,7 +9683,7 @@ impl RangeIndex {
 
     #[must_use]
     pub fn memory_usage(&self, _deep: bool) -> usize {
-        self.len() * std::mem::size_of::<i64>()
+        self.len().saturating_mul(std::mem::size_of::<i64>())
     }
 
     #[must_use]
@@ -23590,6 +23590,17 @@ mod tests {
         assert_eq!(desc.max(), Some(i64::MAX));
         assert_eq!(desc.sum(), 0);
         assert_eq!(desc.mean(), Some(0.0));
+    }
+
+    #[test]
+    fn range_index_memory_usage_saturates_uza04175() {
+        let small = super::RangeIndex::new(2, 11, 3).unwrap();
+        assert_eq!(small.memory_usage(false), 3 * std::mem::size_of::<i64>());
+        assert_eq!(small.nbytes(), small.memory_usage(false));
+
+        let wide = super::RangeIndex::new(i64::MIN, i64::MAX, 1).unwrap();
+        assert_eq!(wide.memory_usage(false), usize::MAX);
+        assert_eq!(wide.nbytes(), usize::MAX);
     }
 
     #[test]
