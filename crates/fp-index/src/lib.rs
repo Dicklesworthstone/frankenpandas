@@ -10642,15 +10642,21 @@ impl RangeIndex {
     /// `pd.RangeIndex.insert(loc, value)`. Returns a flat [`Index`]
     /// because the result is generally not a contiguous range.
     pub fn insert(&self, loc: usize, value: i64) -> Result<Index, IndexError> {
-        let values = self.values();
-        if loc > values.len() {
+        let len = self.len();
+        if loc > len {
             return Err(IndexError::OutOfBounds {
                 position: loc,
-                length: values.len(),
+                length: len,
             });
         }
-        let mut labels = values;
-        labels.insert(loc, value);
+        let mut labels = Vec::with_capacity(len.saturating_add(1));
+        for position in 0..loc {
+            labels.push(self.value_at(position));
+        }
+        labels.push(value);
+        for position in loc..len {
+            labels.push(self.value_at(position));
+        }
         let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             out = out.set_name(name);
@@ -10664,8 +10670,13 @@ impl RangeIndex {
     /// the index name when both operands share it.
     #[must_use]
     pub fn append(&self, other: &Self) -> Index {
-        let mut labels = self.values();
-        labels.extend(other.values());
+        let mut labels = Vec::with_capacity(self.len().saturating_add(other.len()));
+        for position in 0..self.len() {
+            labels.push(self.value_at(position));
+        }
+        for position in 0..other.len() {
+            labels.push(other.value_at(position));
+        }
         let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
             out = out.set_name(name);
@@ -10677,19 +10688,19 @@ impl RangeIndex {
     /// `pd.RangeIndex.delete(loc)`. Returns a flat [`Index`] because the
     /// residual values may no longer form a contiguous range.
     pub fn delete(&self, loc: usize) -> Result<Index, IndexError> {
-        let values = self.values();
-        if loc >= values.len() {
+        let len = self.len();
+        if loc >= len {
             return Err(IndexError::OutOfBounds {
                 position: loc,
-                length: values.len(),
+                length: len,
             });
         }
-        let labels: Vec<i64> = values
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| *i != loc)
-            .map(|(_, v)| v)
-            .collect();
+        let mut labels = Vec::with_capacity(len.saturating_sub(1));
+        for position in 0..len {
+            if position != loc {
+                labels.push(self.value_at(position));
+            }
+        }
         let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             out = out.set_name(name);
@@ -24891,6 +24902,60 @@ mod tests {
             assert!(
                 output.labels.materialized.get().is_none(),
                 "RangeIndex splice outputs should keep typed Int64 output backing"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn range_index_splice_uses_direct_values_un6on() -> Result<(), super::IndexError> {
+        let left = super::RangeIndex::new(9, 0, -4).unwrap().set_name("k");
+        let right = super::RangeIndex::new(-1, -6, -2).unwrap().set_name("k");
+
+        let inserted = left.insert(2, 99)?;
+        assert_eq!(inserted.name(), Some("k"));
+        assert_eq!(
+            inserted.labels.int64_view().unwrap().as_slice(),
+            &[9, 5, 99, 1]
+        );
+
+        let appended = left.append(&right);
+        assert_eq!(appended.name(), Some("k"));
+        assert_eq!(
+            appended.labels.int64_view().unwrap().as_slice(),
+            &[9, 5, 1, -1, -3, -5]
+        );
+
+        let mismatched_name = right.set_name("other");
+        assert_eq!(left.append(&mismatched_name).name(), None);
+
+        let deleted = left.delete(1)?;
+        assert_eq!(deleted.name(), Some("k"));
+        assert_eq!(deleted.labels.int64_view().unwrap().as_slice(), &[9, 1]);
+
+        let insert_err = left.insert(4, 0).unwrap_err();
+        assert!(matches!(
+            insert_err,
+            super::IndexError::OutOfBounds {
+                position: 4,
+                length: 3
+            }
+        ));
+
+        let delete_err = left.delete(3).unwrap_err();
+        assert!(matches!(
+            delete_err,
+            super::IndexError::OutOfBounds {
+                position: 3,
+                length: 3
+            }
+        ));
+
+        for output in [&inserted, &appended, &deleted] {
+            assert!(
+                output.labels.materialized.get().is_none(),
+                "RangeIndex splice should stream direct i64 labels into typed backing"
             );
         }
 
