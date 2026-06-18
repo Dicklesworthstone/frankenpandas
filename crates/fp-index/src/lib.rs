@@ -10359,7 +10359,68 @@ impl RangeIndex {
     /// Locate nearest preceding-or-equal range positions for each target label.
     #[must_use]
     pub fn asof_locs(&self, where_index: &Index, mask: Option<&[bool]>) -> Vec<Option<usize>> {
-        self.to_flat_index().asof_locs(where_index, mask)
+        if let Some(keys) = where_index.labels.int64_view() {
+            if mask.is_none() {
+                return keys
+                    .iter()
+                    .map(|&key| {
+                        let mut lo = 0usize;
+                        let mut hi = self.len();
+                        while lo < hi {
+                            let mid = lo + (hi - lo) / 2;
+                            if self.value_at(mid) <= key {
+                                lo = mid + 1;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                        lo.checked_sub(1)
+                    })
+                    .collect();
+            }
+            return keys
+                .iter()
+                .map(|&key| {
+                    let mut best = None;
+                    for position in 0..self.len() {
+                        if mask
+                            .and_then(|values| values.get(position))
+                            .is_some_and(|include| !include)
+                        {
+                            continue;
+                        }
+                        if self.value_at(position) <= key {
+                            best = Some(position);
+                        } else {
+                            break;
+                        }
+                    }
+                    best
+                })
+                .collect();
+        }
+        where_index
+            .labels
+            .iter()
+            .map(|key| {
+                let mut best = None;
+                for position in 0..self.len() {
+                    if mask
+                        .and_then(|values| values.get(position))
+                        .is_some_and(|include| !include)
+                    {
+                        continue;
+                    }
+                    let label = IndexLabel::Int64(self.value_at(position));
+                    if label.cmp(key).is_le() {
+                        best = Some(position);
+                    } else {
+                        break;
+                    }
+                }
+                best
+            })
+            .collect()
     }
 
     /// Drop range labels, returning a flat Index.
@@ -24153,6 +24214,43 @@ mod tests {
         );
         let cat_key = super::IndexLabel::Utf8("d".to_owned());
         assert_eq!(cat.asof(&cat_key), cat.to_flat_index().asof(&cat_key));
+    }
+
+    #[test]
+    fn range_index_asof_locs_uses_direct_values_vuftp() {
+        let range = super::RangeIndex::new(2, 10, 2).unwrap();
+        let where_index = super::Index::from_i64_values(vec![1, 4, 5, 11]);
+        assert_eq!(
+            range.asof_locs(&where_index, None),
+            range.to_flat_index().asof_locs(&where_index, None)
+        );
+        assert_eq!(
+            range.asof_locs(&where_index, None),
+            vec![None, Some(1), Some(1), Some(3)]
+        );
+
+        let mask = [true, false, true, true];
+        assert_eq!(
+            range.asof_locs(&where_index, Some(&mask)),
+            range.to_flat_index().asof_locs(&where_index, Some(&mask))
+        );
+        assert_eq!(
+            range.asof_locs(&where_index, Some(&mask)),
+            vec![None, Some(0), Some(0), Some(3)]
+        );
+
+        let descending = super::RangeIndex::new(9, 0, -4).unwrap();
+        let descending_where = super::Index::from_i64_values(vec![0, 5, 10]);
+        assert_eq!(
+            descending.asof_locs(&descending_where, None),
+            descending.to_flat_index().asof_locs(&descending_where, None)
+        );
+
+        let mixed_where = super::Index::new(vec![super::IndexLabel::Utf8("z".to_owned())]);
+        assert_eq!(
+            range.asof_locs(&mixed_where, Some(&[true, true])),
+            range.to_flat_index().asof_locs(&mixed_where, Some(&[true, true]))
+        );
     }
 
     #[test]
