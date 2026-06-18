@@ -18562,6 +18562,70 @@ mod tests {
     }
 
     #[test]
+    fn int64_index_mutation_fast_paths_match_materialized_2bgtq() {
+        // Differential harness (br-frankenpandas-2bgtq): insert (uza04.152),
+        // delete (uza04.150), groupby (xk18v) and take on lazy Int64 indexes must
+        // produce the same result as the materialized fallback. Deterministic
+        // seeded LCG — no rand crate, no mocks.
+        let mut state: u64 = 0x84242_u64.wrapping_mul(0x9e37_79b9);
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for iter in 0..2500u32 {
+            let len = (next() % 11) as usize;
+            let mut vals: Vec<i64> = (0..len).map(|_| (next() % 9) as i64 - 4).collect();
+            if next() % 3 == 0 {
+                vals.sort_unstable();
+            }
+            let lazy = Index::from_i64_values(vals.clone());
+            let mat = Index::new(vals.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let ctx = format!("iter={iter} vals={vals:?}");
+
+            // groupby (xk18v): label -> positions map must match exactly.
+            assert_eq!(lazy.groupby(), mat.groupby(), "groupby {ctx}");
+
+            // insert (uza04.152) at a random valid loc with an Int64 item and,
+            // occasionally, a non-Int64 item to exercise the dtype transition.
+            let loc = (next() as usize) % (len + 1);
+            let item = if next() % 4 == 0 {
+                IndexLabel::Utf8(format!("s{}", next() % 3))
+            } else {
+                IndexLabel::Int64((next() % 11) as i64 - 5)
+            };
+            let li = lazy.insert(loc, item.clone());
+            let mi = mat.insert(loc, item.clone());
+            assert_eq!(li.is_ok(), mi.is_ok(), "insert ok {ctx} loc={loc}");
+            if let (Ok(a), Ok(b)) = (&li, &mi) {
+                assert_eq!(a.labels(), b.labels(), "insert labels {ctx} loc={loc} item={item:?}");
+            }
+
+            // delete (uza04.150) at a random valid loc.
+            if len > 0 {
+                let dloc = (next() as usize) % len;
+                let ld = lazy.delete(dloc);
+                let md = mat.delete(dloc);
+                assert_eq!(ld.is_ok(), md.is_ok(), "delete ok {ctx} dloc={dloc}");
+                if let (Ok(a), Ok(b)) = (&ld, &md) {
+                    assert_eq!(a.labels(), b.labels(), "delete labels {ctx} dloc={dloc}");
+                }
+
+                // take with random in-range positions (possibly repeated / reordered).
+                let k = (next() % 6) as usize;
+                let positions: Vec<usize> = (0..k).map(|_| (next() as usize) % len).collect();
+                assert_eq!(
+                    lazy.take(&positions).labels(),
+                    mat.take(&positions).labels(),
+                    "take {ctx} positions={positions:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn int64_affine_lookup_fast_paths_match_materialized_q70pn() {
         // Differential harness (br-frankenpandas-q70pn): affine Int64 lookup fast
         // paths (searchsorted arithmetic ymhb6, asof 1851g/4jr8s, affine get_loc/
