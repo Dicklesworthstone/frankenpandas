@@ -4833,6 +4833,56 @@ mod tests {
         }
     }
 
+    /// br-frankenpandas-6a83t: cast_scalar is the scalar dtype-coercion path
+    /// behind astype/promotion. Property test of its confirmed identity +
+    /// numeric/bool coercion rules over random scalars. Deterministic seeded LCG.
+    #[test]
+    fn cast_scalar_coercion_rules_6a83t() {
+        let mut state: u64 = 0x5a17_c0de_1234_abcd;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for _ in 0..4000u32 {
+            let n = (next() % 21) as i64 - 10; // -10..=10, incl 0
+            let b = next() % 2 == 0;
+            let f = f64::from((next() % 41) as i32 - 20) / 4.0; // finite, incl 0.0
+
+            let i = Scalar::Int64(n);
+            let bo = Scalar::Bool(b);
+            let fl = Scalar::Float64(f);
+
+            // Identity casts.
+            assert_eq!(cast_scalar(&i, DType::Int64), Ok(i.clone()));
+            assert_eq!(cast_scalar(&bo, DType::Bool), Ok(bo.clone()));
+            assert_eq!(cast_scalar(&fl, DType::Float64), Ok(fl.clone()));
+
+            // Representation-preserving nullable identities.
+            assert_eq!(cast_scalar(&i, DType::Int64Nullable), Ok(i.clone()));
+            assert_eq!(cast_scalar(&bo, DType::BoolNullable), Ok(bo.clone()));
+
+            // Int64 coercions.
+            assert_eq!(cast_scalar(&i, DType::Bool), Ok(Scalar::Bool(n != 0)));
+            assert_eq!(
+                cast_scalar(&i, DType::Float64),
+                Ok(Scalar::Float64(n as f64))
+            );
+
+            // Bool coercions.
+            assert_eq!(cast_scalar(&bo, DType::Int64), Ok(Scalar::Int64(i64::from(b))));
+            assert_eq!(
+                cast_scalar(&bo, DType::Float64),
+                Ok(Scalar::Float64(if b { 1.0 } else { 0.0 }))
+            );
+
+            // Finite Float64 -> Int64 truncates toward zero (x as i64).
+            assert_eq!(cast_scalar(&fl, DType::Int64), Ok(Scalar::Int64(f as i64)));
+        }
+    }
+
     /// br-frankenpandas-esjjy / fd90.182: ergonomic From impls for Scalar.
     #[test]
     fn scalar_from_primitive_types() {
