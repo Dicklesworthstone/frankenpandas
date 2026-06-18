@@ -13166,6 +13166,16 @@ mod tests {
     }
 
     #[test]
+    fn csv_embedded_comma_in_quoted_field_rtpo7() {
+        // br-frankenpandas-rtpo7: a quoted field containing the delimiter parses as ONE
+        // field, not two columns (RFC4180). Companion to ftqon (embedded newline).
+        let df = read_csv_str("col,n\n\"a,b\",1\n").expect("read");
+        assert_eq!(df.len(), 1, "one row");
+        assert!(df.column("col").is_some() && df.column("n").is_some(), "two columns only");
+        assert_eq!(df.column("col").unwrap().values()[0], Scalar::Utf8("a,b".to_owned()), "embedded comma kept");
+    }
+
+    #[test]
     fn csv_embedded_newline_in_quoted_field_ftqon() {
         // br-frankenpandas-ftqon: a quoted field containing a newline parses as ONE
         // multiline value (RFC4180), not two rows; and round-trips.
