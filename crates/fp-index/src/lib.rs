@@ -19868,6 +19868,44 @@ mod tests {
     }
 
     #[test]
+    fn int64_index_get_indexer_nonaffine_miaf7() {
+        use std::collections::HashMap;
+
+        // Differential (br-frankenpandas-miaf7): get_indexer on a non-monotonic
+        // unique Int64 index == position map, -1 for absent. Seeded LCG, no mocks.
+        let mut state: u64 = 0x9e3a_71b5_c2d4_06f1;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+        for iter in 0..1500u32 {
+            let n = (next() % 10) as usize + 1;
+            // Shuffled distinct labels 0..n.
+            let mut labels: Vec<i64> = (0..n as i64).collect();
+            for i in (1..n).rev() {
+                let j = (next() as usize) % (i + 1);
+                labels.swap(i, j);
+            }
+            let ix = Index::new(labels.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let pos: HashMap<i64, usize> =
+                labels.iter().enumerate().map(|(p, &v)| (v, p)).collect();
+
+            // Targets mix present (0..n) and absent (n..n+3, -1).
+            let q = (next() % 8) as usize + 1;
+            let targets: Vec<i64> = (0..q).map(|_| (next() % (n as u32 + 4)) as i64 - 1).collect();
+            let target_ix = Index::new(targets.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let got = ix.get_indexer(&target_ix);
+            assert_eq!(got.len(), targets.len(), "len iter={iter}");
+            for i in 0..targets.len() {
+                let exp = pos.get(&targets[i]).copied();
+                assert_eq!(got[i], exp, "get_indexer iter={iter} target={} labels={labels:?}", targets[i]);
+            }
+        }
+    }
+
+    #[test]
     fn int64_index_set_ops_match_set_oracle_npbx4() {
         use std::collections::BTreeSet;
 
