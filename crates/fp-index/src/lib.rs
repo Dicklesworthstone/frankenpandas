@@ -4053,6 +4053,24 @@ impl Index {
             && let (Some(source), Some(keys)) =
                 (self.labels.int64_view(), where_index.labels.int64_view())
         {
+            if mask.is_none() {
+                return keys
+                    .iter()
+                    .map(|&key| {
+                        let mut lo = 0usize;
+                        let mut hi = source.len();
+                        while lo < hi {
+                            let mid = lo + (hi - lo) / 2;
+                            if source[mid] <= key {
+                                lo = mid + 1;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                        lo.checked_sub(1)
+                    })
+                    .collect();
+            }
             return keys
                 .iter()
                 .map(|&key| {
@@ -18904,6 +18922,24 @@ mod tests {
         assert!(
             probes.labels.materialized.get().is_none(),
             "asof_locs should not materialize probe Int64 labels"
+        );
+    }
+
+    #[test]
+    fn int64_asof_locs_no_mask_uses_right_bound_without_materializing_lx6k2() {
+        let source = Index::from_i64_values(vec![1, 3, 3, 8]);
+        let probes = Index::from_i64_values(vec![0, 3, 4, 9]);
+        assert_eq!(
+            source.asof_locs(&probes, None),
+            vec![None, Some(2), Some(2), Some(3)]
+        );
+        assert!(
+            source.labels.materialized.get().is_none(),
+            "no-mask asof_locs should keep duplicate Int64 source labels raw"
+        );
+        assert!(
+            probes.labels.materialized.get().is_none(),
+            "no-mask asof_locs should keep duplicate Int64 probe labels raw"
         );
     }
 
