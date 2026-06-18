@@ -1915,6 +1915,7 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
             quarter_plan: Option<Float64QuarterAffineCsvPlan>,
         },
         I(&'a [i64]),
+        B(&'a [bool]),
         // All-valid contiguous Utf8: (bytes, offsets) with row r =
         // bytes[offsets[r]..offsets[r+1]].
         U(&'a [u8], &'a [usize]),
@@ -1935,6 +1936,11 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                 return None;
             }
             cols.push(FastCol::I(s));
+        } else if let Some(s) = column.as_bool_slice() {
+            if s.len() != n {
+                return None;
+            }
+            cols.push(FastCol::B(s));
         } else if let Some((bytes, offsets)) = column.as_utf8_contiguous() {
             if offsets.len() != n + 1 {
                 return None;
@@ -2007,6 +2013,10 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                 // Int64 uses Rust Display, exactly scalar_to_csv's `v.to_string()`.
                 FastCol::I(s) => {
                     append_i64_decimal(&mut out, s[r]);
+                }
+                // Bool uses pandas to_csv spelling: capitalized True/False.
+                FastCol::B(s) => {
+                    out.push_str(if s[r] { "True" } else { "False" });
                 }
                 // Utf8 cell: the raw &str (= Scalar::Utf8's value in scalar_to_csv),
                 // CSV-quoted only when it contains the delimiter, a quote, CR, or
@@ -15641,6 +15651,40 @@ mod tests {
             ..CsvWriteOptions::default()
         };
         let expected = "i,v\n-1,-9223372036854775808\n0,0\n1,9223372036854775807\n";
+
+        assert_eq!(
+            super::try_write_csv_typed(&frame, &options).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            write_csv_string_with_options(&frame, &options).expect("write"),
+            expected
+        );
+    }
+
+    #[test]
+    fn to_csv_typed_bool_column_stays_on_fast_path_48fwr() {
+        // br-frankenpandas-fp-io-csv-typed-bool-column-fast-path-2k7hm-48fwr:
+        // all-valid Bool columns have a typed backing and should emit pandas
+        // True/False spelling without Scalar materialization.
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "flag".to_string(),
+            Column::from_bool_values(vec![true, false, true]),
+        );
+        columns.insert("value".to_string(), Column::from_i64_values(vec![7, 8, 9]));
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![100, 101, 102]),
+            columns,
+            vec!["flag".to_string(), "value".to_string()],
+        )
+        .unwrap();
+        let options = CsvWriteOptions {
+            include_index: true,
+            index_label: Some("row".to_string()),
+            ..CsvWriteOptions::default()
+        };
+        let expected = "row,flag,value\n100,True,7\n101,False,8\n102,True,9\n";
 
         assert_eq!(
             super::try_write_csv_typed(&frame, &options).as_deref(),
