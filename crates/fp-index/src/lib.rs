@@ -12801,7 +12801,7 @@ pub fn multi_way_align(indexes: &[&Index]) -> MultiAlignmentPlan {
     // keys + FxHashSet leave only the unique-label output clones. The borrow is
     // valid: every &IndexLabel comes from `indexes`, which outlives this scan.
     let mut seen: FxHashSet<&IndexLabel> = FxHashSet::with_capacity_and_hasher(
-        indexes.iter().map(|idx| idx.labels().len()).sum(),
+        aggregate_output_capacity(indexes.iter().map(|idx| idx.labels().len())),
         Default::default(),
     );
     let mut union_labels: Vec<IndexLabel> = Vec::new();
@@ -18028,6 +18028,10 @@ mod tests {
         let a = Index::from_i64(vec![1, 3]);
         let b = Index::from_i64(vec![2, 3]);
         let c = Index::from_i64(vec![1, 2]);
+        assert_eq!(
+            super::aggregate_output_capacity([a.len(), b.len(), c.len()]),
+            6
+        );
         let plan = multi_way_align(&[&a, &b, &c]);
         assert_eq!(
             plan.union_index.labels(),
