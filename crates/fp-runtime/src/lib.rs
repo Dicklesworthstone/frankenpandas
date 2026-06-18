@@ -931,6 +931,43 @@ mod tests {
         assert_eq!(b.finish(), super::semantic_fingerprint_bytes(b"hello world"));
     }
 
+    #[test]
+    fn semantic_fingerprint_streaming_equals_oneshot_h2i8m() {
+        // Metamorphic (br-frankenpandas-h2i8m): chunked SemanticFingerprintBuilder
+        // updates == one-shot over the concatenation, for arbitrary bytes and chunk
+        // boundaries (generalizes the fixed 3-chunk case in 01gdm). Seeded LCG.
+        let mut st: u64 = 0x4f1e_0b1c_2d3e_4f50;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for iter in 0..400u32 {
+            let total = (next() % 40) as usize;
+            let bytes: Vec<u8> = (0..total).map(|_| (next() % 256) as u8).collect();
+            // Split into chunks at random boundaries (some possibly empty).
+            let mut builder = super::SemanticFingerprintBuilder::new();
+            let mut pos = 0usize;
+            while pos < bytes.len() {
+                let remaining = bytes.len() - pos;
+                let take = (next() as usize % (remaining + 1)).min(remaining);
+                builder.update(&bytes[pos..pos + take]);
+                pos += take;
+                if take == 0 {
+                    // Avoid infinite loop on a zero-take; force progress.
+                    builder.update(&bytes[pos..pos + 1.min(bytes.len() - pos)]);
+                    pos += 1;
+                }
+            }
+            assert_eq!(
+                builder.finish(),
+                super::semantic_fingerprint_bytes(&bytes),
+                "streaming==one-shot iter={iter} total={total}"
+            );
+        }
+    }
+
     /// br-frankenpandas-b9vvk: RaptorQ provenance envelopes (AGENTS.md
     /// RaptorQ-Everywhere mandate). Structural invariants of from_source_bytes.
     #[test]
