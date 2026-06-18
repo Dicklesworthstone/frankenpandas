@@ -5933,6 +5933,139 @@ mod tests {
     }
 
     #[test]
+    fn nanmin_nanmax_match_same_family_oracle_vj7ds() {
+        // Differential vs independent same-family comparator oracle
+        // (br-frankenpandas-vj7ds). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        fn family_cmp(left: &Scalar, right: &Scalar) -> std::cmp::Ordering {
+            match (left, right) {
+                (Scalar::Bool(left), Scalar::Bool(right)) => left.cmp(right),
+                (Scalar::Int64(left), Scalar::Int64(right)) => left.cmp(right),
+                (Scalar::Float64(left), Scalar::Float64(right)) => {
+                    left.partial_cmp(right).expect("finite floats")
+                }
+                (Scalar::Utf8(left), Scalar::Utf8(right)) => left.cmp(right),
+                (Scalar::Timedelta64(left), Scalar::Timedelta64(right)) => left.cmp(right),
+                _ => panic!("mixed family in nanmin/nanmax oracle"),
+            }
+        }
+
+        fn assert_minmax(case: usize, family: &str, values: &[Scalar]) {
+            let present = values
+                .iter()
+                .filter(|value| !value.is_missing())
+                .cloned()
+                .collect::<Vec<_>>();
+            let actual_min = super::nanmin(values);
+            let actual_max = super::nanmax(values);
+            if present.is_empty() {
+                assert!(
+                    actual_min.is_missing(),
+                    "case={case} family={family}: expected missing min for {values:?}, got {actual_min:?}"
+                );
+                assert!(
+                    actual_max.is_missing(),
+                    "case={case} family={family}: expected missing max for {values:?}, got {actual_max:?}"
+                );
+                return;
+            }
+
+            let expected_min = present.iter().min_by(|left, right| family_cmp(left, right));
+            let expected_max = present.iter().max_by(|left, right| family_cmp(left, right));
+            assert!(
+                actual_min.semantic_eq(expected_min.expect("min")),
+                "case={case} family={family}: expected min {:?}, got {actual_min:?} for {values:?}",
+                expected_min.expect("min")
+            );
+            assert!(
+                actual_max.semantic_eq(expected_max.expect("max")),
+                "case={case} family={family}: expected max {:?}, got {actual_max:?} for {values:?}",
+                expected_max.expect("max")
+            );
+        }
+
+        let all_missing = [
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(f64::NAN),
+            Scalar::Timedelta64(i64::MIN),
+        ];
+        assert_minmax(usize::MAX, "all_missing", &all_missing);
+
+        let mut seed = 0xa11c_0aba_2e7d_f00d_u64;
+        for case in 0..240 {
+            let len = (next(&mut seed) % 73 + 1) as usize;
+
+            let mut ints = Vec::with_capacity(len);
+            ints.push(Scalar::Int64(case as i64 - 120));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 1_001) as i64 - 500;
+                ints.push(match next(&mut seed) % 6 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    _ => Scalar::Int64(raw),
+                });
+            }
+            assert_minmax(case, "int", &ints);
+
+            let mut floats = Vec::with_capacity(len);
+            floats.push(Scalar::Float64(case as f64 / 11.0));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                floats.push(match next(&mut seed) % 8 {
+                    0 | 1 => Scalar::Float64(f64::NAN),
+                    2 => Scalar::Float64(f64::INFINITY),
+                    3 => Scalar::Float64(f64::NEG_INFINITY),
+                    4 => Scalar::Float64(0.0),
+                    5 => Scalar::Float64(-0.0),
+                    _ => Scalar::Float64(raw as f64 / 41.0),
+                });
+            }
+            assert_minmax(case, "float", &floats);
+
+            let mut bools = Vec::with_capacity(len);
+            bools.push(Scalar::Bool(case & 1 == 0));
+            for _ in 1..len {
+                bools.push(match next(&mut seed) % 5 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    raw => Scalar::Bool(raw & 1 == 0),
+                });
+            }
+            assert_minmax(case, "bool", &bools);
+
+            let mut utf8 = Vec::with_capacity(len);
+            utf8.push(Scalar::Utf8(format!("minmax_{}", case % 17)));
+            for pos in 1..len {
+                utf8.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    raw => Scalar::Utf8(format!("minmax_{}_{}", raw, pos % 11)),
+                });
+            }
+            assert_minmax(case, "utf8", &utf8);
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 120));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 1_003) as i64 - 501;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_minmax(case, "timedelta", &timedeltas);
+        }
+    }
+
+    #[test]
     fn nanmin_nanmax_mixed_incompatible_types_returns_nan() {
         let vals = vec![Scalar::Int64(5), Scalar::Utf8("hello".into())];
         assert!(super::nanmin(&vals).is_missing());
