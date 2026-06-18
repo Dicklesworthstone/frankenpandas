@@ -10753,6 +10753,34 @@ impl Column {
     /// Matches `pd.Series.count()`.
     #[must_use]
     pub fn count(&self) -> usize {
+        if self.dtype == DType::Float64 {
+            if let Some((data, validity)) = self.as_f64_slice_with_validity() {
+                if validity.all() {
+                    return data.iter().filter(|value| !value.is_nan()).count();
+                }
+                return data
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, value)| validity.get(*idx) && !value.is_nan())
+                    .count();
+            }
+            if let Some(data) = self.as_f64_slice() {
+                return data.iter().filter(|value| !value.is_nan()).count();
+            }
+        }
+
+        if matches!(
+            self.dtype,
+            DType::Bool
+                | DType::BoolNullable
+                | DType::Int64
+                | DType::Int64Nullable
+                | DType::Utf8
+                | DType::Interval
+        ) {
+            return self.validity.count_valid();
+        }
+
         self.values.iter().filter(|v| !v.is_missing()).count()
     }
 
@@ -22537,6 +22565,45 @@ mod tests {
             ])
             .expect("col");
             assert_eq!(col.count(), 2);
+        }
+
+        #[test]
+        fn count_uses_nullable_int64_validity_without_scalar_materialization_aed6d() {
+            let validity = ValidityMask::from_invalid_ranges(Arc::from(vec![(1, 3), (7, 1)]), 10);
+            let col = Column::from_i64_values_with_validity((0_i64..10).collect(), validity);
+
+            assert_eq!(col.count(), 6);
+            assert!(matches!(
+                &col.values,
+                ScalarValues::LazyNullableInt64 { .. }
+            ));
+            if let ScalarValues::LazyNullableInt64 { values, .. } = &col.values {
+                assert!(values.get().is_none());
+            }
+        }
+
+        #[test]
+        fn count_float64_raw_path_still_excludes_nan_aed6d() {
+            let col = Column {
+                dtype: DType::Float64,
+                values: ScalarValues::lazy_all_valid_float64(vec![
+                    1.0,
+                    f64::NAN,
+                    f64::INFINITY,
+                    -0.0,
+                ]),
+                validity: ValidityMask::all_valid(4),
+                data: None,
+            };
+
+            assert_eq!(col.count(), 3);
+            assert!(matches!(
+                &col.values,
+                ScalarValues::LazyAllValidFloat64 { .. }
+            ));
+            if let ScalarValues::LazyAllValidFloat64 { values, .. } = &col.values {
+                assert!(values.get().is_none());
+            }
         }
     }
 
