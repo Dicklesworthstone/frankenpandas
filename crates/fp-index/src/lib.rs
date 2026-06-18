@@ -10330,7 +10330,16 @@ impl RangeIndex {
     /// Sort range labels and return the positional sorter.
     #[must_use]
     pub fn sortlevel(&self) -> (Index, Vec<usize>) {
-        self.to_flat_index().sortlevel()
+        let order = self.argsort();
+        let labels = order
+            .iter()
+            .map(|&position| self.value_at(position))
+            .collect();
+        let mut out = Index::from_i64_values(labels);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        (out, order)
     }
 
     /// Returns a clone, matching `pd.RangeIndex.view()`.
@@ -25022,6 +25031,28 @@ mod tests {
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
         assert!(empty.drop(&[IndexLabel::Int64(0)]).is_empty());
+    }
+
+    #[test]
+    fn range_index_sortlevel_builds_direct_output_puano() {
+        let descending = super::RangeIndex::new(8, 0, -2).unwrap().set_name("r");
+        let (sorted, order) = descending.sortlevel();
+
+        assert_eq!(order, vec![3, 2, 1, 0]);
+        assert_eq!(sorted.name(), Some("r"));
+        assert_eq!(
+            sorted.labels.int64_view().unwrap().as_slice(),
+            &[2, 4, 6, 8]
+        );
+        assert!(
+            sorted.labels.materialized.get().is_none(),
+            "RangeIndex::sortlevel should keep typed Int64 output backing"
+        );
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        let (empty_sorted, empty_order) = empty.sortlevel();
+        assert!(empty_sorted.is_empty());
+        assert!(empty_order.is_empty());
     }
 
     #[test]
