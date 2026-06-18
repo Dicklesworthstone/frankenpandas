@@ -10305,7 +10305,40 @@ impl RangeIndex {
 
     /// Cast range labels to a pandas dtype string, returning a flat Index.
     pub fn astype(&self, dtype: &str) -> Result<Index, IndexError> {
-        self.to_flat_index().astype(dtype)
+        match dtype {
+            "int" | "int64" => Ok(self.to_flat_index()),
+            "str" | "string" | "object" => {
+                let labels = (0..self.len())
+                    .map(|position| IndexLabel::Utf8(self.value_at(position).to_string()))
+                    .collect();
+                let mut out = Index::new(labels);
+                if let Some(name) = self.name() {
+                    out = out.set_name(name);
+                }
+                Ok(out)
+            }
+            "datetime64[ns]" => {
+                if self.is_empty() {
+                    Ok(self.to_flat_index())
+                } else {
+                    Err(IndexError::InvalidArgument(
+                        "DatetimeIndex requires homogeneous DatetimeIndex labels".to_owned(),
+                    ))
+                }
+            }
+            "timedelta64[ns]" => {
+                if self.is_empty() {
+                    Ok(self.to_flat_index())
+                } else {
+                    Err(IndexError::InvalidArgument(
+                        "TimedeltaIndex requires homogeneous TimedeltaIndex labels".to_owned(),
+                    ))
+                }
+            }
+            other => Err(IndexError::InvalidArgument(format!(
+                "unsupported Index.astype dtype {other:?}"
+            ))),
+        }
     }
 
     /// Nearest preceding-or-equal range label lookup.
@@ -24028,6 +24061,50 @@ mod tests {
             cat.to_flat_index().astype("int").unwrap()
         );
         assert!(cat.astype("datetime64[ns]").is_err());
+    }
+
+    #[test]
+    fn range_index_astype_uses_direct_values_up4dq() {
+        let range = super::RangeIndex::new(9, 0, -4).unwrap().set_name("r");
+
+        let as_int = range.astype("int64").unwrap();
+        assert_eq!(as_int.name(), Some("r"));
+        assert_eq!(as_int.labels.int64_view().unwrap().as_slice(), &[9, 5, 1]);
+        assert!(
+            as_int.labels.materialized.get().is_none(),
+            "RangeIndex::astype(int64) should keep typed Int64 output backing"
+        );
+
+        let as_string = range.astype("string").unwrap();
+        assert_eq!(as_string.name(), Some("r"));
+        assert_eq!(
+            as_string.labels(),
+            &[
+                super::IndexLabel::Utf8("9".to_owned()),
+                super::IndexLabel::Utf8("5".to_owned()),
+                super::IndexLabel::Utf8("1".to_owned()),
+            ]
+        );
+
+        assert!(matches!(
+            range.astype("float64"),
+            Err(super::IndexError::InvalidArgument(message))
+                if message == "unsupported Index.astype dtype \"float64\""
+        ));
+        assert!(matches!(
+            range.astype("datetime64[ns]"),
+            Err(super::IndexError::InvalidArgument(message))
+                if message == "DatetimeIndex requires homogeneous DatetimeIndex labels"
+        ));
+        assert!(matches!(
+            range.astype("timedelta64[ns]"),
+            Err(super::IndexError::InvalidArgument(message))
+                if message == "TimedeltaIndex requires homogeneous TimedeltaIndex labels"
+        ));
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap().set_name("empty");
+        assert_eq!(empty.astype("datetime64[ns]").unwrap().name(), Some("empty"));
+        assert_eq!(empty.astype("timedelta64[ns]").unwrap().len(), 0);
     }
 
     #[test]
