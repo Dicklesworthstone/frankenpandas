@@ -1489,6 +1489,17 @@ impl Index {
         {
             return range.position(*target);
         }
+        if self.labels.has_lazy_int64_backing() {
+            let IndexLabel::Int64(target) = needle else {
+                return None;
+            };
+            let values = self.labels.int64_view()?;
+            return if matches!(self.sort_order(), SortOrder::AscendingInt64) {
+                values.binary_search(target).ok()
+            } else {
+                values.iter().position(|value| value == target)
+            };
+        }
         match self.sort_order() {
             SortOrder::AscendingInt64 => {
                 if let IndexLabel::Int64(target) = needle {
@@ -19462,6 +19473,50 @@ mod tests {
         assert_eq!(
             unsorted_actual,
             materialized_source.get_indexer(&materialized_unsorted_target)
+        );
+    }
+
+    #[test]
+    fn int64_position_avoids_label_materialization_codb() {
+        let sorted = Index::from_i64_values(vec![1, 3, 5, 9]);
+        let unsorted = Index::from_i64_values(vec![5, 1, 5, 3]);
+        assert!(sorted.labels.materialized.get().is_none());
+        assert!(unsorted.labels.materialized.get().is_none());
+
+        assert_eq!(sorted.position(&IndexLabel::Int64(5)), Some(2));
+        assert_eq!(sorted.get_loc(&IndexLabel::Int64(7)), None);
+        assert!(!sorted.contains(&IndexLabel::Utf8("5".to_owned())));
+        assert_eq!(unsorted.position(&IndexLabel::Int64(5)), Some(0));
+        assert_eq!(unsorted.position(&IndexLabel::Int64(3)), Some(3));
+
+        assert!(
+            sorted.labels.materialized.get().is_none(),
+            "sorted Int64 position should stay on raw backing"
+        );
+        assert!(
+            unsorted.labels.materialized.get().is_none(),
+            "unsorted Int64 position should stay on raw backing"
+        );
+
+        let materialized_sorted = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(9),
+        ]);
+        let materialized_unsorted = Index::new(vec![
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(3),
+        ]);
+        assert_eq!(
+            sorted.position(&IndexLabel::Int64(5)),
+            materialized_sorted.position(&IndexLabel::Int64(5))
+        );
+        assert_eq!(
+            unsorted.position(&IndexLabel::Int64(5)),
+            materialized_unsorted.position(&IndexLabel::Int64(5))
         );
     }
 
