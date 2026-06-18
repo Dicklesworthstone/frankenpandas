@@ -5002,6 +5002,39 @@ mod tests {
 
     /// br-frankenpandas-6a83t: cast_scalar is the scalar dtype-coercion path
     #[test]
+    fn nanvar_ddof_nanstd_nan_skip_p00ag() {
+        use super::{nanmean, nanstd, nanvar};
+        // br-frankenpandas-p00ag: nanmean/nanvar/nanstd skip NaN; ddof picks the
+        // denominator; nanstd==sqrt(nanvar). Seeded LCG, no mocks.
+        let mut s: u64 = 0x4e0a_0b1c_2d3e_4f50;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let val = |sc: Scalar| -> f64 { sc.to_f64().unwrap_or(f64::NAN) };
+        for iter in 0..1000u32 {
+            let n = (next() % 10) as usize + 2;
+            let raw: Vec<f64> = (0..n)
+                .map(|_| if next() % 4 == 0 { f64::NAN } else { (next() % 200) as f64 / 7.0 })
+                .collect();
+            let finite: Vec<f64> = raw.iter().copied().filter(|x| !x.is_nan()).collect();
+            if finite.len() < 2 {
+                continue;
+            }
+            let scalars: Vec<Scalar> = raw.iter().map(|&x| Scalar::Float64(x)).collect();
+            let nf = finite.len() as f64;
+            let mean = finite.iter().sum::<f64>() / nf;
+            let ss = finite.iter().map(|x| (x - mean).powi(2)).sum::<f64>();
+            assert!((val(nanmean(&scalars)) - mean).abs() < 1e-7, "nanmean iter={iter}");
+            assert!((val(nanvar(&scalars, 0)) - ss / nf).abs() < 1e-7, "nanvar ddof0 iter={iter}");
+            assert!((val(nanvar(&scalars, 1)) - ss / (nf - 1.0)).abs() < 1e-7, "nanvar ddof1 iter={iter}");
+            assert!((val(nanstd(&scalars, 1)) - (ss / (nf - 1.0)).sqrt()).abs() < 1e-7, "nanstd ddof1 iter={iter}");
+        }
+    }
+
+    #[test]
     fn nanskew_nankurt_min_sample_and_known_xybnq() {
         // br-frankenpandas-xybnq: guard nanskew/nankurt min-sample-size (NaN below
         // threshold) + known pandas G1/G2 values (the f4dc5540 inline-copy bug area).
