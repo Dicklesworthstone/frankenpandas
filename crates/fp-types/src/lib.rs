@@ -7172,6 +7172,167 @@ mod tests {
     }
 
     #[test]
+    fn nanquantile_matches_numeric_and_timedelta_oracle_ecb7r() {
+        // Differential vs independent sort-based quantile oracles
+        // (br-frankenpandas-ecb7r). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(3202034522624059733)
+                .wrapping_add(4354685564936845319);
+            *seed
+        }
+
+        fn interpolated(sorted: &[f64], q: f64) -> f64 {
+            if sorted.len() == 1 {
+                return sorted[0];
+            }
+            let pos = q * (sorted.len() - 1) as f64;
+            let lo = pos.floor() as usize;
+            let hi = pos.ceil() as usize;
+            if lo == hi {
+                sorted[lo]
+            } else {
+                let weight = pos - lo as f64;
+                sorted[lo] + (sorted[hi] - sorted[lo]) * weight
+            }
+        }
+
+        fn expected_numeric(values: &[Scalar], q: f64) -> Scalar {
+            if !(0.0..=1.0).contains(&q) {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mut samples = values
+                .iter()
+                .filter(|value| !value.is_missing())
+                .filter_map(|value| value.to_f64().ok())
+                .collect::<Vec<_>>();
+            if samples.is_empty() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            samples.sort_by(|left, right| left.partial_cmp(right).expect("finite values"));
+            Scalar::Float64(interpolated(&samples, q))
+        }
+
+        fn expected_timedelta(values: &[Scalar], q: f64) -> Scalar {
+            if !(0.0..=1.0).contains(&q) {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mut samples = values
+                .iter()
+                .filter_map(|value| match value {
+                    Scalar::Timedelta64(ns) if !value.is_missing() => Some(*ns as f64),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if samples.is_empty() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            samples.sort_by(|left, right| left.partial_cmp(right).expect("finite values"));
+            Scalar::Timedelta64(interpolated(&samples, q) as i64)
+        }
+
+        fn assert_quantile(
+            case: usize,
+            family: &str,
+            values: &[Scalar],
+            q: f64,
+            expected: Scalar,
+        ) {
+            let actual = super::nanquantile(values, q);
+            assert!(
+                actual.semantic_eq(&expected),
+                "case={case} family={family} q={q}: expected {expected:?}, got {actual:?} for {values:?}"
+            );
+        }
+
+        let numeric_all_missing = [Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)];
+        assert_quantile(
+            usize::MAX,
+            "numeric_all_missing",
+            &numeric_all_missing,
+            0.5,
+            expected_numeric(&numeric_all_missing, 0.5),
+        );
+        assert_quantile(
+            usize::MAX - 1,
+            "numeric_out_of_range",
+            &[Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            1.25,
+            Scalar::Null(NullKind::NaN),
+        );
+
+        let td_all_missing = [Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)];
+        assert_quantile(
+            usize::MAX - 2,
+            "timedelta_all_missing",
+            &td_all_missing,
+            0.5,
+            expected_timedelta(&td_all_missing, 0.5),
+        );
+        assert_quantile(
+            usize::MAX - 3,
+            "timedelta_out_of_range",
+            &[Scalar::Timedelta64(1), Scalar::Timedelta64(2)],
+            -0.25,
+            Scalar::Null(NullKind::NaN),
+        );
+
+        let mut seed = 0x4a17_1e5e_0b5e_a11d_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 83 + 1) as usize;
+            let q = match next(&mut seed) % 8 {
+                0 => 0.0,
+                1 => 0.25,
+                2 => 0.5,
+                3 => 0.75,
+                4 => 1.0,
+                _ => (next(&mut seed) % 1_001) as f64 / 1_000.0,
+            };
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 8 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 251),
+                    5 => Scalar::Float64(raw as f64 / 67.0),
+                    6 => Scalar::Float64(0.0),
+                    _ => Scalar::Float64(-0.0),
+                });
+            }
+            assert_quantile(
+                case,
+                "numeric",
+                &numeric,
+                q,
+                expected_numeric(&numeric, q),
+            );
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_quantile(
+                case,
+                "timedelta",
+                &timedeltas,
+                q,
+                expected_timedelta(&timedeltas, q),
+            );
+        }
+    }
+
+    #[test]
     fn nanargmax_returns_first_position() {
         let values = vec![
             Scalar::Float64(1.0),
