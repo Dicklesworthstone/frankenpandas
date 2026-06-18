@@ -2334,6 +2334,11 @@ impl Index {
         // IndexLabel::Ord-sorted and unique) => a two-pointer merge yields the
         // same self-ordered, deduplicated intersection without building either
         // FxHashMap (br-frankenpandas-idxdup set ops).
+        if let Some(labels) = self.sorted_merge_set_op_i64(other, SetMergeKind::Intersection) {
+            let mut result = Self::from_i64_values(labels);
+            result.name = self.shared_name(other);
+            return result;
+        }
         if let Some(labels) = self.sorted_merge_set_op(other, SetMergeKind::Intersection) {
             let mut result = Self::new(labels);
             result.name = self.shared_name(other);
@@ -2366,6 +2371,43 @@ impl Index {
     /// side is unsorted so the caller keeps its FxHashMap path. Emits labels in
     /// `self`'s order, which equals the sorted order on the fast path — exactly
     /// what the hash path's `self`-iteration-order filter produces.
+    fn sorted_merge_set_op_i64(&self, other: &Self, kind: SetMergeKind) -> Option<Vec<i64>> {
+        if !matches!(self.sort_order(), SortOrder::AscendingInt64)
+            || !matches!(other.sort_order(), SortOrder::AscendingInt64)
+        {
+            return None;
+        }
+        let a = self.labels.int64_view()?;
+        let b = other.labels.int64_view()?;
+        let mut labels = Vec::with_capacity(a.len().min(b.len()));
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < a.len() {
+            if j >= b.len() {
+                if kind == SetMergeKind::Difference {
+                    labels.extend_from_slice(&a[i..]);
+                }
+                break;
+            }
+            match a[i].cmp(&b[j]) {
+                std::cmp::Ordering::Less => {
+                    if kind == SetMergeKind::Difference {
+                        labels.push(a[i]);
+                    }
+                    i += 1;
+                }
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    if kind == SetMergeKind::Intersection {
+                        labels.push(a[i]);
+                    }
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        Some(labels)
+    }
+
     fn sorted_merge_set_op(&self, other: &Self, kind: SetMergeKind) -> Option<Vec<IndexLabel>> {
         if matches!(self.sort_order(), SortOrder::Unsorted)
             || matches!(other.sort_order(), SortOrder::Unsorted)
@@ -2430,6 +2472,9 @@ impl Index {
     pub fn difference(&self, other: &Self) -> Self {
         // Two-pointer merge when both sides are strictly ascending (see
         // intersection / sorted_merge_set_op).
+        if let Some(labels) = self.sorted_merge_set_op_i64(other, SetMergeKind::Difference) {
+            return self.propagate_name(Self::from_i64_values(labels));
+        }
         if let Some(labels) = self.sorted_merge_set_op(other, SetMergeKind::Difference) {
             return self.propagate_name(Self::new(labels));
         }
@@ -15883,6 +15928,40 @@ mod tests {
                 "difference {a:?} \\ {b:?}"
             );
         }
+    }
+
+    #[test]
+    fn sorted_int64_set_ops_keep_typed_backing_without_materializing_v7m2q() {
+        let left = Index::from_i64_values(vec![1, 3, 5, 9]).set_name("axis");
+        let right = Index::from_i64_values(vec![0, 3, 4, 9, 10]).set_name("axis");
+        assert!(left.labels.materialized.get().is_none());
+        assert!(right.labels.materialized.get().is_none());
+
+        let intersection = left.intersection(&right);
+        let difference = left.difference(&right);
+        assert_eq!(intersection.name(), Some("axis"));
+        assert_eq!(difference.name(), Some("axis"));
+        assert_eq!(
+            intersection.labels.int64_view().unwrap().as_slice(),
+            &[3, 9]
+        );
+        assert_eq!(difference.labels.int64_view().unwrap().as_slice(), &[1, 5]);
+        assert!(
+            left.labels.materialized.get().is_none(),
+            "sorted Int64 set ops should not materialize the left input"
+        );
+        assert!(
+            right.labels.materialized.get().is_none(),
+            "sorted Int64 set ops should not materialize the right input"
+        );
+        assert!(
+            intersection.labels.materialized.get().is_none(),
+            "intersection should keep typed Int64 output backing"
+        );
+        assert!(
+            difference.labels.materialized.get().is_none(),
+            "difference should keep typed Int64 output backing"
+        );
     }
 
     #[test]
