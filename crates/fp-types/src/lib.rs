@@ -6812,6 +6812,148 @@ mod tests {
     }
 
     #[test]
+    fn nanargmax_nanargmin_match_numeric_and_timedelta_oracle_unkj6() {
+        // Differential vs independent first-tie arg oracles
+        // (br-frankenpandas-unkj6). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            *seed
+        }
+
+        fn expected_numeric(values: &[Scalar], find_max: bool) -> Option<usize> {
+            let mut best: Option<(usize, f64)> = None;
+            for (idx, value) in values.iter().enumerate() {
+                if value.is_missing() {
+                    continue;
+                }
+                let Ok(value) = value.to_f64() else {
+                    continue;
+                };
+                if value.is_nan() {
+                    continue;
+                }
+                match best {
+                    None => best = Some((idx, value)),
+                    Some((_, current))
+                        if (find_max && value > current) || (!find_max && value < current) =>
+                    {
+                        best = Some((idx, value));
+                    }
+                    _ => {}
+                }
+            }
+            best.map(|(idx, _)| idx)
+        }
+
+        fn expected_timedelta(values: &[Scalar], find_max: bool) -> Option<usize> {
+            let mut best: Option<(usize, i64)> = None;
+            for (idx, value) in values.iter().enumerate() {
+                if value.is_missing() {
+                    continue;
+                }
+                let Scalar::Timedelta64(ns) = value else {
+                    continue;
+                };
+                match best {
+                    None => best = Some((idx, *ns)),
+                    Some((_, current))
+                        if (find_max && *ns > current) || (!find_max && *ns < current) =>
+                    {
+                        best = Some((idx, *ns));
+                    }
+                    _ => {}
+                }
+            }
+            best.map(|(idx, _)| idx)
+        }
+
+        fn assert_args(
+            case: usize,
+            family: &str,
+            values: &[Scalar],
+            expected_min: Option<usize>,
+            expected_max: Option<usize>,
+        ) {
+            assert_eq!(
+                super::nanargmin(values),
+                expected_min,
+                "case={case} family={family}: nanargmin mismatch for {values:?}"
+            );
+            assert_eq!(
+                super::nanargmax(values),
+                expected_max,
+                "case={case} family={family}: nanargmax mismatch for {values:?}"
+            );
+        }
+
+        let all_missing = [Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)];
+        assert_args(usize::MAX, "numeric_all_missing", &all_missing, None, None);
+        let td_all_missing = [Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)];
+        assert_args(
+            usize::MAX - 1,
+            "timedelta_all_missing",
+            &td_all_missing,
+            None,
+            None,
+        );
+
+        let mut seed = 0xa126_5eed_ed9e_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 83 + 1) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64(case as i64 - 130));
+            if len > 1 {
+                numeric.push(Scalar::Int64(case as i64 - 130));
+            }
+            for _ in numeric.len()..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 9 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 211),
+                    5 => Scalar::Float64(raw as f64 / 47.0),
+                    6 => Scalar::Float64(0.0),
+                    7 => Scalar::Float64(-0.0),
+                    _ => Scalar::Float64(raw.signum() as f64 * f64::INFINITY),
+                });
+            }
+            assert_args(
+                case,
+                "numeric",
+                &numeric,
+                expected_numeric(&numeric, false),
+                expected_numeric(&numeric, true),
+            );
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 130));
+            if len > 1 {
+                timedeltas.push(Scalar::Timedelta64(case as i64 - 130));
+            }
+            for _ in timedeltas.len()..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_args(
+                case,
+                "timedelta",
+                &timedeltas,
+                expected_timedelta(&timedeltas, false),
+                expected_timedelta(&timedeltas, true),
+            );
+        }
+    }
+
+    #[test]
     fn nansem_matches_std_over_sqrt_n() {
         let values = vec![
             Scalar::Float64(2.0),
