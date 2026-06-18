@@ -2656,12 +2656,12 @@ impl Timestamp {
         if self.is_nat() {
             return "NaT".to_string();
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
         // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
         // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
-        let sub_nanos = self.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
-        let days_since_epoch = total_secs / 86400;
-        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+        let nanos_of_day = self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY);
+        let secs_of_day = nanos_of_day / Timedelta::NANOS_PER_SEC;
+        let sub_nanos = nanos_of_day.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
 
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
@@ -9727,6 +9727,26 @@ mod tests {
         assert!(ts_tz.isoformat().contains("[America/New_York]"));
 
         assert_eq!(Timestamp::nat().isoformat(), "NaT");
+    }
+
+    #[test]
+    fn timestamp_isoformat_pre_epoch_subsecond_uses_floor_day_263m5() {
+        assert_eq!(
+            Timestamp::from_nanos(-1).isoformat(),
+            "1969-12-31T23:59:59.999999"
+        );
+        assert_eq!(
+            Timestamp::from_nanos(-Timedelta::NANOS_PER_SEC).isoformat(),
+            "1969-12-31T23:59:59"
+        );
+        assert_eq!(
+            Timestamp::from_nanos(-Timedelta::NANOS_PER_DAY).isoformat(),
+            "1969-12-31T00:00:00"
+        );
+        assert_eq!(
+            Timestamp::from_nanos_tz(-1, "UTC").isoformat(),
+            "1969-12-31T23:59:59.999999+00:00"
+        );
     }
 
     #[test]
