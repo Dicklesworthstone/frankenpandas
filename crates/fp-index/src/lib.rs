@@ -10156,12 +10156,11 @@ impl RangeIndex {
                 "searchsorted requires a monotonically-increasing RangeIndex".to_owned(),
             ));
         }
-        let values = self.values();
         let mut lo = 0usize;
-        let mut hi = values.len();
+        let mut hi = self.len();
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let cmp = values[mid].cmp(&value);
+            let cmp = self.value_at(mid).cmp(&value);
             use std::cmp::Ordering;
             let go_right = matches!(
                 (cmp, side),
@@ -23180,6 +23179,26 @@ mod tests {
         // Includes zero → prod = 0.
         let with_zero = super::RangeIndex::new(0, 5, 1).unwrap();
         assert_eq!(with_zero.prod(), 0);
+    }
+
+    #[test]
+    fn range_index_searchsorted_direct_values_mv1e4() -> Result<(), super::IndexError> {
+        let stepped = super::RangeIndex::new(2, 20, 3).unwrap();
+
+        assert_eq!(stepped.searchsorted(1, "left")?, 0);
+        assert_eq!(stepped.searchsorted(2, "left")?, 0);
+        assert_eq!(stepped.searchsorted(2, "right")?, 1);
+        assert_eq!(stepped.searchsorted(8, "left")?, 2);
+        assert_eq!(stepped.searchsorted(9, "left")?, 3);
+        assert_eq!(stepped.searchsorted(20, "left")?, 6);
+
+        let empty = super::RangeIndex::new(5, 5, 1).unwrap();
+        assert_eq!(empty.searchsorted(5, "left")?, 0);
+
+        let descending = super::RangeIndex::new(9, 0, -3).unwrap();
+        assert!(descending.searchsorted(6, "left").is_err());
+
+        Ok(())
     }
 
     #[test]
