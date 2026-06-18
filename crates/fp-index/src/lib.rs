@@ -10265,7 +10265,14 @@ impl RangeIndex {
     where
         F: Fn(&IndexLabel) -> IndexLabel,
     {
-        self.to_flat_index().map(func)
+        let labels = (0..self.len())
+            .map(|position| func(&IndexLabel::Int64(self.value_at(position))))
+            .collect();
+        let mut out = Index::new(labels);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        out
     }
 
     /// Cast range labels to a pandas dtype string, returning a flat Index.
@@ -24926,6 +24933,28 @@ mod tests {
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
         assert!(empty.groupby().is_empty());
+    }
+
+    #[test]
+    fn range_index_map_iterates_direct_labels_80jbg() {
+        let range = super::RangeIndex::new(5, -1, -2).unwrap().set_name("r");
+        let mapped = range.map(|label| match label {
+            IndexLabel::Int64(value) => IndexLabel::Utf8(format!("v{value}")),
+            other => other.clone(),
+        });
+
+        assert_eq!(mapped.name(), Some("r"));
+        assert_eq!(
+            mapped.labels(),
+            &[
+                IndexLabel::Utf8("v5".to_owned()),
+                IndexLabel::Utf8("v3".to_owned()),
+                IndexLabel::Utf8("v1".to_owned())
+            ]
+        );
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert!(empty.map(|label| label.clone()).is_empty());
     }
 
     #[test]
