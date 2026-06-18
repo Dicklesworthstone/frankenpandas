@@ -3546,6 +3546,12 @@ impl Index {
     /// `pd.Index.to_frame(index=False)`.
     #[must_use]
     pub fn to_frame(&self) -> Vec<Vec<IndexLabel>> {
+        if let Some(values) = self.labels.int64_view() {
+            return values
+                .iter()
+                .map(|&value| vec![IndexLabel::Int64(value)])
+                .collect();
+        }
         self.labels
             .iter()
             .map(|label| vec![label.clone()])
@@ -3556,6 +3562,15 @@ impl Index {
     /// values until `fp-frame` owns the richer return type.
     #[must_use]
     pub fn to_series(&self) -> Vec<(IndexLabel, IndexLabel)> {
+        if let Some(values) = self.labels.int64_view() {
+            return values
+                .iter()
+                .map(|&value| {
+                    let label = IndexLabel::Int64(value);
+                    (label.clone(), label)
+                })
+                .collect();
+        }
         self.labels
             .iter()
             .map(|label| (label.clone(), label.clone()))
@@ -18902,6 +18917,58 @@ mod tests {
                 (IndexLabel::from("b"), IndexLabel::from("b")),
             ]
         );
+    }
+
+    #[test]
+    fn int64_frame_series_views_avoid_source_materialization_codb() {
+        let index = Index::from_i64_values(vec![7, -1, 7]).set_name("row");
+        assert!(index.labels.materialized.get().is_none());
+
+        assert_eq!(
+            index.to_frame(),
+            vec![
+                vec![IndexLabel::Int64(7)],
+                vec![IndexLabel::Int64(-1)],
+                vec![IndexLabel::Int64(7)],
+            ]
+        );
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "to_frame should build owned rows from raw Int64 values"
+        );
+
+        assert_eq!(
+            index.to_series(),
+            vec![
+                (IndexLabel::Int64(7), IndexLabel::Int64(7)),
+                (IndexLabel::Int64(-1), IndexLabel::Int64(-1)),
+                (IndexLabel::Int64(7), IndexLabel::Int64(7)),
+            ]
+        );
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "to_series should build owned pairs from raw Int64 values"
+        );
+
+        let materialized = Index::new(vec![
+            IndexLabel::Int64(7),
+            IndexLabel::Int64(-1),
+            IndexLabel::Int64(7),
+        ]);
+        assert_eq!(index.to_frame(), materialized.to_frame());
+        assert_eq!(index.to_series(), materialized.to_series());
+
+        let affine = Index::new_known_unique_int64_affine_range(4, 3, 3).unwrap();
+        assert!(affine.labels.materialized.get().is_none());
+        assert_eq!(
+            affine.to_frame(),
+            vec![
+                vec![IndexLabel::Int64(4)],
+                vec![IndexLabel::Int64(7)],
+                vec![IndexLabel::Int64(10)],
+            ]
+        );
+        assert!(affine.labels.materialized.get().is_none());
     }
 
     #[test]
