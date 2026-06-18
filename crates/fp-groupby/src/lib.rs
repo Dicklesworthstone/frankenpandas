@@ -1581,6 +1581,81 @@ fn try_groupby_count_size_counter(
     Some((out_index, out_values))
 }
 
+/// Numeric generic-key path for `groupby.mean()`.
+///
+/// The generic fallback hashes the same keys, clones every non-missing value
+/// into a per-group `Vec<Scalar>`, then `nanmean` scans each group. Mean only
+/// needs the same group map plus a streaming `to_f64()` sum and count. This
+/// helper deliberately accepts only values that `nanmean` would reduce through
+/// its numeric `to_f64()` fold; Timedelta64 and other non-numeric groups fall
+/// back to the existing vector path so dtype-preserving pandas semantics stay
+/// untouched.
+fn try_groupby_mean_numeric_counter(
+    keys: &[Scalar],
+    values: &[Scalar],
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, (usize, f64, usize)>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, 0.0, 0)
+        });
+
+        if value.is_missing() {
+            continue;
+        }
+        let value = value.to_f64().ok()?;
+        entry.1 += value;
+        entry.2 += 1;
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let (source_idx, sum, count) = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[*source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(if *count == 0 {
+            Scalar::Null(NullKind::NaN)
+        } else {
+            Scalar::Float64(*sum / *count as f64)
+        });
+    }
+
+    Some((out_index, out_values))
+}
+
 pub fn groupby_agg(
     keys: &Series,
     values: &Series,
@@ -1642,6 +1717,17 @@ pub fn groupby_agg(
     // direct-address count/size behavior stays unchanged.
     if let Some((out_index, out_values)) =
         try_groupby_count_size_counter(key_vals, val_vals, func, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key mean only needs a streaming sum and count for
+    // numeric values. Non-numeric or Timedelta values fall back to the vector
+    // path below, preserving dtype-specific pandas compatibility.
+    if matches!(func, AggFunc::Mean)
+        && let Some((out_index, out_values)) =
+            try_groupby_mean_numeric_counter(key_vals, val_vals, options.dropna, options.sort)
     {
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
@@ -5341,6 +5427,117 @@ mod tests {
         assert_eq!(
             first_seen_size.values(),
             &[Scalar::Int64(3), Scalar::Int64(2), Scalar::Int64(1)]
+        );
+    }
+
+    #[test]
+    fn groupby_mean_utf8_counter_path_preserves_null_and_order_semantics() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..6).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            (0..6).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(5),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+
+        let mean = groupby_mean(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(mean.index().labels(), &["a".into(), "b".into(), "c".into()]);
+        assert_eq!(
+            mean.values(),
+            &[
+                Scalar::Float64(5.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN)
+            ]
+        );
+
+        let first_seen = GroupByOptions {
+            dropna: true,
+            sort: false,
+        };
+        let first_seen_mean =
+            groupby_mean(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
+        assert_eq!(
+            first_seen_mean.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            first_seen_mean.values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(5.0),
+                Scalar::Null(NullKind::NaN)
+            ]
+        );
+    }
+
+    #[test]
+    fn groupby_mean_utf8_counter_path_preserves_timedelta_fallback() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..4).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "td",
+            (0..4).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Timedelta64(10),
+                Scalar::Timedelta64(20),
+                Scalar::Timedelta64(30),
+                Scalar::Null(NullKind::NaT),
+            ],
+        )
+        .unwrap();
+
+        let mean = groupby_mean(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(mean.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(
+            mean.values(),
+            &[Scalar::Timedelta64(15), Scalar::Timedelta64(30)]
         );
     }
 }
