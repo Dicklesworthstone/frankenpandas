@@ -10253,12 +10253,28 @@ impl RangeIndex {
 
     /// Get labels for a level. RangeIndex is flat and only accepts level 0.
     pub fn get_level_values(&self, level: usize) -> Result<Index, IndexError> {
-        self.to_flat_index().get_level_values(level)
+        if level == 0 {
+            Ok(self.to_flat_index())
+        } else {
+            Err(IndexError::OutOfBounds {
+                position: level,
+                length: 1,
+            })
+        }
     }
 
     /// Drop a level. RangeIndex is flat, so removing its only level is invalid.
     pub fn droplevel(&self, level: usize) -> Result<Index, IndexError> {
-        self.to_flat_index().droplevel(level)
+        if level == 0 {
+            Err(IndexError::InvalidArgument(
+                "cannot remove the only level from a flat Index".to_owned(),
+            ))
+        } else {
+            Err(IndexError::OutOfBounds {
+                position: level,
+                length: 1,
+            })
+        }
     }
 
     /// Group equal range labels into position buckets.
@@ -23795,6 +23811,41 @@ mod tests {
             cat.get_level_values(1),
             Err(super::IndexError::OutOfBounds {
                 position: 1,
+                length: 1
+            })
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn range_index_level_ops_handle_flat_contract_directly_ckbyh() -> Result<(), super::IndexError> {
+        let range = super::RangeIndex::new(9, 0, -4)?.set_name("row");
+
+        let level_values = range.get_level_values(0)?;
+        assert_eq!(level_values.name(), Some("row"));
+        assert_eq!(level_values.labels.int64_view().unwrap().as_slice(), &[9, 5, 1]);
+        assert!(
+            level_values.labels.materialized.get().is_none(),
+            "RangeIndex::get_level_values should keep typed Int64 output backing"
+        );
+
+        assert!(matches!(
+            range.get_level_values(2),
+            Err(super::IndexError::OutOfBounds {
+                position: 2,
+                length: 1
+            })
+        ));
+        assert!(matches!(
+            range.droplevel(0),
+            Err(super::IndexError::InvalidArgument(message))
+                if message == "cannot remove the only level from a flat Index"
+        ));
+        assert!(matches!(
+            range.droplevel(2),
+            Err(super::IndexError::OutOfBounds {
+                position: 2,
                 length: 1
             })
         ));
