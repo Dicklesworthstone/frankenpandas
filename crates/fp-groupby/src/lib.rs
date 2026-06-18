@@ -2745,6 +2745,38 @@ mod tests {
     }
 
     #[test]
+    fn groupby_min_le_mean_le_max_3obe6() {
+        // Metamorphic (br-frankenpandas-3obe6): per group, min<=mean<=max. Seeded LCG.
+        let mut s: u64 = 0x4c0b_0b2c_2d3e_4f50;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let getf = |c: &[Scalar]| -> Vec<f64> {
+            c.iter().map(|v| match v { Scalar::Int64(x) => *x as f64, Scalar::Float64(x) => *x, _ => f64::NAN }).collect()
+        };
+        let pol = RuntimePolicy::strict();
+        for iter in 0..400u32 {
+            let n = (next() % 16) as usize + 1;
+            let keys: Vec<i64> = (0..n).map(|_| (next() % 4) as i64).collect();
+            let vals: Vec<f64> = (0..n).map(|_| (next() % 200) as f64 / 3.0 - 33.0).collect();
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let ks = Series::from_values("k", idx.clone(), keys.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>()).unwrap();
+            let vs = Series::from_values("v", idx, vals.iter().map(|&x| Scalar::Float64(x)).collect::<Vec<_>>()).unwrap();
+            let mut l = EvidenceLedger::new();
+            let mins = getf(groupby_min(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap().values());
+            let means = getf(groupby_mean(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap().values());
+            let maxs = getf(groupby_max(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap().values());
+            for g in 0..mins.len() {
+                assert!(mins[g] <= means[g] + 1e-9, "min<=mean iter={iter} g={g}");
+                assert!(means[g] <= maxs[g] + 1e-9, "mean<=max iter={iter} g={g}");
+            }
+        }
+    }
+
+    #[test]
     fn groupby_sum_equals_mean_times_count_0czr8() {
         // Metamorphic (br-frankenpandas-0czr8): per group, sum == mean * count.
         // Seeded LCG, no mocks.
