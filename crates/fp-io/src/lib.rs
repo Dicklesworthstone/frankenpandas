@@ -13130,6 +13130,20 @@ mod tests {
     }
 
     #[test]
+    fn csv_write_header_line_order_g9rxa() {
+        // br-frankenpandas-g9rxa: write_csv_string's first line == column names in
+        // column order joined by comma.
+        let idx = vec![0_i64.into(), 1_i64.into()];
+        let col = |name: &str, v: [i64; 2]| {
+            Series::from_values(name, idx.clone(), vec![Scalar::Int64(v[0]), Scalar::Int64(v[1])]).unwrap()
+        };
+        let df = DataFrame::from_series(vec![col("alpha", [1, 2]), col("beta", [3, 4]), col("gamma", [5, 6])]).unwrap();
+        let csv = write_csv_string(&df).expect("write");
+        let header = csv.lines().next().expect("header line");
+        assert_eq!(header, "alpha,beta,gamma", "header order; csv={csv:?}");
+    }
+
+    #[test]
     fn csv_per_column_dtype_inference_me2x3() {
         // br-frankenpandas-me2x3: read_csv infers Int64 for all-int, Float64 for a
         // column containing a decimal, Utf8 for text.
