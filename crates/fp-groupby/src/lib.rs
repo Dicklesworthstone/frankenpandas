@@ -2745,6 +2745,46 @@ mod tests {
     }
 
     #[test]
+    fn groupby_drops_null_key_rows_tr1un() {
+        // br-frankenpandas-tr1un: groupby (dropna=true default) excludes null-key
+        // rows. Keys [a,null,a,b] vals [10,20,30,40] -> a=40, b=40 (null row dropped).
+        let idx: Vec<IndexLabel> = (0..4i64).map(IndexLabel::Int64).collect();
+        let keys = Series::from_values(
+            "k",
+            idx.clone(),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "v",
+            idx,
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)],
+        )
+        .unwrap();
+        let mut led = EvidenceLedger::new();
+        let out = groupby_sum(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut led,
+        )
+        .unwrap();
+        // Null-key group excluded; a and b only.
+        assert_eq!(out.len(), 2, "null-key group dropped");
+        assert_eq!(
+            out.index().labels(),
+            &[IndexLabel::Utf8("a".to_owned()), IndexLabel::Utf8("b".to_owned())]
+        );
+        assert_eq!(out.values(), &[Scalar::Int64(40), Scalar::Int64(40)], "sums exclude null-key value 20");
+    }
+
+    #[test]
     fn groupby_var_std_two_pass_oracle_7io1l() {
         use std::collections::BTreeMap;
 
