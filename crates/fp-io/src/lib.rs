@@ -14935,6 +14935,29 @@ mod tests {
     }
 
     #[test]
+    fn read_csv_mixed_quoted_unquoted_numeric_infers_numeric_3gen4() {
+        // br-frankenpandas-3gen4: quoting is per-field CSV syntax stripped before
+        // type inference, so a column mixing quoted + unquoted numbers still
+        // infers a numeric dtype (pandas parity).
+        let int_col = read_csv_str("x\n1\n\"2\"\n3\n").expect("read int");
+        let xi = int_col.column("x").expect("x");
+        assert_eq!(xi.dtype(), DType::Int64, "mixed quoted/unquoted ints -> Int64");
+        assert_eq!(
+            xi.values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+
+        // Mixed int + quoted float -> Float64 (one float promotes the column).
+        let float_col = read_csv_str("y\n1\n\"2.5\"\n3\n").expect("read float");
+        let yf = float_col.column("y").expect("y");
+        assert_eq!(yf.dtype(), DType::Float64, "mixed int + quoted float -> Float64");
+        assert_eq!(
+            yf.values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(2.5), Scalar::Float64(3.0)]
+        );
+    }
+
+    #[test]
     fn read_csv_simple_typed_numeric_fast_path_rejects_quoted_fields() {
         let input = "x\n\"1.5\"\n";
         let headers = vec!["x".to_owned()];
