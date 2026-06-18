@@ -4,6 +4,43 @@ Purpose: record every cod-b optimization attempt in the new performance campaign
 including dead ends, so future agents do not retry failed levers without a concrete
 retry predicate.
 
+## 2026-06-18 - br-frankenpandas-uza04.199 - CategoricalIndex unique/drop_duplicates rank bitset
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: replace `CategoricalIndex::{unique,drop_duplicates}` full-label
+  `FxHashSet` construction with first-seen output construction over
+  category-rank bitsets plus invalid-label fallback sets.
+- Baseline comparator: current `unique` hashes every full label string to decide
+  first-seen output membership, and `drop_duplicates` forwards through that same
+  hash path even when the categorical dictionary already supplies compact valid
+  label identity.
+- Graveyard mapping: bitmap membership and witness-carry specialization:
+  reuse the categorical dictionary as a rank witness, turn valid-label
+  membership into one bit per category, and retain string hashing only for
+  impossible deserialized labels or oversized unused category universes.
+- Alien-artifact proof obligation: first-seen order is still driven by the input
+  label scan; valid labels push exactly once per first category rank; invalid
+  labels push exactly once per first string value; categories, ordered flag, and
+  name are copied unchanged. Oversized category domains keep the old direct
+  label-hash fallback so sparse metadata cannot dominate the lane.
+- Guard added:
+  `categorical_index_unique_drop_duplicates_use_rank_bitset_uza04199`, checking
+  first-seen output order, category/name/ordered propagation, invalid-label
+  fallback, `drop_duplicates()==unique`, and oversized-category fallback against
+  a local first-seen label oracle.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is focused
+  criterion for `CategoricalIndex::{unique,drop_duplicates}` on repeated
+  low-cardinality realistic categorical indexes versus the legacy pandas
+  original and a pre-patch full-label hash-set baseline.
+- Retry predicate if rejected: only retry if same-host profiling shows
+  categorical label-producing uniqueness above 0.1% self-time and allocation
+  profiling proves label hashing, not category-map construction or output
+  cloning, is the residual.
+
 ## 2026-06-18 - br-frankenpandas-uza04.198 - CategoricalIndex duplicated rank bitset
 
 - Status: implemented, benchmark verdict pending batch-test.

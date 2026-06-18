@@ -11361,6 +11361,35 @@ impl CategoricalIndex {
         unique
     }
 
+    fn unique_labels_by_hash(&self) -> Vec<String> {
+        let mut seen = FxHashSet::<&str>::default();
+        let mut uniques = Vec::<String>::new();
+        for label in &self.labels {
+            if seen.insert(label.as_str()) {
+                uniques.push(label.clone());
+            }
+        }
+        uniques
+    }
+
+    fn unique_labels_by_category_rank(&self) -> Vec<String> {
+        let map = self.category_index_map();
+        let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
+        let mut invalid_seen: FxHashSet<&str> = FxHashSet::default();
+        let mut uniques =
+            Vec::<String>::with_capacity(self.labels.len().min(self.categories.len()));
+        for label in &self.labels {
+            if let Some(rank) = map.get(label.as_str()).copied() {
+                if mark_category_rank(&mut seen_ranks, rank) {
+                    uniques.push(label.clone());
+                }
+            } else if invalid_seen.insert(label.as_str()) {
+                uniques.push(label.clone());
+            }
+        }
+        uniques
+    }
+
     fn duplicated_by_hash(&self, keep: DuplicateKeep) -> Vec<bool> {
         let n = self.labels.len();
         let mut result = vec![false; n];
@@ -12420,15 +12449,13 @@ impl CategoricalIndex {
     /// ordered flag rolls through. The result keeps the index name.
     #[must_use]
     pub fn unique(&self) -> Self {
-        let mut seen = FxHashSet::<&String>::default();
-        let mut uniques = Vec::<String>::new();
-        for label in &self.labels {
-            if seen.insert(label) {
-                uniques.push(label.clone());
-            }
-        }
+        let labels = if self.category_rank_unique_scan_is_bounded() {
+            self.unique_labels_by_category_rank()
+        } else {
+            self.unique_labels_by_hash()
+        };
         Self {
-            labels: uniques,
+            labels,
             categories: self.categories.clone(),
             ordered: self.ordered,
             name: self.name.clone(),
@@ -27083,6 +27110,84 @@ mod tests {
         };
         assert!(!sparse.category_rank_unique_scan_is_bounded());
         assert_matches_flat(&sparse);
+    }
+
+    #[test]
+    fn categorical_index_unique_drop_duplicates_use_rank_bitset_uza04199() {
+        fn first_seen_oracle(labels: &[String]) -> Vec<String> {
+            let mut seen = std::collections::HashSet::<&str>::new();
+            let mut unique = Vec::new();
+            for label in labels {
+                if seen.insert(label.as_str()) {
+                    unique.push(label.clone());
+                }
+            }
+            unique
+        }
+
+        fn assert_unique_matches_oracle(index: &super::CategoricalIndex) {
+            let expected = first_seen_oracle(index.labels());
+            let unique = index.unique();
+            assert_eq!(unique.labels(), expected.as_slice());
+            assert_eq!(unique.categories(), index.categories());
+            assert_eq!(unique.ordered(), index.ordered());
+            assert_eq!(unique.name(), index.name());
+            assert_eq!(index.drop_duplicates().labels(), unique.labels());
+        }
+
+        let categories = vec![
+            "low".to_owned(),
+            "med".to_owned(),
+            "high".to_owned(),
+            "unused".to_owned(),
+        ];
+        let repeated = super::CategoricalIndex::with_categories(
+            vec![
+                "low".to_owned(),
+                "high".to_owned(),
+                "low".to_owned(),
+                "med".to_owned(),
+                "high".to_owned(),
+                "low".to_owned(),
+            ],
+            categories,
+            true,
+        )
+        .expect("categorical index")
+        .set_name("priority");
+        assert!(repeated.category_rank_unique_scan_is_bounded());
+        assert_unique_matches_oracle(&repeated);
+
+        let invalid = super::CategoricalIndex {
+            labels: vec![
+                "ghost".to_owned(),
+                "low".to_owned(),
+                "ghost".to_owned(),
+                "other".to_owned(),
+                "low".to_owned(),
+            ],
+            categories: vec!["low".to_owned()],
+            ordered: true,
+            name: Some("dirty".to_owned()),
+        };
+        assert!(invalid.category_rank_unique_scan_is_bounded());
+        assert_unique_matches_oracle(&invalid);
+
+        let mut large_categories = vec!["a".to_owned(), "b".to_owned()];
+        large_categories.extend((0..50).map(|value| format!("unused-{value}")));
+        let sparse = super::CategoricalIndex {
+            labels: vec![
+                "a".to_owned(),
+                "b".to_owned(),
+                "a".to_owned(),
+                "b".to_owned(),
+            ],
+            categories: large_categories,
+            ordered: false,
+            name: None,
+        };
+        assert!(!sparse.category_rank_unique_scan_is_bounded());
+        assert_unique_matches_oracle(&sparse);
     }
 
     #[test]
