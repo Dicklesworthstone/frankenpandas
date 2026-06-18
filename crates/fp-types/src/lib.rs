@@ -5675,6 +5675,84 @@ mod tests {
     }
 
     #[test]
+    fn nannunique_matches_scalar_bucket_oracle_elvbg() {
+        // Differential vs independent scalar unique-bucket oracle
+        // (br-frankenpandas-elvbg). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            *seed
+        }
+
+        fn same_bucket(left: &Scalar, right: &Scalar) -> bool {
+            match (left, right) {
+                (Scalar::Float64(left), Scalar::Float64(right)) => {
+                    let left = if *left == 0.0 { 0.0 } else { *left };
+                    let right = if *right == 0.0 { 0.0 } else { *right };
+                    left.to_bits() == right.to_bits()
+                }
+                _ => left == right,
+            }
+        }
+
+        fn expected_nunique(values: &[Scalar]) -> i64 {
+            let mut seen = Vec::<Scalar>::new();
+            for value in values {
+                if value.is_missing() {
+                    continue;
+                }
+                if !seen.iter().any(|existing| same_bucket(existing, value)) {
+                    seen.push(value.clone());
+                }
+            }
+            seen.len() as i64
+        }
+
+        fn assert_nannunique(case: usize, values: &[Scalar]) {
+            assert_eq!(
+                super::nannunique(values),
+                Scalar::Int64(expected_nunique(values)),
+                "case={case}: nannunique mismatch for {values:?}"
+            );
+        }
+
+        assert_nannunique(
+            usize::MAX,
+            &[
+                Scalar::Float64(-0.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(f64::NAN),
+                Scalar::Null(NullKind::Null),
+                Scalar::Timedelta64(i64::MIN),
+            ],
+        );
+
+        let mut seed = 0x0e1b_60d0_b5e7_u64;
+        for case in 0..320 {
+            let len = (next(&mut seed) % 97 + 1) as usize;
+            let mut values = Vec::with_capacity(len);
+            for pos in 0..len {
+                let raw = (next(&mut seed) % 1_001) as i64 - 500;
+                values.push(match next(&mut seed) % 11 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 37),
+                    5 => Scalar::Float64(raw as f64 / 19.0),
+                    6 => Scalar::Float64(0.0),
+                    7 => Scalar::Float64(-0.0),
+                    8 => Scalar::Utf8(format!("uniq_{}", pos % 13)),
+                    9 => Scalar::Utf8(String::new()),
+                    _ => Scalar::Timedelta64(raw % 41),
+                });
+            }
+            assert_nannunique(case, &values);
+        }
+    }
+
+    #[test]
     fn nanmean_basic() {
         let vals = vec![
             Scalar::Float64(2.0),
