@@ -2745,6 +2745,32 @@ mod tests {
     }
 
     #[test]
+    fn groupby_count_vs_size_null_values_z1o82() {
+        // br-frankenpandas-z1o82: count excludes null values; size counts all rows.
+        let idx: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+        let keys = Series::from_values(
+            "k",
+            idx.clone(),
+            vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "v",
+            idx,
+            vec![Scalar::Float64(10.0), Scalar::Float64(f64::NAN), Scalar::Float64(20.0)],
+        )
+        .unwrap();
+        let pol = RuntimePolicy::strict();
+        let mut l1 = EvidenceLedger::new();
+        let mut l2 = EvidenceLedger::new();
+        let count = groupby_count(&keys, &values, GroupByOptions::default(), &pol, &mut l1).unwrap();
+        let size = groupby_size(&keys, &values, GroupByOptions::default(), &pol, &mut l2).unwrap();
+        // a: count 1 (NaN excluded), size 2; b: count 1, size 1.
+        assert_eq!(count.values(), &[Scalar::Int64(1), Scalar::Int64(1)], "count excludes NaN");
+        assert_eq!(size.values(), &[Scalar::Int64(2), Scalar::Int64(1)], "size counts all rows");
+    }
+
+    #[test]
     fn groupby_drops_null_key_rows_tr1un() {
         // br-frankenpandas-tr1un: groupby (dropna=true default) excludes null-key
         // rows. Keys [a,null,a,b] vals [10,20,30,40] -> a=40, b=40 (null row dropped).
