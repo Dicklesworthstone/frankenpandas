@@ -2653,6 +2653,25 @@ impl Index {
     /// Matches `pd.Index.drop(labels)`.
     #[must_use]
     pub fn drop_labels(&self, labels_to_drop: &[IndexLabel]) -> Self {
+        if let Some(values) = self.labels.int64_view() {
+            let drop_set: FxHashSet<i64> = labels_to_drop
+                .iter()
+                .filter_map(|label| match label {
+                    IndexLabel::Int64(value) => Some(*value),
+                    _ => None,
+                })
+                .collect();
+            let kept = if drop_set.is_empty() {
+                values.as_ref().clone()
+            } else {
+                values
+                    .iter()
+                    .copied()
+                    .filter(|value| !drop_set.contains(value))
+                    .collect()
+            };
+            return self.propagate_name(Self::from_i64_values(kept));
+        }
         self.propagate_name(Self::new(
             self.labels
                 .iter()
@@ -17505,6 +17524,54 @@ mod tests {
         assert_eq!(dropped.len(), 2);
         assert_eq!(dropped.labels()[0], IndexLabel::Utf8("a".into()));
         assert_eq!(dropped.labels()[1], IndexLabel::Utf8("c".into()));
+    }
+
+    #[test]
+    fn int64_drop_labels_preserves_typed_backing_codb() {
+        let index = Index::from_i64_values(vec![1, 2, 1, 3, 4]).set_name("row");
+        assert!(index.labels.materialized.get().is_none());
+
+        let dropped = index.drop_labels(&[IndexLabel::Int64(1), IndexLabel::Utf8("1".into())]);
+
+        assert_eq!(dropped.name(), Some("row"));
+        assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[2, 3, 4]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            dropped.labels.materialized.get().is_none(),
+            "typed Int64 drop_labels should keep typed output backing"
+        );
+
+        let materialized = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(4),
+        ]);
+        assert_eq!(
+            dropped.labels(),
+            materialized
+                .drop_labels(&[IndexLabel::Int64(1), IndexLabel::Utf8("1".into())])
+                .labels()
+        );
+    }
+
+    #[test]
+    fn affine_int64_drop_labels_preserves_typed_backing_codb() {
+        let index = Index::new_known_unique_int64_affine_range(10, -2, 5)
+            .unwrap()
+            .set_name("axis");
+        assert!(index.labels.materialized.get().is_none());
+
+        let dropped = index.drop_labels(&[IndexLabel::Int64(8), IndexLabel::Int64(2)]);
+
+        assert_eq!(dropped.name(), Some("axis"));
+        assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[10, 6, 4]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            dropped.labels.materialized.get().is_none(),
+            "affine Int64 drop_labels should gather raw values into typed output"
+        );
     }
 
     #[test]
