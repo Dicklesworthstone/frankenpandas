@@ -8909,6 +8909,49 @@ mod tests {
     }
 
     #[test]
+    fn merge_indicator_column_d3ec6() {
+        use std::collections::BTreeSet;
+        // br-frankenpandas-d3ec6: outer-join indicator marks left_only/both/right_only.
+        let left = DataFrame::from_dict(
+            &["k"],
+            vec![("k", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["k"],
+            vec![("k", vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)])],
+        )
+        .expect("right");
+        let opts = super::MergeExecutionOptions {
+            indicator_name: Some("_merge".to_owned()),
+            ..Default::default()
+        };
+        let m = super::merge_dataframes_on_with_options(
+            &left, &right, &["k"], &["k"], JoinType::Outer, opts,
+        )
+        .expect("merge");
+
+        let keys = merged_values(&m, "k").expect("k");
+        let ind = merged_values(&m, "_merge").expect("_merge present");
+        let lset: BTreeSet<i64> = [1, 2, 3].into_iter().collect();
+        let rset: BTreeSet<i64> = [2, 3, 4].into_iter().collect();
+        assert_eq!(keys.len(), 4, "outer keys = union");
+        for i in 0..keys.len() {
+            let k = match &keys[i] {
+                Scalar::Int64(v) => *v,
+                _ => i64::MIN,
+            };
+            let exp = match (lset.contains(&k), rset.contains(&k)) {
+                (true, true) => "both",
+                (true, false) => "left_only",
+                (false, true) => "right_only",
+                (false, false) => "??",
+            };
+            assert_eq!(ind[i], Scalar::Utf8(exp.to_owned()), "indicator at key {k}");
+        }
+    }
+
+    #[test]
     fn merge_overlapping_columns_suffixed_vb10q() {
         // br-frankenpandas-vb10q: a non-key column present in both frames is
         // suffixed _x (left) / _y (right) on merge.
