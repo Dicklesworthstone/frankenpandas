@@ -13130,6 +13130,30 @@ mod tests {
     }
 
     #[test]
+    fn csv_bool_column_round_trip_w3dja() {
+        // br-frankenpandas-w3dja: Bool column survives write_csv_string -> read_csv_str
+        // (True/False spelling on write + case-insensitive bool inference on read).
+        let bools = [true, false, true, false, true];
+        let df = DataFrame::from_series(vec![Series::from_values(
+            "flag",
+            (0..bools.len() as i64).map(Into::into).collect::<Vec<_>>(),
+            bools.iter().map(|&b| Scalar::Bool(b)).collect::<Vec<_>>(),
+        )
+        .unwrap()])
+        .unwrap();
+
+        let csv = write_csv_string(&df).expect("write");
+        let back = read_csv_str(&csv).expect("read");
+        let col = back.column("flag").expect("flag");
+        assert_eq!(col.dtype(), DType::Bool, "round-trip keeps Bool; csv={csv:?}");
+        assert_eq!(
+            col.values(),
+            &bools.iter().map(|&b| Scalar::Bool(b)).collect::<Vec<_>>()[..],
+            "bool values preserved"
+        );
+    }
+
+    #[test]
     fn csv_read_write_read_idempotent_5gfjz() {
         // Round-trip fixed point (br-frankenpandas-5gfjz): read -> write -> read
         // yields an identical frame. Simple cells (ints + single letters, no
