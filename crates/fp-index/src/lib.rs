@@ -2597,6 +2597,31 @@ impl Index {
 
     #[must_use]
     pub fn from_range(start: i64, stop: i64, step: i64) -> Self {
+        let len = if step > 0 {
+            if start >= stop {
+                Some(0_i128)
+            } else {
+                let distance = stop as i128 - start as i128;
+                let step = step as i128;
+                Some((distance + step - 1) / step)
+            }
+        } else if step < 0 {
+            if start <= stop {
+                Some(0_i128)
+            } else {
+                let distance = start as i128 - stop as i128;
+                let step = -(step as i128);
+                Some((distance + step - 1) / step)
+            }
+        } else {
+            Some(0_i128)
+        };
+        if let Some(len) = len.and_then(|value| usize::try_from(value).ok())
+            && let Some(index) = Self::new_known_unique_int64_affine_range(start, step, len)
+        {
+            return index;
+        }
+
         let mut labels = Vec::new();
         let mut val = start;
         if step > 0 {
@@ -17269,6 +17294,18 @@ mod tests {
     fn from_range_basic() {
         let index = Index::from_range(0, 5, 1);
         assert_eq!(
+            index.labels.int64_affine_range(),
+            Some(Int64AffineLabels {
+                start: 0,
+                step: 1,
+                len: 5
+            })
+        );
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "from_range should keep unit Int64 range labels lazy"
+        );
+        assert_eq!(
             index.labels(),
             &[
                 IndexLabel::Int64(0),
@@ -17284,6 +17321,18 @@ mod tests {
     fn from_range_step_2() {
         let index = Index::from_range(0, 10, 3);
         assert_eq!(
+            index.labels.int64_affine_range(),
+            Some(Int64AffineLabels {
+                start: 0,
+                step: 3,
+                len: 4
+            })
+        );
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "from_range should keep strided Int64 labels lazy"
+        );
+        assert_eq!(
             index.labels(),
             &[
                 IndexLabel::Int64(0),
@@ -17298,6 +17347,18 @@ mod tests {
     fn from_range_negative_step() {
         let index = Index::from_range(5, 0, -2);
         assert_eq!(
+            index.labels.int64_affine_range(),
+            Some(Int64AffineLabels {
+                start: 5,
+                step: -2,
+                len: 3
+            })
+        );
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "from_range should keep descending Int64 labels lazy"
+        );
+        assert_eq!(
             index.labels(),
             &[
                 IndexLabel::Int64(5),
@@ -17310,6 +17371,18 @@ mod tests {
     #[test]
     fn from_range_empty_when_step_zero() {
         let index = Index::from_range(0, 5, 0);
+        assert_eq!(
+            index.labels.int64_affine_range(),
+            Some(Int64AffineLabels {
+                start: 0,
+                step: 0,
+                len: 0
+            })
+        );
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "from_range step=0 should keep empty Int64 labels lazy"
+        );
         assert!(index.is_empty());
     }
 
