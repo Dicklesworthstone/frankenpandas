@@ -6112,6 +6112,46 @@ mod tests {
     }
 
     #[test]
+    fn eval_str_arithmetic_precedence_3j187() {
+        // End-to-end correctness oracle (br-frankenpandas-3j187): parse + evaluate
+        // arithmetic over a small Int64 frame, asserting per-row results computed
+        // by hand. Int operands keep Int64 (exact — no float fragility).
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let col = |name: &str, vals: Vec<i64>| {
+            fp_frame::Series::from_values(
+                name,
+                (0..vals.len() as i64).map(|i| i.into()).collect::<Vec<_>>(),
+                vals.into_iter().map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        // Row0: a=10,b=3,c=2  Row1: a=20,b=4,c=5
+        let frame = fp_frame::DataFrame::from_series(vec![
+            col("a", vec![10, 20]),
+            col("b", vec![3, 4]),
+            col("c", vec![2, 5]),
+        ])
+        .unwrap();
+
+        let i = |x: i64, y: i64| vec![Scalar::Int64(x), Scalar::Int64(y)];
+        let mut ev = |e: &str| super::eval_str(e, &frame, &policy, &mut ledger).unwrap().values().to_vec();
+
+        assert_eq!(ev("a + b * c"), i(16, 40), "* binds tighter than +");
+        assert_eq!(ev("(a + b) * c"), i(26, 120), "parentheses override precedence");
+        assert_eq!(ev("a - b - c"), i(5, 11), "- is left-associative");
+        assert_eq!(ev("a * b + c"), i(32, 85), "* before +");
+        assert_eq!(ev("a % b"), i(1, 0), "modulo");
+        assert_eq!(ev("a // b"), i(3, 5), "floor division");
+        assert_eq!(ev("-a"), i(-10, -20), "unary minus");
+        assert_eq!(
+            ev("a > b"),
+            vec![Scalar::Bool(true), Scalar::Bool(true)],
+            "comparison yields bool"
+        );
+    }
+
+    #[test]
     fn query_str_chained_comparison_and_ops_match_pandas() {
         let policy = RuntimePolicy::hardened(Some(100));
         let mut ledger = EvidenceLedger::new();
