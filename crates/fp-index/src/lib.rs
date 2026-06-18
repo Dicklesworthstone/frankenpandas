@@ -1121,6 +1121,10 @@ fn fixed_width_label_memory_usage(len: usize, width: usize) -> usize {
     len.saturating_mul(width)
 }
 
+fn saturating_usize_sum(values: impl IntoIterator<Item = usize>) -> usize {
+    values.into_iter().fold(0usize, usize::saturating_add)
+}
+
 impl Index {
     #[must_use]
     pub fn new(labels: Vec<IndexLabel>) -> Self {
@@ -11001,12 +11005,17 @@ impl CategoricalIndex {
 
     #[must_use]
     pub fn memory_usage(&self, deep: bool) -> usize {
-        let fixed = (self.labels.len() + self.categories.len()) * std::mem::size_of::<String>();
+        let fixed = fixed_width_label_memory_usage(
+            self.labels.len().saturating_add(self.categories.len()),
+            std::mem::size_of::<String>(),
+        );
         if deep {
             fixed
-                + self.labels.iter().map(String::len).sum::<usize>()
-                + self.categories.iter().map(String::len).sum::<usize>()
-                + self.name.as_ref().map_or(0, String::len)
+                .saturating_add(saturating_usize_sum(self.labels.iter().map(String::len)))
+                .saturating_add(saturating_usize_sum(
+                    self.categories.iter().map(String::len),
+                ))
+                .saturating_add(self.name.as_ref().map_or(0, String::len))
         } else {
             fixed
         }
@@ -16555,6 +16564,25 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn categorical_index_memory_usage_saturates_uza04180() -> Result<(), super::IndexError> {
+        let categorical = CategoricalIndex::from_values(
+            vec!["low".to_owned(), "high".to_owned(), "low".to_owned()],
+            true,
+        )
+        .set_name("priority");
+        let fixed = 5 * std::mem::size_of::<String>();
+
+        assert_eq!(categorical.nbytes(), fixed);
+        assert_eq!(categorical.memory_usage(false), fixed);
+        assert_eq!(
+            categorical.memory_usage(true),
+            fixed + "lowhighlow".len() + "lowhigh".len() + "priority".len()
+        );
+        assert_eq!(super::saturating_usize_sum([usize::MAX, 1]), usize::MAX);
+        Ok(())
     }
 
     #[test]
