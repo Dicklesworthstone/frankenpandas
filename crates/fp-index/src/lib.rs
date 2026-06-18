@@ -10252,7 +10252,11 @@ impl RangeIndex {
     /// Group equal range labels into position buckets.
     #[must_use]
     pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
-        self.to_flat_index().groupby()
+        let mut groups = HashMap::with_capacity(self.len());
+        for position in 0..self.len() {
+            groups.insert(IndexLabel::Int64(self.value_at(position)), vec![position]);
+        }
+        groups
     }
 
     /// Apply a function to each range label, returning a flat Index.
@@ -24907,6 +24911,21 @@ mod tests {
         let nonzero = super::RangeIndex::new(2, 8, 2).unwrap();
         assert!(nonzero.any());
         assert!(nonzero.all());
+    }
+
+    #[test]
+    fn range_index_groupby_builds_direct_buckets_wvlfh() {
+        let descending = super::RangeIndex::new(8, 0, -2).unwrap();
+        let groups = descending.groupby();
+
+        assert_eq!(groups[&IndexLabel::Int64(8)], vec![0]);
+        assert_eq!(groups[&IndexLabel::Int64(6)], vec![1]);
+        assert_eq!(groups[&IndexLabel::Int64(4)], vec![2]);
+        assert_eq!(groups[&IndexLabel::Int64(2)], vec![3]);
+        assert_eq!(groups.len(), 4);
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert!(empty.groupby().is_empty());
     }
 
     #[test]
