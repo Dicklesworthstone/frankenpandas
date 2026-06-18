@@ -13100,6 +13100,41 @@ mod tests {
     };
 
     #[test]
+    fn csv_read_write_read_idempotent_5gfjz() {
+        // Round-trip fixed point (br-frankenpandas-5gfjz): read -> write -> read
+        // yields an identical frame. Simple cells (ints + single letters, no
+        // special chars) avoid quoting/precision edges. Seeded LCG, no mocks.
+        let mut st: u64 = 0xc5f0_1d2e_3a4b_5c6d;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for iter in 0..400u32 {
+            let rows = (next() % 6) as usize + 1;
+            let mut csv = String::from("a,b,c\n");
+            for _ in 0..rows {
+                let x = (next() % 100) as i64;
+                let y = (next() % 1000) as i64;
+                let letter = (b'a' + (next() % 5) as u8) as char;
+                csv.push_str(&format!("{x},{y},{letter}\n"));
+            }
+            let f1 = read_csv_str(&csv).expect("read1");
+            let s2 = write_csv_string(&f1).expect("write");
+            let f2 = read_csv_str(&s2).expect("read2");
+            assert_eq!(f1.len(), f2.len(), "row count iter={iter} csv={csv:?}");
+            for name in ["a", "b", "c"] {
+                assert_eq!(
+                    f1.column(name).expect("c1").values(),
+                    f2.column(name).expect("c2").values(),
+                    "col {name} iter={iter} csv={csv:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn csv_round_trip_preserves_null_and_numeric_shape() {
         let input = "id,value\n1,10\n2,\n3,3.5\n";
         let frame = read_csv_str(input).expect("read");
