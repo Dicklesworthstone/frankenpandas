@@ -13130,6 +13130,30 @@ mod tests {
     }
 
     #[test]
+    fn csv_embedded_newline_in_quoted_field_ftqon() {
+        // br-frankenpandas-ftqon: a quoted field containing a newline parses as ONE
+        // multiline value (RFC4180), not two rows; and round-trips.
+        let input = "col\n\"line1\nline2\"\n";
+        let df = read_csv_str(input).expect("read");
+        assert_eq!(df.len(), 1, "embedded newline stays one row; df={df:?}");
+        let col = df.column("col").expect("col");
+        assert_eq!(
+            col.values()[0],
+            Scalar::Utf8("line1\nline2".to_owned()),
+            "multiline value intact"
+        );
+        // Round-trip: writing then reading preserves the multiline value.
+        let csv = write_csv_string(&df).expect("write");
+        let back = read_csv_str(&csv).expect("reread");
+        assert_eq!(back.len(), 1, "round-trip row count");
+        assert_eq!(
+            back.column("col").expect("col").values()[0],
+            Scalar::Utf8("line1\nline2".to_owned()),
+            "round-trip value"
+        );
+    }
+
+    #[test]
     fn csv_bool_column_round_trip_w3dja() {
         // br-frankenpandas-w3dja: Bool column survives write_csv_string -> read_csv_str
         // (True/False spelling on write + case-insensitive bool inference on read).
