@@ -9933,6 +9933,66 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_ordinal_matches_seeded_epoch_oracle_l2f0p() {
+        const EPOCH_ORDINAL: i64 = 719_163;
+        const DAY: i64 = Timedelta::NANOS_PER_DAY;
+
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(3202034522624059733)
+                .wrapping_add(4354685564936845319);
+            *seed
+        }
+
+        fn assert_ordinal_case(case: usize, day_offset: i64, subday_nanos: i64) {
+            let nanos = day_offset
+                .saturating_mul(DAY)
+                .saturating_add(subday_nanos);
+            let ts = Timestamp::from_nanos(nanos);
+            let expected_day_offset = nanos.div_euclid(DAY);
+            let expected_ordinal = EPOCH_ORDINAL + expected_day_offset;
+
+            assert_eq!(
+                ts.toordinal(),
+                Some(expected_ordinal),
+                "case {case}: toordinal"
+            );
+
+            let midnight = Timestamp::fromordinal(expected_ordinal);
+            assert_eq!(
+                midnight.nanos,
+                expected_day_offset * DAY,
+                "case {case}: fromordinal nanos"
+            );
+            assert_eq!(
+                midnight.toordinal(),
+                Some(expected_ordinal),
+                "case {case}: fromordinal roundtrip"
+            );
+        }
+
+        assert_eq!(Timestamp::nat().toordinal(), None);
+        assert!(Timestamp::fromordinal(0).is_nat());
+        assert!(Timestamp::fromordinal(-1).is_nat());
+
+        assert_ordinal_case(usize::MAX, -1, DAY - 1);
+        assert_ordinal_case(usize::MAX - 1, 0, -1);
+        assert_ordinal_case(usize::MAX - 2, 19_723, 0);
+
+        let mut seed = 0x1f20_f0d1_0a11_0d1e_u64;
+        for case in 0..260 {
+            let day_offset = (next(&mut seed) % 40_001) as i64 - 10_000;
+            let subday_nanos = match case % 7 {
+                0 => 0,
+                1 => DAY - 1,
+                2 => -1,
+                _ => (next(&mut seed) % (2 * DAY as u64 - 1)) as i64 - (DAY - 1),
+            };
+            assert_ordinal_case(case, day_offset, subday_nanos);
+        }
+    }
+
+    #[test]
     fn timestamp_parse_iso8601_date_only() {
         let ts = Timestamp::parse("2024-01-15").unwrap();
         assert_eq!(ts.year(), Some(2024));
