@@ -2798,7 +2798,10 @@ impl Timestamp {
     }
 
     fn parse_time(s: &str) -> Option<(u32, u32, u32, u64)> {
-        let (time_str, frac_str) = s.split_once('.').unwrap_or((s, ""));
+        let (time_str, frac_str) = match s.split_once('.') {
+            Some((time, frac)) => (time, Some(frac)),
+            None => (s, None),
+        };
         let parts: Vec<&str> = time_str.split(':').collect();
         if parts.is_empty() || parts.len() > 3 {
             return None;
@@ -2811,11 +2814,16 @@ impl Timestamp {
             return None;
         }
 
-        let nanos = if frac_str.is_empty() {
-            0
-        } else {
-            let padded = format!("{:0<9}", &frac_str[..frac_str.len().min(9)]);
-            padded.parse::<u64>().unwrap_or(0)
+        let nanos = match frac_str {
+            None => 0,
+            Some(frac) => {
+                if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                let truncated = &frac[..frac.len().min(9)];
+                let padded = format!("{truncated:0<9}");
+                padded.parse::<u64>().ok()?
+            }
         };
 
         Some((hour, minute, second, nanos))
@@ -10098,6 +10106,19 @@ mod tests {
         assert!(Timestamp::parse("not a date").is_err());
         assert!(Timestamp::parse("2024-13-01").is_err()); // invalid month
         assert!(Timestamp::parse("2024-01-32").is_err()); // invalid day
+    }
+
+    #[test]
+    fn timestamp_parse_rejects_invalid_fractional_seconds_87se2() {
+        assert!(Timestamp::parse("2024-01-15T10:30:45.").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45.abc").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45.-1").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45.１２３").is_err());
+
+        let ts = Timestamp::parse("2024-01-15T10:30:45.123456789987").unwrap();
+        assert_eq!(ts.second(), Some(45));
+        assert_eq!(ts.microsecond(), Some(123456));
+        assert_eq!(ts.nanosecond(), Some(789));
     }
 
     #[test]
