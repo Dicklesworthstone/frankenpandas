@@ -10045,7 +10045,9 @@ impl RangeIndex {
         if len == 0 {
             return None;
         }
-        let last = self.start + (len as i64 - 1) * self.step;
+        let last_offset = len - 1;
+        let last = i128::from(self.start) + (last_offset as i128) * i128::from(self.step);
+        let last = i64::try_from(last).ok()?;
         Some((self.start, last))
     }
 
@@ -10151,9 +10153,9 @@ impl RangeIndex {
         let Some((first, last)) = self.first_last() else {
             return 0;
         };
-        let n = i128::from(len as i64);
+        let n = len as i128;
         let total = (i128::from(first) + i128::from(last)) * n / 2;
-        i64::try_from(total).unwrap_or(i64::MAX)
+        i64::try_from(total).unwrap_or(if total > 0 { i64::MAX } else { i64::MIN })
     }
 
     /// Mean of all values, matching `pd.RangeIndex.mean()`. Returns `None`
@@ -23566,6 +23568,21 @@ mod tests {
 
         let overflow = super::RangeIndex::new(i64::MAX, i64::MAX - 2, -1).unwrap();
         assert_eq!(overflow.prod(), i64::MAX);
+    }
+
+    #[test]
+    fn range_index_reductions_use_wide_length_uza04173() {
+        let asc = super::RangeIndex::new(i64::MIN, i64::MAX, 1).unwrap();
+        assert_eq!(asc.min(), Some(i64::MIN));
+        assert_eq!(asc.max(), Some(i64::MAX - 1));
+        assert_eq!(asc.sum(), i64::MIN);
+        assert_eq!(asc.mean(), Some(-1.0));
+
+        let desc = super::RangeIndex::new(i64::MAX, i64::MIN, -1).unwrap();
+        assert_eq!(desc.min(), Some(i64::MIN + 1));
+        assert_eq!(desc.max(), Some(i64::MAX));
+        assert_eq!(desc.sum(), 0);
+        assert_eq!(desc.mean(), Some(0.0));
     }
 
     #[test]
