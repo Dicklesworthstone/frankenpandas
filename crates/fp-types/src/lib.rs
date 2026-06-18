@@ -6868,6 +6868,120 @@ mod tests {
     }
 
     #[test]
+    fn nanptp_matches_numeric_and_timedelta_oracle_affjt() {
+        // Differential vs independent max-min oracles
+        // (br-frankenpandas-affjt). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(3202034522624059733)
+                .wrapping_add(4354685564936845319);
+            *seed
+        }
+
+        fn expected_numeric(values: &[Scalar]) -> Scalar {
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            let mut seen = false;
+            for value in values {
+                if value.is_missing() {
+                    continue;
+                }
+                if let Ok(value) = value.to_f64() {
+                    seen = true;
+                    lo = lo.min(value);
+                    hi = hi.max(value);
+                }
+            }
+            if seen {
+                Scalar::Float64(hi - lo)
+            } else {
+                Scalar::Null(NullKind::NaN)
+            }
+        }
+
+        fn expected_timedelta(values: &[Scalar]) -> Scalar {
+            let mut lo = i64::MAX;
+            let mut hi = i64::MIN;
+            let mut seen = false;
+            for value in values {
+                if let Scalar::Timedelta64(ns) = value
+                    && !value.is_missing()
+                {
+                    seen = true;
+                    lo = lo.min(*ns);
+                    hi = hi.max(*ns);
+                }
+            }
+            if seen {
+                Scalar::Timedelta64(hi - lo)
+            } else {
+                Scalar::Null(NullKind::NaN)
+            }
+        }
+
+        fn assert_ptp(case: usize, family: &str, values: &[Scalar], expected: Scalar) {
+            let actual = super::nanptp(values);
+            assert!(
+                actual.semantic_eq(&expected),
+                "case={case} family={family}: expected {expected:?}, got {actual:?} for {values:?}"
+            );
+        }
+
+        assert_ptp(
+            usize::MAX,
+            "numeric_all_missing",
+            &[Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)],
+            Scalar::Null(NullKind::NaN),
+        );
+        assert_ptp(
+            usize::MAX - 1,
+            "timedelta_all_missing",
+            &[Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)],
+            Scalar::Null(NullKind::NaN),
+        );
+
+        let mut seed = 0xa22f_17ed_57a7_15e5_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 83 + 1) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                numeric.push(match next(&mut seed) % 9 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw),
+                    5 => Scalar::Float64(raw as f64 / 53.0),
+                    6 => Scalar::Float64(0.0),
+                    7 => Scalar::Float64(-0.0),
+                    _ => Scalar::Float64(raw.signum() as f64 * f64::INFINITY),
+                });
+            }
+            assert_ptp(case, "numeric", &numeric, expected_numeric(&numeric));
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 130));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 10_001) as i64 - 5_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_ptp(
+                case,
+                "timedelta",
+                &timedeltas,
+                expected_timedelta(&timedeltas),
+            );
+        }
+    }
+
+    #[test]
     fn nanargmax_nanargmin_timedelta64_compare_by_ns_ql1t5() {
         // Per br-frankenpandas-ql1t5: argmax/argmin on Timedelta64 compare
         // i64 ns directly instead of silently skipping via to_f64.
