@@ -9827,14 +9827,8 @@ impl RangeIndex {
     }
 
     fn value_at(&self, position: usize) -> i64 {
-        let offset = i64::try_from(position).expect("validated RangeIndex value bounds");
-        let delta = self
-            .step
-            .checked_mul(offset)
-            .expect("validated RangeIndex value bounds");
-        self.start
-            .checked_add(delta)
-            .expect("validated RangeIndex value bounds")
+        let value = i128::from(self.start) + (position as i128) * i128::from(self.step);
+        i64::try_from(value).expect("validated RangeIndex value bounds")
     }
 
     fn contains_value(&self, value: i64) -> bool {
@@ -25172,6 +25166,22 @@ mod tests {
             "RangeIndex::repeat should keep typed Int64 output backing"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn range_index_take_uses_wide_position_values_uza04176() -> Result<(), super::IndexError> {
+        let range = super::RangeIndex::new(i64::MIN, i64::MAX, 1)
+            .unwrap()
+            .set_name("wide");
+        let zero_pos = usize::try_from(i128::from(i64::MAX) + 1).unwrap();
+        let taken = range.take(&[0, zero_pos, range.len() - 1])?;
+
+        assert_eq!(taken.name(), Some("wide"));
+        assert_eq!(
+            taken.labels.int64_view().unwrap().as_slice(),
+            &[i64::MIN, 0, i64::MAX - 1]
+        );
         Ok(())
     }
 
