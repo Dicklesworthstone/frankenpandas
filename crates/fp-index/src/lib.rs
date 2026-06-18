@@ -9985,7 +9985,9 @@ impl RangeIndex {
     /// Stringify each value, matching `pd.RangeIndex.format()`.
     #[must_use]
     pub fn format(&self) -> Vec<String> {
-        self.values().into_iter().map(|v| v.to_string()).collect()
+        (0..self.len())
+            .map(|position| self.value_at(position).to_string())
+            .collect()
     }
 
     /// Identity factorization, matching `pd.RangeIndex.factorize()`.
@@ -26202,6 +26204,15 @@ mod tests {
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
         assert_eq!(empty.format(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn range_index_format_uses_direct_values_nkivs() {
+        let stepped = super::RangeIndex::new(-3, 6, 3).unwrap();
+        assert_eq!(stepped.format(), vec!["-3", "0", "3"]);
+
+        let descending = super::RangeIndex::new(4, -5, -4).unwrap();
+        assert_eq!(descending.format(), vec!["4", "0", "-4"]);
     }
 
     #[test]
