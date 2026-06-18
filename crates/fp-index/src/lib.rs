@@ -9804,19 +9804,18 @@ impl RangeIndex {
 
     #[must_use]
     pub fn values(&self) -> Vec<i64> {
-        self.to_index()
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Int64(value) => Some(*value),
-                IndexLabel::Float64(_)
-                | IndexLabel::Bool(_)
-                | IndexLabel::Utf8(_)
-                | IndexLabel::Timedelta64(_)
-                | IndexLabel::Datetime64(_)
-                | IndexLabel::Null(_) => None,
-            })
-            .collect()
+        let len = self.len();
+        let mut values = Vec::with_capacity(len);
+        let mut value = self.start;
+        for offset in 0..len {
+            values.push(value);
+            if offset + 1 < len {
+                value = value
+                    .checked_add(self.step)
+                    .expect("validated RangeIndex value bounds");
+            }
+        }
+        values
     }
 
     /// Positional first differences for RangeIndex values.
@@ -24433,6 +24432,18 @@ mod tests {
             }
         ));
         Ok(())
+    }
+
+    #[test]
+    fn range_index_values_generate_arithmetic_progression_without_flat_index_w6q7d() {
+        let positive = super::RangeIndex::new(2, 11, 3).unwrap();
+        assert_eq!(positive.values(), vec![2, 5, 8]);
+
+        let descending = super::RangeIndex::new(9, 0, -4).unwrap();
+        assert_eq!(descending.values(), vec![9, 5, 1]);
+
+        let empty = super::RangeIndex::new(5, 5, 1).unwrap();
+        assert!(empty.values().is_empty());
     }
 
     #[test]
