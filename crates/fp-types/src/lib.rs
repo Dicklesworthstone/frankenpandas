@@ -5004,6 +5004,28 @@ mod tests {
     /// behind astype/promotion. Property test of its confirmed identity +
     /// numeric/bool coercion rules over random scalars. Deterministic seeded LCG.
     #[test]
+    fn cast_scalar_to_utf8_formatting_yes7i() {
+        // Property (br-frankenpandas-yes7i): cast to Utf8 formats per pandas
+        // astype(str): Int64 -> decimal, Bool -> True/False. Seeded LCG, no mocks.
+        let mut st: u64 = 0x4e57_0b1c_2d3e_4f50;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for _ in 0..3000u32 {
+            let n = (next() % 4_000_001) as i64 - 2_000_000;
+            assert_eq!(
+                cast_scalar(&Scalar::Int64(n), DType::Utf8).unwrap(),
+                Scalar::Utf8(n.to_string())
+            );
+        }
+        assert_eq!(cast_scalar(&Scalar::Bool(true), DType::Utf8).unwrap(), Scalar::Utf8("True".to_string()));
+        assert_eq!(cast_scalar(&Scalar::Bool(false), DType::Utf8).unwrap(), Scalar::Utf8("False".to_string()));
+    }
+
+    #[test]
     fn cast_scalar_coercion_rules_6a83t() {
         let mut state: u64 = 0x5a17_c0de_1234_abcd;
         let mut next = || {
