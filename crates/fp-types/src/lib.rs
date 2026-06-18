@@ -2372,8 +2372,10 @@ impl Timestamp {
         // Convert y/m/d to days since Unix epoch, then to nanos
         // Unix epoch is 1970-01-01, which is ordinal 719163
         let days_since_epoch = ordinal - 719163;
-        let nanos = days_since_epoch * 24 * 60 * 60 * 1_000_000_000_i64;
-        Self { nanos, tz: None }
+        match days_since_epoch.checked_mul(Timedelta::NANOS_PER_DAY) {
+            Some(nanos) => Self { nanos, tz: None },
+            None => Self::nat(),
+        }
     }
 
     /// Return the Julian Date (astronomical day number).
@@ -10064,6 +10066,20 @@ mod tests {
         // Invalid ordinal returns NaT
         let nat = Timestamp::fromordinal(0);
         assert!(nat.is_nat());
+    }
+
+    #[test]
+    fn timestamp_fromordinal_guards_nanosecond_overflow_ycvrd() {
+        const EPOCH_ORDINAL: i64 = 719_163;
+        let max_day_offset = i64::MAX / Timedelta::NANOS_PER_DAY;
+        let max_valid_ordinal = EPOCH_ORDINAL + max_day_offset;
+
+        let max_valid = Timestamp::fromordinal(max_valid_ordinal);
+        assert!(!max_valid.is_nat());
+        assert_eq!(max_valid.nanos, max_day_offset * Timedelta::NANOS_PER_DAY);
+
+        assert!(Timestamp::fromordinal(max_valid_ordinal + 1).is_nat());
+        assert!(Timestamp::fromordinal(i64::MAX).is_nat());
     }
 
     #[test]
