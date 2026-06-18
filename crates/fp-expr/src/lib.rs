@@ -6112,6 +6112,40 @@ mod tests {
     }
 
     #[test]
+    fn eval_str_true_division_float_8bnl8() {
+        // br-frankenpandas-8bnl8: expression-level true division a/b -> Float64
+        // (3j187 used %,// not /). Seeded LCG, no mocks.
+        let mut st: u64 = 0xd1f0_e7a1_2b3c_4d5e;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        let policy = RuntimePolicy::hardened(Some(100));
+        for iter in 0..400u32 {
+            let n = (next() % 5) as usize + 1;
+            let a: Vec<i64> = (0..n).map(|_| (next() % 40) as i64 - 20).collect();
+            let b: Vec<i64> = (0..n).map(|_| ((next() % 5) as i64) + 1).collect(); // non-zero
+            let mut ledger = EvidenceLedger::new();
+            let frame = fp_frame::DataFrame::from_series(vec![
+                fp_frame::Series::from_values("a", (0..n as i64).map(Into::into).collect::<Vec<_>>(), a.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>()).unwrap(),
+                fp_frame::Series::from_values("b", (0..n as i64).map(Into::into).collect::<Vec<_>>(), b.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>()).unwrap(),
+            ])
+            .unwrap();
+            let out = super::eval_str("a / b", &frame, &policy, &mut ledger).unwrap();
+            for i in 0..n {
+                let got = match &out.values()[i] {
+                    Scalar::Float64(x) => *x,
+                    Scalar::Int64(x) => *x as f64,
+                    _ => f64::NAN,
+                };
+                assert!((got - a[i] as f64 / b[i] as f64).abs() < 1e-9, "div iter={iter} i={i} {}/{}", a[i], b[i]);
+            }
+        }
+    }
+
+    #[test]
     fn eval_str_arithmetic_precedence_3j187() {
         // End-to-end correctness oracle (br-frankenpandas-3j187): parse + evaluate
         // arithmetic over a small Int64 frame, asserting per-row results computed
