@@ -10555,43 +10555,53 @@ impl RangeIndex {
         Ok(out)
     }
 
-    fn set_op_via_int<F>(&self, other: &Self, op: F) -> Index
-    where
-        F: FnOnce(Vec<i64>, Vec<i64>) -> Vec<i64>,
-    {
-        let values = op(self.values(), other.values());
-        let mut idx = Index::from_i64_values(values);
+    /// Values present in both ranges, matching
+    /// `pd.RangeIndex.intersection(other)`. Returns flat Index because
+    /// the result may not be a contiguous range.
+    #[must_use]
+    pub fn intersection(&self, other: &Self) -> Index {
+        let mut right_set = FxHashSet::<i64>::default();
+        for position in 0..other.len() {
+            right_set.insert(other.value_at(position));
+        }
+        let mut seen = FxHashSet::<i64>::default();
+        let mut labels = Vec::new();
+        for position in 0..self.len() {
+            let value = self.value_at(position);
+            if right_set.contains(&value) && seen.insert(value) {
+                labels.push(value);
+            }
+        }
+        let mut idx = Index::from_i64_values(labels);
         if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
             idx = idx.set_name(name);
         }
         idx
     }
 
-    /// Values present in both ranges, matching
-    /// `pd.RangeIndex.intersection(other)`. Returns flat Index because
-    /// the result may not be a contiguous range.
-    #[must_use]
-    pub fn intersection(&self, other: &Self) -> Index {
-        self.set_op_via_int(other, |left, right| {
-            let right_set: FxHashSet<i64> = right.into_iter().collect();
-            let mut seen = FxHashSet::<i64>::default();
-            left.into_iter()
-                .filter(|v| right_set.contains(v) && seen.insert(*v))
-                .collect()
-        })
-    }
-
     /// Self values then other values not seen, matching
     /// `pd.RangeIndex.union(other)`.
     #[must_use]
     pub fn union(&self, other: &Self) -> Index {
-        self.set_op_via_int(other, |left, right| {
-            let mut seen = FxHashSet::<i64>::default();
-            left.into_iter()
-                .chain(right)
-                .filter(|v| seen.insert(*v))
-                .collect()
-        })
+        let mut seen = FxHashSet::<i64>::default();
+        let mut labels = Vec::with_capacity(self.len().saturating_add(other.len()));
+        for position in 0..self.len() {
+            let value = self.value_at(position);
+            if seen.insert(value) {
+                labels.push(value);
+            }
+        }
+        for position in 0..other.len() {
+            let value = other.value_at(position);
+            if seen.insert(value) {
+                labels.push(value);
+            }
+        }
+        let mut idx = Index::from_i64_values(labels);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            idx = idx.set_name(name);
+        }
+        idx
     }
 
     /// Self values not in other, matching
@@ -10599,15 +10609,19 @@ impl RangeIndex {
     #[must_use]
     pub fn difference(&self, other: &Self) -> Index {
         // Per br-frankenpandas-6r1lq: difference preserves self.name (not
-        // shared_name like union/intersection). Build inline rather than
-        // routing through set_op_via_int's shared-name logic.
-        let right_set: FxHashSet<i64> = other.values().into_iter().collect();
+        // shared_name like union/intersection).
+        let mut right_set = FxHashSet::<i64>::default();
+        for position in 0..other.len() {
+            right_set.insert(other.value_at(position));
+        }
         let mut seen = FxHashSet::<i64>::default();
-        let labels: Vec<i64> = self
-            .values()
-            .into_iter()
-            .filter(|v| !right_set.contains(v) && seen.insert(*v))
-            .collect();
+        let mut labels = Vec::new();
+        for position in 0..self.len() {
+            let value = self.value_at(position);
+            if !right_set.contains(&value) && seen.insert(value) {
+                labels.push(value);
+            }
+        }
         let mut idx = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             idx = idx.set_name(name);
@@ -10619,23 +10633,33 @@ impl RangeIndex {
     /// `pd.RangeIndex.symmetric_difference(other)`.
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Index {
-        self.set_op_via_int(other, |left, right| {
-            let left_set: FxHashSet<i64> = left.iter().copied().collect();
-            let right_set: FxHashSet<i64> = right.iter().copied().collect();
-            let mut seen = FxHashSet::<i64>::default();
-            let mut out = Vec::new();
-            for v in left {
-                if !right_set.contains(&v) && seen.insert(v) {
-                    out.push(v);
-                }
+        let mut left_set = FxHashSet::<i64>::default();
+        for position in 0..self.len() {
+            left_set.insert(self.value_at(position));
+        }
+        let mut right_set = FxHashSet::<i64>::default();
+        for position in 0..other.len() {
+            right_set.insert(other.value_at(position));
+        }
+        let mut seen = FxHashSet::<i64>::default();
+        let mut labels = Vec::new();
+        for position in 0..self.len() {
+            let value = self.value_at(position);
+            if !right_set.contains(&value) && seen.insert(value) {
+                labels.push(value);
             }
-            for v in right {
-                if !left_set.contains(&v) && seen.insert(v) {
-                    out.push(v);
-                }
+        }
+        for position in 0..other.len() {
+            let value = other.value_at(position);
+            if !left_set.contains(&value) && seen.insert(value) {
+                labels.push(value);
             }
-            out
-        })
+        }
+        let mut idx = Index::from_i64_values(labels);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            idx = idx.set_name(name);
+        }
+        idx
     }
 
     /// Insert `value` at position `loc`, matching
@@ -24872,6 +24896,48 @@ mod tests {
             assert!(
                 output.labels.materialized.get().is_none(),
                 "RangeIndex set ops should keep typed Int64 output backing"
+            );
+        }
+    }
+
+    #[test]
+    fn range_index_set_ops_use_direct_values_b7nxg() {
+        let left = super::RangeIndex::new(9, -3, -3).unwrap().set_name("k");
+        let right = super::RangeIndex::new(6, -6, -3).unwrap().set_name("k");
+
+        let intersection = left.intersection(&right);
+        let union = left.union(&right);
+        let difference = left.difference(&right);
+        let symmetric = left.symmetric_difference(&right);
+
+        assert_eq!(intersection.name(), Some("k"));
+        assert_eq!(union.name(), Some("k"));
+        assert_eq!(difference.name(), Some("k"));
+        assert_eq!(symmetric.name(), Some("k"));
+        assert_eq!(
+            intersection.labels.int64_view().unwrap().as_slice(),
+            &[6, 3, 0]
+        );
+        assert_eq!(
+            union.labels.int64_view().unwrap().as_slice(),
+            &[9, 6, 3, 0, -3]
+        );
+        assert_eq!(difference.labels.int64_view().unwrap().as_slice(), &[9]);
+        assert_eq!(
+            symmetric.labels.int64_view().unwrap().as_slice(),
+            &[9, -3]
+        );
+
+        let mismatched = right.set_name("other");
+        assert_eq!(left.intersection(&mismatched).name(), None);
+        assert_eq!(left.union(&mismatched).name(), None);
+        assert_eq!(left.symmetric_difference(&mismatched).name(), None);
+        assert_eq!(left.difference(&mismatched).name(), Some("k"));
+
+        for output in [&intersection, &union, &difference, &symmetric] {
+            assert!(
+                output.labels.materialized.get().is_none(),
+                "RangeIndex set ops should stream direct i64 labels into typed backing"
             );
         }
     }
