@@ -10552,9 +10552,9 @@ impl RangeIndex {
                 length: values.len(),
             });
         }
-        let mut labels: Vec<IndexLabel> = values.into_iter().map(IndexLabel::Int64).collect();
-        labels.insert(loc, IndexLabel::Int64(value));
-        let mut out = Index::new(labels);
+        let mut labels = values;
+        labels.insert(loc, value);
+        let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             out = out.set_name(name);
         }
@@ -10567,10 +10567,9 @@ impl RangeIndex {
     /// the index name when both operands share it.
     #[must_use]
     pub fn append(&self, other: &Self) -> Index {
-        let mut labels: Vec<IndexLabel> =
-            self.values().into_iter().map(IndexLabel::Int64).collect();
-        labels.extend(other.values().into_iter().map(IndexLabel::Int64));
-        let mut out = Index::new(labels);
+        let mut labels = self.values();
+        labels.extend(other.values());
+        let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
             out = out.set_name(name);
         }
@@ -10588,13 +10587,13 @@ impl RangeIndex {
                 length: values.len(),
             });
         }
-        let labels: Vec<IndexLabel> = values
+        let labels: Vec<i64> = values
             .into_iter()
             .enumerate()
             .filter(|(i, _)| *i != loc)
-            .map(|(_, v)| IndexLabel::Int64(v))
+            .map(|(_, v)| v)
             .collect();
-        let mut out = Index::new(labels);
+        let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             out = out.set_name(name);
         }
@@ -24539,6 +24538,38 @@ mod tests {
                 "RangeIndex set ops should keep typed Int64 output backing"
             );
         }
+    }
+
+    #[test]
+    fn range_index_splice_outputs_keep_typed_backing_uza04169() -> Result<(), super::IndexError> {
+        let left = super::RangeIndex::new(0, 3, 1).unwrap().set_name("k");
+        let right = super::RangeIndex::new(10, 12, 1).unwrap().set_name("k");
+
+        let inserted = left.insert(1, 99)?;
+        let appended = left.append(&right);
+        let deleted = left.delete(1)?;
+
+        assert_eq!(inserted.name(), Some("k"));
+        assert_eq!(appended.name(), Some("k"));
+        assert_eq!(deleted.name(), Some("k"));
+        assert_eq!(
+            inserted.labels.int64_view().unwrap().as_slice(),
+            &[0, 99, 1, 2]
+        );
+        assert_eq!(
+            appended.labels.int64_view().unwrap().as_slice(),
+            &[0, 1, 2, 10, 11]
+        );
+        assert_eq!(deleted.labels.int64_view().unwrap().as_slice(), &[0, 2]);
+
+        for output in [&inserted, &appended, &deleted] {
+            assert!(
+                output.labels.materialized.get().is_none(),
+                "RangeIndex splice outputs should keep typed Int64 output backing"
+            );
+        }
+
+        Ok(())
     }
 
     #[test]
