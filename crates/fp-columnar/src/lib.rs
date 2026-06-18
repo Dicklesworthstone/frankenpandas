@@ -19273,6 +19273,124 @@ mod tests {
         }
 
         #[test]
+        fn fillna_matches_scalar_replacement_oracle_56isx() {
+            // Differential vs scalar replacement oracle (br-frankenpandas-56isx).
+            // Seeded LCG, no mocks.
+            fn next(seed: &mut u64) -> u64 {
+                *seed = seed
+                    .wrapping_mul(3202034522624059733)
+                    .wrapping_add(4354685564936845319);
+                *seed
+            }
+
+            fn assert_fillna(case: usize, family: &str, values: Vec<Scalar>, fill: Scalar) {
+                let input = Column::from_values(values).expect("column");
+                let expected = input
+                    .values()
+                    .iter()
+                    .map(|value| {
+                        if value.is_missing() {
+                            fill.clone()
+                        } else {
+                            value.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let filled = input.fillna(&fill).expect("fillna");
+                assert_eq!(
+                    filled.dtype(),
+                    input.dtype(),
+                    "case={case} family={family}: dtype changed"
+                );
+                assert_eq!(
+                    filled.len(),
+                    input.len(),
+                    "case={case} family={family}: length changed"
+                );
+                assert_eq!(
+                    filled.values(),
+                    expected.as_slice(),
+                    "case={case} family={family}: replacement mismatch"
+                );
+                assert_eq!(
+                    filled.validity().count_valid(),
+                    filled.len(),
+                    "case={case} family={family}: fillna left invalid positions"
+                );
+            }
+
+            let mut seed = 0xf111_ca5c_a1a5_56a1_u64;
+            for case in 0..180 {
+                let len = (next(&mut seed) % 73 + 1) as usize;
+
+                let mut floats = Vec::with_capacity(len);
+                floats.push(Scalar::Float64(case as f64 / 5.0));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 16_001) as i64 - 8_000;
+                    floats.push(match next(&mut seed) % 7 {
+                        0 | 1 => Scalar::Float64(f64::NAN),
+                        2 => Scalar::Float64(f64::INFINITY),
+                        3 => Scalar::Float64(f64::NEG_INFINITY),
+                        _ => Scalar::Float64(raw as f64 / 37.0),
+                    });
+                }
+                assert_fillna(case, "float", floats, Scalar::Float64(-123.5));
+
+                let mut ints = Vec::with_capacity(len);
+                ints.push(Scalar::Int64(case as i64 - 90));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 101) as i64 - 50;
+                    ints.push(match next(&mut seed) % 6 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        _ => Scalar::Int64(raw),
+                    });
+                }
+                assert_fillna(case, "int", ints, Scalar::Int64(-777));
+
+                let mut bools = Vec::with_capacity(len);
+                bools.push(Scalar::Bool(case & 1 == 0));
+                for _ in 1..len {
+                    bools.push(match next(&mut seed) % 5 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        raw => Scalar::Bool(raw & 1 == 0),
+                    });
+                }
+                assert_fillna(case, "bool", bools, Scalar::Bool(true));
+
+                let mut utf8 = Vec::with_capacity(len);
+                utf8.push(Scalar::Utf8(format!("fill{}", case % 19)));
+                for pos in 1..len {
+                    utf8.push(match next(&mut seed) % 7 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        raw => Scalar::Utf8(format!("fill{}_{}", raw, pos % 13)),
+                    });
+                }
+                assert_fillna(case, "utf8", utf8, Scalar::Utf8("filled".into()));
+
+                let mut timedeltas = Vec::with_capacity(len);
+                timedeltas.push(Scalar::Timedelta64(case as i64));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 149) as i64 - 74;
+                    timedeltas.push(match next(&mut seed) % 7 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Timedelta64(i64::MIN),
+                        _ => Scalar::Timedelta64(raw),
+                    });
+                }
+                assert_fillna(
+                    case,
+                    "timedelta",
+                    timedeltas,
+                    Scalar::Timedelta64(123_456),
+                );
+            }
+        }
+
+        #[test]
         fn dropna_removes_missing() {
             let col = Column::from_values(vec![
                 Scalar::Int64(1),
