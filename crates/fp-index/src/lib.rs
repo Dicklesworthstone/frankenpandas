@@ -10493,9 +10493,113 @@ impl RangeIndex {
         out
     }
 
+    fn apply_join_name(&self, other: &Index, mut out: Index) -> Index {
+        if self.name() == other.name()
+            && let Some(name) = self.name()
+        {
+            out = out.set_name(name);
+        }
+        out
+    }
+
+    fn join_inner_i64(&self, other: &[i64]) -> Index {
+        let mut labels = Vec::new();
+        if other.is_empty() || self.is_empty() {
+            return Index::from_i64_values(labels);
+        }
+
+        if let Some((min, span)) = Index::i64_dense_span(other) {
+            let mut bits = vec![0u64; span.div_ceil(64)];
+            for &value in other {
+                let slot = (value as i128 - min as i128) as usize;
+                bits[slot >> 6] |= 1u64 << (slot & 63);
+            }
+            for position in 0..self.len() {
+                let value = self.value_at(position);
+                let offset = value as i128 - min as i128;
+                if offset >= 0 && (offset as usize) < span {
+                    let slot = offset as usize;
+                    if (bits[slot >> 6] >> (slot & 63)) & 1 == 1 {
+                        labels.push(value);
+                    }
+                }
+            }
+        } else {
+            let mut other_set = FxHashSet::<i64>::default();
+            other_set.reserve(other.len());
+            for &value in other {
+                other_set.insert(value);
+            }
+            for position in 0..self.len() {
+                let value = self.value_at(position);
+                if other_set.contains(&value) {
+                    labels.push(value);
+                }
+            }
+        }
+
+        Index::from_i64_values(labels)
+    }
+
+    fn join_outer_i64(&self, other: &[i64]) -> Index {
+        let mut labels = Vec::with_capacity(combined_output_capacity(self.len(), other.len()));
+        for position in 0..self.len() {
+            labels.push(self.value_at(position));
+        }
+        if other.is_empty() {
+            return Index::from_i64_values(labels);
+        }
+
+        if let Some((min, span)) = Index::i64_dense_span(other) {
+            let mut seen = vec![0u64; span.div_ceil(64)];
+            for &value in other {
+                if self.contains_value(value) {
+                    continue;
+                }
+                let slot = (value as i128 - min as i128) as usize;
+                let bit = 1u64 << (slot & 63);
+                let word = slot >> 6;
+                if seen[word] & bit == 0 {
+                    seen[word] |= bit;
+                    labels.push(value);
+                }
+            }
+        } else {
+            let mut seen = FxHashSet::<i64>::default();
+            seen.reserve(other.len());
+            for &value in other {
+                if !self.contains_value(value) && seen.insert(value) {
+                    labels.push(value);
+                }
+            }
+        }
+
+        Index::from_i64_values(labels)
+    }
+
     /// Join range labels with another flat Index.
     pub fn join(&self, other: &Index, how: &str) -> Result<Index, IndexError> {
-        self.to_flat_index().join(other, how)
+        match how {
+            "left" => Ok(self.to_flat_index()),
+            "right" => Ok(other.clone()),
+            "inner" => {
+                if let Some(other_values) = other.labels.int64_view() {
+                    let out = self.join_inner_i64(&other_values);
+                    return Ok(self.apply_join_name(other, out));
+                }
+                self.to_flat_index().join(other, how)
+            }
+            "outer" => {
+                if let Some(other_values) = other.labels.int64_view() {
+                    let out = self.join_outer_i64(&other_values);
+                    return Ok(self.apply_join_name(other, out));
+                }
+                self.to_flat_index().join(other, how)
+            }
+            other => Err(IndexError::InvalidArgument(format!(
+                "join: how must be 'left', 'right', 'inner', or 'outer', got {other:?}"
+            ))),
+        }
     }
 
     /// Sort range labels and return the positional sorter.
@@ -25946,6 +26050,59 @@ mod tests {
         let (empty_sorted, empty_order) = empty.sortlevel();
         assert!(empty_sorted.is_empty());
         assert!(empty_order.is_empty());
+    }
+
+    #[test]
+    fn range_index_join_direct_i64_matches_flat_oracle_uza04190(
+    ) -> Result<(), super::IndexError> {
+        let range = super::RangeIndex::new(9, 0, -3).unwrap().set_name("k");
+        let other = super::Index::from_i64_values(vec![6, 12, 6, 0]).set_name("k");
+
+        let inner = range.join(&other, "inner")?;
+        assert_eq!(inner.name(), Some("k"));
+        assert_eq!(inner.labels.int64_view().unwrap().as_slice(), &[6]);
+        assert!(
+            inner.labels.materialized.get().is_none(),
+            "RangeIndex::join(inner) should keep typed Int64 output backing"
+        );
+
+        let outer = range.join(&other, "outer")?;
+        assert_eq!(outer.name(), Some("k"));
+        assert_eq!(
+            outer.labels.int64_view().unwrap().as_slice(),
+            &[9, 6, 3, 12, 0]
+        );
+        assert!(
+            outer.labels.materialized.get().is_none(),
+            "RangeIndex::join(outer) should keep typed Int64 output backing"
+        );
+
+        for how in ["left", "right", "inner", "outer"] {
+            let direct = range.join(&other, how)?;
+            let oracle = range.to_flat_index().join(&other, how)?;
+            assert_eq!(direct.name(), oracle.name(), "name mismatch for {how}");
+            assert_eq!(direct, oracle, "label mismatch for {how}");
+        }
+
+        let mismatched_name = other.set_name("other");
+        assert_eq!(range.join(&mismatched_name, "inner")?.name(), None);
+        assert_eq!(range.join(&mismatched_name, "outer")?.name(), None);
+
+        let mixed = super::Index::new(vec![
+            super::IndexLabel::Int64(6),
+            super::IndexLabel::Utf8("x".to_owned()),
+        ]);
+        assert_eq!(
+            range.join(&mixed, "inner")?,
+            range.to_flat_index().join(&mixed, "inner")?
+        );
+        assert!(matches!(
+            range.join(&other, "sideways"),
+            Err(super::IndexError::InvalidArgument(message))
+                if message == "join: how must be 'left', 'right', 'inner', or 'outer', got \"sideways\""
+        ));
+
+        Ok(())
     }
 
     #[test]
