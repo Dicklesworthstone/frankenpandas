@@ -7703,6 +7703,106 @@ mod tests {
     }
 
     #[test]
+    fn nanprod_matches_numeric_and_timedelta_oracle_9938h() {
+        // Differential vs independent product oracles
+        // (br-frankenpandas-9938h). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        fn expected_numeric(values: &[Scalar]) -> Scalar {
+            let mut product = 1.0_f64;
+            for value in values {
+                if value.is_missing() {
+                    continue;
+                }
+                if let Ok(value) = value.to_f64() {
+                    product *= value;
+                }
+            }
+            Scalar::Float64(product)
+        }
+
+        fn expected_timedelta(values: &[Scalar]) -> Scalar {
+            if values
+                .iter()
+                .any(|value| matches!(value, Scalar::Timedelta64(_)) && !value.is_missing())
+            {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(1.0)
+            }
+        }
+
+        fn assert_prod(case: usize, family: &str, values: &[Scalar], expected: Scalar) {
+            let actual = super::nanprod(values);
+            assert!(
+                actual.semantic_eq(&expected),
+                "case={case} family={family}: expected {expected:?}, got {actual:?} for {values:?}"
+            );
+        }
+
+        let all_missing = [Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)];
+        assert_prod(
+            usize::MAX,
+            "numeric_all_missing",
+            &all_missing,
+            Scalar::Float64(1.0),
+        );
+
+        let td_all_missing = [Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)];
+        assert_prod(
+            usize::MAX - 1,
+            "timedelta_all_missing",
+            &td_all_missing,
+            expected_timedelta(&td_all_missing),
+        );
+
+        let mut seed = 0x6e0d_9938_a11c_0de5_u64;
+        for case in 0..280 {
+            let len = (next(&mut seed) % 89 + 1) as usize;
+
+            let mut numeric = Vec::with_capacity(len);
+            numeric.push(Scalar::Int64((case % 17) as i64 - 8));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 2_001) as i64 - 1_000;
+                numeric.push(match next(&mut seed) % 9 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Int64(raw % 19),
+                    5 => Scalar::Float64(raw as f64 / 97.0),
+                    6 => Scalar::Float64(0.0),
+                    7 => Scalar::Float64(-0.0),
+                    _ => Scalar::Float64(1.0),
+                });
+            }
+            assert_prod(case, "numeric", &numeric, expected_numeric(&numeric));
+
+            let mut timedeltas = Vec::with_capacity(len);
+            timedeltas.push(Scalar::Timedelta64(case as i64 - 140));
+            for _ in 1..len {
+                let raw = (next(&mut seed) % 10_001) as i64 - 5_000;
+                timedeltas.push(match next(&mut seed) % 7 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Timedelta64(i64::MIN),
+                    _ => Scalar::Timedelta64(raw),
+                });
+            }
+            assert_prod(
+                case,
+                "timedelta",
+                &timedeltas,
+                expected_timedelta(&timedeltas),
+            );
+        }
+    }
+
+    #[test]
     fn nanskew_symmetric_distribution_near_zero() {
         let values = vec![
             Scalar::Float64(1.0),
