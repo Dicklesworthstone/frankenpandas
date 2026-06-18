@@ -9832,9 +9832,8 @@ impl RangeIndex {
     /// Positional first differences for RangeIndex values.
     #[must_use]
     pub fn diff(&self, periods: i64) -> Vec<Option<i64>> {
-        let values = self.values();
-        positional_diff(values.len(), periods, |current, previous| {
-            values[current].checked_sub(values[previous])
+        positional_diff(self.len(), periods, |current, previous| {
+            self.value_at(current).checked_sub(self.value_at(previous))
         })
     }
 
@@ -23891,6 +23890,13 @@ mod tests {
         assert_eq!(range.diff(-2), vec![Some(-4), Some(-4), None, None]);
         assert_eq!(range.diff(0), vec![Some(0), Some(0), Some(0), Some(0)]);
         assert_eq!(range.name(), Some("r"));
+
+        let descending = super::RangeIndex::new(9, 0, -3).unwrap();
+        assert_eq!(
+            descending.diff(1),
+            vec![None, Some(-3), Some(-3)]
+        );
+        assert_eq!(descending.diff(-1), vec![Some(3), Some(3), None]);
 
         let cat = super::CategoricalIndex::from_values(vec!["a".to_owned(), "b".to_owned()], false);
         let err = cat.diff(1).unwrap_err();
