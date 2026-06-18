@@ -4,6 +4,41 @@ Purpose: record every cod-b optimization attempt in the new performance campaign
 including dead ends, so future agents do not retry failed levers without a concrete
 retry predicate.
 
+## 2026-06-18 - br-frankenpandas-uza04.196 - CategoricalIndex monotonic rank scan
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: replace `CategoricalIndex::{is_monotonic_increasing,
+  is_monotonic_decreasing}` `codes()` materialization with a streaming category
+  rank scan over `Option<usize>` ranks.
+- Baseline comparator: current monotonic predicates allocate a full
+  `Vec<Option<usize>>` through `codes()` and then scan adjacent windows, even
+  though the final result only needs the previous and current rank.
+- Graveyard mapping: semantic compression and cache-aware streaming scan:
+  retain only one prior category-rank witness instead of allocating a full code
+  vector for a boolean predicate.
+- Alien-artifact proof obligation: `codes()` maps labels to first-occurrence
+  category ranks and represents impossible labels as `None`. The streaming
+  comparator preserves the exact `Option<usize>` ordering used by
+  `codes().windows(2)` while removing the intermediate vector; category order,
+  duplicate categories, empty/singleton truth values, and invalid-label
+  behavior remain unchanged.
+- Guard added:
+  `categorical_index_monotonic_scans_ranks_without_codes_vec_uza04196`, covering
+  increasing and decreasing categorical rank sequences plus an invalid-label
+  case checked directly against the old `codes().windows(..)` comparator.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is
+  `crates/fp-index/examples/bench_categorical_codes.rs` or a focused categorical
+  monotonic criterion lane on repeated realistic categorical indexes versus the
+  legacy pandas original and a pre-patch `codes()` allocation baseline.
+- Retry predicate if rejected: only retry if same-host profiling shows
+  categorical monotonic predicates above 0.1% self-time and allocation profiling
+  proves `codes()` vector construction, not category rank hash lookups, is the
+  residual.
+
 ## 2026-06-18 - br-frankenpandas-uza04.195 - MultiIndex nunique direct count
 
 - Status: implemented, benchmark verdict pending batch-test.

@@ -11178,8 +11178,7 @@ impl CategoricalIndex {
 
     #[must_use]
     pub fn is_monotonic_increasing(&self) -> bool {
-        let codes = self.codes();
-        codes.windows(2).all(|window| window[0] <= window[1])
+        self.category_ranks_are_monotonic(|prev, next| prev <= next)
     }
 
     #[must_use]
@@ -11189,8 +11188,7 @@ impl CategoricalIndex {
 
     #[must_use]
     pub fn is_monotonic_decreasing(&self) -> bool {
-        let codes = self.codes();
-        codes.windows(2).all(|window| window[0] >= window[1])
+        self.category_ranks_are_monotonic(|prev, next| prev >= next)
     }
 
     #[must_use]
@@ -11285,6 +11283,27 @@ impl CategoricalIndex {
             map.entry(cat.as_str()).or_insert(i);
         }
         map
+    }
+
+    fn category_ranks_are_monotonic(
+        &self,
+        mut ordered: impl FnMut(Option<usize>, Option<usize>) -> bool,
+    ) -> bool {
+        let map = self.category_index_map();
+        let mut ranks = self
+            .labels
+            .iter()
+            .map(|label| map.get(label.as_str()).copied());
+        let Some(mut previous) = ranks.next() else {
+            return true;
+        };
+        for rank in ranks {
+            if !ordered(previous, rank) {
+                return false;
+            }
+            previous = rank;
+        }
+        true
     }
 
     #[must_use]
@@ -26686,6 +26705,62 @@ mod tests {
         let unique = cat.unique();
         assert_eq!(unique.categories(), categories.as_slice());
         assert!(unique.ordered());
+    }
+
+    #[test]
+    fn categorical_index_monotonic_scans_ranks_without_codes_vec_uza04196() {
+        let increasing = super::CategoricalIndex::with_categories(
+            vec![
+                "bronze".to_owned(),
+                "silver".to_owned(),
+                "silver".to_owned(),
+                "gold".to_owned(),
+            ],
+            vec![
+                "bronze".to_owned(),
+                "silver".to_owned(),
+                "gold".to_owned(),
+            ],
+            true,
+        )
+        .expect("categorical index");
+        assert!(increasing.is_monotonic_increasing());
+        assert!(!increasing.is_monotonic_decreasing());
+
+        let decreasing = super::CategoricalIndex::with_categories(
+            vec![
+                "gold".to_owned(),
+                "silver".to_owned(),
+                "silver".to_owned(),
+                "bronze".to_owned(),
+            ],
+            vec![
+                "bronze".to_owned(),
+                "silver".to_owned(),
+                "gold".to_owned(),
+            ],
+            true,
+        )
+        .expect("categorical index");
+        assert!(!decreasing.is_monotonic_increasing());
+        assert!(decreasing.is_monotonic_decreasing());
+
+        let invalid = super::CategoricalIndex {
+            labels: vec!["missing".to_owned(), "bronze".to_owned()],
+            categories: vec!["bronze".to_owned()],
+            ordered: true,
+            name: None,
+        };
+        let codes = invalid.codes();
+        assert_eq!(codes, vec![None, Some(0)]);
+        assert_eq!(
+            invalid.is_monotonic_increasing(),
+            codes.windows(2).all(|window| window[0] <= window[1])
+        );
+        assert_eq!(
+            invalid.is_monotonic_decreasing(),
+            codes.windows(2).all(|window| window[0] >= window[1])
+        );
     }
 
     #[test]
