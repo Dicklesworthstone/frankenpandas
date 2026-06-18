@@ -2745,6 +2745,40 @@ mod tests {
     }
 
     #[test]
+    fn groupby_sum_equals_mean_times_count_0czr8() {
+        // Metamorphic (br-frankenpandas-0czr8): per group, sum == mean * count.
+        // Seeded LCG, no mocks.
+        let mut s: u64 = 0x4c0c_0b1c_2d3e_4f50;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as u32
+        };
+        let getf = |c: &[Scalar]| -> Vec<f64> {
+            c.iter().map(|v| match v { Scalar::Int64(x) => *x as f64, Scalar::Float64(x) => *x, _ => f64::NAN }).collect()
+        };
+        let pol = RuntimePolicy::strict();
+        for iter in 0..400u32 {
+            let n = (next() % 16) as usize + 1;
+            let keys: Vec<i64> = (0..n).map(|_| (next() % 4) as i64).collect();
+            let vals: Vec<f64> = (0..n).map(|_| (next() % 100) as f64 / 3.0).collect();
+            let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let ks = Series::from_values("k", idx.clone(), keys.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>()).unwrap();
+            let vs = Series::from_values("v", idx, vals.iter().map(|&x| Scalar::Float64(x)).collect::<Vec<_>>()).unwrap();
+            let mut l = EvidenceLedger::new();
+            let sums = getf(groupby_sum(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap().values());
+            let means = getf(groupby_mean(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap().values());
+            let counts = getf(groupby_count(&ks, &vs, GroupByOptions::default(), &pol, &mut l).unwrap().values());
+            assert_eq!(sums.len(), means.len(), "len iter={iter}");
+            assert_eq!(sums.len(), counts.len(), "len iter={iter}");
+            for g in 0..sums.len() {
+                assert!((sums[g] - means[g] * counts[g]).abs() < 1e-6, "sum==mean*count iter={iter} g={g}");
+            }
+        }
+    }
+
+    #[test]
     fn groupby_count_vs_size_null_values_z1o82() {
         // br-frankenpandas-z1o82: count excludes null values; size counts all rows.
         let idx: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
