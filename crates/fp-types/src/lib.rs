@@ -5635,6 +5635,94 @@ mod tests {
     }
 
     #[test]
+    fn nanany_nanall_nancount_match_scalar_oracle_zr2qg() {
+        // Differential vs scalar truthiness/count oracle
+        // (br-frankenpandas-zr2qg). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        fn truthy(value: &Scalar) -> Option<bool> {
+            if value.is_missing() {
+                return None;
+            }
+            match value {
+                Scalar::Bool(value) => Some(*value),
+                Scalar::Int64(value) => Some(*value != 0),
+                Scalar::Float64(value) => Some(*value != 0.0),
+                Scalar::Utf8(value) => Some(!value.is_empty()),
+                Scalar::Timedelta64(value) => Some(*value != 0),
+                _ => None,
+            }
+        }
+
+        fn assert_nanops(case: usize, values: &[Scalar]) {
+            let truth_values = values.iter().filter_map(truthy).collect::<Vec<_>>();
+            let expected_any = truth_values.iter().any(|value| *value);
+            let expected_all = !truth_values.iter().any(|value| !*value);
+            let expected_count = values.iter().filter(|value| !value.is_missing()).count() as i64;
+
+            assert_eq!(
+                super::nanany(values),
+                Scalar::Bool(expected_any),
+                "case={case}: nanany mismatch for {values:?}"
+            );
+            assert_eq!(
+                super::nanall(values),
+                Scalar::Bool(expected_all),
+                "case={case}: nanall mismatch for {values:?}"
+            );
+            assert_eq!(
+                super::nancount(values),
+                Scalar::Int64(expected_count),
+                "case={case}: nancount mismatch for {values:?}"
+            );
+        }
+
+        assert_nanops(
+            usize::MAX,
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(f64::NAN),
+                Scalar::Timedelta64(i64::MIN),
+            ],
+        );
+
+        let mut seed = 0x7a20_2f7e_5ca1_ab1e_u64;
+        for case in 0..320 {
+            let len = (next(&mut seed) % 89 + 1) as usize;
+            let mut values = Vec::with_capacity(len);
+            for pos in 0..len {
+                let raw = (next(&mut seed) % 10_001) as i64 - 5_000;
+                let value = match next(&mut seed) % 12 {
+                    0 => Scalar::Null(NullKind::Null),
+                    1 => Scalar::Null(NullKind::NaN),
+                    2 => Scalar::Float64(f64::NAN),
+                    3 => Scalar::Bool(raw & 1 == 0),
+                    4 => Scalar::Bool(false),
+                    5 => Scalar::Int64(raw % 17),
+                    6 => Scalar::Int64(0),
+                    7 => Scalar::Float64(raw as f64 / 23.0),
+                    8 => Scalar::Float64(0.0),
+                    9 => Scalar::Utf8(if raw & 1 == 0 {
+                        String::new()
+                    } else {
+                        format!("nanops_{case}_{pos}")
+                    }),
+                    10 => Scalar::Timedelta64(raw),
+                    _ => Scalar::Timedelta64(0),
+                };
+                values.push(value);
+            }
+            assert_nanops(case, &values);
+        }
+    }
+
+    #[test]
     fn nanmin_basic() {
         let vals = vec![
             Scalar::Float64(5.0),
