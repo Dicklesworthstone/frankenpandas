@@ -10834,15 +10834,10 @@ impl RangeIndex {
     /// the result may not be a contiguous range.
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Index {
-        let mut right_set = FxHashSet::<i64>::default();
-        for position in 0..other.len() {
-            right_set.insert(other.value_at(position));
-        }
-        let mut seen = FxHashSet::<i64>::default();
-        let mut labels = Vec::new();
+        let mut labels = Vec::with_capacity(self.len().min(other.len()));
         for position in 0..self.len() {
             let value = self.value_at(position);
-            if right_set.contains(&value) && seen.insert(value) {
+            if other.contains_value(value) {
                 labels.push(value);
             }
         }
@@ -10857,17 +10852,13 @@ impl RangeIndex {
     /// `pd.RangeIndex.union(other)`.
     #[must_use]
     pub fn union(&self, other: &Self) -> Index {
-        let mut seen = FxHashSet::<i64>::default();
         let mut labels = Vec::with_capacity(combined_output_capacity(self.len(), other.len()));
         for position in 0..self.len() {
-            let value = self.value_at(position);
-            if seen.insert(value) {
-                labels.push(value);
-            }
+            labels.push(self.value_at(position));
         }
         for position in 0..other.len() {
             let value = other.value_at(position);
-            if seen.insert(value) {
+            if !self.contains_value(value) {
                 labels.push(value);
             }
         }
@@ -10884,15 +10875,10 @@ impl RangeIndex {
     pub fn difference(&self, other: &Self) -> Index {
         // Per br-frankenpandas-6r1lq: difference preserves self.name (not
         // shared_name like union/intersection).
-        let mut right_set = FxHashSet::<i64>::default();
-        for position in 0..other.len() {
-            right_set.insert(other.value_at(position));
-        }
-        let mut seen = FxHashSet::<i64>::default();
-        let mut labels = Vec::new();
+        let mut labels = Vec::with_capacity(self.len());
         for position in 0..self.len() {
             let value = self.value_at(position);
-            if !right_set.contains(&value) && seen.insert(value) {
+            if !other.contains_value(value) {
                 labels.push(value);
             }
         }
@@ -10907,25 +10893,16 @@ impl RangeIndex {
     /// `pd.RangeIndex.symmetric_difference(other)`.
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Index {
-        let mut left_set = FxHashSet::<i64>::default();
-        for position in 0..self.len() {
-            left_set.insert(self.value_at(position));
-        }
-        let mut right_set = FxHashSet::<i64>::default();
-        for position in 0..other.len() {
-            right_set.insert(other.value_at(position));
-        }
-        let mut seen = FxHashSet::<i64>::default();
-        let mut labels = Vec::new();
+        let mut labels = Vec::with_capacity(combined_output_capacity(self.len(), other.len()));
         for position in 0..self.len() {
             let value = self.value_at(position);
-            if !right_set.contains(&value) && seen.insert(value) {
+            if !other.contains_value(value) {
                 labels.push(value);
             }
         }
         for position in 0..other.len() {
             let value = other.value_at(position);
-            if !left_set.contains(&value) && seen.insert(value) {
+            if !self.contains_value(value) {
                 labels.push(value);
             }
         }
@@ -25704,6 +25681,50 @@ mod tests {
             assert!(
                 output.labels.materialized.get().is_none(),
                 "RangeIndex set ops should stream direct i64 labels into typed backing"
+            );
+        }
+    }
+
+    #[test]
+    fn range_index_set_ops_closed_form_membership_preserves_order_iatnc() {
+        let left = super::RangeIndex::new(9, -3, -3).unwrap().set_name("k");
+        let right = super::RangeIndex::new(6, -9, -6).unwrap().set_name("k");
+
+        let intersection = left.intersection(&right);
+        let union = left.union(&right);
+        let difference = left.difference(&right);
+        let symmetric = left.symmetric_difference(&right);
+
+        assert_eq!(intersection.name(), Some("k"));
+        assert_eq!(union.name(), Some("k"));
+        assert_eq!(difference.name(), Some("k"));
+        assert_eq!(symmetric.name(), Some("k"));
+        assert_eq!(intersection.labels.int64_view().unwrap().as_slice(), &[6, 0]);
+        assert_eq!(
+            union.labels.int64_view().unwrap().as_slice(),
+            &[9, 6, 3, 0, -6]
+        );
+        assert_eq!(difference.labels.int64_view().unwrap().as_slice(), &[9, 3]);
+        assert_eq!(
+            symmetric.labels.int64_view().unwrap().as_slice(),
+            &[9, 3, -6]
+        );
+
+        let disjoint = super::RangeIndex::new(20, 26, 2).unwrap().set_name("k");
+        assert!(left.intersection(&disjoint).is_empty());
+        assert_eq!(
+            left.symmetric_difference(&disjoint)
+                .labels
+                .int64_view()
+                .unwrap()
+                .as_slice(),
+            &[9, 6, 3, 0, 20, 22, 24]
+        );
+
+        for output in [&intersection, &union, &difference, &symmetric] {
+            assert!(
+                output.labels.materialized.get().is_none(),
+                "RangeIndex closed-form set ops should keep typed Int64 output backing"
             );
         }
     }

@@ -63,3 +63,36 @@ retry predicate.
   `RangeIndex::join` or `Index::join` flat forwarding above 0.1% self-time and a
   same-host reverted comparison proves intermediate range materialization, not
   downstream `Index` construction, is the residual.
+
+## 2026-06-18 - br-frankenpandas-iatnc - Closed-form RangeIndex set ops
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: replace `RangeIndex::{intersection, union, difference,
+  symmetric_difference}` `FxHashSet<i64>` membership/seen maps with direct
+  arithmetic membership checks through `RangeIndex::contains_value`.
+- Baseline comparator: current RangeIndex-vs-RangeIndex set-op path, which builds
+  one to three hash sets even though both operands are unique arithmetic
+  progressions.
+- Graveyard mapping: algebraic data representation and cache-oblivious scanning:
+  use `(start, step, len)` as a semantic witness and stream each side exactly
+  once with no hash-table allocation or probe cache misses.
+- Alien-artifact proof obligation: `RangeIndex` is unique by construction, so
+  seen-set deduplication is redundant. Membership in the opposite range is
+  closed-form; output order remains self-order for intersection/difference and
+  self-then-other order for union/symmetric difference. Name propagation and
+  typed Int64 backing are unchanged.
+- Guard added:
+  `range_index_set_ops_closed_form_membership_preserves_order_iatnc`, covering
+  overlapping descending ranges, disjoint ranges, pandas-order outputs, name
+  propagation, and typed Int64 output backing.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is criterion
+  `RangeIndex` set ops on overlapping/disjoint 1M-row ascending and descending
+  ranges versus the legacy pandas original and a pre-patch hash-set baseline.
+- Retry predicate if rejected: only revisit if a same-host benchmark proves
+  `RangeIndex::{intersection, union, difference, symmetric_difference}` is still
+  above 0.1% self-time and the residual is arithmetic membership rather than
+  typed `Index` construction or output allocation.
