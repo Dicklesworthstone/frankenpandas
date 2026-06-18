@@ -10185,23 +10185,30 @@ impl RangeIndex {
                 "searchsorted requires a monotonically-increasing RangeIndex".to_owned(),
             ));
         }
-        let mut lo = 0usize;
-        let mut hi = self.len();
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            let cmp = self.value_at(mid).cmp(&value);
-            use std::cmp::Ordering;
-            let go_right = matches!(
-                (cmp, side),
-                (Ordering::Less, _) | (Ordering::Equal, "right")
-            );
-            if go_right {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
+        let len = self.len();
+        if len == 0 {
+            return Ok(0);
         }
-        Ok(lo)
+        let start = i128::from(self.start);
+        let value = i128::from(value);
+        if value < start {
+            return Ok(0);
+        }
+        let step = i128::from(self.step);
+        let offset = value - start;
+        let base = offset / step;
+        let rem = offset % step;
+        let insertion = if rem == 0 {
+            base + i128::from(side == "right")
+        } else {
+            base + 1
+        };
+        let len_i128 = len as i128;
+        Ok(if insertion >= len_i128 {
+            len
+        } else {
+            insertion as usize
+        })
     }
 
     /// Convert to a flat [`Index`] of i64 labels, matching
@@ -23602,6 +23609,22 @@ mod tests {
         let descending = super::RangeIndex::new(9, 0, -3).unwrap();
         assert!(descending.searchsorted(6, "left").is_err());
 
+        Ok(())
+    }
+
+    #[test]
+    fn range_index_searchsorted_uses_closed_form_uza04174() -> Result<(), super::IndexError> {
+        let stepped = super::RangeIndex::new(i64::MIN, i64::MIN + 10, 2).unwrap();
+        assert_eq!(stepped.searchsorted(i64::MIN, "left")?, 0);
+        assert_eq!(stepped.searchsorted(i64::MIN, "right")?, 1);
+        assert_eq!(stepped.searchsorted(i64::MIN + 3, "left")?, 2);
+        assert_eq!(stepped.searchsorted(i64::MIN + 4, "right")?, 3);
+
+        let wide = super::RangeIndex::new(i64::MIN, i64::MAX, 1).unwrap();
+        let zero_pos = usize::try_from(i128::from(i64::MAX) + 1).unwrap();
+        assert_eq!(wide.searchsorted(0, "left")?, zero_pos);
+        assert_eq!(wide.searchsorted(0, "right")?, zero_pos + 1);
+        assert_eq!(wide.searchsorted(i64::MAX, "left")?, wide.len());
         Ok(())
     }
 
