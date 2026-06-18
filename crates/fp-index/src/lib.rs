@@ -1461,6 +1461,13 @@ impl Index {
         {
             return SortOrder::AscendingInt64;
         }
+        if let Some(values) = self.labels.int64_view() {
+            return if values.len() <= 1 || values.windows(2).all(|pair| pair[0] < pair[1]) {
+                SortOrder::AscendingInt64
+            } else {
+                SortOrder::Unsorted
+            };
+        }
         *self
             .sort_order_cache
             .get_or_init(|| detect_sort_order(self.labels()))
@@ -2263,6 +2270,16 @@ impl Index {
         // Strictly-ascending => nothing is dropped; O(1) Arc-sharing clone.
         if !matches!(self.sort_order(), SortOrder::Unsorted) {
             return self.clone();
+        }
+        if let Some(values) = self.labels.int64_view() {
+            let duplicated = Self::duplicated_i64(&values, keep);
+            let labels = values
+                .iter()
+                .copied()
+                .zip(duplicated)
+                .filter_map(|(value, is_duplicated)| (!is_duplicated).then_some(value))
+                .collect();
+            return self.propagate_name(Self::from_i64_values(labels));
         }
         let duplicated = self.duplicated(keep);
         let labels = self
@@ -15675,6 +15692,57 @@ mod tests {
         assert!(
             dropped.labels.materialized.get().is_none(),
             "drop_duplicates delegates to unique and should keep typed backing"
+        );
+    }
+
+    #[test]
+    fn typed_int64_drop_duplicates_keep_modes_preserve_typed_backing_codb() {
+        let index = Index::from_i64_values(vec![9, 9, 4, 9, 4, 2]).set_name("axis");
+        assert!(index.labels.materialized.get().is_none());
+
+        let keep_last = index.drop_duplicates_keep(DuplicateKeep::Last);
+        let keep_none = index.drop_duplicates_keep(DuplicateKeep::None);
+
+        assert_eq!(keep_last.name(), Some("axis"));
+        assert_eq!(
+            keep_last.labels.int64_view().unwrap().as_slice(),
+            &[9, 4, 2]
+        );
+        assert_eq!(keep_none.name(), Some("axis"));
+        assert_eq!(keep_none.labels.int64_view().unwrap().as_slice(), &[2]);
+        assert!(
+            index.labels.materialized.get().is_none(),
+            "keep modes should not materialize the source Int64 labels"
+        );
+        assert!(
+            keep_last.labels.materialized.get().is_none(),
+            "keep=last should keep typed output backing"
+        );
+        assert!(
+            keep_none.labels.materialized.get().is_none(),
+            "keep=false should keep typed output backing"
+        );
+
+        let materialized = Index::new(vec![
+            IndexLabel::Int64(9),
+            IndexLabel::Int64(9),
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(9),
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(2),
+        ])
+        .set_name("axis");
+        assert_eq!(
+            keep_last.labels(),
+            materialized
+                .drop_duplicates_keep(DuplicateKeep::Last)
+                .labels()
+        );
+        assert_eq!(
+            keep_none.labels(),
+            materialized
+                .drop_duplicates_keep(DuplicateKeep::None)
+                .labels()
         );
     }
 
