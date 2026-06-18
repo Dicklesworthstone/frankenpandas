@@ -8017,6 +8017,126 @@ mod tests {
         );
     }
 
+    #[test]
+    fn nanskew_nankurt_match_numeric_oracle_jr7zk() {
+        // Differential vs independent bias-corrected moment oracles
+        // (br-frankenpandas-jr7zk). Seeded LCG, no mocks.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            *seed
+        }
+
+        fn samples(values: &[Scalar]) -> Vec<f64> {
+            values
+                .iter()
+                .filter(|value| !value.is_missing())
+                .filter_map(|value| value.to_f64().ok())
+                .collect()
+        }
+
+        fn expected_skew(values: &[Scalar]) -> Scalar {
+            let samples = samples(values);
+            let n = samples.len() as f64;
+            if n < 3.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean = samples.iter().sum::<f64>() / n;
+            let m2 = samples
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>();
+            let m3 = samples
+                .iter()
+                .map(|value| (value - mean).powi(3))
+                .sum::<f64>();
+            let s2 = m2 / (n - 1.0);
+            if s2 == 0.0 {
+                return Scalar::Float64(0.0);
+            }
+            Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s2.powf(1.5)))
+        }
+
+        fn expected_kurt(values: &[Scalar]) -> Scalar {
+            let samples = samples(values);
+            let n = samples.len() as f64;
+            if n < 4.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean = samples.iter().sum::<f64>() / n;
+            let m2 = samples
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>();
+            let m4 = samples
+                .iter()
+                .map(|value| (value - mean).powi(4))
+                .sum::<f64>();
+            let s2 = m2 / (n - 1.0);
+            if s2 == 0.0 {
+                return Scalar::Float64(0.0);
+            }
+            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
+            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
+            Scalar::Float64(adj * (m4 / (s2 * s2)) - sub)
+        }
+
+        fn assert_moments(case: usize, values: &[Scalar]) {
+            let expected_skew = expected_skew(values);
+            let expected_kurt = expected_kurt(values);
+            let actual_skew = super::nanskew(values);
+            let actual_kurt = super::nankurt(values);
+            assert!(
+                actual_skew.semantic_eq(&expected_skew),
+                "case={case}: expected skew {expected_skew:?}, got {actual_skew:?} for {values:?}"
+            );
+            assert!(
+                actual_kurt.semantic_eq(&expected_kurt),
+                "case={case}: expected kurt {expected_kurt:?}, got {actual_kurt:?} for {values:?}"
+            );
+        }
+
+        assert_moments(
+            usize::MAX,
+            &[Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)],
+        );
+        assert_moments(
+            usize::MAX - 1,
+            &[
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+            ],
+        );
+
+        let mut seed = 0x5ce7_9a55_a11c_0de5_u64;
+        for case in 0..260 {
+            let len = (next(&mut seed) % 89 + 1) as usize;
+            let mut values = Vec::with_capacity(len);
+            if case % 11 == 0 {
+                values.extend((0..len).map(|_| Scalar::Float64(3.0)));
+            } else {
+                values.push(Scalar::Float64(case as f64 / 19.0));
+                for _ in 1..len {
+                    let raw = (next(&mut seed) % 20_001) as i64 - 10_000;
+                    values.push(match next(&mut seed) % 8 {
+                        0 => Scalar::Null(NullKind::Null),
+                        1 => Scalar::Null(NullKind::NaN),
+                        2 => Scalar::Float64(f64::NAN),
+                        3 => Scalar::Bool(raw & 1 == 0),
+                        4 => Scalar::Int64(raw % 251),
+                        5 => Scalar::Float64(raw as f64 / 83.0),
+                        6 => Scalar::Float64(0.0),
+                        _ => Scalar::Float64(-0.0),
+                    });
+                }
+            }
+            assert_moments(case, &values);
+        }
+    }
+
     // ── Interval tests (br-frankenpandas-j8k4) ──────────────────────────
 
     #[test]
