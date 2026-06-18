@@ -1091,6 +1091,20 @@ fn try_groupby_agg_dense_int64(
         return None;
     }
 
+    // Int64/Bool prod must preserve Int64 output (pandas parity, mirroring Sum).
+    // The dense path accumulates a Float64 product, so route integer/bool prod to
+    // the generic scalar path which keeps an i64 product. Int64 columns are always
+    // all-valid (mixed Int64+Null upcasts to Float64 at construction), so the first
+    // non-missing value reliably reflects the column dtype. br-frankenpandas-rl25i.
+    if matches!(func, AggFunc::Prod)
+        && values
+            .iter()
+            .find(|v| !v.is_missing())
+            .is_some_and(|v| matches!(v, Scalar::Int64(_) | Scalar::Bool(_)))
+    {
+        return None;
+    }
+
     let (min_key, max_key, saw_int_key) = dense_int64_range(keys, dropna)?;
     if !saw_int_key {
         return Some((Vec::new(), Vec::new()));
@@ -1669,6 +1683,25 @@ pub fn groupby_agg(
             AggFunc::Std => fp_types::nanstd(vals, 1),
             AggFunc::Median => fp_types::nanmedian(vals),
             AggFunc::Nunique => fp_types::nannunique(vals),
+            // pandas groupby.prod() preserves Int64 for integer/bool input,
+            // mirroring Sum (the earlier Float64-only path diverged from pandas).
+            // Accumulate an i128 product and keep Int64 when it fits; fall back to
+            // the Float64 nanprod only on i64 overflow. br-frankenpandas-rl25i.
+            AggFunc::Prod if matches!(value_dtype, DType::Int64 | DType::Bool) => {
+                let mut total: Option<i128> = Some(1);
+                for v in vals {
+                    let x = match v {
+                        Scalar::Int64(x) => i128::from(*x),
+                        Scalar::Bool(b) => i128::from(*b),
+                        _ => continue,
+                    };
+                    total = total.and_then(|t| t.checked_mul(x));
+                }
+                match total.and_then(|t| i64::try_from(t).ok()) {
+                    Some(x) => Scalar::Int64(x),
+                    None => fp_types::nanprod(vals),
+                }
+            }
             AggFunc::Prod => fp_types::nanprod(vals),
             AggFunc::Size => Scalar::Int64(*total_count as i64),
         };
@@ -2611,8 +2644,9 @@ mod tests {
             }
             let exp_keys: Vec<IndexLabel> =
                 keys_seen.keys().map(|&k| IndexLabel::Int64(k)).collect();
-            // Expected per-group products as integers.
-            let exp_prod: Vec<i64> = groups.values().copied().collect();
+            // groupby_prod preserves Int64 for Int64 input (pandas parity, fixed in
+            // br-frankenpandas-rl25i; previously returned Float64).
+            let exp_prod: Vec<Scalar> = groups.values().map(|&p| Scalar::Int64(p)).collect();
 
             let ctx = format!("iter={iter} keys={key_vals:?} vals={val_vals:?}");
             let mut led = EvidenceLedger::new();
@@ -2625,21 +2659,7 @@ mod tests {
             )
             .expect("prod");
             assert_eq!(out.index().labels(), exp_keys, "prod keys {ctx}");
-            // Compare product VALUES dtype-agnostically. groupby_prod currently
-            // returns Float64 for Int64 input (sum returns Int64); that dtype
-            // divergence is tracked separately in br-frankenpandas-rl25i. Here we
-            // verify the products themselves are computed correctly.
-            let got_prod: Vec<i64> = out
-                .values()
-                .iter()
-                .map(|s| match s {
-                    Scalar::Int64(v) => *v,
-                    Scalar::Float64(v) => *v as i64,
-                    // Any other dtype is unexpected; sentinel fails the assert.
-                    _ => i64::MIN,
-                })
-                .collect();
-            assert_eq!(got_prod, exp_prod, "prod vals {ctx}");
+            assert_eq!(out.values(), exp_prod.as_slice(), "prod vals {ctx}");
         }
     }
 
@@ -4798,8 +4818,9 @@ mod tests {
 
         let result = groupby_prod(&keys, &values, options, &policy, &mut ledger).unwrap();
         assert_eq!(result.len(), 2);
-        assert_eq!(result.values()[0], Scalar::Float64(6.0)); // x: 2*3
-        assert_eq!(result.values()[1], Scalar::Float64(20.0)); // y: 4*5
+        // pandas groupby.prod() preserves Int64 for integer input (br-frankenpandas-rl25i).
+        assert_eq!(result.values()[0], Scalar::Int64(6)); // x: 2*3
+        assert_eq!(result.values()[1], Scalar::Int64(20)); // y: 4*5
     }
 
     #[test]
