@@ -16898,6 +16898,132 @@ mod tests {
         assert_eq!(empty.symmetric_difference(&non_empty), non_empty);
     }
 
+    #[test]
+    fn int64_set_ops_match_first_seen_reference_c6wel() {
+        fn labels_i64(index: &Index) -> Vec<i64> {
+            let mut out = Vec::with_capacity(index.len());
+            for label in index.labels() {
+                if let IndexLabel::Int64(value) = label {
+                    out.push(*value);
+                } else {
+                    out.push(i64::MIN);
+                }
+            }
+            out
+        }
+
+        fn push_first_seen(
+            values: &[i64],
+            seen: &mut std::collections::BTreeSet<i64>,
+            out: &mut Vec<i64>,
+        ) {
+            for &value in values {
+                if seen.insert(value) {
+                    out.push(value);
+                }
+            }
+        }
+
+        fn intersection_ref(a: &[i64], b: &[i64]) -> Vec<i64> {
+            let bset: std::collections::BTreeSet<i64> = b.iter().copied().collect();
+            let mut seen = std::collections::BTreeSet::new();
+            let mut out = Vec::new();
+            for &value in a {
+                if bset.contains(&value) && seen.insert(value) {
+                    out.push(value);
+                }
+            }
+            out
+        }
+
+        fn union_ref(a: &[i64], b: &[i64]) -> Vec<i64> {
+            let mut seen = std::collections::BTreeSet::new();
+            let mut out = Vec::with_capacity(a.len() + b.len());
+            push_first_seen(a, &mut seen, &mut out);
+            push_first_seen(b, &mut seen, &mut out);
+            out
+        }
+
+        fn difference_ref(a: &[i64], b: &[i64]) -> Vec<i64> {
+            let bset: std::collections::BTreeSet<i64> = b.iter().copied().collect();
+            let mut seen = std::collections::BTreeSet::new();
+            let mut out = Vec::new();
+            for &value in a {
+                if !bset.contains(&value) && seen.insert(value) {
+                    out.push(value);
+                }
+            }
+            out
+        }
+
+        fn symmetric_difference_ref(a: &[i64], b: &[i64]) -> Vec<i64> {
+            let aset: std::collections::BTreeSet<i64> = a.iter().copied().collect();
+            let bset: std::collections::BTreeSet<i64> = b.iter().copied().collect();
+            let mut seen = std::collections::BTreeSet::new();
+            let mut out = Vec::new();
+            for &value in a {
+                if !bset.contains(&value) && seen.insert(value) {
+                    out.push(value);
+                }
+            }
+            for &value in b {
+                if !aset.contains(&value) && seen.insert(value) {
+                    out.push(value);
+                }
+            }
+            out
+        }
+
+        let mut state: u64 = 0xc6e1_f157_e700_0001;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            u32::try_from(state >> 33).unwrap_or(0)
+        };
+        let values = |len: usize, next: &mut dyn FnMut() -> u32| {
+            let mut vals: Vec<i64> = (0..len).map(|_| i64::from(next() % 11) - 5).collect();
+            match next() % 5 {
+                0 => vals.sort_unstable(),
+                1 => vals.sort_unstable_by(|a, b| b.cmp(a)),
+                2 if vals.len() > 1 => {
+                    let shift = usize::try_from(next()).unwrap_or(0) % vals.len();
+                    vals.rotate_left(shift);
+                }
+                _ => {}
+            }
+            vals
+        };
+
+        for iter in 0..2500u32 {
+            let a = values(usize::try_from(next() % 15).unwrap_or(0), &mut next);
+            let b = values(usize::try_from(next() % 15).unwrap_or(0), &mut next);
+            let ia = Index::from_i64_values(a.clone());
+            let ib = Index::from_i64_values(b.clone());
+
+            assert_eq!(
+                labels_i64(&ia.intersection(&ib)),
+                intersection_ref(&a, &b),
+                "intersection iter={iter} a={a:?} b={b:?}"
+            );
+            assert_eq!(
+                labels_i64(&ia.union_with(&ib)),
+                union_ref(&a, &b),
+                "union iter={iter} a={a:?} b={b:?}"
+            );
+            assert_eq!(
+                labels_i64(&ia.difference(&ib)),
+                difference_ref(&a, &b),
+                "difference iter={iter} a={a:?} b={b:?}"
+            );
+            assert_eq!(
+                labels_i64(&ia.symmetric_difference(&ib)),
+                symmetric_difference_ref(&a, &b),
+                "symmetric_difference iter={iter} a={a:?} b={b:?}"
+            );
+        }
+    }
+
     // === AG-11: Leapfrog Triejoin Tests ===
 
     use super::{leapfrog_intersection, leapfrog_union, multi_way_align};
