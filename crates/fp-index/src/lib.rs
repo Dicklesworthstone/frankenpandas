@@ -1117,6 +1117,10 @@ fn ordered_label_identity_pair(left: u64, right: u64) -> (u64, u64) {
     }
 }
 
+fn fixed_width_label_memory_usage(len: usize, width: usize) -> usize {
+    len.saturating_mul(width)
+}
+
 impl Index {
     #[must_use]
     pub fn new(labels: Vec<IndexLabel>) -> Self {
@@ -3253,26 +3257,27 @@ impl Index {
     #[must_use]
     pub fn memory_usage(&self, deep: bool) -> usize {
         if self.labels.has_lazy_int64_backing() {
-            return self.labels.len() * 8;
+            return fixed_width_label_memory_usage(self.labels.len(), 8);
         }
         self.labels
             .iter()
-            .map(|label| match label {
-                IndexLabel::Int64(_)
-                | IndexLabel::Float64(_)
-                | IndexLabel::Timedelta64(_)
-                | IndexLabel::Datetime64(_)
-                | IndexLabel::Null(_) => 8,
-                IndexLabel::Bool(_) => 1,
-                IndexLabel::Utf8(s) => {
-                    if deep {
-                        std::mem::size_of::<String>() + s.len()
-                    } else {
-                        std::mem::size_of::<String>()
+            .fold(0usize, |total, label| {
+                total.saturating_add(match label {
+                    IndexLabel::Int64(_)
+                    | IndexLabel::Float64(_)
+                    | IndexLabel::Timedelta64(_)
+                    | IndexLabel::Datetime64(_)
+                    | IndexLabel::Null(_) => 8,
+                    IndexLabel::Bool(_) => 1,
+                    IndexLabel::Utf8(s) => {
+                        if deep {
+                            std::mem::size_of::<String>().saturating_add(s.len())
+                        } else {
+                            std::mem::size_of::<String>()
+                        }
                     }
-                }
+                })
             })
-            .sum()
     }
 
     /// Number of levels in this index.
@@ -19485,6 +19490,19 @@ mod tests {
         assert_eq!(empty.memory_usage(true), 0);
         assert_eq!(empty.nbytes(), 0);
         assert!(empty.labels.materialized.get().is_none());
+    }
+
+    #[test]
+    fn index_memory_usage_saturates_fixed_width_bytes_uza04179() {
+        assert_eq!(super::fixed_width_label_memory_usage(4, 8), 32);
+        assert_eq!(
+            super::fixed_width_label_memory_usage(usize::MAX, 8),
+            usize::MAX
+        );
+        assert_eq!(
+            super::fixed_width_label_memory_usage(8, usize::MAX),
+            usize::MAX
+        );
     }
 
     #[test]
