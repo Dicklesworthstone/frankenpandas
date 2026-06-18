@@ -4700,6 +4700,43 @@ mod tests {
     /// test of its total-order axioms over finite/non-NaT same-dtype scalars,
     /// plus the intentional NaN degeneracy. Deterministic seeded LCG — no rand
     /// crate, no mocks.
+    /// br-frankenpandas-767ak: extends ay8o9's NaN pinning to the temporal NAT
+    /// sentinels (i64::MIN). semantic_cmp treats NAT as degenerate (Equal to all
+    /// same-dtype), which is why temporal ordering ops must treat NAT as missing.
+    #[test]
+    fn semantic_cmp_nat_degeneracy_temporal_767ak() {
+        use std::cmp::Ordering;
+        const NAT: i64 = i64::MIN;
+
+        // Timedelta64 NAT is degenerate (Equal to finite and to itself).
+        let td_nat = Scalar::Timedelta64(NAT);
+        for v in [-3i64, 0, 5, 99] {
+            let td = Scalar::Timedelta64(v);
+            assert_eq!(td_nat.semantic_cmp(&td), Ordering::Equal, "td NAT vs {v}");
+            assert_eq!(td.semantic_cmp(&td_nat), Ordering::Equal, "td {v} vs NAT");
+        }
+        assert_eq!(td_nat.semantic_cmp(&td_nat), Ordering::Equal);
+
+        // Datetime64 NAT likewise.
+        let dt_nat = Scalar::Datetime64(NAT);
+        for v in [-3i64, 0, 5, 99] {
+            let dt = Scalar::Datetime64(v);
+            assert_eq!(dt_nat.semantic_cmp(&dt), Ordering::Equal, "dt NAT vs {v}");
+            assert_eq!(dt.semantic_cmp(&dt_nat), Ordering::Equal, "dt {v} vs NAT");
+        }
+        assert_eq!(dt_nat.semantic_cmp(&dt_nat), Ordering::Equal);
+
+        // Non-NAT temporal values order normally (reflexive, antisymmetric, lt).
+        for (a, b) in [(1i64, 2i64), (5, 5), (9, -1)] {
+            let (ta, tb) = (Scalar::Timedelta64(a), Scalar::Timedelta64(b));
+            assert_eq!(ta.semantic_cmp(&ta), Ordering::Equal);
+            assert_eq!(ta.semantic_cmp(&tb), b.cmp(&a).reverse()); // a.cmp(b)
+            assert_eq!(ta.semantic_cmp(&tb), a.cmp(&b));
+            let (da, db) = (Scalar::Datetime64(a), Scalar::Datetime64(b));
+            assert_eq!(da.semantic_cmp(&db), a.cmp(&b));
+        }
+    }
+
     #[test]
     fn semantic_cmp_total_order_axioms_ay8o9() {
         use std::cmp::Ordering;
