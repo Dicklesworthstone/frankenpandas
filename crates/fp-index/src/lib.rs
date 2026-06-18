@@ -10423,12 +10423,12 @@ impl RangeIndex {
                 context: "where: cond length must match index length".to_owned(),
             });
         }
-        let labels: Vec<IndexLabel> = values
+        let labels: Vec<i64> = values
             .into_iter()
             .zip(cond.iter())
-            .map(|(v, &keep)| IndexLabel::Int64(if keep { v } else { other }))
+            .map(|(v, &keep)| if keep { v } else { other })
             .collect();
-        let mut out = Index::new(labels);
+        let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             out = out.set_name(name);
         }
@@ -10446,12 +10446,12 @@ impl RangeIndex {
                 context: "putmask: mask length must match index length".to_owned(),
             });
         }
-        let labels: Vec<IndexLabel> = values
+        let labels: Vec<i64> = values
             .into_iter()
             .zip(mask.iter())
-            .map(|(v, &replace)| IndexLabel::Int64(if replace { value } else { v }))
+            .map(|(v, &replace)| if replace { value } else { v })
             .collect();
-        let mut out = Index::new(labels);
+        let mut out = Index::from_i64_values(labels);
         if let Some(name) = self.name() {
             out = out.set_name(name);
         }
@@ -24479,6 +24479,32 @@ mod tests {
             flat.labels.materialized.get().is_none(),
             "RangeIndex::to_flat_index should keep typed Int64 output backing"
         );
+    }
+
+    #[test]
+    fn range_index_where_putmask_keep_typed_backing_uza04153() -> Result<(), super::IndexError> {
+        let range = super::RangeIndex::new(2, 11, 3).unwrap().set_name("r");
+
+        let replaced = range.r#where(&[true, false, true], 99)?;
+        assert_eq!(replaced.name(), Some("r"));
+        assert_eq!(
+            replaced.labels.int64_view().unwrap().as_slice(),
+            &[2, 99, 8]
+        );
+        assert!(
+            replaced.labels.materialized.get().is_none(),
+            "RangeIndex::where should keep typed Int64 output backing"
+        );
+
+        let masked = range.putmask(&[false, true, false], -7)?;
+        assert_eq!(masked.name(), Some("r"));
+        assert_eq!(masked.labels.int64_view().unwrap().as_slice(), &[2, -7, 8]);
+        assert!(
+            masked.labels.materialized.get().is_none(),
+            "RangeIndex::putmask should keep typed Int64 output backing"
+        );
+
+        Ok(())
     }
 
     #[test]
