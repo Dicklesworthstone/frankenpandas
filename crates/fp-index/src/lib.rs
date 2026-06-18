@@ -19994,6 +19994,30 @@ mod tests {
     }
 
     #[test]
+    fn int64_index_sort_values_monotonic_bbx5s() {
+        // Property (br-frankenpandas-bbx5s): sort_values yields a monotonic-increasing
+        // index equal to the sorted label multiset. Seeded LCG, no mocks.
+        let mut st: u64 = 0x4e57_0b1c_2d3e_4f53;
+        let mut next = || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (st >> 33) as u32
+        };
+        for iter in 0..800u32 {
+            let n = (next() % 12) as usize + 1;
+            let labels: Vec<i64> = (0..n).map(|_| (next() % 8) as i64).collect(); // dups
+            let idx = Index::new(labels.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+            let sorted = idx.sort_values();
+            assert!(sorted.is_monotonic_increasing(), "monotonic iter={iter} labels={labels:?}");
+            let got: Vec<i64> = sorted.labels().iter().map(|l| match l { IndexLabel::Int64(k) => *k, _ => i64::MIN }).collect();
+            let mut exp = labels.clone();
+            exp.sort_unstable();
+            assert_eq!(got, exp, "sorted multiset iter={iter}");
+        }
+    }
+
+    #[test]
     fn int64_get_indexer_non_unique_ohq9e() {
         use std::collections::HashMap;
         // Differential (br-frankenpandas-ohq9e): get_indexer_non_unique on a
