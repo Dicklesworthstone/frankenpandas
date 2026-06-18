@@ -931,6 +931,42 @@ mod tests {
         assert_eq!(b.finish(), super::semantic_fingerprint_bytes(b"hello world"));
     }
 
+    /// br-frankenpandas-b9vvk: RaptorQ provenance envelopes (AGENTS.md
+    /// RaptorQ-Everywhere mandate). Structural invariants of from_source_bytes.
+    #[test]
+    fn raptorq_envelope_from_source_bytes_invariants_b9vvk() {
+        let sym = super::DEFAULT_RAPTORQ_SYMBOL_BYTES;
+        let repair = 3u32;
+        for &len in &[0usize, 1, sym, sym + 1, 3 * sym - 72] {
+            let source: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let env = RaptorQEnvelope::from_source_bytes("pkt-1", "conformance", &source, repair);
+
+            let expected_k = len.div_ceil(sym) as u32; // chunk count (0 for empty)
+            assert_eq!(env.raptorq.k, expected_k, "k for len={len}");
+            assert_eq!(
+                env.raptorq.symbol_hashes.len() as u32,
+                expected_k,
+                "one symbol hash per source symbol, len={len}"
+            );
+            assert_eq!(env.raptorq.repair_symbols, repair, "repair_symbols len={len}");
+            assert_eq!(
+                env.source_hash,
+                super::semantic_fingerprint_bytes(&source),
+                "source_hash == fingerprint, len={len}"
+            );
+            let expected_overhead =
+                if expected_k == 0 { 0.0 } else { f64::from(repair) / f64::from(expected_k) };
+            assert_eq!(env.raptorq.overhead_ratio, expected_overhead, "overhead len={len}");
+            assert_eq!(env.scrub.status, "ok", "scrub ok len={len}");
+            assert!(env.decode_proofs.is_empty(), "no decode proofs yet len={len}");
+            // Every symbol hash is a well-formed sha256 fingerprint.
+            assert!(
+                env.raptorq.symbol_hashes.iter().all(|h| h.starts_with("sha256:") && h.len() == 7 + 64),
+                "symbol hash format len={len}"
+            );
+        }
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
     struct StructuredTestLog {
         packet_id: String,
