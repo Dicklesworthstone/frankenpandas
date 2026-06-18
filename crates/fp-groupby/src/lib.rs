@@ -1656,6 +1656,151 @@ fn try_groupby_mean_numeric_counter(
     Some((out_index, out_values))
 }
 
+fn update_min_max_scalar_slot(
+    slot: &mut Option<Scalar>,
+    invalid: &mut bool,
+    value: &Scalar,
+    take_min: bool,
+) {
+    if value.is_missing() || *invalid {
+        return;
+    }
+
+    let Some(current) = slot else {
+        *slot = Some(value.clone());
+        return;
+    };
+
+    let replace = match (&*current, value) {
+        (Scalar::Int64(a), Scalar::Int64(b)) => {
+            if take_min {
+                b < a
+            } else {
+                b > a
+            }
+        }
+        (Scalar::Float64(a), Scalar::Float64(b)) => {
+            if take_min {
+                b < a
+            } else {
+                b > a
+            }
+        }
+        (Scalar::Utf8(a), Scalar::Utf8(b)) => {
+            if take_min {
+                b < a
+            } else {
+                b > a
+            }
+        }
+        (Scalar::Bool(a), Scalar::Bool(b)) => {
+            if take_min {
+                b < a
+            } else {
+                b > a
+            }
+        }
+        (Scalar::Timedelta64(a), Scalar::Timedelta64(b)) => {
+            if take_min {
+                b < a
+            } else {
+                b > a
+            }
+        }
+        (a, b) => match (a.to_f64(), b.to_f64()) {
+            (Ok(af), Ok(bf)) => {
+                if take_min {
+                    bf < af
+                } else {
+                    bf > af
+                }
+            }
+            _ => {
+                *invalid = true;
+                false
+            }
+        },
+    };
+
+    if replace {
+        *current = value.clone();
+    }
+}
+
+/// Generic string/object-key path for `groupby.min()` and `groupby.max()`.
+///
+/// The generic fallback hashes the same keys, clones every non-missing value
+/// into a per-group `Vec<Scalar>`, then calls `nanmin`/`nanmax`. Min/max only
+/// need the current extremum scalar plus the same "incomparable pair => NaN"
+/// witness, so this keeps a single slot per group and mirrors
+/// `fp_types::nanmin`/`nanmax` comparison order exactly.
+fn try_groupby_min_max_scalar_slot(
+    keys: &[Scalar],
+    values: &[Scalar],
+    func: AggFunc,
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if !matches!(func, AggFunc::Min | AggFunc::Max) {
+        return None;
+    }
+
+    let take_min = matches!(func, AggFunc::Min);
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, (usize, Option<Scalar>, bool)>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, None, false)
+        });
+
+        update_min_max_scalar_slot(&mut entry.1, &mut entry.2, value, take_min);
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let (source_idx, slot, invalid) = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[*source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(if *invalid {
+            Scalar::Null(NullKind::NaN)
+        } else {
+            slot.clone().unwrap_or(Scalar::Null(NullKind::NaN))
+        });
+    }
+
+    Some((out_index, out_values))
+}
+
 pub fn groupby_agg(
     keys: &Series,
     values: &Series,
@@ -1728,6 +1873,17 @@ pub fn groupby_agg(
     if matches!(func, AggFunc::Mean)
         && let Some((out_index, out_values)) =
             try_groupby_mean_numeric_counter(key_vals, val_vals, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key min/max only need one scalar slot per group,
+    // not a cloned value Vec. Keep this after dense Int64 so the typed direct
+    // path remains the fastest route for small integer domains.
+    if matches!(func, AggFunc::Min | AggFunc::Max)
+        && let Some((out_index, out_values)) =
+            try_groupby_min_max_scalar_slot(key_vals, val_vals, func, options.dropna, options.sort)
     {
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
@@ -4313,6 +4469,166 @@ mod tests {
         // pandas groupby.max() preserves source Int64 dtype.
         assert_eq!(out.values(), &[Scalar::Int64(30), Scalar::Int64(40)]);
         assert_eq!(out.name(), "max");
+    }
+
+    #[test]
+    fn groupby_min_max_utf8_keys_skip_missing_and_keep_order() {
+        let keys = Series::from_values(
+            "key",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(5),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let min_sorted = groupby_min(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let max_sorted = groupby_max(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            min_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            max_sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(
+            &min_sorted.values()[..2],
+            &[Scalar::Int64(5), Scalar::Int64(1)]
+        );
+        assert_eq!(
+            &max_sorted.values()[..2],
+            &[Scalar::Int64(5), Scalar::Int64(3)]
+        );
+        assert!(min_sorted.values()[2].is_missing());
+        assert!(max_sorted.values()[2].is_missing());
+
+        let first_seen = GroupByOptions {
+            sort: false,
+            ..GroupByOptions::default()
+        };
+        let min_unsorted = groupby_min(
+            &keys,
+            &values,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let max_unsorted = groupby_max(
+            &keys,
+            &values,
+            first_seen,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            min_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            max_unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            &min_unsorted.values()[..2],
+            &[Scalar::Int64(1), Scalar::Int64(5)]
+        );
+        assert_eq!(
+            &max_unsorted.values()[..2],
+            &[Scalar::Int64(3), Scalar::Int64(5)]
+        );
+        assert!(min_unsorted.values()[2].is_missing());
+        assert!(max_unsorted.values()[2].is_missing());
+    }
+
+    #[test]
+    fn groupby_min_max_object_key_incomparable_values_return_nan() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("x".into()), Scalar::Int64(1)],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let out_min = groupby_min(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let out_max = groupby_max(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(out_min.index().labels(), &["a".into()]);
+        assert_eq!(out_max.index().labels(), &["a".into()]);
+        assert!(out_min.values()[0].is_missing());
+        assert!(out_max.values()[0].is_missing());
     }
 
     #[test]
