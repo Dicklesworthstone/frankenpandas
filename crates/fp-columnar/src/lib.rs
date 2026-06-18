@@ -9414,6 +9414,9 @@ impl Column {
                 right: other.len(),
             });
         }
+        if let Some(out) = self.typed_bool_binary(other, |left, right| left && right) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
             if a.is_missing() || b.is_missing() {
@@ -9442,6 +9445,9 @@ impl Column {
                 right: other.len(),
             });
         }
+        if let Some(out) = self.typed_bool_binary(other, |left, right| left || right) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
             if a.is_missing() || b.is_missing() {
@@ -9469,6 +9475,9 @@ impl Column {
                 left: self.len(),
                 right: other.len(),
             });
+        }
+        if let Some(out) = self.typed_bool_binary(other, |left, right| left ^ right) {
+            return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
@@ -9556,6 +9565,9 @@ impl Column {
 
     /// Element-wise bitwise NOT (invert).
     pub fn bitwise_not(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_bool_unary(|value| !value) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -22630,6 +22642,68 @@ mod tests {
             if let ScalarValues::LazyAllValidBool { values, .. } = &right.values {
                 assert!(values.get().is_none());
             }
+        }
+
+        #[test]
+        fn bitwise_bool_ops_use_raw_buffers_without_scalar_materialization_ffoy7() {
+            let left = Column {
+                dtype: DType::Bool,
+                values: ScalarValues::lazy_all_valid_bool(vec![true, false, true, false]),
+                validity: ValidityMask::all_valid(4),
+                data: None,
+            };
+            let right = Column {
+                dtype: DType::Bool,
+                values: ScalarValues::lazy_all_valid_bool(vec![false, false, true, true]),
+                validity: ValidityMask::all_valid(4),
+                data: None,
+            };
+
+            assert_eq!(
+                left.bitwise_and(&right).expect("and").values(),
+                &[
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                ]
+            );
+            assert_eq!(
+                left.bitwise_or(&right).expect("or").values(),
+                &[
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                ]
+            );
+            assert_eq!(
+                left.bitwise_xor(&right).expect("xor").values(),
+                &[
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                ]
+            );
+            assert_eq!(
+                left.bitwise_not().expect("not").values(),
+                &[
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                ]
+            );
+
+            assert!(matches!(
+                &left.values,
+                ScalarValues::LazyAllValidBool { values, .. } if values.get().is_none()
+            ));
+            assert!(matches!(
+                &right.values,
+                ScalarValues::LazyAllValidBool { values, .. } if values.get().is_none()
+            ));
         }
 
         #[test]
