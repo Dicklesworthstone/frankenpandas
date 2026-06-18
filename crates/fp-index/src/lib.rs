@@ -1902,8 +1902,8 @@ impl Index {
     /// input order. Bit-identical to the `FxHashMap<&IndexLabel>` first-seen
     /// filter for all-Int64 indexes, with inline `i64` dedup keys (dense bitset
     /// when bounded, else `FxHashSet<i64>`).
-    fn unique_i64(vals: &[i64]) -> Vec<IndexLabel> {
-        let mut out: Vec<IndexLabel> = Vec::new();
+    fn unique_i64(vals: &[i64]) -> Vec<i64> {
+        let mut out: Vec<i64> = Vec::new();
         let dense = Self::i64_dense_span(vals);
         let mut seen_bits = Vec::<u64>::new();
         let mut seen_hash = FxHashSet::<i64>::default();
@@ -1926,7 +1926,7 @@ impl Index {
                 None => seen_hash.insert(v),
             };
             if fresh {
-                out.push(IndexLabel::Int64(v));
+                out.push(v);
             }
         }
         out
@@ -2193,7 +2193,7 @@ impl Index {
         // Typed all-Int64 fast path: inline `i64` first-occurrence dedup instead
         // of the pointer-keyed `FxHashMap<&IndexLabel>`. Bit-identical order.
         if let Some(vals) = self.labels.int64_view() {
-            return self.propagate_name(Self::new(Self::unique_i64(&vals)));
+            return self.propagate_name(Self::from_i64_values(Self::unique_i64(&vals)));
         }
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let labels: Vec<IndexLabel> = self
@@ -15613,6 +15613,48 @@ mod tests {
                 "drop_duplicates {labels:?}"
             );
         }
+    }
+
+    #[test]
+    fn typed_int64_unique_preserves_typed_backing_codb() {
+        let index = Index::from_i64_values(vec![3, 1, 3, 2, 1]).set_name("row");
+        assert!(index.labels.materialized.get().is_none());
+
+        let unique = index.unique();
+
+        assert_eq!(unique.name(), Some("row"));
+        assert_eq!(unique.labels.int64_view().unwrap().as_slice(), &[3, 1, 2]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            unique.labels.materialized.get().is_none(),
+            "typed Int64 unique should preserve typed output backing"
+        );
+
+        let materialized = Index::new(vec![
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(1),
+        ])
+        .set_name("row");
+        assert_eq!(unique.labels(), materialized.unique().labels());
+    }
+
+    #[test]
+    fn typed_int64_drop_duplicates_preserves_typed_backing_codb() {
+        let index = Index::from_i64_values(vec![9, 9, 4, 9, 4, 2]).set_name("axis");
+        assert!(index.labels.materialized.get().is_none());
+
+        let dropped = index.drop_duplicates();
+
+        assert_eq!(dropped.name(), Some("axis"));
+        assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[9, 4, 2]);
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            dropped.labels.materialized.get().is_none(),
+            "drop_duplicates delegates to unique and should keep typed backing"
+        );
     }
 
     #[test]
