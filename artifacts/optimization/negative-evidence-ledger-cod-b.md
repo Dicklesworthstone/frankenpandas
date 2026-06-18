@@ -126,3 +126,30 @@ retry predicate.
 - Retry predicate if rejected: only revisit if a same-host benchmark shows these
   vectorized RangeIndex indexers above 0.1% self-time and allocation profiling
   confirms miss-error construction is still material.
+
+## 2026-06-18 - br-frankenpandas-ruthb - RangeIndex isin direct mask
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: replace `RangeIndex::isin` needle `FxHashSet<i64>` construction plus
+  per-row hash probes with direct output-mask marking via
+  `RangeIndex::position_of_value`.
+- Baseline comparator: current `RangeIndex::isin(values)` path, which hashes all
+  needles and probes that table once per range row.
+- Graveyard mapping: bitset/bitmap marking and cache-aware linear writes: map
+  semantic keys directly to output positions and avoid hash probes entirely.
+- Alien-artifact proof obligation: `isin` returns a mask in index-position order;
+  duplicate needles collapse to the same boolean slot; missing needles leave the
+  mask unchanged; empty ranges return an empty mask.
+- Guard added: `range_index_isin_marks_positions_without_hash_ruthb`, covering
+  ascending and descending ranges, duplicate needles, misses, and empty ranges.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is criterion
+  `RangeIndex::isin` on 1M-row ascending/descending ranges with small and large
+  needle arrays versus the legacy pandas original and a pre-patch hash-probe
+  baseline.
+- Retry predicate if rejected: only retry if a same-host benchmark shows
+  `RangeIndex::isin` above 0.1% self-time and the profile attributes cost to
+  hash-table probing rather than output-mask allocation.

@@ -10665,10 +10665,13 @@ impl RangeIndex {
     /// Per-position membership mask, matching `pd.RangeIndex.isin(values)`.
     #[must_use]
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
-        let needle: FxHashSet<i64> = values.iter().copied().collect();
-        (0..self.len())
-            .map(|position| needle.contains(&self.value_at(position)))
-            .collect()
+        let mut mask = vec![false; self.len()];
+        for &value in values {
+            if let Some(position) = self.position_of_value(value) {
+                mask[position] = true;
+            }
+        }
+        mask
     }
 
     /// Half-open positional range for a value slice, matching
@@ -25967,6 +25970,24 @@ mod tests {
 
         let empty = super::RangeIndex::new(5, 5, 1).unwrap();
         assert!(empty.isin(&[5]).is_empty());
+    }
+
+    #[test]
+    fn range_index_isin_marks_positions_without_hash_ruthb() {
+        let ascending = super::RangeIndex::new(-2, 5, 2).unwrap();
+        assert_eq!(
+            ascending.isin(&[4, -2, 4, 99, 1]),
+            vec![true, false, false, true]
+        );
+
+        let descending = super::RangeIndex::new(9, -3, -3).unwrap();
+        assert_eq!(
+            descending.isin(&[0, 12, 9, 0, -3]),
+            vec![true, false, false, true]
+        );
+
+        let empty = super::RangeIndex::new(3, 3, 1).unwrap();
+        assert!(empty.isin(&[3, 99]).is_empty());
     }
 
     #[test]
