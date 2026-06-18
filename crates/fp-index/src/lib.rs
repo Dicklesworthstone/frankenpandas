@@ -10325,7 +10325,9 @@ impl RangeIndex {
     #[must_use]
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
         let needle: FxHashSet<i64> = values.iter().copied().collect();
-        self.values().iter().map(|v| needle.contains(v)).collect()
+        (0..self.len())
+            .map(|position| needle.contains(&self.value_at(position)))
+            .collect()
     }
 
     /// Half-open positional range for a value slice, matching
@@ -24855,6 +24857,18 @@ mod tests {
         let mask = r.isin(&[1, 3, 99]);
         assert_eq!(mask, vec![false, true, false, true, false]);
         Ok(())
+    }
+
+    #[test]
+    fn range_index_isin_iterates_direct_values_djhvr() {
+        let descending = super::RangeIndex::new(10, 0, -2).unwrap();
+        assert_eq!(
+            descending.isin(&[4, 10, 4, 99]),
+            vec![true, false, false, true, false]
+        );
+
+        let empty = super::RangeIndex::new(5, 5, 1).unwrap();
+        assert!(empty.isin(&[5]).is_empty());
     }
 
     #[test]
