@@ -41,6 +41,8 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | DataFrame.mean(axis=1) Float64 (rrf64) | 500k×10 f64 | 41.01 ms | 7.47 ms | **5.49× faster** | ✅ FIXED — was pure-Scalar (no typed path at all); typed Σ/k (count=k, no-NaN gated), bit-identical, 79 axis1 tests |
 | DataFrame.var(axis=1) Float64 (rrf64) | 500k×10 f64 | 118.10 ms | 10.05 ms | **11.75× faster** | ✅ FIXED — reduce_rows_func_f64 (typed per-row buffer + same Fn(&[f64]), no per-row Vec alloc / Scalar); bit-identical, 79 axis1 tests |
 | DataFrame.std(axis=1) Float64 (rrf64) | 500k×10 f64 | 118.56 ms | 11.29 ms | **10.50× faster** | ✅ FIXED — reduce_rows_func_f64; sem/skew/kurtosis_axis1 also wired (same helper, same pattern) |
+| DataFrame.sum(axis=0) Float64 | 500k×10 f64 | 3.58 ms | 0.87 ms | **4.14× faster** | ✅ already typed — reduce_numeric delegates to per-column Series.sum (typed) |
+| DataFrame.std(axis=0) Float64 | 500k×10 f64 | 54.08 ms | 1.40 ms | **38.7× faster** | ✅ already typed — per-column Series.std (Welford); pandas per-column std very slow |
 | DataFrame.transpose (bench_df) | 2000×10 f64 | 0.036 ms | 1.47 ms | **0.025× (40× slower)** | 🔴 LOSS — Scalar gather-based; NICHE (transpose of large frames pathological/rare), low priority |
 | shift typed Float64 (202cdf50) | 2M f64, periods=1 | 0.74 ms | 9.01 ms | **0.082× (12× SLOWER)** | ⚠️ KEEP (≥ old Scalar path) but LOSS — structural |
 | shift typed Int64 fill (51601b7a) | 2M i64, periods=2 | 0.74 ms | 7.86 ms | **0.094× (10.6× SLOWER)** | ⚠️ KEEP but LOSS — structural |
