@@ -456,3 +456,33 @@ retry predicate.
 - Retry predicate if rejected: only retry if a same-host benchmark shows
   `RangeIndex::isin` above 0.1% self-time and the profile attributes cost to
   hash-table probing rather than output-mask allocation.
+
+## 2026-06-19 - br-frankenpandas-jlv2o - RangeIndex asof closed-form search
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: route ascending `RangeIndex::asof(IndexLabel::Int64)` through
+  `searchsorted(..., "right") - 1` and direct `value_at`, avoiding the previous
+  per-label scan across the whole range.
+- Baseline comparator: current direct-label scan in `RangeIndex::asof`, which is
+  allocation-free but still O(n) for every ascending lookup.
+- Graveyard mapping: learned-index-style closed-form positioning over an affine
+  key domain; use `(start, step, len)` as the semantic witness and binary-search
+  the implicit arithmetic progression instead of materializing or scanning it.
+- Alien-artifact proof obligation: `asof` keeps pandas-style
+  preceding-or-equal semantics for ascending integer ranges, returns `None`
+  before the first label and for empty ranges, and leaves descending/non-Int64
+  behavior on the existing fallback path.
+- Guard added:
+  `range_index_asof_uses_closed_form_for_ascending_i64_jlv2o`, comparing
+  ascending results with the flat-index oracle and covering singleton,
+  descending, and empty ranges.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-19; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is criterion
+  ascending `RangeIndex::asof` on million-row ranges versus the legacy pandas
+  original and a pre-patch linear-scan baseline.
+- Retry predicate if rejected: only revisit this family if a same-host profile
+  shows `RangeIndex::asof` above 0.1% self-time and the residual cost is lookup
+  positioning rather than caller-side alignment or scalar dispatch.

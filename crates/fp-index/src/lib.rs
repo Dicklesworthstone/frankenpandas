@@ -10400,6 +10400,12 @@ impl RangeIndex {
     /// Nearest preceding-or-equal range label lookup.
     #[must_use]
     pub fn asof(&self, key: &IndexLabel) -> Option<IndexLabel> {
+        if let IndexLabel::Int64(needle) = key
+            && self.step > 0
+        {
+            let position = self.searchsorted(*needle, "right").ok()?.checked_sub(1)?;
+            return Some(IndexLabel::Int64(self.value_at(position)));
+        }
         let mut best = None;
         for position in 0..self.len() {
             let label = IndexLabel::Int64(self.value_at(position));
@@ -26399,6 +26405,28 @@ mod tests {
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
         assert_eq!(empty.asof(&IndexLabel::Int64(0)), None);
+    }
+
+    #[test]
+    fn range_index_asof_uses_closed_form_for_ascending_i64_jlv2o() {
+        let range = super::RangeIndex::new(-7, 20, 4).unwrap();
+        for needle in [-20, -7, -6, 0, 1, 17, 18, 99] {
+            let key = IndexLabel::Int64(needle);
+            assert_eq!(range.asof(&key), range.to_flat_index().asof(&key));
+        }
+
+        let singleton = super::RangeIndex::new(42, 100, 1000).unwrap();
+        assert_eq!(
+            singleton.asof(&IndexLabel::Int64(42)),
+            Some(IndexLabel::Int64(42))
+        );
+        assert_eq!(singleton.asof(&IndexLabel::Int64(41)), None);
+
+        let descending = super::RangeIndex::new(8, 0, -2).unwrap();
+        assert_eq!(descending.asof(&IndexLabel::Int64(7)), None);
+
+        let empty = super::RangeIndex::new(5, 5, 1).unwrap();
+        assert_eq!(empty.asof(&IndexLabel::Int64(5)), None);
     }
 
     #[test]
