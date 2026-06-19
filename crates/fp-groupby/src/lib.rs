@@ -1776,6 +1776,108 @@ fn try_groupby_var_std_numeric_counter(
     Some((out_index, out_values))
 }
 
+fn scalar_group_label(label: &Scalar) -> IndexLabel {
+    match label {
+        Scalar::Int64(v) => IndexLabel::Int64(*v),
+        Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+        Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+        Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+        Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
+        Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+        Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+        Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+        Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+        Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+    }
+}
+
+fn numeric_median_scalar(values: &mut [f64]) -> Scalar {
+    if values.is_empty() {
+        return Scalar::Null(NullKind::NaN);
+    }
+
+    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(Ordering::Equal);
+    let mid = values.len() / 2;
+    if values
+        .iter()
+        .any(|x| x.is_nan() || (*x == 0.0 && x.is_sign_negative()))
+    {
+        values.sort_by(cmp);
+        if values.len().is_multiple_of(2) {
+            Scalar::Float64((values[mid - 1] + values[mid]) / 2.0)
+        } else {
+            Scalar::Float64(values[mid])
+        }
+    } else if values.len().is_multiple_of(2) {
+        let (lo_part, &mut hi, _) = values.select_nth_unstable_by(mid, cmp);
+        let lo = lo_part.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        Scalar::Float64((lo + hi) / 2.0)
+    } else {
+        let (_, &mut median, _) = values.select_nth_unstable_by(mid, cmp);
+        Scalar::Float64(median)
+    }
+}
+
+/// Numeric generic-key path for `groupby.median()`.
+///
+/// The generic fallback hashes the same keys, clones every non-missing value
+/// into a per-group `Vec<Scalar>`, then `nanmedian` allocates a second
+/// `Vec<f64>` via `collect_finite`. Median still needs one sortable vector per
+/// group, but for numeric values it can store `f64` directly and reuse the same
+/// order-statistic selection as the dense Int64-key path. Timedelta and
+/// non-numeric values fall back to the existing vector path so dtype-specific
+/// pandas compatibility stays untouched.
+fn try_groupby_median_numeric_vectors(
+    keys: &[Scalar],
+    values: &[Scalar],
+    dropna: bool,
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, (usize, Vec<f64>)>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, Vec::new())
+        });
+
+        if value.is_missing() {
+            continue;
+        }
+        if matches!(value, Scalar::Timedelta64(_)) {
+            return None;
+        }
+        entry.1.push(value.to_f64().ok()?);
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let (source_idx, values) = groups
+            .get_mut(key)
+            .expect("ordering references only inserted keys");
+        out_index.push(scalar_group_label(&keys[*source_idx]));
+        out_values.push(numeric_median_scalar(values));
+    }
+
+    Some((out_index, out_values))
+}
+
 fn update_min_max_scalar_slot(
     slot: &mut Option<Scalar>,
     invalid: &mut bool,
@@ -2189,6 +2291,17 @@ pub fn groupby_agg(
             options.dropna,
             options.sort,
         )
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key median needs sortable values, but it can store
+    // numeric f64 values directly instead of cloning Scalar values and then
+    // allocating a second collect_finite vector inside nanmedian.
+    if matches!(func, AggFunc::Median)
+        && let Some((out_index, out_values)) =
+            try_groupby_median_numeric_vectors(key_vals, val_vals, options.dropna, options.sort)
     {
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
@@ -5975,6 +6088,129 @@ mod tests {
                 Scalar::Timedelta64(7),
                 Scalar::Timedelta64(fp_types::Timedelta::NAT)
             ]
+        );
+    }
+
+    #[test]
+    fn groupby_median_utf8_keys_numeric_vectors_uza04203() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..8).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("d".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            (0..8).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(5.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(8.0),
+                Scalar::Float64(6.0),
+            ],
+        )
+        .unwrap();
+
+        let sorted = groupby_median(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into(), "d".into()]
+        );
+        assert_eq!(
+            sorted.values(),
+            &[
+                Scalar::Float64(6.0),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(8.0)
+            ]
+        );
+
+        let first_seen = GroupByOptions {
+            dropna: true,
+            sort: false,
+        };
+        let unsorted =
+            groupby_median(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
+        assert_eq!(
+            unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into(), "d".into()]
+        );
+        assert_eq!(
+            unsorted.values(),
+            &[
+                Scalar::Float64(3.0),
+                Scalar::Float64(6.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(8.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn groupby_median_timedelta_fallback_preserves_dtype_uza04203() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..5).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "td",
+            (0..5).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Timedelta64(10),
+                Scalar::Timedelta64(20),
+                Scalar::Timedelta64(30),
+                Scalar::Null(NullKind::NaT),
+                Scalar::Timedelta64(50),
+            ],
+        )
+        .unwrap();
+
+        let out = groupby_median(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(
+            out.values(),
+            &[Scalar::Timedelta64(15), Scalar::Timedelta64(40)]
         );
     }
 

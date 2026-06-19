@@ -151,3 +151,52 @@ retry failed levers without a concrete retry predicate.
   fallback Vec materialization or the hash/group lookup itself; route any
   remaining gap to a shared grouped-key primitive rather than another reducer
   micro-specialization.
+
+## 2026-06-18 - br-frankenpandas-uza04.203 - Generic groupby median numeric vectors
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: route generic-key `groupby_agg(Median)` / `groupby_median` over
+  per-group `Vec<f64>` numeric value vectors instead of cloning every
+  non-missing value into per-group `Vec<Scalar>` and then allocating a second
+  `collect_finite` `Vec<f64>` inside `nanmedian`.
+- Baseline comparator: prior generic non-Int64-key median path, which hashes
+  the same `GroupKeyRef` but stores cloned `Scalar` values before reducing.
+  Dense Int64-key median already has a CSR/select-nth route, so this only
+  targets realistic UTF-8/object-key groups that still needed median sorting.
+- Graveyard mapping: vectorized execution, cache-aware aggregation state, and
+  constants-aware data-structure specialization. The helper keeps the existing
+  group hash/order primitive but removes object materialization from the median
+  value lane.
+- Alien-artifact proof obligation: group admission and output label ordering
+  are unchanged because the same `GroupKeyRef`, first-source index, and
+  `compare_group_labels` sort are used. Median values are the same finite
+  non-missing `to_f64()` values in each group; odd/even selection uses the
+  existing dense path's order-statistic rule, with NaN/negative-zero groups
+  routed through a full sort fallback. Timedelta and non-numeric values decline
+  the fast path, preserving dtype-specific fallback semantics.
+- Guard added: `groupby_median_utf8_keys_numeric_vectors_uza04203`, covering
+  UTF-8 keys, sorted output, first-seen output, null skipping, odd/even groups,
+  singleton groups, and all-missing groups; and
+  `groupby_median_timedelta_fallback_preserves_dtype_uza04203`, covering
+  Timedelta median fallback to `Timedelta64` output.
+- Bench guard added: `crates/fp-groupby/src/bin/groupby-bench.rs` now accepts
+  `--agg agg-median` so the batch runner can target the dispatcher median path
+  against the legacy pandas original and pre-patch `Vec<Scalar>` fallback.
+- Cass/ledger preflight: local cass search returned zero hits for the broad
+  frankenpandas rejected/slower query, while repo ledger search showed prior
+  groupby counter keeps and a rejected all-singleton string-groupby shortcut.
+  This attempt avoids the rejected shortcut family and targets only median
+  value materialization under generic keys.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a cargo check -p fp-groupby`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is
+  `groupby-bench --agg agg-median --key-kind utf8` on realistic cardinalities
+  versus legacy pandas original and a pre-patch per-group `Vec<Scalar>` median
+  baseline, with golden digest unchanged.
+- Retry predicate if rejected: do not retry scalar-clone elimination for median
+  unless same-host profiling shows residual self-time in the generic median
+  fallback's `Vec<Scalar>` materialization or `collect_finite` allocation; route
+  remaining median gaps to shared grouped-key plans or per-group selection
+  algorithms rather than another wrapper-level vector swap.

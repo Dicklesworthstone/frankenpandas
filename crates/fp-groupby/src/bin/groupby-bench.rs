@@ -56,6 +56,7 @@ fn run_agg(
         "agg-prod" => groupby_agg(keys, values, AggFunc::Prod, opts, &policy, &mut ledger)?,
         "agg-var" => groupby_agg(keys, values, AggFunc::Var, opts, &policy, &mut ledger)?,
         "agg-std" => groupby_agg(keys, values, AggFunc::Std, opts, &policy, &mut ledger)?,
+        "agg-median" => groupby_agg(keys, values, AggFunc::Median, opts, &policy, &mut ledger)?,
         other => return Err(format!("unknown agg '{other}'").into()),
     };
     Ok(out)
