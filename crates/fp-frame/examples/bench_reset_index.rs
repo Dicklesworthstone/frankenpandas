@@ -42,7 +42,7 @@ fn digest(df: &DataFrame) -> u64 {
     // are all pinned.
     for name in df.column_names() {
         fnv1a64_update(&mut h, name.as_bytes());
-        if let Some(col) = df.column(&name) {
+        if let Some(col) = df.column(name) {
             for v in col.values() {
                 let x = match v {
                     Scalar::Int64(x) => *x,

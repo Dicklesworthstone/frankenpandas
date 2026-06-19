@@ -7,7 +7,6 @@
 use fp_columnar::Column;
 use fp_frame::Series;
 use fp_index::{Index, IndexLabel};
-use fp_types::Scalar;
 
 fn idx(labels: &[i64]) -> Index {
     Index::new(labels.iter().map(|&x| IndexLabel::Int64(x)).collect())
@@ -61,7 +60,8 @@ fn main() {
         Series::new("b".to_string(), shifted, Column::from_f64_values(b.clone())).unwrap();
 
     let mut acc = String::new();
-    let ops: [(&str, fn(&Series, &Series) -> Series); 6] = [
+    type SeriesCmpOp = (&'static str, fn(&Series, &Series) -> Series);
+    let ops: [SeriesCmpOp; 6] = [
         ("gt", |x, y| x.gt(y).unwrap()),
         ("lt", |x, y| x.lt(y).unwrap()),
         ("eq", |x, y| x.eq_series(y).unwrap()),

@@ -20,12 +20,12 @@ fn bool_series(vals: &[bool]) -> Series {
 #[test]
 fn any_all_typed_bool_all_valid() {
     // all-valid Bool -> as_bool_slice typed fast path
-    assert_eq!(bool_series(&[true, false, true]).any().unwrap(), true);
-    assert_eq!(bool_series(&[true, false, true]).all().unwrap(), false);
-    assert_eq!(bool_series(&[true, true]).any().unwrap(), true);
-    assert_eq!(bool_series(&[true, true]).all().unwrap(), true);
-    assert_eq!(bool_series(&[false, false]).any().unwrap(), false);
-    assert_eq!(bool_series(&[false, false]).all().unwrap(), false);
+    assert!(bool_series(&[true, false, true]).any().unwrap());
+    assert!(!bool_series(&[true, false, true]).all().unwrap());
+    assert!(bool_series(&[true, true]).any().unwrap());
+    assert!(bool_series(&[true, true]).all().unwrap());
+    assert!(!bool_series(&[false, false]).any().unwrap());
+    assert!(!bool_series(&[false, false]).all().unwrap());
 }
 
 #[test]
@@ -44,16 +44,16 @@ fn any_all_bool_with_missing_scalar_fallback() {
         Scalar::Null(NullKind::Null),
         Scalar::Bool(true),
     ]);
-    assert_eq!(s.any().unwrap(), true); // a true is present
-    assert_eq!(s.all().unwrap(), false); // a false is present
+    assert!(s.any().unwrap()); // a true is present
+    assert!(!s.all().unwrap()); // a false is present
     let s2 = with_missing(vec![Scalar::Bool(true), Scalar::Null(NullKind::Null)]);
-    assert_eq!(s2.any().unwrap(), true);
-    assert_eq!(s2.all().unwrap(), true); // missing skipped, remaining all true
+    assert!(s2.any().unwrap());
+    assert!(s2.all().unwrap()); // missing skipped, remaining all true
 }
 
 #[test]
 fn any_all_empty_bool() {
     let empty = Series::new("b", Index::new(vec![]), Column::from_bool_values(vec![])).unwrap();
-    assert_eq!(empty.any().unwrap(), false);
-    assert_eq!(empty.all().unwrap(), true);
+    assert!(!empty.any().unwrap());
+    assert!(empty.all().unwrap());
 }

@@ -482,6 +482,59 @@ impl ValidityMask {
         (0..self.len).map(|idx| self.get(idx))
     }
 
+    #[doc(hidden)]
+    pub fn for_each_invalid_range(&self, mut visit: impl FnMut(usize, usize)) {
+        if self.len == 0 || self.is_all_valid_sentinel() {
+            return;
+        }
+        if let Some(ranges) = &self.invalid_ranges {
+            for &(start, len) in ranges.iter() {
+                visit(start, len);
+            }
+            return;
+        }
+
+        let mut pending_start = 0usize;
+        let mut pending_len = 0usize;
+        for word_idx in 0..self.len.div_ceil(64) {
+            let mut invalid_bits = !self.words.get(word_idx).copied().unwrap_or(0);
+            if word_idx == self.len / 64 {
+                let remainder = self.len % 64;
+                if remainder > 0 {
+                    invalid_bits &= (1_u64 << remainder) - 1;
+                }
+            }
+
+            while invalid_bits != 0 {
+                let bit_start = invalid_bits.trailing_zeros() as usize;
+                let shifted = invalid_bits >> bit_start;
+                let run_len = (!shifted).trailing_zeros() as usize;
+                let start = word_idx * 64 + bit_start;
+
+                if pending_len > 0 && pending_start + pending_len == start {
+                    pending_len += run_len;
+                } else {
+                    if pending_len > 0 {
+                        visit(pending_start, pending_len);
+                    }
+                    pending_start = start;
+                    pending_len = run_len;
+                }
+
+                let run_mask = if run_len == 64 {
+                    u64::MAX
+                } else {
+                    ((1_u64 << run_len) - 1) << bit_start
+                };
+                invalid_bits &= !run_mask;
+            }
+        }
+
+        if pending_len > 0 {
+            visit(pending_start, pending_len);
+        }
+    }
+
     /// Number of invalid (cleared) positions.
     #[must_use]
     pub fn count_invalid(&self) -> usize {
@@ -17349,6 +17402,26 @@ mod tests {
     }
 
     #[test]
+    fn validity_mask_invalid_range_visitor_merges_word_boundaries() {
+        let mut mask = ValidityMask::all_valid(140);
+        for idx in 60..68 {
+            mask.set(idx, false);
+        }
+        for idx in [3, 90, 91, 139] {
+            mask.set(idx, false);
+        }
+
+        let mut ranges = Vec::new();
+        mask.for_each_invalid_range(|start, len| ranges.push((start, len)));
+        assert_eq!(ranges, vec![(3, 1), (60, 8), (90, 2), (139, 1)]);
+
+        let sparse = ValidityMask::from_invalid_ranges(Arc::from(ranges.clone()), 140);
+        let mut sparse_ranges = Vec::new();
+        sparse.for_each_invalid_range(|start, len| sparse_ranges.push((start, len)));
+        assert_eq!(sparse_ranges, ranges);
+    }
+
+    #[test]
     fn validity_mask_all_invalid() {
         let mask = ValidityMask::all_invalid(100);
         assert_eq!(mask.len(), 100);
@@ -20407,7 +20480,7 @@ mod tests {
                 value
             }
 
-            let mut seed = 0xc11f_0b0a_7e5d_1dc_u64;
+            let mut seed = 0x0c11_f0b0_a7e5_d1dc_u64;
             for case in 0..220 {
                 let len = (next(&mut seed) % 61 + 1) as usize;
                 let mut lower = bound(&mut seed);
@@ -20604,7 +20677,8 @@ mod tests {
                 }
 
                 let input = Column::from_values(values.clone()).expect("column");
-                let outputs: [(&str, Column, fn(f64) -> f64); 3] = [
+                type UnaryFloatOutput = (&'static str, Column, fn(f64) -> f64);
+                let outputs: [UnaryFloatOutput; 3] = [
                     ("floor", input.floor().expect("floor"), floor_oracle),
                     ("ceil", input.ceil().expect("ceil"), ceil_oracle),
                     ("trunc", input.trunc().expect("trunc"), trunc_oracle),

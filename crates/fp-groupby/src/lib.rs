@@ -3557,7 +3557,7 @@ mod tests {
         // Oracle differential (br-frankenpandas-xnbl7): groupby_nunique (dense
         // 2-D seen-bitset path b562aef4) must equal a hand-computed per-group
         // distinct-value count. Deterministic seeded LCG — no rand, no mocks.
-        let mut state: u64 = 0x9e21_77b1_dead_5e7u64.wrapping_mul(3);
+        let mut state: u64 = 0x09e2_177b_1dea_d5e7_u64.wrapping_mul(3);
         let mut next = || {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)

@@ -56,7 +56,8 @@ fn hash_merged(m: &MergedDataFrame) -> (u64, usize) {
 }
 fn main() {
     // configs: (lk1,lk2,rk1,rk2). unique composite -> direct-address; dup -> CSR.
-    let cfgs: Vec<(Vec<i64>, Vec<i64>, Vec<i64>, Vec<i64>)> = vec![
+    type KeyColumns = (Vec<i64>, Vec<i64>, Vec<i64>, Vec<i64>);
+    let cfgs: Vec<KeyColumns> = vec![
         (vec![0, 1, 2], vec![5, 6, 7], vec![1, 2, 9], vec![6, 7, 0]), // unique both, partial
         (vec![1, 1, 2], vec![3, 3, 4], vec![1, 2], vec![3, 4]),       // dup left composite -> CSR
         (vec![0, 1], vec![0, 0], vec![0, 1, 0], vec![0, 0, 0]),       // dup right composite -> CSR

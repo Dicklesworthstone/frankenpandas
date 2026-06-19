@@ -44,7 +44,7 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | DataFrame.sum(axis=0) Float64 | 500k×10 f64 | 3.58 ms | 0.87 ms | **4.14× faster** | ✅ already typed — reduce_numeric delegates to per-column Series.sum (typed) |
 | DataFrame.std(axis=0) Float64 | 500k×10 f64 | 54.08 ms | 1.40 ms | **38.7× faster** | ✅ already typed — per-column Series.std (Welford); pandas per-column std very slow |
 | DataFrame.count(axis=1) all-present (cntf) | 500k×10 f64 | 39.92 ms | 0.165 ms | **242× faster** | ✅ FIXED — was per-cell is_missing scan (5M checks); when every column is typed-all-valid (as_f64/i64/bool_slice Some) no cell is missing ⇒ count = #cols constant Int64. Bit-identical, conformance green |
-| DataFrame.all(axis=1) typed Float64 (allf) | 500k×10 f64 | 4.48 ms | 8.0 ms | **0.56× (1.79× slower)** | ⚠️ IMPROVED from 21.7× LOSS (97ms!) — typed all-Float64 path (as_f64_slice, truthy=v!=0.0) skips 5M Scalar values() materialization (12× FP-side); bit-identical, conformance green. Residual = Scalar::Bool output + numpy vectorization |
+| DataFrame.all(axis=1) Float64 (allf) | 500k×10 f64 | 4.48 ms | 8.0 ms | **0.56× (1.79× slower)** | ⚠️ IMPROVED from 21.7× LOSS (97ms) — typed all-Float64 path (as_f64_slice, truthy=v!=0.0, no-NaN gated, bit-identical) skips 5M Scalar values() materialize = 12× FP-side. Applied (fc22d33f), conformance green. Residual = Scalar::Bool output + numpy vectorization |
 | DataFrame.any(axis=1) (bench_df) | 500k×10 f64 | 6.42 ms | 8.66 ms | **0.74× (1.35× slower)** | ⚠️ modest LOSS — short-circuits (first col true); typed path candidate, lower priority |
 | DataFrame.transpose (bench_df) | 2000×10 f64 | 0.036 ms | 1.47 ms | **0.025× (40× slower)** | 🔴 LOSS — Scalar gather-based; NICHE (transpose of large frames pathological/rare), low priority |
 | shift typed Float64 (202cdf50) | 2M f64, periods=1 | 0.74 ms | 9.01 ms | **0.082× (12× SLOWER)** | ⚠️ KEEP (≥ old Scalar path) but LOSS — structural |
@@ -54,6 +54,7 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | ffill + mimalloc boundary allocator (3nah5) | 2M f64, ~10% NaN | 2.50 ms | 6.89 ms | **0.36× (2.76× slower)** | ✅ KEEP — adopted at process boundaries; 2.51× faster than current glibc-malloc ffill (17.32 ms), still needs single-pass builder |
 | shift no-scan Float64 rebuild + mimalloc (dfcv8) | 2M f64, periods=1 | 0.943 ms | 0.673 ms | **1.40× faster** | ✅ KEEP — skips redundant Float64 NaN/validity rebuild scan via hidden all-valid constructor; golden `d41eaaa775ee123e` unchanged; plain glibc path is 1.47 ms = 0.64×, so allocator boundary still matters |
 | ffill no-scan Float64 rebuild + mimalloc (dfcv8) | 2M f64, ~10% NaN | 3.221 ms | 6.17 ms | **0.52× (1.9× slower)** | ⚠️ KEEP as no-regression side effect — 1.12× faster than prior mimalloc row, but still a pandas loss; route deeper validity-run/branchless fill work |
+| ffill validity-run bulk fill + mimalloc (skw2c) | 2M f64, ~10% NaN | 3.340 ms | 2.371 ms | **1.41× faster** | ✅ KEEP — packed-word invalid-run visitor + bulk f64 copy fills only missing spans; FP-side 5.745→2.371 ms = 2.42× faster; focused conformance green; `perf stat` blocked by `perf_event_paranoid=4` |
 
 | set_index typed Int64 col→idx (p9omo) | 1M rows, 2 cols | 1.12 ms | 0.17 ms | **6.5× faster** | ✅ KEEP — Index::from_i64_values |
 | cummax (sweep bench_misc) | 2M f64 | 22.02 ms | 2.63 ms | **8.4× faster** | ✅ pandas cummax surprisingly slow; fp crushes |
@@ -160,11 +161,12 @@ elimination wins for `Nunique` (2.89× on a 2M-row CV-gated workload) and `Media
 (1.80× on a 2M-row CV-gated workload). The remaining Utf8 gap is reducer-specific:
 plain sum/mean-style Utf8 grouping still needs factorize→dense.
 
-### Gap: shift/concat/ffill structural — column-rebuild vs in-place (6.6–24× slower)
-**ffill (2M f64, ~10% NaN) confirms the pattern: 18.43 ms vs pandas 2.79 ms = 6.6× slower.**
-ffill has a typed `as_f64_slice_with_validity` path but still rebuilds a fresh Column +
-re-inits validity, so it loses to pandas' in-place forward-fill — the same root cause as
-shift/concat below. The rebuild-class ops (shift/concat/ffill) are fp's consistent structural
+### Gap: shift/concat/ffill structural — column-rebuild vs in-place (historically 6.6–24× slower)
+**ffill (2M f64, ~10% NaN) originally confirmed the pattern: 18.43 ms vs pandas 2.79 ms = 6.6× slower.**
+ffill had a typed `as_f64_slice_with_validity` path but still rebuilt every output slot and
+re-initialized validity. skw2c fixes the no-limit Float64 case by extracting invalid runs from
+packed validity words, bulk-copying the f64 buffer, and filling only missing spans; that flips
+ffill to 2.371 ms vs pandas 3.340 ms = 1.41× faster. concat remains the active rebuild-class
 loss; the algorithm-class ops (dedup/value_counts/std/grouping) consistently win.
 
 fp shift/concat rebuild a whole new typed Column (`as_f64/i64_slice` materializes the typed
@@ -237,6 +239,13 @@ verdict is "keep with allocator boundary." `ffill` improves modestly but remains
 6.17 ms vs pandas 3.221 ms = 0.52×. `perf stat` profiling was attempted but blocked by
 `/proc/sys/kernel/perf_event_paranoid=4`; timing, golden digests, conformance, and UBS are
 the accepted proof for this narrow lever.
+
+**skw2c follow-up — ffill validity-run path flips the gap.** Current-source
+`rch exec -- cargo build --release -p fp-frame --example bench_rebuild_mimalloc` plus local
+`taskset -c 7` timings show `ffill` at 2.371 ms vs pandas 3.340 ms = 1.41× faster after the
+packed validity-run visitor. Same-run before for the mimalloc boundary was 5.745 ms, so the
+lever is a 2.42× FP-side win. `perf stat` is still blocked by `perf_event_paranoid=4`; focused
+`fp-columnar` and `fp-frame` tests cover the new run visitor and leading-null pandas semantics.
 
 **ADOPTION VERIFY (cod-a exact-parent A/B).** Compared the `250bfbf2^` parent binary against
 `250bfbf2` (`release-perf`, local executable after `rch` build proof; both pinned with

@@ -30,7 +30,7 @@ fn reference(data: &[f64]) -> Vec<(u64, i64)> {
             }
         }
     }
-    out.sort_by(|a, b| b.1.cmp(&a.1)); // stable desc by count
+    out.sort_by_key(|row| std::cmp::Reverse(row.1)); // stable desc by count
     out
 }
 

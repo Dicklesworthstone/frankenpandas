@@ -4825,7 +4825,7 @@ mod tests {
                 // finite, in -5.0..=5.0 by 0.5 — no NaN/inf.
                 1 => Scalar::Float64(f64::from((r % 21) as i32 - 10) / 2.0),
                 2 => Scalar::Utf8(format!("s{}", r % 5)),
-                _ => Scalar::Bool(r % 2 == 0),
+                _ => Scalar::Bool(r.is_multiple_of(2)),
             };
             let a = mk(next());
             let b = mk(next());
@@ -10322,9 +10322,7 @@ mod tests {
             }
         }
 
-        fn assert_components(
-            case: usize,
-            text: &str,
+        struct Components {
             year: i64,
             month: u32,
             day: u32,
@@ -10332,8 +10330,19 @@ mod tests {
             minute: u32,
             second: u32,
             nanos: u64,
-        ) {
+        }
+
+        fn assert_components(case: usize, text: &str, expected: Components) {
             let ts = Timestamp::parse(text).expect("seeded valid timestamp");
+            let Components {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanos,
+            } = expected;
             assert_eq!(ts.year(), Some(year), "case {case}: year");
             assert_eq!(ts.month(), Some(month as i64), "case {case}: month");
             assert_eq!(ts.day(), Some(day as i64), "case {case}: day");
@@ -10366,17 +10375,31 @@ mod tests {
         assert!(Timestamp::parse("2001-04-31").is_err());
         assert!(Timestamp::parse("2024-00-15").is_err());
 
-        assert_components(usize::MAX, "2000-02-29", 2000, 2, 29, 0, 0, 0, 0);
+        assert_components(
+            usize::MAX,
+            "2000-02-29",
+            Components {
+                year: 2000,
+                month: 2,
+                day: 29,
+                hour: 0,
+                minute: 0,
+                second: 0,
+                nanos: 0,
+            },
+        );
         assert_components(
             usize::MAX - 1,
             "2024-02-29T23:59:59.000000001",
-            2024,
-            2,
-            29,
-            23,
-            59,
-            59,
-            1,
+            Components {
+                year: 2024,
+                month: 2,
+                day: 29,
+                hour: 23,
+                minute: 59,
+                second: 59,
+                nanos: 1,
+            },
         );
 
         let mut seed = 0x15e0_1d50_1f0a_cade_u64;
@@ -10392,23 +10415,71 @@ mod tests {
             match case % 4 {
                 0 => {
                     let text = format!("{year:04}-{month:02}-{day:02}");
-                    assert_components(case, &text, year, month, day, 0, 0, 0, 0);
+                    assert_components(
+                        case,
+                        &text,
+                        Components {
+                            year,
+                            month,
+                            day,
+                            hour: 0,
+                            minute: 0,
+                            second: 0,
+                            nanos: 0,
+                        },
+                    );
                 }
                 1 => {
                     let text =
                         format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}");
-                    assert_components(case, &text, year, month, day, hour, minute, second, 0);
+                    assert_components(
+                        case,
+                        &text,
+                        Components {
+                            year,
+                            month,
+                            day,
+                            hour,
+                            minute,
+                            second,
+                            nanos: 0,
+                        },
+                    );
                 }
                 2 => {
                     let text =
                         format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}");
-                    assert_components(case, &text, year, month, day, hour, minute, second, 0);
+                    assert_components(
+                        case,
+                        &text,
+                        Components {
+                            year,
+                            month,
+                            day,
+                            hour,
+                            minute,
+                            second,
+                            nanos: 0,
+                        },
+                    );
                 }
                 _ => {
                     let text = format!(
                         "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{nanos:09}"
                     );
-                    assert_components(case, &text, year, month, day, hour, minute, second, nanos);
+                    assert_components(
+                        case,
+                        &text,
+                        Components {
+                            year,
+                            month,
+                            day,
+                            hour,
+                            minute,
+                            second,
+                            nanos,
+                        },
+                    );
                 }
             }
         }

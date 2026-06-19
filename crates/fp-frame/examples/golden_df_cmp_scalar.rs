@@ -24,7 +24,7 @@ fn main() {
     fnull[5] = f64::NAN; // forces as_f64_slice -> None (NaN excluded), AoS path
     let i: Vec<i64> = (0..n).map(|k| (k as i64 % 91) - 45).collect();
     let s: Vec<Scalar> = (0..n)
-        .map(|k| Scalar::Utf8(format!("k{}", k % 7).into()))
+        .map(|k| Scalar::Utf8(format!("k{}", k % 7)))
         .collect();
 
     let idx = Index::new((0..n as i64).map(IndexLabel::Int64).collect());
@@ -58,7 +58,8 @@ fn main() {
 
     let mut acc = String::new();
     use fp_frame::DataFrame as DF;
-    let ops: [(&str, fn(&DF, &Scalar) -> DF); 6] = [
+    type DataFrameScalarCmpOp = (&'static str, fn(&DF, &Scalar) -> DF);
+    let ops: [DataFrameScalarCmpOp; 6] = [
         ("eq", |d, k| d.eq_scalar_df(k).unwrap()),
         ("ne", |d, k| d.ne_scalar_df(k).unwrap()),
         ("gt", |d, k| d.gt_scalar_df(k).unwrap()),
