@@ -68,8 +68,11 @@ and are now ahead — the FxHash-over-khash and zero-copy-gather/slice veins fli
   - `series_agg_size_any_all_tt0bx` — agg of mixed Int64+Bool: the result Column coerces
     Bool→Int64 ([3,1,0,3]); test expected pandas object-dtype Bool ([3,True,False,3]). Real
     parity gap (mixed-agg object dtype), not a perf lever.
-  - `dataframe_set_index_rejects_null_labels_oeirt` — Float64-NaN key via the Float64Index
-    path (i10en) isn't rejected; unrelated to the Int64 set_index lever (p9omo).
+  - ~~`dataframe_set_index_rejects_null_labels_oeirt`~~ **FIXED**: my early test wrongly
+    expected set_index to reject a Float64 NaN label; pandas ACCEPTS NaN index labels
+    (verified vs 2.2.3) and fp's i10en Float64Index path correctly does too. Corrected the
+    test to assert the pandas-faithful semantics (Scalar::Null rejected, Float64 NaN
+    accepted) — now passes (rch cargo test exit 0).
   - `dataframe_groupby_prod_preserves_int64_j9w3s` — groupby prod returns Float64(6.0) vs
     Int64(6); dtype-preservation gap.
 - ACTION: these need owner fixes (parity/golden), tracked separately; perf levers are clean.
