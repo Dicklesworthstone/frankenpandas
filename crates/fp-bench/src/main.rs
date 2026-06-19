@@ -12,15 +12,16 @@
 //! /ewm map to more setup-heavy harnesses and are filed as follow-up; the Python
 //! side simply reports those FP workloads as INCOMPLETE until added here.
 
-use std::{collections::BTreeMap, time::Instant};
+use std::{collections::BTreeMap, hint::black_box, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::{DataFrame, Series, to_datetime};
-use fp_index::{DuplicateKeep, Index, IndexLabel};
+use fp_index::{DuplicateKeep, Index, IndexLabel, RangeIndex};
 use fp_join::{JoinType, merge_dataframes_on_with};
 
 const WARMUP: usize = 3;
 const ITERS: usize = 25;
+const TAKE_BATCH: usize = 256;
 
 /// splitmix64 — deterministic, seed-stable uniform stream. We only need a
 /// fair-distribution data set for TIMING (not bit-identity with numpy's PCG64),
@@ -54,6 +55,12 @@ fn size_rows_cols(size: &str) -> (usize, usize) {
         "1M" => (1_000_000, 10),
         _ => (100_000, 10),
     }
+}
+
+fn arithmetic_take_positions(rows: usize) -> Vec<usize> {
+    let start = rows / 8;
+    let stop = rows - start;
+    (start..stop).step_by(2).collect()
 }
 
 /// Build one Float64 column of `rows` values per the requested dtype, advancing
@@ -493,6 +500,33 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 .collect();
             time_us(|| {
                 let _ = df.reindex(new_labels.clone()).expect("reindex");
+            })
+        }
+        ("indexing", "range_index_take_arithmetic") => {
+            // pandas: pd.RangeIndex(10, 10 + 3*n, 3).take(arithmetic_positions).
+            // Batch repeated takes inside the timed unit so FP's lazy affine
+            // output path stays above timer noise without charging setup.
+            let range = RangeIndex::new(10, 10 + rows as i64 * 3, 3).expect("range index fixture");
+            let positions = arithmetic_take_positions(rows);
+            time_us(|| {
+                for _ in 0..TAKE_BATCH {
+                    black_box(
+                        range
+                            .take(black_box(positions.as_slice()))
+                            .expect("range take"),
+                    );
+                }
+            })
+        }
+        ("indexing", "affine_index_take_arithmetic") => {
+            // pandas: pd.Index(np.arange(10, 10 + 3*n, 3)).take(arithmetic_positions).
+            let index =
+                Index::new_known_unique_int64_affine_range(10, 3, rows).expect("affine index");
+            let positions = arithmetic_take_positions(rows);
+            time_us(|| {
+                for _ in 0..TAKE_BATCH {
+                    black_box(index.take(black_box(positions.as_slice())));
+                }
             })
         }
         // pandas: left.merge(right, on="key", how=inner|left|outer). The frame

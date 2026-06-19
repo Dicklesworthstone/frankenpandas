@@ -34,6 +34,40 @@ Artifacts:
 - `artifacts/perf/cod-a-groupby-gauntlet-criterion-a7287a4d.txt`
 - `artifacts/optimization/negative-evidence-ledger-cod-a.md`
 
+## 2026-06-18/19 Gauntlet Refresh: Range/affine `Index::take`
+
+Release-readiness score for this cluster: **2/5**.
+
+- pandas oracle: 2.2.3.
+- FrankenPandas profile: `release-perf`, `fp-bench`, `TAKE_BATCH=256`.
+- Build target: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`.
+- Decision: keep `br-frankenpandas-uza04.205` (`RangeIndex::take` arithmetic
+  selector laziness) as a measured FP-side improvement, but do not count it as
+  pandas domination; revert `br-frankenpandas-uza04.206` because generic affine
+  `Index::take` arithmetic laziness regressed versus the pre-optimization FP
+  baseline and remained slower than pandas.
+
+| Workload | Rows | Final FP p50 | pandas p50 | Ratio vs pandas | Verdict | Action |
+|---|---:|---:|---:|---:|---|---|
+| `range_index_take_arithmetic` | 1M | 83.685 ms | 62.712 ms | 0.749x | SLOWER | Keep `.205`; next target is eliminating the O(k) selector scan |
+| `affine_index_take_arithmetic` | 100k | 7.200 ms | 6.001 ms | 0.833x | SLOWER | `.206` reverted |
+| `affine_index_take_arithmetic` | 1M | 72.051 ms | 54.687 ms | 0.759x | SLOWER | `.206` reverted |
+| `range_index_take_arithmetic` | 100k | dropped | dropped | n/a | DROPPED_HIGH_CV | Recorded in negative ledger; reruns stayed above CV gate |
+
+Pre-optimization comparator:
+
+| Workload | Rows | Preopt FP p50 | Final FP p50 | FP-side delta | Release note |
+|---|---:|---:|---:|---:|---|
+| `range_index_take_arithmetic` | 1M | 127.438 ms | 83.685 ms | 1.52x faster | Partial keep, not pandas-ready |
+| `affine_index_take_arithmetic` | 1M | 72.892 ms | 72.051 ms | 1.01x faster after revert | Reverted `.206`; no material gain retained |
+
+Evidence artifacts:
+
+- `artifacts/bench/gauntlet_cod_b_range_take_after_revert206_vs_pandas_batch256_taskset7.json`
+- `artifacts/bench/gauntlet_cod_b_range_take_preopt_vs_pandas_batch256_taskset7.json`
+- `artifacts/bench/gauntlet_cod_b_range_take_criterion_after_revert206.txt`
+- `artifacts/optimization/negative-evidence-ledger-cod-b.md`
+
 ## Categories
 
 | Category | Weight | FP p50 | PD p50 | Ratio | Verdict |

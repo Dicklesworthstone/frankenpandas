@@ -1,0 +1,13 @@
+=== vs-pandas Benchmark Harness ===
+Timestamp: 2026-06-19T01:12:39.480972+00:00
+Categories: indexing
+Sizes: 1M
+Dtypes: float64
+Workloads: range_index_take_arithmetic
+pandas version: 2.2.3
+
+
+[INDEXING] (weight: 0.1)
+  [indexing] range_index_take_arithmetic @ 1M/float64... SLOWER (0.54x)
+
+Results written to: artifacts/bench/gauntlet_cod_b_range_take_1m_batch256_taskset7_rerun.json

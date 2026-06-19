@@ -4,9 +4,78 @@ Purpose: record every cod-b optimization attempt in the new performance campaign
 including dead ends, so future agents do not retry failed levers without a concrete
 retry predicate.
 
+## 2026-06-18/19 - Gauntlet verification - br-frankenpandas-uza04.205/.206 affine take cluster
+
+- Harness: `benches/vs_pandas_harness.py --category indexing --workloads
+  range_index_take_arithmetic,affine_index_take_arithmetic --sizes 100k,1M
+  --dtypes float64`, `TAKE_BATCH=256`, pinned with `taskset` for accepted rows.
+- Subject: FrankenPandas `fp-bench` built with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo build
+  --profile release-perf -p fp-bench`.
+- Oracle: pandas 2.2.3.
+- Criterion guard: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b
+  rch exec -- cargo bench -p fp-conformance --bench vs_pandas --
+  take_arithmetic`.
+- Final action: keep br-frankenpandas-uza04.205 `RangeIndex::take` arithmetic
+  selector laziness as a measured FP-side improvement, but record it as still
+  slower than pandas; revert br-frankenpandas-uza04.206 generic affine
+  `Index::take` arithmetic laziness because it regressed the generic affine
+  workload versus the pre-optimization FP baseline and pandas.
+
+### Accepted final post-revert rows
+
+| Workload | Rows | FP p50 | pandas p50 | Ratio vs pandas | Verdict | Artifact |
+|---|---:|---:|---:|---:|---|---|
+| `range_index_take_arithmetic` | 1M | 83.685 ms | 62.712 ms | 0.749x | SLOWER | `artifacts/bench/gauntlet_cod_b_range_take_after_revert206_vs_pandas_batch256_taskset7.json` |
+| `affine_index_take_arithmetic` | 100k | 7.200 ms | 6.001 ms | 0.833x | SLOWER | `artifacts/bench/gauntlet_cod_b_range_take_after_revert206_vs_pandas_batch256_taskset7.json` |
+| `affine_index_take_arithmetic` | 1M | 72.051 ms | 54.687 ms | 0.759x | SLOWER | `artifacts/bench/gauntlet_cod_b_range_take_after_revert206_vs_pandas_batch256_taskset7.json` |
+
+### Accepted pre-optimization comparator
+
+| Workload | Rows | Preopt FP p50 | pandas p50 | Ratio vs pandas | Post-revert FP p50 | FP delta | Decision |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `range_index_take_arithmetic` | 100k | 12.187 ms | 7.643 ms | 0.627x | no accepted row; noisy p50 8.16-8.49 ms | routing only | keep based on 1M accepted row |
+| `range_index_take_arithmetic` | 1M | 127.438 ms | 62.487 ms | 0.490x | 83.685 ms | 1.52x faster FP-side | KEEP `.205`, still slower than pandas |
+| `affine_index_take_arithmetic` | 100k | 6.965 ms | 5.280 ms | 0.758x | 7.200 ms | 0.97x FP-side | `.206` reverted |
+| `affine_index_take_arithmetic` | 1M | 72.892 ms | 52.949 ms | 0.726x | 72.051 ms | 1.01x FP-side | `.206` reverted; no material gain |
+
+### Rejected intermediate `.206` rows before revert
+
+| Workload | Rows | FP p50 | pandas p50 | Ratio vs pandas | Verdict | Artifact |
+|---|---:|---:|---:|---:|---|---|
+| `range_index_take_arithmetic` | 100k | 10.708 ms | 7.647 ms | 0.714x | SLOWER | `artifacts/bench/gauntlet_cod_b_range_take_vs_pandas_batch256_taskset7.json` |
+| `range_index_take_arithmetic` | 1M | 107.195 ms | 58.252 ms | 0.543x | SLOWER | `artifacts/bench/gauntlet_cod_b_range_take_1m_batch256_taskset7_rerun.json` |
+| `affine_index_take_arithmetic` | 100k | 11.350 ms | 5.278 ms | 0.465x | SLOWER | `artifacts/bench/gauntlet_cod_b_range_take_vs_pandas_batch256_taskset7.json` |
+| `affine_index_take_arithmetic` | 1M | 114.805 ms | 52.543 ms | 0.458x | SLOWER | `artifacts/bench/gauntlet_cod_b_range_take_vs_pandas_batch256_taskset7.json` |
+
+### Dropped/noise rows kept for non-retry context
+
+| Artifact | Result |
+|---|---|
+| `artifacts/bench/gauntlet_cod_b_range_take_vs_pandas.json` | `TAKE_BATCH=16`; all four rows dropped by CV. Provisional medians already trailed pandas, so batch was increased instead of accepting noisy data. |
+| `artifacts/bench/gauntlet_cod_b_range_take_vs_pandas_batch64.json` | `affine_index_take_arithmetic` accepted and slower at 100k/1M (0.582x, 0.477x); both RangeIndex rows dropped. |
+| `artifacts/bench/gauntlet_cod_b_range_take_vs_pandas_batch256.json` | only RangeIndex 1M accepted and slower (0.544x); other rows dropped. |
+| `artifacts/bench/gauntlet_cod_b_range_take_after_revert206_vs_pandas_batch256_taskset7.json` | final RangeIndex 100k row dropped: FP p50 8.227 ms, pandas p50 8.571 ms, FP CV 14.83%. |
+| `artifacts/bench/gauntlet_cod_b_range_take_100k_after_revert206_batch256_taskset7_rerun.json` | final RangeIndex 100k rerun dropped: FP p50 8.160 ms, pandas p50 8.441 ms, FP CV 7.02%. |
+| `artifacts/bench/gauntlet_cod_b_range_take_100k_after_revert206_batch256_taskset8_rerun.json` | final RangeIndex 100k rerun dropped: FP p50 8.485 ms, pandas p50 7.659 ms, FP CV 5.82%. |
+
+### Retry rules from this gauntlet
+
+- Do not retry the generic affine `Index::take` arithmetic-selector lazy-output
+  lever as implemented in `.206`. Its selector scan plus lazy constructor did
+  not beat the existing `take_i64_values` path and was materially slower than
+  pandas. A retry must use a different primitive: caller-supplied arithmetic
+  selector metadata, a range/slice selector type that avoids rescanning the
+  selector vector, or a downstream DataFrame/Series path that never constructs
+  the position vector.
+- RangeIndex `.205` is allowed to remain, but it is not a domination result.
+  The next bead should attack the residual O(k) arithmetic-selector scan or
+  introduce a first-class `RangeTake`/slice selector witness so both FP and
+  pandas avoid dense position-vector work.
+
 ## 2026-06-18 - br-frankenpandas-uza04.206 - Affine Index take selectors
 
-- Status: implemented, benchmark verdict pending batch-test.
+- Status: reverted after gauntlet; benchmark verdict rejected.
 - Lever: detect arithmetic selectors in generic `Index::take` when the source
   index already has lazy affine Int64 backing, and return a lazy affine Int64
   `Index` instead of allocating the typed output vector.
@@ -22,7 +91,8 @@ retry predicate.
   duplicate/non-arithmetic selectors fall back to typed vectors; descending
   selectors keep negative affine steps; checked stride multiplication and
   affine construction reject unrepresentable strides without changing output.
-- Guard added: `affine_int64_take_arithmetic_selectors_keep_lazy_uza04206`,
+- Guard removed with the reverted fast path:
+  `affine_int64_take_arithmetic_selectors_keep_lazy_uza04206`,
   checking ascending, descending, singleton, empty, duplicate fallback,
   irregular fallback, name propagation, lazy backing, and label equality through
   the public typed view.
@@ -30,10 +100,10 @@ retry predicate.
   `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
   on 2026-06-18; only pre-existing workspace manifest license/license-file
   warnings were emitted.
-- Benchmark verdict: pending. Required follow-up comparator is focused
-  criterion for `Index::take` over range-backed/affine indexes and realistic
-  DataFrame/Series reorder/iloc/list-take paths versus the legacy pandas
-  original and pre-patch `take_i64_values` typed-vector materialization.
+- Benchmark verdict: rejected by the 2026-06-18/19 gauntlet above. The
+  intermediate fast path measured 0.465x pandas at 100k and 0.458x pandas at
+  1M, while the pre-optimization path measured 0.758x and 0.726x respectively.
+  The code was reverted in the gauntlet commit.
 - Retry predicate if rejected: only retry if same-worker profiling shows
   affine `Index::take` or downstream reorder index gathering above 0.1%
   self-time and allocation profiling proves typed output-vector construction is
@@ -41,7 +111,8 @@ retry predicate.
 
 ## 2026-06-18 - br-frankenpandas-uza04.205 - RangeIndex take affine selectors
 
-- Status: implemented, benchmark verdict pending batch-test.
+- Status: kept after gauntlet as a measured FP-side improvement, still slower
+  than pandas.
 - Lever: detect arithmetic `RangeIndex::take` position selectors and return a
   lazy affine Int64 `Index` instead of materializing every output label into a
   `Vec<i64>`.
@@ -66,10 +137,10 @@ retry predicate.
   `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
   on 2026-06-18; only pre-existing workspace manifest license/license-file
   warnings were emitted.
-- Benchmark verdict: pending. Required follow-up comparator is focused
-  criterion for `RangeIndex::take` and realistic DataFrame/Series iloc/list-take
-  paths with contiguous, strided, and reversed selectors versus the legacy
-  pandas original and pre-patch typed-vector materialization.
+- Benchmark verdict: accepted as partial FP-side win by the 2026-06-18/19
+  gauntlet above. The accepted 1M row improved FP p50 from 127.438 ms preopt to
+  83.685 ms post-revert, but still trailed pandas at 0.749x. No domination
+  claim is made.
 - Retry predicate if rejected: only retry if same-worker profiling shows
   `RangeIndex::take` or index gather materialization above 0.1% self-time and
   allocation profiling proves the residual is typed output-vector construction,

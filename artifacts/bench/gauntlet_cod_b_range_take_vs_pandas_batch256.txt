@@ -1,0 +1,16 @@
+=== vs-pandas Benchmark Harness ===
+Timestamp: 2026-06-19T01:11:42.656131+00:00
+Categories: indexing
+Sizes: 100k, 1M
+Dtypes: float64
+Workloads: affine_index_take_arithmetic, range_index_take_arithmetic
+pandas version: 2.2.3
+
+
+[INDEXING] (weight: 0.1)
+  [indexing] range_index_take_arithmetic @ 100k/float64... DROPPED_HIGH_CV (N/A)
+  [indexing] range_index_take_arithmetic @ 1M/float64... SLOWER (0.54x)
+  [indexing] affine_index_take_arithmetic @ 100k/float64... DROPPED_HIGH_CV (N/A)
+  [indexing] affine_index_take_arithmetic @ 1M/float64... DROPPED_HIGH_CV (N/A)
+
+Results written to: artifacts/bench/gauntlet_cod_b_range_take_vs_pandas_batch256.json

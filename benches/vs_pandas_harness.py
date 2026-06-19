@@ -25,6 +25,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from json import JSONDecodeError
 from pathlib import Path
 from statistics import mean, stdev
 from typing import Any
@@ -61,6 +62,7 @@ CV_THRESHOLD = 5.0  # Drop results with cv > 5%
 MIN_ITERATIONS = 10
 MAX_ITERATIONS = 100
 WARMUP_ITERATIONS = 3
+TAKE_BATCH = 256
 
 
 @dataclass
@@ -276,6 +278,39 @@ def bench_reindex_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df.reindex(new_index))
 
 
+def _range_take_positions(n: int) -> np.ndarray:
+    start = n // 8
+    return np.arange(start, n - start, 2, dtype=np.intp)
+
+
+def bench_range_index_take_arithmetic_pandas(df: pd.DataFrame) -> list[float]:
+    n = len(df)
+    idx = pd.RangeIndex(10, 10 + n * 3, 3)
+    positions = _range_take_positions(n)
+
+    def op():
+        result = None
+        for _ in range(TAKE_BATCH):
+            result = idx.take(positions)
+        return result
+
+    return time_operation(op)
+
+
+def bench_affine_index_take_arithmetic_pandas(df: pd.DataFrame) -> list[float]:
+    n = len(df)
+    idx = pd.Index(np.arange(10, 10 + n * 3, 3, dtype=np.int64))
+    positions = _range_take_positions(n)
+
+    def op():
+        result = None
+        for _ in range(TAKE_BATCH):
+            result = idx.take(positions)
+        return result
+
+    return time_operation(op)
+
+
 def _build_join_frames(n: int):
     # Mirrors the fp-bench / criterion build_join_frames: left key 0..n, right
     # key 0,2,..,2(n-1) — a unique-key int64 join (inner keeps ~n/2 rows).
@@ -397,6 +432,8 @@ PANDAS_WORKLOADS = {
         "iloc_slice": bench_iloc_slice_pandas,
         "loc_labels": bench_loc_labels_pandas,
         "reindex": bench_reindex_pandas,
+        "range_index_take_arithmetic": bench_range_index_take_arithmetic_pandas,
+        "affine_index_take_arithmetic": bench_affine_index_take_arithmetic_pandas,
     },
     "joins": {
         "join_inner": bench_join_inner_pandas,
@@ -453,7 +490,7 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
     if not bench_binary.exists():
         print(f"[WARN] fp-bench binary not found at {bench_binary}", file=sys.stderr)
         print("[INFO] Skipping FrankenPandas workload - build with:", file=sys.stderr)
-        print(f"  cargo build --profile release-perf -p fp-bench", file=sys.stderr)
+        print("  cargo build --profile release-perf -p fp-bench", file=sys.stderr)
         return TimingResult(
             workload=workload,
             category=category,
@@ -463,11 +500,19 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
             times_us=[],
         )
 
+    bench_binary = bench_binary.resolve(strict=True)
+    if bench_binary.name != "fp-bench":
+        raise ValueError(f"Unexpected fp-bench executable path: {bench_binary}")
+
+    # nosec B603: fp-bench is resolved and name-checked above; shell=False and
+    # category/workload values are selected from the static workload matrix.
     result = subprocess.run(
         [str(bench_binary), "--category", category, "--workload", workload,
          "--size", size, "--dtype", dtype, "--json"],
         capture_output=True,
+        check=False,
         text=True,
+        timeout=300,
     )
 
     if result.returncode != 0:
@@ -481,7 +526,19 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
             times_us=[],
         )
 
-    data = json.loads(result.stdout)
+    try:
+        data = json.loads(result.stdout)
+    except JSONDecodeError as exc:
+        print(f"[WARN] fp-bench emitted invalid JSON: {exc}", file=sys.stderr)
+        return TimingResult(
+            workload=workload,
+            category=category,
+            size=size,
+            dtype=dtype,
+            engine="frankenpandas",
+            times_us=[],
+        )
+
     return TimingResult(
         workload=workload,
         category=category,
@@ -536,10 +593,15 @@ def compute_comparison(fp_result: TimingResult, pd_result: TimingResult,
 
 
 def run_category(category: str, sizes: list[str], dtypes: list[str],
-                 tmp_path: Path) -> list[dict[str, Any]]:
+                 tmp_path: Path, workload_filter: set[str] | None = None) -> list[dict[str, Any]]:
     """Run all workloads in a category for given sizes and dtypes."""
     results = []
     workloads = PANDAS_WORKLOADS.get(category, {})
+    if workload_filter is not None:
+        unknown = workload_filter - set(workloads)
+        if unknown:
+            raise ValueError(f"Unknown workload(s) for {category}: {sorted(unknown)}")
+        workloads = {name: func for name, func in workloads.items() if name in workload_filter}
 
     for workload in workloads:
         for size in sizes:
@@ -570,6 +632,8 @@ def main():
                         help="Comma-separated sizes (10k,100k,1M)")
     parser.add_argument("--dtypes", default="float64",
                         help="Comma-separated dtypes")
+    parser.add_argument("--workloads",
+                        help="Comma-separated workload names within the selected category")
     parser.add_argument("--output", type=Path, help="Output JSON file")
     args = parser.parse_args()
 
@@ -582,6 +646,11 @@ def main():
 
     sizes = [s.strip() for s in args.sizes.split(",")]
     dtypes = [d.strip() for d in args.dtypes.split(",")]
+    workload_filter = (
+        {w.strip() for w in args.workloads.split(",") if w.strip()}
+        if args.workloads
+        else None
+    )
     categories = list(CATEGORIES.keys()) if args.all else [args.category]
 
     import tempfile
@@ -591,17 +660,19 @@ def main():
         all_results = []
         timestamp = datetime.now(timezone.utc).isoformat()
 
-        print(f"=== vs-pandas Benchmark Harness ===")
+        print("=== vs-pandas Benchmark Harness ===")
         print(f"Timestamp: {timestamp}")
         print(f"Categories: {', '.join(categories)}")
         print(f"Sizes: {', '.join(sizes)}")
         print(f"Dtypes: {', '.join(dtypes)}")
+        if workload_filter is not None:
+            print(f"Workloads: {', '.join(sorted(workload_filter))}")
         print(f"pandas version: {pd.__version__}")
         print()
 
         for category in categories:
             print(f"\n[{category.upper()}] (weight: {CATEGORIES[category]})")
-            results = run_category(category, sizes, dtypes, tmp_path)
+            results = run_category(category, sizes, dtypes, tmp_path, workload_filter)
             all_results.extend(results)
 
         output = {

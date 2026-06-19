@@ -2617,47 +2617,8 @@ impl Index {
         ))
     }
 
-    fn take_arithmetic_affine_indices(&self, indices: &[usize]) -> Option<Self> {
-        let range = self.labels.int64_affine_range()?;
-        let index = match indices {
-            [] => Self::new_known_unique_int64_affine_range(range.start, range.step, 0)?,
-            [index] => {
-                if *index >= range.len {
-                    return None;
-                }
-                let first_label = range.value_at(*index);
-                Self::new_known_unique_int64_affine_range(first_label, range.step, 1)?
-            }
-            [first, second, ..] => {
-                if *first >= range.len || *second >= range.len {
-                    return None;
-                }
-                let position_step = (*second as i128) - (*first as i128);
-                if position_step == 0 {
-                    return None;
-                }
-                if !indices.iter().all(|&index| index < range.len)
-                    || !indices
-                        .windows(2)
-                        .all(|window| (window[1] as i128) - (window[0] as i128) == position_step)
-                {
-                    return None;
-                }
-                let label_step = i128::from(range.step).checked_mul(position_step)?;
-                let label_step = i64::try_from(label_step).ok()?;
-                let first_label = range.value_at(*first);
-                Self::new_known_unique_int64_affine_range(first_label, label_step, indices.len())?
-            }
-        };
-
-        Some(self.propagate_name(index))
-    }
-
     #[must_use]
     pub fn take(&self, indices: &[usize]) -> Self {
-        if let Some(index) = self.take_arithmetic_affine_indices(indices) {
-            return index;
-        }
         if let Some(values) = self.labels.take_i64_values(indices) {
             return self.propagate_name(Self::from_i64_values(values));
         }
@@ -18071,80 +18032,6 @@ mod tests {
         assert!(
             taken.labels.materialized.get().is_none(),
             "affine Int64 take should gather into typed output backing"
-        );
-    }
-
-    #[test]
-    fn affine_int64_take_arithmetic_selectors_keep_lazy_uza04206() {
-        let index = Index::new_known_unique_int64_affine_range(5, 3, 8)
-            .unwrap()
-            .set_name("axis");
-
-        let ascending = index.take(&[1, 3, 5]);
-        assert_eq!(ascending.name(), Some("axis"));
-        assert_eq!(
-            ascending.labels.int64_affine_range(),
-            Some(Int64AffineLabels {
-                start: 8,
-                step: 6,
-                len: 3
-            })
-        );
-        assert_eq!(
-            ascending.labels.int64_view().unwrap().as_slice(),
-            &[8, 14, 20]
-        );
-        assert!(
-            ascending.labels.materialized.get().is_none(),
-            "arithmetic Index::take should not materialize affine labels"
-        );
-
-        let descending = index.take(&[6, 4, 2]);
-        assert_eq!(
-            descending.labels.int64_affine_range(),
-            Some(Int64AffineLabels {
-                start: 23,
-                step: -6,
-                len: 3
-            })
-        );
-        assert_eq!(
-            descending.labels.int64_view().unwrap().as_slice(),
-            &[23, 17, 11]
-        );
-
-        let singleton = index.take(&[7]);
-        assert_eq!(singleton.labels.int64_view().unwrap().as_slice(), &[26]);
-        assert!(
-            singleton.labels.int64_affine_range().is_some(),
-            "singleton affine take can keep lazy backing"
-        );
-
-        let empty = index.take(&[]);
-        assert!(empty.labels.int64_view().unwrap().is_empty());
-        assert!(
-            empty.labels.int64_affine_range().is_some(),
-            "empty affine take can keep lazy backing"
-        );
-
-        let duplicate = index.take(&[1, 1, 2]);
-        assert_eq!(
-            duplicate.labels.int64_view().unwrap().as_slice(),
-            &[8, 8, 11]
-        );
-        assert!(
-            duplicate.labels.int64_affine_range().is_none(),
-            "duplicate selectors must keep typed fallback"
-        );
-
-        let irregular = index.take(&[1, 3, 4]);
-        assert_eq!(
-            irregular.labels.int64_view().unwrap().as_slice(),
-            &[8, 14, 17]
-        );
-        assert!(
-            irregular.labels.int64_affine_range().is_none(),
-            "irregular selectors must keep typed fallback"
         );
     }
 

@@ -19,17 +19,18 @@
 //!     cargo bench -p fp-conformance --bench vs_pandas -- "rolling/"
 //!     cargo bench -p fp-conformance --bench vs_pandas -- "indexing/"
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, hint::black_box};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fp_columnar::Column;
 use fp_frame::{DataFrame, Series, concat_dataframes, concat_dataframes_with_axis};
-use fp_index::{DuplicateKeep, Index, IndexLabel};
+use fp_index::{DuplicateKeep, Index, IndexLabel, RangeIndex};
 use fp_io::read_csv_str;
 use fp_join::{JoinType, merge_dataframes_on_with};
 use fp_types::Scalar;
 
 const SIZES: &[usize] = &[10_000, 100_000];
+const TAKE_BATCH: usize = 256;
 
 // ============================================================================
 // DATA GENERATION HELPERS
@@ -128,6 +129,12 @@ fn build_csv_string(n: usize, cols: usize) -> String {
         csv.push('\n');
     }
     csv
+}
+
+fn arithmetic_take_positions(n: usize) -> Vec<usize> {
+    let start = n / 8;
+    let stop = n - start;
+    (start..stop).step_by(2).collect()
 }
 
 // ============================================================================
@@ -492,6 +499,50 @@ fn bench_reindex(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_range_index_take_arithmetic(c: &mut Criterion) {
+    let mut group = c.benchmark_group("indexing/range_index_take_arithmetic");
+    for &n in SIZES {
+        let range = RangeIndex::new(10, 10 + n as i64 * 3, 3).expect("range index fixture");
+        let positions = arithmetic_take_positions(n);
+        group.bench_with_input(
+            BenchmarkId::new("rows", n),
+            &(range, positions),
+            |b, (range, positions)| {
+                b.iter(|| {
+                    for _ in 0..TAKE_BATCH {
+                        black_box(
+                            range
+                                .take(black_box(positions.as_slice()))
+                                .expect("range take"),
+                        );
+                    }
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_affine_index_take_arithmetic(c: &mut Criterion) {
+    let mut group = c.benchmark_group("indexing/affine_index_take_arithmetic");
+    for &n in SIZES {
+        let index = Index::new_known_unique_int64_affine_range(10, 3, n).expect("affine index");
+        let positions = arithmetic_take_positions(n);
+        group.bench_with_input(
+            BenchmarkId::new("rows", n),
+            &(index, positions),
+            |b, (index, positions)| {
+                b.iter(|| {
+                    for _ in 0..TAKE_BATCH {
+                        black_box(index.take(black_box(positions.as_slice())));
+                    }
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 // ============================================================================
 // CRITERION GROUPS
 // ============================================================================
@@ -544,7 +595,9 @@ criterion_group!(
     bench_iloc_slice,
     bench_loc_labels,
     bench_at_scalar,
-    bench_reindex
+    bench_reindex,
+    bench_range_index_take_arithmetic,
+    bench_affine_index_take_arithmetic
 );
 
 criterion_main!(
