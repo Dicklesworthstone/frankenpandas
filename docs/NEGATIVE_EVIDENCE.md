@@ -35,9 +35,13 @@ fp's path has structural overhead: per-series `as_i64_slice` (may materialize th
 buffer from the Scalars variant on first call), `extend_from_slice` into a fresh Vec<i64>,
 `Column::from_i64_values` (validity init), then `Series::new`. The typed lever is NOT a
 regression (≥ the old Scalar concat, bit-transparent) so not reverted, but concat is fp's
-weakest realistic op. FIX (future, structural — not a 1-line code-first change): pre-size +
-single typed buffer build, avoid double as_i64_slice, ensure from_values yields a
-typed-backed column so as_i64_slice is a cheap ref. Recorded as the top perf gap.
+weakest realistic op. FIX ATTEMPT (REVERTED): collect each typed slice ONCE via `Option::collect` instead of the
+double `as_i64_slice` (probe + extend). Built+measured: **6.81 → 6.49 ms (~5%, immaterial)**
+— the double-call was NOT the bottleneck. Reverted (working-tree only). CONFIRMED the 24×
+gap is STRUCTURAL: `Column::from_i64_values` (validity init) + `Series::new` + per-series
+typed-buffer materialization, vs pandas' single flat `np.concatenate`. Closing it needs a
+kernel-level concat (build one validity-free typed Column directly, skip Series wrapping) —
+out of code-first fp-frame scope. Dead ends recorded: don't retry double-call dedup.
 
 ### Gap: max/min lose to numpy SIMD (~5×)
 fp `Series.max/min` use `iter().max()` (Option/Ord comparison loop, doesn't auto-vectorize)
