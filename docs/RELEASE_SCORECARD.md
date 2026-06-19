@@ -15,8 +15,10 @@ conformance guard passes by execution.
   reset/set_index (5–6.5×), std/var (11×), str case (6.5×), head/tail (17×),
   slice/filter/sort/sum (1.2–1.3×), RangeIndex.asof scalar lookup (3,840–16,031×) —
   fp beats pandas wherever typed access unlocks a cheaper algorithm.
-- **Known gaps before "faster than pandas everywhere":** concat (24×), shift (12×), and
-  ffill (6.6×) need a kernel-level single-pass column builder (avoid rebuild); max/min
+- **Known gaps before "faster than pandas everywhere":** concat, shift, and ffill were
+  narrowed by the 3nah5 mimalloc boundary allocator (concat 24× slower -> 2.15× slower,
+  shift 12× -> 5.0×, ffill 6.6× -> 2.76×) but still need a kernel-level single-pass
+  column builder / reused-buffer path; max/min
   (5×) need SIMD; utf8 groupby (1.8×) needs key-factorize→dense; small/miss-heavy
   RangeIndex indexers still trail pandas despite the exception-allocation fix. All gaps
   are tracked.
@@ -41,9 +43,9 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | max / min | 2M int64 | 0.61× / 0.54× | 🟡 8-lane chunked accumulator: 3.2×/2.8× FP-side win; gap 5×→1.7× |
 | reset_index | 1M int64-indexed | 5.1× | 🟢 |
 | str.lower/upper | 1M strings | 6.5× | 🟢 |
-| concat | 8×125k Int64 | 0.041× | 🔴 24× slower (structural) |
-| shift | 2M, p=1 | 0.082× | 🔴 12× slower (structural) |
-| ffill | 2M f64, ~10% NaN | 0.15× | 🔴 6.6× slower (column-rebuild) |
+| concat | 8×125k Int64 | 0.46× with 3nah5 mimalloc boundary | 🔴 2.15× slower; allocator floor narrowed, still structural |
+| shift | 2M, p=1 | 0.20× with 3nah5 mimalloc boundary | 🔴 5.0× slower; needs reused/single-pass builder |
+| ffill | 2M f64, ~10% NaN | 0.36× with 3nah5 mimalloc boundary | 🔴 2.76× slower; column-rebuild remains |
 | groupby.sum int key | 1M, 1000 keys | 5.4× | 🟢 dense grouping |
 | groupby.sum utf8 key | 1M, 1000 keys | 0.56× | 🔴 1.78× slower (Utf8 hashing) |
 | groupby.agg(nunique) utf8 key | 2M, 1000 keys | 2.89× | 🟢 CV-gated accepted |
@@ -68,8 +70,10 @@ shift/concat as a confirmed **column-rebuild** loss (typed path, but rebuilds a 
 
 Pattern: typed-slice levers win 2–11× where they unlock a cheaper ALGORITHM (FxHash dedup,
 dense value_counts, Welford std/var, contiguous str). They LOSE on ops that just rebuild
-the whole Column (concat 24×, shift 12×, ffill 6.6×) — fp's column-rebuild construction is heavier than
-numpy's in-place memmove/concatenate; and on max/min (~5×) which need SIMD. The RangeIndex
+the whole Column. The 3nah5 mimalloc boundary allocator turns those losses from catastrophic
+to actionable (concat 0.46×, shift 0.20×, ffill 0.36× vs pandas), but fp's column-rebuild
+construction is still heavier than numpy's pooled/in-place memmove/concatenate; and max/min
+still need SIMD. The RangeIndex
 indexer loss is a separate vectorized-engine gap, not a regression of the retained FP-side
 miss-allocation lever.
 

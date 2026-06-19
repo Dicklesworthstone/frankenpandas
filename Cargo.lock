@@ -1284,6 +1284,7 @@ dependencies = [
  "fp-index",
  "fp-io",
  "fp-join",
+ "mimalloc",
 ]
 
 [[package]]
@@ -1452,6 +1453,7 @@ dependencies = [
  "fp-io",
  "fp-join",
  "fp-types",
+ "mimalloc",
  "pyo3",
 ]
 

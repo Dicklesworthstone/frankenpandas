@@ -20,11 +20,15 @@ use fp_columnar::Column;
 use fp_frame::{DataFrame, Series};
 use fp_index::{Index, IndexLabel};
 use fp_types::Scalar;
+use mimalloc::MiMalloc;
 use pyo3::{
     IntoPyObjectExt,
     prelude::*,
     types::{PyDict, PyList},
 };
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 /// Map a pandas-style dtype string to a FrankenPandas `DType`.
 fn parse_dtype(name: &str) -> PyResult<fp_types::DType> {

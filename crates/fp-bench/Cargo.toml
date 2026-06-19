@@ -22,3 +22,4 @@ fp-frame = { path = "../fp-frame", version = "0.1.0" }
 fp-index = { path = "../fp-index", version = "0.1.0" }
 fp-io = { path = "../fp-io", version = "0.1.0" }
 fp-join = { path = "../fp-join", version = "0.1.0" }
+mimalloc = { workspace = true }

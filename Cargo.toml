@@ -49,6 +49,7 @@ orc-rust = "0.8.0"
 parquet = { version = "58.3.0", default-features = false, features = ["arrow", "snap"] }
 postgres = { version = "0.19", features = ["with-chrono-0_4"] }
 mysql = "28.0"
+mimalloc = "0.1"
 pyo3 = { version = "0.28", features = ["extension-module"] }
 quick-xml = "0.40.1"
 regex = "1.12.3"
