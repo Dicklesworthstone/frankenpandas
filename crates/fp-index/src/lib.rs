@@ -2327,6 +2327,13 @@ impl Index {
         if let (Some(self_i64), Some(target_i64)) =
             (self.labels.int64_view(), target.labels.int64_view())
         {
+            // Unsorted UNIQUE Int64 self: reuse the identity-cached i64->pos
+            // map so repeated reindex/align/join don't rebuild it every call
+            // (pandas caches its int64 engine). Bit-identical first-occurrence;
+            // a duplicate self returns None and keeps the per-call builder.
+            if let Some(resolved) = self.unsorted_unique_int64_positions(target.labels()) {
+                return resolved;
+            }
             return Self::get_indexer_i64(&self_i64, &target_i64);
         }
         // Unsorted UNIQUE non-Int64 self: route through the identity-cached
