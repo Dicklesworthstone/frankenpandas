@@ -32,6 +32,7 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | str.lower/upper contiguous (apply_str_utf8) | 1M strings | 84.04 ms | 12.88 ms | **6.5× faster** | ✅ KEEP — contiguous buf + ASCII in-place |
 | shift typed Float64 (202cdf50) | 2M f64, periods=1 | 0.74 ms | 9.01 ms | **0.082× (12× SLOWER)** | ⚠️ KEEP (≥ old Scalar path) but LOSS — structural |
 | shift typed Int64 fill (51601b7a) | 2M i64, periods=2 | 0.74 ms | 7.86 ms | **0.094× (10.6× SLOWER)** | ⚠️ KEEP but LOSS — structural |
+| ffill typed Float64 (as_f64_slice_with_validity) | 2M f64, ~10% NaN | 2.79 ms | 18.43 ms | **0.15× (6.6× SLOWER)** | ⚠️ KEEP but LOSS — confirms column-rebuild pattern |
 
 | set_index typed Int64 col→idx (p9omo) | 1M rows, 2 cols | 1.12 ms | 0.17 ms | **6.5× faster** | ✅ KEEP — Index::from_i64_values |
 | RangeIndex.asof closed-form (jlv2o) | 100k rows, 4,096 scalar probes | 232.02 ms | 60.42 µs | **3,840× faster** | ✅ KEEP — public scalar API; pandas CV 4.82% |
@@ -68,7 +69,13 @@ domain. Int64-key groupby already wins 5.4× via the dense path, and the later `
 value-clone elimination lane wins 2.89× on a 2M-row CV-gated workload. The remaining Utf8
 gap is reducer-specific: plain sum/mean-style Utf8 grouping still needs factorize→dense.
 
-### Gap: shift/concat structural — column-rebuild vs in-place (10–24× slower)
+### Gap: shift/concat/ffill structural — column-rebuild vs in-place (6.6–24× slower)
+**ffill (2M f64, ~10% NaN) confirms the pattern: 18.43 ms vs pandas 2.79 ms = 6.6× slower.**
+ffill has a typed `as_f64_slice_with_validity` path but still rebuilds a fresh Column +
+re-inits validity, so it loses to pandas' in-place forward-fill — the same root cause as
+shift/concat below. The rebuild-class ops (shift/concat/ffill) are fp's consistent structural
+loss; the algorithm-class ops (dedup/value_counts/std/grouping) consistently win.
+
 fp shift/concat rebuild a whole new typed Column (`as_f64/i64_slice` materializes the typed
 buffer for `from_values`-built columns, then `from_f64/i64_values` re-inits validity, then
 `Series::new`) — multiple O(n) passes — whereas pandas shift/concat is ~one numpy memmove/
