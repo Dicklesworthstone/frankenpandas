@@ -441,6 +441,60 @@ fn int64_position_lookup_cached(identity: u64, values: &[i64]) -> Arc<FxHashMap<
     Arc::clone(guard.entry(identity).or_insert(arc))
 }
 
+/// First-occurrence `String -> position` lookup tables for unique all-Utf8
+/// indexes, cached by runtime label identity. The value is `Option`: `None`
+/// records "this index is not all-Utf8" so the warm path stays O(1) instead of
+/// rescanning a non-Utf8 index on every `loc` call.
+#[allow(clippy::type_complexity)]
+static INDEX_UTF8_POS_LOOKUP_CACHE: OnceLock<
+    Mutex<FxHashMap<u64, Option<Arc<FxHashMap<Box<str>, usize>>>>>,
+> = OnceLock::new();
+
+/// Each entry can hold a whole index's worth of boxed strings, so cap the entry
+/// count tightly (utf8 entries are heavier than the i64 ones).
+const INDEX_UTF8_POS_LOOKUP_CACHE_MAX: usize = 16;
+
+/// Build-or-fetch the cached first-occurrence `String -> position` table for an
+/// index lineage. Returns `None` (and caches that verdict) when the index is
+/// not entirely Utf8. The caller has already proven the index is unique, so
+/// first occurrence == only occurrence.
+fn utf8_position_lookup_cached(
+    identity: u64,
+    index_labels: &[IndexLabel],
+) -> Option<Arc<FxHashMap<Box<str>, usize>>> {
+    let cache = INDEX_UTF8_POS_LOOKUP_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Some(existing) = cache
+        .lock()
+        .expect("index utf8 position lookup cache poisoned")
+        .get(&identity)
+        .cloned()
+    {
+        return existing;
+    }
+    let mut map: FxHashMap<Box<str>, usize> = FxHashMap::default();
+    map.reserve(index_labels.len());
+    let mut all_utf8 = true;
+    for (pos, label) in index_labels.iter().enumerate() {
+        match label {
+            IndexLabel::Utf8(value) => {
+                map.insert(value.as_str().into(), pos);
+            }
+            _ => {
+                all_utf8 = false;
+                break;
+            }
+        }
+    }
+    let result = if all_utf8 { Some(Arc::new(map)) } else { None };
+    let mut guard = cache
+        .lock()
+        .expect("index utf8 position lookup cache poisoned");
+    if guard.len() >= INDEX_UTF8_POS_LOOKUP_CACHE_MAX {
+        guard.clear();
+    }
+    guard.entry(identity).or_insert(result).clone()
+}
+
 /// Shared contiguous-Utf8 label backing: a byte buffer + `n+1` offsets, row `i`
 /// being `bytes[offsets[i]..offsets[i+1]]` (br-frankenpandas-nbspq).
 type Utf8LabelBacking = (Arc<[u8]>, Arc<[usize]>);
@@ -2290,6 +2344,34 @@ impl Index {
                 .iter()
                 .map(|label| match label {
                     IndexLabel::Int64(value) => lookup.get(value).copied(),
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// Resolve a list-like selector against a unique all-Utf8 index using a
+    /// first-occurrence `String -> position` hashtable cached by the index's
+    /// runtime label identity, instead of rebuilding the per-call pointer-key
+    /// `FxHashMap<&IndexLabel, Vec<usize>>` over the whole index.
+    ///
+    /// Returns `None` (caller keeps its duplicate-aware fallback) when the index
+    /// has duplicate labels (pandas returns every match) or is not entirely
+    /// Utf8. The index is unique here, so each requested label yields at most
+    /// one position; missing or non-Utf8 selectors map to `None` and callers
+    /// preserve their own fail-closed error surface.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn unique_utf8_positions(&self, labels: &[IndexLabel]) -> Option<Vec<Option<usize>>> {
+        if self.has_duplicates() {
+            return None;
+        }
+        let lookup = utf8_position_lookup_cached(self.label_identity, self.labels())?;
+        Some(
+            labels
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Utf8(value) => lookup.get(value.as_str()).copied(),
                     _ => None,
                 })
                 .collect(),

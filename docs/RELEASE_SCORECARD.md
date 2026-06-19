@@ -63,6 +63,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | reset_index | 1M int64-indexed | 5.1× | 🟢 |
 | loc[[labels]] sorted Int64 | 2M f64 step-2 idx, select 1000 | 1.58× | 🟢 flipped from 5340× SLOWER; 0pkt2 cached int64_view + binary-search batch resolver |
 | loc[[labels]] unsorted Int64 | 2M f64 shuffled unique idx, select 1000 | 13.7× | 🟢 flipped from 5147× SLOWER; 2pvdg identity-cached i64→pos hashtable |
+| loc[[labels]] Utf8 index | 2M f64 string idx, select 1000 | 7.9× | 🟢 flipped from 2029× SLOWER; sfsx4 identity-cached String→pos hashtable |
 | str.lower/upper | 1M strings | 6.5× | 🟢 |
 | concat | 8×125k Int64 | 0.46× with 3nah5 mimalloc boundary | 🔴 2.15× slower; allocator floor narrowed, still structural |
 | shift | 2M, p=1 | 1.40× with dcfv8 no-scan + 3nah5 mimalloc boundary | 🟢 flipped; plain glibc path remains 0.64×, golden unchanged |
