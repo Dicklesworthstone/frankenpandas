@@ -4,6 +4,41 @@ Purpose: record every cod-b optimization attempt in the new performance campaign
 including dead ends, so future agents do not retry failed levers without a concrete
 retry predicate.
 
+## 2026-06-18 - br-frankenpandas-uza04.206 - Affine Index take selectors
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: detect arithmetic selectors in generic `Index::take` when the source
+  index already has lazy affine Int64 backing, and return a lazy affine Int64
+  `Index` instead of allocating the typed output vector.
+- Baseline comparator: the pre-patch `Index::take` used `take_i64_values` for
+  lazy affine labels, which avoided enum-label materialization but still wrote
+  every selected scalar into a fresh `Vec<i64>`.
+- Graveyard mapping: selection-vector specialization and semantic witnesses:
+  the source affine label certificate plus an arithmetic selector certificate
+  compose into a new affine label certificate, so output labels can stay symbolic
+  until a caller asks for concrete labels.
+- Alien-artifact proof obligation: the fast path only fires for existing affine
+  Int64 backing; out-of-bounds selectors return to the old panic path;
+  duplicate/non-arithmetic selectors fall back to typed vectors; descending
+  selectors keep negative affine steps; checked stride multiplication and
+  affine construction reject unrepresentable strides without changing output.
+- Guard added: `affine_int64_take_arithmetic_selectors_keep_lazy_uza04206`,
+  checking ascending, descending, singleton, empty, duplicate fallback,
+  irregular fallback, name propagation, lazy backing, and label equality through
+  the public typed view.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is focused
+  criterion for `Index::take` over range-backed/affine indexes and realistic
+  DataFrame/Series reorder/iloc/list-take paths versus the legacy pandas
+  original and pre-patch `take_i64_values` typed-vector materialization.
+- Retry predicate if rejected: only retry if same-worker profiling shows
+  affine `Index::take` or downstream reorder index gathering above 0.1%
+  self-time and allocation profiling proves typed output-vector construction is
+  still the residual after excluding non-affine selectors.
+
 ## 2026-06-18 - br-frankenpandas-uza04.205 - RangeIndex take affine selectors
 
 - Status: implemented, benchmark verdict pending batch-test.
