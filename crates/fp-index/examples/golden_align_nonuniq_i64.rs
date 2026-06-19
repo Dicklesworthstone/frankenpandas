@@ -37,7 +37,7 @@ fn reference(l: &[i64], r: &[i64], mode: AlignMode) -> Tup {
     let lg = groups(l);
     let rg = groups(r);
     let (mut u, mut lp, mut rp) = (Vec::new(), Vec::new(), Vec::new());
-    let mut push =
+    let push =
         |u: &mut Vec<i64>, lp: &mut Vec<Option<usize>>, rp: &mut Vec<Option<usize>>, v, a, b| {
             u.push(v);
             lp.push(a);

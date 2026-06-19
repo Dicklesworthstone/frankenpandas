@@ -19,6 +19,13 @@ rustc-hash = "2"
 serde = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false }
+
+[[bench]]
+name = "range_index_asof"
+harness = false
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

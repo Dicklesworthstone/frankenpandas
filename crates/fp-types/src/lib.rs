@@ -2695,7 +2695,7 @@ impl Timestamp {
 
         let base = if sub_nanos == 0 {
             format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}")
-        } else if sub_nanos % 1_000 == 0 {
+        } else if sub_nanos.is_multiple_of(1_000) {
             format!(
                 "{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{:06}",
                 sub_nanos / 1_000

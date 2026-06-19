@@ -1,9 +1,9 @@
 # FrankenPandas Perf — Negative-Evidence Ledger & Head-to-Head vs pandas
 
-Measured head-to-head: each lever's realistic-workload bench run **locally** from the
-release binary (built remotely via `rch exec -- cargo build --release -p fp-frame
---examples`, artifacts transferred to `/data/projects/.rch-targets/frankenpandas-cc`),
-compared against **pandas 2.2.3** (`python3`, `time.perf_counter`, best-of-N).
+Measured head-to-head: each lever's realistic-workload bench run **locally** from a
+release binary or focused Criterion bench (heavy builds/bench guards may be offloaded
+with `rch`), compared against **pandas 2.2.3** (`python3`, `time.perf_counter`, best-of-N
+or repeated p50 batches).
 
 Method: `examples/bench_*.rs` self-time `best=<ns>` over N iters; pandas scripts
 (`perf/pandas_baseline/`) time the equivalent op best-of-N on a matched workload.
@@ -34,8 +34,21 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | shift typed Int64 fill (51601b7a) | 2M i64, periods=2 | 0.74 ms | 7.86 ms | **0.094× (10.6× SLOWER)** | ⚠️ KEEP but LOSS — structural |
 
 | set_index typed Int64 col→idx (p9omo) | 1M rows, 2 cols | 1.12 ms | 0.17 ms | **6.5× faster** | ✅ KEEP — Index::from_i64_values |
+| RangeIndex.asof closed-form (jlv2o) | 100k rows, 4,096 scalar probes | 232.02 ms | 60.42 µs | **3,840× faster** | ✅ KEEP — public scalar API; pandas CV 4.82% |
+| RangeIndex.asof closed-form (jlv2o) | 1M rows, 4,096 scalar probes | 1,050.29 ms | 65.52 µs | **16,031× faster** | ✅ KEEP — lookup no longer scales with range length |
 | groupby.sum Int64 key (dense grouping) | 1M rows, 1000 keys | 13.26 ms | 2.44 ms | **5.4× faster** | ✅ KEEP — int64_dense_grouping |
 | groupby.sum Utf8 key (build_groups FxHash buguz) | 1M rows, 1000 keys | 31.10 ms | 55.33 ms | **0.56× (1.78× SLOWER)** | ⚠️ KEEP (FxHash ≥ SipHash) but LOSS — Utf8 ScalarKey hashing |
+
+### Win: RangeIndex.asof closed-form scalar lookup
+The `jlv2o` lever changes ascending `RangeIndex::asof(Int64)` from direct label scanning
+to `searchsorted(..., "right") - 1` over the affine `(start, stop, step)` witness.
+Focused Criterion on the local host measured 4,096-probe batches at 60.42 µs (100k rows)
+and 65.52 µs (1M rows). The matching pandas 2.2.3 public scalar API loop measured
+232.02 ms and 1,050.29 ms respectively, with pandas CV below 5%. No revert: the lever
+is both behavior-guarded and decisively faster than pandas on the targeted workload.
+Artifacts: `artifacts/bench/gauntlet_cod_b_range_asof_vs_pandas.json`,
+`artifacts/bench/gauntlet_cod_b_range_asof_criterion_local.txt`, and
+`artifacts/bench/gauntlet_cod_b_range_asof_pandas.json`.
 
 ### Gap: Utf8 groupby 1.78× slower than pandas
 fp groups Utf8 keys via `build_groups` → `FxHashMap<ScalarKey, Vec<usize>>`: per-row String
@@ -93,7 +106,9 @@ recorded — do not retry the branchless-fold approach.
 | max | 2M int64 | 200 µs |
 | std | 2M int64 | 5.44 ms |
 
-(fp numbers for these pending the all-examples release build; rows added as measured.)
+Most rows above have now been converted from pending into measured evidence. Remaining
+code-first pending lanes are tracked in `artifacts/optimization/negative-evidence-ledger-cod-b.md`
+and cod-a's groupby high-CV rerun notes.
 
 ## Reverts
 

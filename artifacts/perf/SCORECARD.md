@@ -34,6 +34,30 @@ Artifacts:
 - `artifacts/perf/cod-a-groupby-gauntlet-criterion-a7287a4d.txt`
 - `artifacts/optimization/negative-evidence-ledger-cod-a.md`
 
+## 2026-06-19 Cod-b Gauntlet Refresh - `RangeIndex::asof`
+
+Release-readiness score for this cluster: **4/5**.
+
+- Bead: `br-frankenpandas-jlv2o`.
+- pandas oracle: 2.2.3 public `RangeIndex.asof` scalar API.
+- FrankenPandas profile: focused `fp-index` Criterion bench.
+- Build target: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`.
+- Decision: keep the closed-form ascending `RangeIndex::asof` path. No revert:
+  both accepted rows dominate pandas with pandas CV below 5%.
+
+| Workload | Rows | FP median | pandas median | Ratio vs pandas | Verdict | Action |
+|---|---:|---:|---:|---:|---|---|
+| 4,096 scalar `asof` probes | 100k | 60.42 µs | 232.02 ms | 3,840x | FASTER | Keep `jlv2o` |
+| 4,096 scalar `asof` probes | 1M | 65.52 µs | 1,050.29 ms | 16,031x | FASTER | Keep `jlv2o` |
+
+Evidence artifacts:
+
+- `artifacts/bench/gauntlet_cod_b_range_asof_vs_pandas.json`
+- `artifacts/bench/gauntlet_cod_b_range_asof_criterion_local.txt`
+- `artifacts/bench/gauntlet_cod_b_range_asof_criterion.txt`
+- `artifacts/bench/gauntlet_cod_b_range_asof_pandas.json`
+- `artifacts/optimization/negative-evidence-ledger-cod-b.md`
+
 ## 2026-06-18/19 Gauntlet Refresh: Range/affine `Index::take`
 
 Release-readiness score for this cluster: **2/5**.

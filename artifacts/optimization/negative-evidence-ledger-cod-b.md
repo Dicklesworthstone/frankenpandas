@@ -601,7 +601,7 @@ retry predicate.
 
 ## 2026-06-19 - br-frankenpandas-jlv2o - RangeIndex asof closed-form search
 
-- Status: implemented, benchmark verdict pending batch-test.
+- Status: measured; keep.
 - Lever: route ascending `RangeIndex::asof(IndexLabel::Int64)` through
   `searchsorted(..., "right") - 1` and direct `value_at`, avoiding the previous
   per-label scan across the whole range.
@@ -622,9 +622,18 @@ retry predicate.
   `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
   on 2026-06-19; only pre-existing workspace manifest license/license-file
   warnings were emitted.
-- Benchmark verdict: pending. Required follow-up comparator is criterion
-  ascending `RangeIndex::asof` on million-row ranges versus the legacy pandas
-  original and a pre-patch linear-scan baseline.
+- Benchmark verdict: accepted. Focused local Criterion plus pandas 2.2.3
+  public-API timing measured 4,096 deterministic scalar probes over ascending
+  ranges. `rch exec -- cargo bench -p fp-index --bench range_index_asof` also
+  passed as the offloaded compile/bench guard; the ratio rows use local
+  same-host Criterion/pandas measurements because the `hz2` worker did not have
+  pandas installed.
+
+| Rows | FP median | pandas median | Ratio vs pandas | Verdict | Artifact |
+|---:|---:|---:|---:|---|---|
+| 100k | 60.42 µs | 232.02 ms | 3,840x faster | KEEP | `artifacts/bench/gauntlet_cod_b_range_asof_vs_pandas.json` |
+| 1M | 65.52 µs | 1,050.29 ms | 16,031x faster | KEEP | `artifacts/bench/gauntlet_cod_b_range_asof_vs_pandas.json` |
+
 - Retry predicate if rejected: only revisit this family if a same-host profile
   shows `RangeIndex::asof` above 0.1% self-time and the residual cost is lookup
   positioning rather than caller-side alignment or scalar dispatch.

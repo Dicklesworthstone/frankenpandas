@@ -79,7 +79,7 @@ fn main() {
     let n = 30_000usize;
 
     // Skewed counts (ties + varied) so the stable sort order matters.
-    let mut a: Vec<i64> = (0..n).map(|i| (rnd(500))).collect();
+    let mut a: Vec<i64> = (0..n).map(|_| rnd(500)).collect();
     let _ = &mut a;
     check("skewed_dense", &a);
     check(
