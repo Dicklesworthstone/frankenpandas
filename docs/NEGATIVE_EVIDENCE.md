@@ -115,6 +115,8 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | groupby.max Utf8 key clone-free slot (uza04.191) | 1M rows, 1000 keys, Float64 values, NaN every 37th, 5×20 batch p50 | 43.107 ms | 16.973 ms | **2.54× faster** | ✅ VERIFIED KEEP — same scalar-slot family; golden `6d20c5176a43035d`; focused max release guard green |
 | groupby.first Utf8 key clone-free slot (uza04.192) | 1M rows, 1000 keys, Float64 values, NaN every 37th, 5×20 batch p50 | 42.290 ms | 14.497 ms | **2.92× faster** | ✅ VERIFIED KEEP — streaming first-present scalar slot; golden `a8c2c037ffb85c88`; focused first/first-last release guards green |
 | groupby.last Utf8 key clone-free slot (uza04.192) | 1M rows, 1000 keys, Float64 values, NaN every 37th, 5×20 batch p50 | 42.085 ms | 18.385 ms | **2.29× faster** | ✅ VERIFIED KEEP — streaming last-present scalar slot; golden `d373b7337998d544`; focused last release guard green |
+| groupby.count Utf8 key clone-free counter (uza04.187) | 1M rows, 1000 keys, Float64 values, NaN every 37th, 5×20 batch p50 | 40.566 ms | 16.307 ms | **2.49× faster** | ✅ VERIFIED KEEP — counter-only non-null path; golden `1e555b43a73656c1`; focused count/count-size release guards green |
+| groupby.size Utf8 key clone-free counter (uza04.187) | 1M rows, 1000 keys, Float64 values, NaN every 37th, 5×20 batch p50 | 45.113 ms | 16.064 ms | **2.81× faster** | ✅ VERIFIED KEEP — total-row counter path; golden `c6ccd2e318a736dd`; focused size release guards green |
 | groupby.agg(nunique) Utf8 key (uza04.204) | 2M rows, 1000 keys, Float64 values, NaN every 37th | 153.75 ms | 53.12 ms | **2.89× faster** | ✅ KEEP — CV-gated accepted; FP CV 2.68%, pandas CV 0.95% |
 | groupby.agg(median) Utf8 key (uza04.203) | 100k rows, 1000 keys, Float64 values, NaN every 37th | 5.53 ms | 2.10 ms | **2.63× faster** | ✅ KEEP — CV-gated accepted; FP CV 1.48%, pandas CV 4.56% |
 | groupby.agg(median) Utf8 key (uza04.203) | 2M rows, 1000 keys, Float64 values, NaN every 37th | 77.17 ms | 42.98 ms | **1.80× faster** | ✅ KEEP — CV-gated accepted; FP CV 3.21%, pandas CV 1.06% |
@@ -227,6 +229,29 @@ coverage. `rch exec -- cargo test --release -p fp-groupby groupby_last -- --noca
 passed the focused last release guard. Semantics preserved: null skipping, all-missing
 NaN output, selected scalar identity for object groups, sorted output order, and
 first-seen order fallback.
+
+### Win: clone-free generic `groupby.count`/`size` on Utf8 keys (br-frankenpandas-uza04.187)
+**VERIFIED after code-first commit.** The implementation had already landed and was reset
+open because batch proof was pending. Current cod-a verification built `fp-groupby` per-crate:
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a rch exec -- cargo build --release -p fp-groupby --bin groupby-bench`
+passed on worker `ovh-b`, then the retrieved release binary was used for local timings.
+
+Head-to-head fixture: 1,000,000 rows, 1,000 Utf8 groups, Float64 values, every 37th
+value missing, `sort=True`, pandas 2.2.3 / numpy 2.4.3. Batched pandas p50s were
+`count` 40.566 ms and `size` 45.113 ms. FP public batches were:
+`count` 15.024, 20.496, 16.307, 14.301, 16.462 ms (p50 16.307 ms), and
+`size` 14.055, 14.669, 16.064, 16.483, 16.341 ms (p50 16.064 ms). Verdict:
+**2.49x faster than pandas for count** and **2.81x faster than pandas for size**.
+Golden digests on the same fixture are `1e555b43a73656c1` for count and
+`c6ccd2e318a736dd` for size.
+
+Conformance guards:
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a rch exec -- cargo test --release -p fp-groupby groupby_count -- --nocapture`
+passed 4/4 focused release tests, including the Utf8 count/size null/order guard.
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a rch exec -- cargo test --release -p fp-groupby groupby_size -- --nocapture`
+passed 3/3 focused release tests. Semantics preserved: `count` skips missing
+values, `size` includes missing values, sorted output order is stable, and the
+first-seen `sort=false` contract remains covered by the shared guard.
 
 ### Gap: shift/concat/ffill structural — column-rebuild vs in-place (historically 6.6–24× slower)
 **ffill (2M f64, ~10% NaN) originally confirmed the pattern: 18.43 ms vs pandas 2.79 ms = 6.6× slower.**
