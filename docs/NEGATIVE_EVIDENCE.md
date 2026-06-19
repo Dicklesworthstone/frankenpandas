@@ -38,6 +38,13 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | ffill + mimalloc global allocator (EXPERIMENT) | 2M f64, ~10% NaN | 2.79 ms | 6.62 ms | **0.42× (2.4× slower)** | 🚀 2.8× faster than glibc-malloc ffill; mimalloc generalizes (3nah5) |
 
 | set_index typed Int64 col→idx (p9omo) | 1M rows, 2 cols | 1.12 ms | 0.17 ms | **6.5× faster** | ✅ KEEP — Index::from_i64_values |
+| cummax (sweep bench_misc) | 2M f64 | 22.02 ms | 2.63 ms | **8.4× faster** | ✅ pandas cummax surprisingly slow; fp crushes |
+| cumsum (sweep bench_misc) | 2M f64 | 22.73 ms | 3.09 ms | **7.4× faster** | ✅ pandas cumsum surprisingly slow; fp crushes |
+| clip (sweep bench_misc) | 2M f64, both bounds | 29.39 ms | 5.23 ms | **5.6× faster** | ✅ big win |
+| rank average (sweep bench_misc) | 2M f64 shuffled | 321.97 ms | 209.43 ms | **1.54× faster** | ✅ both slow (sort+ties); fp ahead |
+| nlargest(20) (sweep bench_misc) | 2M f64 shuffled | 46.27 ms | 58.29 ms | **0.79× (1.26× slower)** | 🔴 LOSS — select_nth already used; values() Scalar materialization + semantic_cmp overhead |
+| diff (sweep bench_misc) | 2M f64, periods=1 | 0.86 ms | 1.86 ms | **0.46× (2.16× slower)** | 🔴 LOSS — rebuild-class (allocator-bound, mimalloc-fixable like shift/ffill) |
+| fillna(value) (sweep bench_misc) | 2M f64, ~10% NaN | 2.53 ms | 4.48 ms | **0.57× (1.77× slower)** | 🔴 LOSS — rebuild-class (allocator-bound, mimalloc-fixable) |
 | RangeIndex.asof closed-form (jlv2o) | 100k rows, 4,096 scalar probes | 232.02 ms | 60.42 µs | **3,840× faster** | ✅ KEEP — public scalar API; pandas CV 4.82% |
 | RangeIndex.asof closed-form (jlv2o) | 1M rows, 4,096 scalar probes | 1,050.29 ms | 65.52 µs | **16,031× faster** | ✅ KEEP — lookup no longer scales with range length |
 | RangeIndex.get_indexer miss-heavy (29u49) | 100k targets, 15/16 misses | 1.110 ms | 1.344 ms | **0.83× (1.21× SLOWER)** | ⚠️ KEEP vs legacy — 3.82× faster than get_loc-loop model, but pandas gap remains |
