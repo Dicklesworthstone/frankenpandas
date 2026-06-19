@@ -4,6 +4,42 @@ Purpose: record every cod-b optimization attempt in the new performance campaign
 including dead ends, so future agents do not retry failed levers without a concrete
 retry predicate.
 
+## 2026-06-18 - br-frankenpandas-uza04.205 - RangeIndex take affine selectors
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: detect arithmetic `RangeIndex::take` position selectors and return a
+  lazy affine Int64 `Index` instead of materializing every output label into a
+  `Vec<i64>`.
+- Baseline comparator: the pre-patch path bounds-checked positions, computed
+  every selected label, allocated a typed output vector, and deferred only the
+  enum-label materialization. Common iloc/list-take shapes such as contiguous,
+  stepped, reversed, singleton, and empty selectors carry enough affine witness
+  data to skip that output vector entirely.
+- Graveyard mapping: selection-vector and witness-carry specialization: keep
+  the arithmetic selector as a semantic certificate and propagate it into an
+  affine backing, falling back to typed vectors for duplicate or irregular
+  gathers where uniqueness/stride witnesses are invalid.
+- Alien-artifact proof obligation: bounds errors are still raised before the
+  fast path; duplicate selectors cannot use the known-unique affine constructor;
+  descending selectors keep negative affine steps; empty/singleton selectors
+  preserve labels and name; checked step multiplication and affine construction
+  fall back to the old typed output if the stride cannot be represented safely.
+- Guard added: `range_index_take_arithmetic_keep_affine_uza04205`, checking
+  ascending, descending, singleton, empty, duplicate fallback, name propagation,
+  materialization avoidance, and label equality through the public typed view.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo check -p fp-index`
+  on 2026-06-18; only pre-existing workspace manifest license/license-file
+  warnings were emitted.
+- Benchmark verdict: pending. Required follow-up comparator is focused
+  criterion for `RangeIndex::take` and realistic DataFrame/Series iloc/list-take
+  paths with contiguous, strided, and reversed selectors versus the legacy
+  pandas original and pre-patch typed-vector materialization.
+- Retry predicate if rejected: only retry if same-worker profiling shows
+  `RangeIndex::take` or index gather materialization above 0.1% self-time and
+  allocation profiling proves the residual is typed output-vector construction,
+  not downstream label materialization or non-affine selector handling.
+
 ## 2026-06-18 - br-frankenpandas-uza04.201 - CategoricalIndex factorize rank codes
 
 - Status: implemented, benchmark verdict pending batch-test.

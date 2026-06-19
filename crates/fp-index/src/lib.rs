@@ -9877,6 +9877,37 @@ impl RangeIndex {
         i64::try_from(value).expect("validated RangeIndex value bounds")
     }
 
+    fn take_arithmetic_positions(&self, positions: &[usize]) -> Option<Index> {
+        let mut index = match positions {
+            [] => Index::new_known_unique_int64_affine_range(self.start, self.step, 0)?,
+            [position] => {
+                let first_label = self.value_at(*position);
+                Index::new_known_unique_int64_affine_range(first_label, self.step, 1)?
+            }
+            [first, second, ..] => {
+                let position_step = (*second as i128) - (*first as i128);
+                if position_step == 0 {
+                    return None;
+                }
+                if !positions
+                    .windows(2)
+                    .all(|window| (window[1] as i128) - (window[0] as i128) == position_step)
+                {
+                    return None;
+                }
+                let label_step = i128::from(self.step).checked_mul(position_step)?;
+                let label_step = i64::try_from(label_step).ok()?;
+                let first_label = self.value_at(*first);
+                Index::new_known_unique_int64_affine_range(first_label, label_step, positions.len())?
+            }
+        };
+
+        if let Some(name) = self.name() {
+            index = index.set_name(name);
+        }
+        Some(index)
+    }
+
     fn position_of_value(&self, value: i64) -> Option<usize> {
         if self.step == 0 {
             return None;
@@ -10057,6 +10088,9 @@ impl RangeIndex {
                     length: len,
                 });
             }
+        }
+        if let Some(idx) = self.take_arithmetic_positions(positions) {
+            return Ok(idx);
         }
         let labels: Vec<i64> = positions.iter().map(|&p| self.value_at(p)).collect();
         let mut idx = Index::from_i64_values(labels);
@@ -25820,6 +25854,68 @@ mod tests {
         assert!(
             repeated.labels.materialized.get().is_none(),
             "RangeIndex::repeat should keep typed Int64 output backing"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn range_index_take_arithmetic_keep_affine_uza04205() -> Result<(), super::IndexError> {
+        let range = super::RangeIndex::new(10, 40, 3).unwrap().set_name("r");
+
+        let ascending = range.take(&[1, 3, 5])?;
+        assert_eq!(ascending.name(), Some("r"));
+        assert_eq!(
+            ascending.labels.int64_view().unwrap().as_slice(),
+            &[13, 19, 25]
+        );
+        let affine = ascending
+            .labels
+            .int64_affine_range()
+            .expect("arithmetic take should keep lazy affine backing");
+        assert_eq!((affine.start, affine.step, affine.len), (13, 6, 3));
+        assert!(
+            ascending.labels.materialized.get().is_none(),
+            "arithmetic RangeIndex::take should not materialize labels"
+        );
+
+        let descending = range.take(&[5, 3, 1])?;
+        assert_eq!(
+            descending.labels.int64_view().unwrap().as_slice(),
+            &[25, 19, 13]
+        );
+        let affine = descending
+            .labels
+            .int64_affine_range()
+            .expect("descending arithmetic take should keep lazy affine backing");
+        assert_eq!((affine.start, affine.step, affine.len), (25, -6, 3));
+
+        let singleton = range.take(&[4])?;
+        assert_eq!(singleton.labels.int64_view().unwrap().as_slice(), &[22]);
+        assert!(
+            singleton.labels.int64_affine_range().is_some(),
+            "singleton take can stay lazy affine"
+        );
+
+        let empty = range.take(&[])?;
+        assert!(empty.labels.int64_view().unwrap().is_empty());
+        assert!(
+            empty.labels.int64_affine_range().is_some(),
+            "empty take can stay lazy affine"
+        );
+
+        let duplicate = range.take(&[1, 1, 2])?;
+        assert_eq!(
+            duplicate.labels.int64_view().unwrap().as_slice(),
+            &[13, 13, 16]
+        );
+        assert!(
+            duplicate.labels.int64_affine_range().is_none(),
+            "duplicate selectors must preserve materialized typed fallback"
+        );
+        assert!(
+            duplicate.labels.materialized.get().is_none(),
+            "fallback should remain typed Int64, not enum materialized"
         );
 
         Ok(())
