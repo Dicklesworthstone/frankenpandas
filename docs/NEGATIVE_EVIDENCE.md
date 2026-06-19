@@ -21,6 +21,21 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | head/tail zero-copy slice (6wx84) | 2M int64, k=5 | 5.91 µs | 0.35 µs | **~17× faster** | ✅ KEEP — Index::slice+Column::slice |
 | loc_bool filter (t0y8n) | 2M, 50% mask | 10.89 ms | 8.42 ms | **1.29× faster** | ✅ KEEP — collect-positions + take_positions |
 | drop_duplicates FxHashSet (6vep3) | 1M, card 1000 | 5.99 ms | 2.95 ms | **2.03× faster** | ✅ KEEP — beat khash dedup |
+| sum typed Int64 (bwgyc) | 2M int64 | 216 µs | 171 µs | **1.27× faster** | ✅ KEEP |
+| std / var typed (0xdfx Welford) | 2M int64 | 19.5 ms | 1.72 ms | **11.3× faster** | ✅ KEEP — Welford crushes pandas std |
+| max typed Int64 (4qs3h) | 2M int64 | 219 µs | 1.15 ms | **0.19× (5.2× SLOWER)** | ⚠️ KEEP (beats old fp Scalar path) but LOSES to numpy SIMD — gap |
+| min typed Int64 (4qs3h) | 2M int64 | 230 µs | 1.17 ms | **0.20× (5.1× SLOWER)** | ⚠️ KEEP but LOSES to numpy SIMD — gap |
+
+### Gap: max/min lose to numpy SIMD (~5×)
+fp `Series.max/min` use `iter().max()` (Option/Ord comparison loop, doesn't auto-vectorize)
+vs numpy's SIMD max. NOT a regression (the typed lever beats old fp's Scalar iteration), so
+not reverted — but a real vs-pandas gap. FIX ATTEMPT (REVERTED): branchless
+`fold(i64::MIN, i64::max)` — built+measured, **max stayed 1.15 ms (~0 gain)**; LLVM did not
+auto-vectorize the i64 min/max reduction here. Reverted to the simpler `iter().max()`
+(working-tree only, never committed). CONCLUSION: beating numpy SIMD max/min needs explicit
+SIMD (portable_simd / chunked manual vectorization) — out of safe-Rust auto-vec reach; a
+candidate radical lever for the kernel layer, NOT a code-first fp-frame change. Dead end
+recorded — do not retry the branchless-fold approach.
 
 ## pandas 2.2.3 baselines (best-of-N, for pending comparisons)
 
