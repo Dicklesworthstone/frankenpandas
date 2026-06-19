@@ -63,6 +63,7 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | skew (sweep bench_misc4) | 2M f64 | 38.56 ms | 7.75 ms | **5.0× faster** | ✅ typed numeric_values moments |
 | sem (sweep bench_misc4) | 2M f64 | 42.41 ms | 9.47 ms | **4.5× faster** | ✅ typed |
 | mode typed f64-bits + splitmix (mixf64) | 2M f64, ~1000 distinct | 17.32 ms | 10.87 ms | **1.59× faster** | ✅ FIXED — was 2.97× LOSS! splitmix on the 0loqz tally (bijective, bit-identical, 41 tests) = 4.7× FP-side. Same FxHash-clustering root cause as unique |
+| value_counts Float64 (already neutral) | 2M f64, ~1000 distinct | 17.53 ms | 16.06 ms | **1.09× faster** | ➖ NEUTRAL — already fine. Uses ScalarKey FxHashMap whose ENUM-discriminant hash avoids the raw-u64 FxHash clustering that hit unique/mode. FIX ATTEMPT (REVERTED): typed f64-bits+splitmix path = 16.06→15.43 ms (~4%, ~0-gain), so reverted — ScalarKey path already un-clustered here. Explains WHY only the raw-u64 ops (unique/mode) clustered |
 | diff (sweep bench_misc) | 2M f64, periods=1 | 0.86 ms | 1.86 ms | **0.46× (2.16× slower)** | 🔴 LOSS — rebuild-class (allocator-bound, mimalloc-fixable like shift/ffill) |
 | fillna(value) (sweep bench_misc) | 2M f64, ~10% NaN | 2.53 ms | 4.48 ms | **0.57× (1.77× slower)** | 🔴 LOSS — rebuild-class (allocator-bound, mimalloc-fixable) |
 | RangeIndex.asof closed-form (jlv2o) | 100k rows, 4,096 scalar probes | 232.02 ms | 60.42 µs | **3,840× faster** | ✅ KEEP — public scalar API; pandas CV 4.82% |
