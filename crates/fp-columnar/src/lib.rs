@@ -6104,7 +6104,8 @@ impl Column {
     /// caller must have already proven `data` is NaN-free (otherwise a NaN slot
     /// would wrongly claim valid). Identical to the no-NaN branch of
     /// [`Self::from_f64_values`]. (br-frankenpandas-9houf)
-    fn from_f64_values_all_valid_unchecked(data: Vec<f64>) -> Self {
+    #[doc(hidden)]
+    pub fn from_f64_values_all_valid_unchecked(data: Vec<f64>) -> Self {
         let len = data.len();
         Self {
             dtype: DType::Float64,

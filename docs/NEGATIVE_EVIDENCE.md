@@ -36,6 +36,8 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | ffill typed Float64 (as_f64_slice_with_validity) | 2M f64, ~10% NaN | 2.79 ms | 18.43 ms | **0.15× (6.6× SLOWER)** | ⚠️ KEEP but LOSS — confirms column-rebuild pattern |
 | shift + mimalloc boundary allocator (3nah5) | 2M f64, periods=1 | 0.858 ms | 4.30 ms | **0.20× (5.0× slower)** | ✅ KEEP — adopted at process boundaries; 1.35× faster than current glibc-malloc shift (5.80 ms), golden `d41eaaa775ee123e` unchanged |
 | ffill + mimalloc boundary allocator (3nah5) | 2M f64, ~10% NaN | 2.50 ms | 6.89 ms | **0.36× (2.76× slower)** | ✅ KEEP — adopted at process boundaries; 2.51× faster than current glibc-malloc ffill (17.32 ms), still needs single-pass builder |
+| shift no-scan Float64 rebuild + mimalloc (dfcv8) | 2M f64, periods=1 | 0.943 ms | 0.673 ms | **1.40× faster** | ✅ KEEP — skips redundant Float64 NaN/validity rebuild scan via hidden all-valid constructor; golden `d41eaaa775ee123e` unchanged; plain glibc path is 1.47 ms = 0.64×, so allocator boundary still matters |
+| ffill no-scan Float64 rebuild + mimalloc (dfcv8) | 2M f64, ~10% NaN | 3.221 ms | 6.17 ms | **0.52× (1.9× slower)** | ⚠️ KEEP as no-regression side effect — 1.12× faster than prior mimalloc row, but still a pandas loss; route deeper validity-run/branchless fill work |
 
 | set_index typed Int64 col→idx (p9omo) | 1M rows, 2 cols | 1.12 ms | 0.17 ms | **6.5× faster** | ✅ KEEP — Index::from_i64_values |
 | cummax (sweep bench_misc) | 2M f64 | 22.02 ms | 2.63 ms | **8.4× faster** | ✅ pandas cummax surprisingly slow; fp crushes |
@@ -199,6 +201,16 @@ losses (concat 13×, ffill 2.8×, shift 2.3×), strongest where allocation domin
 bead 3nah5 — `#[global_allocator]` is SAFE Rust (no unsafe), so unlike the AVX2 SIMD lever it
 is compatible with this codebase; only the workspace-coordination (arena interaction, re-
 baselining) blocks unilateral adoption.
+
+**dfcv8 follow-up — shift rebuild scan eliminated, ffill still residual.** Current-source
+`rch exec -- cargo build --release -p fp-frame --example bench_shift --example bench_ffill
+--example bench_rebuild_mimalloc` plus local release-binary timings show `shift` now wins in
+the intended mimalloc boundary mode: 0.673 ms vs pandas 0.943 ms = 1.40× faster. The plain
+glibc allocator path remains a loss (1.47 ms vs pandas 0.943 ms = 0.64×), so the honest
+verdict is "keep with allocator boundary." `ffill` improves modestly but remains behind:
+6.17 ms vs pandas 3.221 ms = 0.52×. `perf stat` profiling was attempted but blocked by
+`/proc/sys/kernel/perf_event_paranoid=4`; timing, golden digests, conformance, and UBS are
+the accepted proof for this narrow lever.
 
 **ADOPTION VERIFY (cod-a exact-parent A/B).** Compared the `250bfbf2^` parent binary against
 `250bfbf2` (`release-perf`, local executable after `rch` build proof; both pinned with
