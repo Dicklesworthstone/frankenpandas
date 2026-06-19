@@ -2,7 +2,7 @@
 
 ## Release-readiness verdict (gauntlet, measured)
 
-**Perf vs pandas 2.2.3: 33/39 realistic ops faster (median ≈2.8× among wins); 4 losses,
+**Perf vs pandas 2.2.3: 32/39 realistic ops faster (median ≈2.8× among wins); 5 losses,
 2 neutral rows, all with documented fix paths; 0 perf-lever regressions.** Conformance:
 3078/3079 fp-frame tests pass (1 remaining failure — `groupby_prod_preserves_int64_j9w3s`,
 cod-b's groupby-prod-dtype gap); the gauntlet drove this from 6 failures to 1 (peers fixed
@@ -32,7 +32,9 @@ focused `fp-groupby` release tests green.
   i64x8/i64x4 probes were measured and reverted as regressions; Series add/mul now has a
   kept morsel-sweep lever that makes both arithmetic rows near-parity pinned, with mul
   faster unpinned and add still threshold-sensitive; Series.combine_first is still a
-  0.41× loss after grtx1's measured 1.05× no-rescan improvement. All gaps are tracked.
+  0.41× loss after grtx1's measured 1.05× no-rescan improvement; Series.map Float64
+  dense integer-key mapping improved FP-side by 1.19× but remains a 0.68× pandas loss.
+  All gaps are tracked.
 - **Allocator adoption gate:** exact-parent `fp-bench` A/B for `250bfbf2` kept the 3nah5
   process-boundary allocator: 5 broad smoke wins (up to 3.35×), neutral control lanes, and
   no confirmed regression above 5% after paired reruns of the initially suspicious rows.
@@ -56,6 +58,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | sum | 2M int64 | 1.27× | 🟢 |
 | max / min | 2M int64 | 0.57× / 0.57× rerun | 🟡 8-lane chunked accumulator remains best safe-Rust path; safe `std::simd` i64x8/i64x4 rejected |
 | Series add / mul | 2M f64 same-index | pinned add 1.01× neutral, mul 0.96× neutral; unpinned add 0.88× loss, mul 1.19× win | 🟡 tycz7 kept disjoint morsel sweep; FP-side add/mul ~6.0×/5.6× faster, add remains threshold-sensitive |
+| Series.map Float64 | 2M f64, 50-entry zero-based full-coverage map | 0.68×; FP-side 21.33→17.92 ms | 🔴 still 1.48× slower; kept 0jdij dense direct-address map, residual output/key-guard cost tracked |
 | Series.combine_first | 2M f64 same-index, ~50% NaN fill | 0.41× local; rch hz2 FP-side 1.05× keep | 🔴 still 2.44× slower; grtx1 skips a redundant Float64 validity rescan but output allocation/select remains |
 | reset_index | 1M int64-indexed | 5.1× | 🟢 |
 | str.lower/upper | 1M strings | 6.5× | 🟢 |
@@ -80,11 +83,11 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | RangeIndex.get_indexer miss-heavy | 100k / 1M targets | 2.64× / 3.61× | 🟢 flipped by arithmetic bulk membership; `rch` same-worker FP-side 4.0× |
 | RangeIndex.reindex all-miss | 100k / 1M targets | 36.1× / 51.5× | 🟢 exact RangeIndex lattice fast path; `rch` same-worker FP-side 75.7× / 32.2× |
 
-**Score: 33/39 measured ops faster than pandas; 4 losses (max, min, concat, combine_first),
-2 neutral rows (add, mul pinned); 0 shipped regressions; 8 reverted/no-ship SIMD, allocation,
+**Score: 32/39 measured ops faster than pandas; 5 losses (max, min, concat, Series.map Float64, combine_first),
+2 neutral rows (add, mul pinned); 0 shipped regressions; 9 reverted/no-ship SIMD, allocation,
 or ~0-gain attempts.**
 
-Median win among the 33 ≈ 2.8×; the remaining losses are kernel/structural gaps with
+Median win among the 32 ≈ 2.8×; the remaining losses are kernel/structural gaps with
 documented fix paths — none are code-first fp-frame regressions. concat
 remains a confirmed **column-rebuild** loss; ffill was the same class until skw2c changed
 the no-limit path to bulk-copy the f64 buffer and fill only invalid validity runs.
@@ -109,6 +112,11 @@ The latest `grtx1` Series.combine_first pass removed one redundant output validi
 typed same-index Float64 path (rch hz2 19.375 ms -> 18.33/18.40 ms, ~1.05× FP-side), but the
 local pandas ratio is still 0.41×, so the row stays red and routes to output allocation/packed
 select work.
+The latest `0jdij` Series.map pass turned the stale FxHash mapping lane into a dense
+direct-address table for finite integer-valued Float64 mapping keys. It is a real FP-side
+keep (21.326 ms -> 17.924 ms, 1.19×) with map/factorize conformance green, but current
+pandas 2.2.3 is 12.116 ms on the same pinned fixture, so the row stays red at 0.68× and
+routes to output materialization/key-guard work.
 
 Pattern: typed-slice levers win 2–11× where they unlock a cheaper ALGORITHM (FxHash dedup,
 dense value_counts, Welford std/var, contiguous str). They LOSE on ops that just rebuild
@@ -119,7 +127,7 @@ pandas because fp's column-rebuild construction is still heavier than numpy's po
 memmove/concatenate; max/min
 still need target-specific SIMD beyond current safe `std::simd` lowering; Series add/mul
 still need durable numpy-class vectorization or output materialization work to move from
-near-parity to clear wins; combine_first still needs lower-allocation select/materialization
+near-parity to clear wins; Series.map Float64 and combine_first still need lower-allocation select/materialization
 despite the grtx1 no-rescan keep. The Utf8 `groupby.sum` gap flipped under the clone-free streaming counter,
 and the RangeIndex indexer gap flipped under the affine arithmetic bulk path, not by
 weakening the retained public `get_loc` error semantics.
