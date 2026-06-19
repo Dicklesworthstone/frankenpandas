@@ -29,6 +29,20 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | reset_index typed Int64 idx→col (bp6k7) | 1M int64-indexed, 2 cols | 1.93 ms | 0.38 ms | **5.1× faster** | ✅ KEEP — Index::from_i64_values |
 | concat typed buffer (tbrtu) | 8×125k Int64 series, ignore_index | 0.28 ms | 6.81 ms | **0.041× (24× SLOWER)** | ⚠️ KEEP (bit-transparent, ≥ old Scalar path) but BIG LOSS vs pandas |
 
+| str.lower/upper contiguous (apply_str_utf8) | 1M strings | 84.04 ms | 12.88 ms | **6.5× faster** | ✅ KEEP — contiguous buf + ASCII in-place |
+| shift typed Float64 (202cdf50) | 2M f64, periods=1 | 0.74 ms | 9.01 ms | **0.082× (12× SLOWER)** | ⚠️ KEEP (≥ old Scalar path) but LOSS — structural |
+| shift typed Int64 fill (51601b7a) | 2M i64, periods=2 | 0.74 ms | 7.86 ms | **0.094× (10.6× SLOWER)** | ⚠️ KEEP but LOSS — structural |
+
+### Gap: shift/concat structural — column-rebuild vs in-place (10–24× slower)
+fp shift/concat rebuild a whole new typed Column (`as_f64/i64_slice` materializes the typed
+buffer for `from_values`-built columns, then `from_f64/i64_values` re-inits validity, then
+`Series::new`) — multiple O(n) passes — whereas pandas shift/concat is ~one numpy memmove/
+concatenate. The typed levers are NOT regressions (≥ old fp Scalar rebuild) so kept, but the
+WHOLE-COLUMN-REBUILD construction is fp's structural disadvantage on these ops. INSIGHT: the
+typed-slice levers win big when typed access unlocks a cheaper ALGORITHM (FxHash dedup, dense
+value_counts, Welford std → 2–11× wins) but only break even (then lose on construction
+overhead) for ops that merely rebuild the column (shift/concat). Kernel-level fix needed.
+
 ### Gap: concat 24× slower than pandas (biggest gap found)
 pandas `pd.concat` of Int64 series ≈ a single `np.concatenate` (flat int64 memcpy, 281µs/1M).
 fp's path has structural overhead: per-series `as_i64_slice` (may materialize the typed

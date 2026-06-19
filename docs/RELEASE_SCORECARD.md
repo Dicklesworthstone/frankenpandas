@@ -17,13 +17,18 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | sum | 2M int64 | 1.27× | 🟢 |
 | max / min | 2M int64 | 0.19× / 0.20× | 🔴 lose to numpy SIMD |
 | reset_index | 1M int64-indexed | 5.1× | 🟢 |
+| str.lower/upper | 1M strings | 6.5× | 🟢 |
 | concat | 8×125k Int64 | 0.041× | 🔴 24× slower (structural) |
+| shift | 2M, p=1 | 0.082× | 🔴 12× slower (structural) |
 
-**Score: 8/11 measured ops faster than pandas; 3 losses (max, min, concat);
-0 regressions; 1 reverted ~0-gain attempt.**
+**Score: 9/13 measured ops faster than pandas; 4 losses (max, min, concat, shift);
+0 regressions; 2 reverted ~0-gain attempts.**
 
-Top gaps to close: **concat (24× — structural construction overhead)** and **max/min
-(~5× — needs SIMD)**. Both are kernel/structural, not 1-line code-first fixes.
+Pattern: typed-slice levers win 2–11× where they unlock a cheaper ALGORITHM (FxHash dedup,
+dense value_counts, Welford std/var, contiguous str). They LOSE on ops that just rebuild
+the whole Column (concat 24×, shift 12×) — fp's column-rebuild construction is heavier than
+numpy's in-place memmove/concatenate; and on max/min (~5×) which need SIMD. All 4 losses are
+kernel/structural, not code-first.
 
 Notably, three of these (value_counts, sort_values, filter/dedup) were *lagging* pandas
 before this session's levers (value_counts 0.62×, sort 0.91× per the perf-frontier notes)
