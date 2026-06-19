@@ -2,7 +2,7 @@
 
 ## Release-readiness verdict (gauntlet, measured)
 
-**Perf vs pandas 2.2.3: 23/30 realistic ops faster (median ≈2.8× among wins); 6 losses and
+**Perf vs pandas 2.2.3: 24/30 realistic ops faster (median ≈2.8× among wins); 5 losses and
 1 neutral row, all with documented fix paths; 0 perf-lever regressions.** Conformance:
 3078/3079 fp-frame tests pass (1 remaining failure — `groupby_prod_preserves_int64_j9w3s`,
 cod-b's groupby-prod-dtype gap); the gauntlet drove this from 6 failures to 1 (peers fixed
@@ -11,7 +11,7 @@ conformance guard passes by execution. Current dcfv8 gate also has `fp-conforman
 --tests` green.
 
 - **Ship-ready strengths:** value_counts (2.6×), drop_duplicates (2.0×), groupby int-key
-  (5.4×), groupby mean Utf8-key (2.80×), groupby nunique Utf8-key (2.89×),
+  (5.4×), groupby sum/prod Utf8-key (2.18×/2.54×), groupby mean Utf8-key (2.80×), groupby nunique Utf8-key (2.89×),
   groupby median Utf8-key (1.80–2.63×),
   groupby std/var Utf8-key (1.22–1.34×),
   reset/set_index (5–6.5×), std/var (11×), str case (6.5×), head/tail (17×),
@@ -22,7 +22,7 @@ conformance guard passes by execution. Current dcfv8 gate also has `fp-conforman
   or chunk/view path; ffill now flips to 1.41× faster via skw2c validity-run bulk fill;
   shift flips to 1.40× faster in the no-scan + mimalloc boundary mode while remaining
   allocator-sensitive on the plain glibc path; max/min
-  (5×) need SIMD; utf8 groupby sum (1.8×) needs key-factorize→dense; small/miss-heavy
+  (5×) need SIMD; small/miss-heavy
   RangeIndex indexers still trail pandas despite the exception-allocation fix. All gaps
   are tracked.
 - **Allocator adoption gate:** exact-parent `fp-bench` A/B for `250bfbf2` kept the 3nah5
@@ -54,7 +54,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | ffill | 2M f64, ~10% NaN | 1.41× with skw2c validity-run fill + 3nah5 mimalloc boundary | 🟢 flipped; packed validity-run bulk fill |
 | groupby.sum int key | 1M, 1000 keys | 5.4× | 🟢 dense grouping |
 | groupby.mean utf8 key | 1M, 1000 keys | 2.80× | 🟢 clone-free streaming sum/count counters |
-| groupby.sum utf8 key | 1M, 1000 keys | 0.56× | 🔴 1.78× slower (Utf8 hashing) |
+| groupby.sum utf8 key | 1M, 1000 keys | 2.18× | 🟢 clone-free streaming sum counter; was 0.56× |
 | groupby.agg(nunique) utf8 key | 2M, 1000 keys | 2.89× | 🟢 CV-gated accepted |
 | groupby.agg(median) utf8 key | 100k/2M, 1000 keys | 2.63× / 1.80× | 🟢 CV-gated accepted |
 | groupby.agg(var) utf8 key | 100k/1M/2M, 1000 keys | 1.29× / 1.22× / 1.30× | 🟢 CV-gated accepted |
@@ -64,11 +64,11 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | RangeIndex.get_indexer miss-heavy | 100k targets | 0.83× | 🔴 1.21× slower; 3.82× faster than legacy get_loc-loop model |
 | RangeIndex.reindex all-miss | 100k / 1M targets | 0.86× / 1.07× | 🔴 100k slower; 1M neutral; keep vs legacy model |
 
-**Score: 23/30 measured ops faster than pandas; 6 losses (max, min, concat,
-utf8-groupby sum, RangeIndex.get_indexer 100k, RangeIndex.reindex 100k), 1 neutral
+**Score: 24/30 measured ops faster than pandas; 5 losses (max, min, concat,
+RangeIndex.get_indexer 100k, RangeIndex.reindex 100k), 1 neutral
 (RangeIndex.reindex 1M); 0 regressions; 2 reverted ~0-gain attempts.**
 
-Median win among the 23 ≈ 2.8×; the losses are kernel/structural or pandas-vectorized-engine
+Median win among the 24 ≈ 2.8×; the losses are kernel/structural or pandas-vectorized-engine
 gaps with documented fix paths — none are code-first fp-frame regressions. concat
 remains a confirmed **column-rebuild** loss; ffill was the same class until skw2c changed
 the no-limit path to bulk-copy the f64 buffer and fill only invalid validity runs. The RangeIndex indexer loss is different:
@@ -81,8 +81,9 @@ the whole Column. The 3nah5 mimalloc boundary allocator turns those losses from 
 to actionable; dcfv8's no-scan shift path now flips shift to 1.40× faster under that boundary,
 and skw2c's validity-run ffill path flips ffill to 1.41× faster. concat (0.46×) still trails
 pandas because fp's column-rebuild construction is still heavier than numpy's pooled/in-place
-memmove/concatenate; and max/min
-still need SIMD. The RangeIndex
+memmove/concatenate; max/min
+still need SIMD. The Utf8 `groupby.sum` gap flipped under the clone-free streaming counter,
+and the remaining RangeIndex
 indexer loss is a separate vectorized-engine gap, not a regression of the retained FP-side
 miss-allocation lever.
 

@@ -90,7 +90,8 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | RangeIndex.reindex all-miss (29u49) | 100k target RangeIndex | 0.990 ms | 1.150 ms | **0.86× (1.16× SLOWER)** | ⚠️ KEEP vs legacy — 4.64× faster than get_loc-loop model, but pandas gap remains |
 | RangeIndex.reindex all-miss (29u49) | 1M target RangeIndex | 13.13 ms | 12.28 ms | 1.07× faster | NEUTRAL — below 10% margin; 4.11× faster than legacy model |
 | groupby.sum Int64 key (dense grouping) | 1M rows, 1000 keys | 13.26 ms | 2.44 ms | **5.4× faster** | ✅ KEEP — int64_dense_grouping |
-| groupby.sum Utf8 key (build_groups FxHash buguz) | 1M rows, 1000 keys | 31.10 ms | 55.33 ms | **0.56× (1.78× SLOWER)** | ⚠️ KEEP (FxHash ≥ SipHash) but LOSS — Utf8 ScalarKey hashing |
+| groupby.sum Utf8 key clone-free counter (uza04.193) | 1M rows, 1000 keys, Float64 values, NaN every 37th | 32.946 ms | 15.141 ms | **2.18× faster** | ✅ VERIFIED KEEP — previous row was 0.56×/1.78× slower; public `groupby_sum` and `groupby_agg(Sum)` share digest `7fb4fd07f6f8bdf2`; pandas CV 3.17%, FP public-sum CV ~0.7% |
+| groupby.prod Utf8 key clone-free counter (uza04.193) | 1M rows, 1000 keys, Float64 values, NaN every 37th | 32.988 ms | 13.001 ms | **2.54× faster** | ✅ VERIFIED KEEP — same streaming product counter family; pandas CV 3.51%, FP public-prod CV <1%; focused fallback/overflow/timedelta guards green |
 | groupby.agg(nunique) Utf8 key (uza04.204) | 2M rows, 1000 keys, Float64 values, NaN every 37th | 153.75 ms | 53.12 ms | **2.89× faster** | ✅ KEEP — CV-gated accepted; FP CV 2.68%, pandas CV 0.95% |
 | groupby.agg(median) Utf8 key (uza04.203) | 100k rows, 1000 keys, Float64 values, NaN every 37th | 5.53 ms | 2.10 ms | **2.63× faster** | ✅ KEEP — CV-gated accepted; FP CV 1.48%, pandas CV 4.56% |
 | groupby.agg(median) Utf8 key (uza04.203) | 2M rows, 1000 keys, Float64 values, NaN every 37th | 77.17 ms | 42.98 ms | **1.80× faster** | ✅ KEEP — CV-gated accepted; FP CV 3.21%, pandas CV 1.06% |
@@ -151,16 +152,32 @@ Artifacts: `artifacts/bench/gauntlet_cod_b_range_indexers_vs_pandas.json`,
 `artifacts/bench/gauntlet_cod_b_range_indexers_criterion_rch.txt`, and
 `artifacts/bench/gauntlet_cod_b_range_indexers_pandas.json`.
 
-### Gap: Utf8 groupby 1.78× slower than pandas
-fp groups Utf8 keys via `build_groups` → `FxHashMap<ScalarKey, Vec<usize>>`: per-row String
-hashing + `ScalarKey::Utf8` (holds a `&str`/owned), Vec<usize> accumulation, then agg. The
-FxHash lever (buguz) beat SipHash but the path still loses to pandas' factorize-then-aggregate
-on object keys. Not a regression (kept). FIX: factorize Utf8 keys to dense codes once (like
-the Int64 dense path), then group on codes — a bigger algorithmic change, cod-b's groupby
-domain. Int64-key groupby already wins 5.4× via the dense path; later value-lane clone
-elimination wins for `Nunique` (2.89× on a 2M-row CV-gated workload) and `Median`
-(1.80× on a 2M-row CV-gated workload). The remaining Utf8 gap is reducer-specific:
-plain sum/mean-style Utf8 grouping still needs factorize→dense.
+### Win: clone-free generic `groupby.sum`/`prod` on Utf8 keys (br-frankenpandas-uza04.193)
+**VERIFIED after code-first commit.** The implementation had already landed and was reset
+open because batch proof was pending. Current cod-b verification rebuilt `fp-groupby` per-crate:
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo build --release -p fp-groupby --bin groupby-bench`
+passed on worker `hz2`, then the local retrieved release binary was run pinned to CPU 7.
+
+Head-to-head fixture: 1,000,000 rows, 1,000 Utf8 groups, Float64 values, every 37th
+value missing, `sort=True`. Fair pandas Series-vs-Series batches on pandas 2.2.3 were
+`sum` p50 32.946 ms (CV 3.17%) and `prod` p50 32.988 ms (CV 3.51%). FP public
+`groupby_sum` batches were 15.180, 15.141, 15.226, 15.000, 14.930 ms (p50
+15.141 ms, CV ~0.7%). FP public `groupby_prod` batches were 13.001, 13.099,
+12.909, 12.995, 13.149 ms (p50 13.001 ms, CV <1%). Verdict: **2.18x faster
+than pandas for sum** and **2.54x faster than pandas for prod**. The public
+`sum` and dispatcher alias `agg-sum` produce the same golden digest:
+`7fb4fd07f6f8bdf2` (`out_rows=1000`).
+
+Conformance guards:
+`rch exec -- cargo test -p fp-groupby groupby_agg_sum_matches_dedicated_sum --release`,
+`groupby_agg_sum_prod_utf8_keys_stream_integer_slots`,
+`groupby_agg_sum_prod_float64_utf8_keys_stream_counters_2qb1i`,
+`groupby_agg_sum_prod_bool_and_prod_overflow_preserve_fallbacks`, and
+`groupby_agg_sum_prod_timedelta_fallback_preserved_2qb1i` all passed. Semantics
+preserved: sorted and first-seen output order, null skipping, all-missing defaults,
+Bool/Int64 dtype preservation, product overflow f64 fallback, Float64 folds, and
+Timedelta fallback routing. `perf stat` attribution remained blocked by
+`perf_event_paranoid=4`.
 
 ### Gap: shift/concat/ffill structural — column-rebuild vs in-place (historically 6.6–24× slower)
 **ffill (2M f64, ~10% NaN) originally confirmed the pattern: 18.43 ms vs pandas 2.79 ms = 6.6× slower.**
