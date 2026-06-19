@@ -69,13 +69,13 @@ use fp_columnar::{Column, ColumnError};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexError, IndexLabel, align_union, validate_alignment_plan};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
-use fp_types::{DType, NullKind, Scalar, Timedelta, Timestamp};
+use fp_types::{DType, IntervalClosed, NullKind, PeriodFreq, Scalar, Timedelta, Timestamp};
 // Group accumulation maps key on GroupKeyRef and read group ORDER from a
 // separate `ordering` Vec (first-seen order), never from map iteration. So the
 // hasher is observationally invisible: swapping SipHash -> FxHash changes only
 // bucket placement, not any output value or order. FxHash (rustc-hash) is pure
 // safe Rust; on the hot string-key path it is ~2x the std SipHasher.
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1878,6 +1878,104 @@ fn try_groupby_median_numeric_vectors(
     Some((out_index, out_values))
 }
 
+#[derive(Hash, PartialEq, Eq)]
+enum NuniqueValueKey<'a> {
+    Bool(bool),
+    Int64(i64),
+    FloatBits(u64),
+    Utf8(&'a str),
+    Timedelta64(i64),
+    Datetime64(i64),
+    Period(i64, PeriodFreq),
+    Interval(u64, u64, IntervalClosed),
+}
+
+fn nunique_value_key(value: &Scalar) -> Option<NuniqueValueKey<'_>> {
+    if value.is_missing() {
+        return None;
+    }
+    Some(match value {
+        Scalar::Bool(v) => NuniqueValueKey::Bool(*v),
+        Scalar::Int64(v) => NuniqueValueKey::Int64(*v),
+        Scalar::Float64(v) => {
+            let normalized = if *v == 0.0 { 0.0 } else { *v };
+            NuniqueValueKey::FloatBits(normalized.to_bits())
+        }
+        Scalar::Utf8(v) => NuniqueValueKey::Utf8(v.as_str()),
+        Scalar::Timedelta64(v) => NuniqueValueKey::Timedelta64(*v),
+        Scalar::Datetime64(v) => NuniqueValueKey::Datetime64(*v),
+        Scalar::Period(v) => NuniqueValueKey::Period(v.ordinal, v.freq),
+        Scalar::Interval(v) => NuniqueValueKey::Interval(
+            if v.left == 0.0 { 0.0 } else { v.left }.to_bits(),
+            if v.right == 0.0 { 0.0 } else { v.right }.to_bits(),
+            v.closed,
+        ),
+        Scalar::Null(_) => return None,
+    })
+}
+
+struct NuniqueScalarAccumulator<'a> {
+    source_idx: usize,
+    seen: FxHashSet<NuniqueValueKey<'a>>,
+}
+
+/// Generic string/object-key path for `groupby.nunique()`.
+///
+/// The fallback hashes the same groups, clones every non-missing value into a
+/// per-group `Vec<Scalar>`, and only then calls `nannunique`. Distinct-counting
+/// needs no value order and no owned scalars, so this stores the exact borrowed
+/// bucket keys that `nannunique` would derive and preserves the same missing
+/// skip, `-0.0`/`+0.0` normalization, and dtype-specific equality.
+fn try_groupby_nunique_borrowed_sets(
+    keys: &[Scalar],
+    values: &[Scalar],
+    dropna: bool,
+    sort: bool,
+) -> (Vec<IndexLabel>, Vec<Scalar>) {
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, NuniqueScalarAccumulator<'_>>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            NuniqueScalarAccumulator {
+                source_idx: pos,
+                seen: FxHashSet::default(),
+            }
+        });
+
+        if let Some(value_key) = nunique_value_key(value) {
+            entry.seen.insert(value_key);
+        }
+    }
+
+    if sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            groups
+                .get(key)
+                .expect("ordering references only inserted keys")
+                .source_idx
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let group = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        out_index.push(scalar_group_label(&keys[group.source_idx]));
+        out_values.push(Scalar::Int64(group.seen.len() as i64));
+    }
+
+    (out_index, out_values)
+}
+
 fn update_min_max_scalar_slot(
     slot: &mut Option<Scalar>,
     invalid: &mut bool,
@@ -2357,6 +2455,16 @@ pub fn groupby_agg(
         && let Some((out_index, out_values)) =
             try_groupby_nunique_dense_int64(key_vals, val_vals, options.dropna, options.sort)
     {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
+    // Generic string/object-key nunique only needs per-group distinct buckets,
+    // not cloned value vectors. Keep this after the dense Int64 seen-bitset
+    // route so bounded integer key/value cases retain the direct-address path.
+    if matches!(func, AggFunc::Nunique) {
+        let (out_index, out_values) =
+            try_groupby_nunique_borrowed_sets(key_vals, val_vals, options.dropna, options.sort);
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
     }
@@ -6211,6 +6319,95 @@ mod tests {
         assert_eq!(
             out.values(),
             &[Scalar::Timedelta64(15), Scalar::Timedelta64(40)]
+        );
+    }
+
+    #[test]
+    fn groupby_nunique_utf8_keys_borrowed_sets_uza04204() {
+        let policy = RuntimePolicy::default();
+        let mut ledger = EvidenceLedger::new();
+        let keys = Series::from_values(
+            "key",
+            (0..12).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("d".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("d".to_owned()),
+                Scalar::Utf8("e".to_owned()),
+                Scalar::Utf8("e".to_owned()),
+                Scalar::Utf8("e".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            (0..12).map(|i| (i as i64).into()).collect(),
+            vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Float64(-0.0),
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(0.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Timedelta64(5),
+                Scalar::Float64(1.0),
+                Scalar::Timedelta64(5),
+                Scalar::Bool(true),
+                Scalar::Int64(1),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+
+        let sorted = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Nunique,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            sorted.index().labels(),
+            &["a".into(), "b".into(), "c".into(), "d".into(), "e".into()]
+        );
+        assert_eq!(
+            sorted.values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+            ]
+        );
+
+        let first_seen = GroupByOptions {
+            dropna: true,
+            sort: false,
+        };
+        let unsorted =
+            groupby_nunique(&keys, &values, first_seen, &policy, &mut ledger).unwrap();
+        assert_eq!(
+            unsorted.index().labels(),
+            &["b".into(), "a".into(), "c".into(), "d".into(), "e".into()]
+        );
+        assert_eq!(
+            unsorted.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+            ]
         );
     }
 

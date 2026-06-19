@@ -200,3 +200,46 @@ retry failed levers without a concrete retry predicate.
   fallback's `Vec<Scalar>` materialization or `collect_finite` allocation; route
   remaining median gaps to shared grouped-key plans or per-group selection
   algorithms rather than another wrapper-level vector swap.
+
+## 2026-06-18 - br-frankenpandas-uza04.204 - Generic groupby nunique borrowed sets
+
+- Status: implemented, benchmark verdict pending batch-test.
+- Lever: route generic-key `groupby_agg(Nunique)` / `groupby_nunique` over
+  per-group borrowed scalar bucket sets instead of cloning every non-missing
+  value into `Vec<Scalar>` before calling `nannunique`.
+- Baseline comparator: prior generic non-Int64-key nunique path, which hashes
+  the same `GroupKeyRef` groups but stores cloned `Scalar` values per group
+  before building `nannunique`'s distinct set. Dense Int64 key/value nunique
+  keeps its existing direct seen-bitset path and still has precedence.
+- Graveyard mapping: Swiss-table-style fast hash state, allocation elimination,
+  and cache-aware aggregation state. The helper keeps one compact `FxHashSet`
+  per group and stores borrowed scalar bucket keys, so realistic UTF-8-key
+  nunique avoids object cloning and a second reducer-local set construction.
+- Alien-artifact proof obligation: value buckets mirror `fp_types::nannunique`
+  exactly: missing values are skipped; `-0.0` and `+0.0` normalize to one
+  float bucket; NaN is missing; Bool, Int64, Float64, Utf8, Timedelta,
+  Datetime, Period, and Interval buckets remain dtype-distinct. Output labels
+  and ordering are unchanged because the same `GroupKeyRef`, first-source
+  index, and `compare_group_labels` sort are used.
+- Guard added: `groupby_nunique_utf8_keys_borrowed_sets_uza04204`, covering
+  UTF-8 keys, sorted output, first-seen output, duplicate strings, all-missing
+  groups, `-0.0`/`+0.0` collapse, Timedelta duplicate buckets, and dtype-distinct
+  Bool/Int64/Float64 buckets.
+- Bench guard added: `crates/fp-groupby/src/bin/groupby-bench.rs` now accepts
+  `--agg agg-nunique` so the batch runner can target the dispatcher nunique
+  path against the legacy pandas original and pre-patch `Vec<Scalar>` fallback.
+- Cass/ledger preflight: local cass search returned zero hits for the broad
+  frankenpandas groupby rejected/slower query; repo ledger search showed prior
+  cod-a generic groupby counter keeps and the rejected all-singleton
+  string-groupby shortcut. This attempt avoids the shortcut family and targets
+  only reducer-local value cloning/set construction under generic keys.
+- Validation run: passed
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a cargo check -p fp-groupby`.
+- Benchmark verdict: pending. Required follow-up comparator is
+  `groupby-bench --agg agg-nunique --key-kind utf8` on realistic cardinalities
+  versus legacy pandas original and a pre-patch per-group `Vec<Scalar>` nunique
+  baseline, with golden digest unchanged.
+- Retry predicate if rejected: do not retry generic `Nunique` value-clone
+  elimination unless same-host profiling shows residual self-time in fallback
+  value materialization or `nannunique` set construction; route remaining gaps
+  to shared group-key construction or a lower-level scalar-bucket primitive.
