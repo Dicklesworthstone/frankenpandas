@@ -394,8 +394,51 @@ static INDEX_LABEL_EQUALITY_CACHE: OnceLock<Mutex<FxHashMap<(u64, u64), bool>>> 
 
 const INDEX_LABEL_EQUALITY_CACHE_MAX: usize = 4096;
 
+/// First-occurrence `i64 -> position` lookup tables for unsorted unique Int64
+/// indexes, cached by the index's runtime label identity (mirrors
+/// `INDEX_LABEL_EQUALITY_CACHE`). Lets repeated `loc[[labels]]` resolve each
+/// requested label in O(1) without rebuilding the per-call pointer-key
+/// `FxHashMap<&IndexLabel, Vec<usize>>` over the whole index every time.
+static INDEX_INT64_POS_LOOKUP_CACHE: OnceLock<Mutex<FxHashMap<u64, Arc<FxHashMap<i64, usize>>>>> =
+    OnceLock::new();
+
+/// Each entry can hold a whole-index hashtable (O(n) memory), so bound the
+/// entry count far more tightly than the boolean equality cache. The common
+/// case is a handful of distinct loc'd frames; the cap only trips under
+/// pathological churn, where a full clear (rebuild on next miss) is cheaper
+/// than unbounded retention.
+const INDEX_INT64_POS_LOOKUP_CACHE_MAX: usize = 64;
+
 fn next_index_label_identity() -> u64 {
     INDEX_LABEL_ID_COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
+}
+
+/// Build-or-fetch the cached first-occurrence `i64 -> position` table for an
+/// index lineage. `values` must be the index's raw `i64` view; the caller has
+/// already proven the index is unique, so first occurrence == only occurrence.
+fn int64_position_lookup_cached(identity: u64, values: &[i64]) -> Arc<FxHashMap<i64, usize>> {
+    let cache = INDEX_INT64_POS_LOOKUP_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Some(existing) = cache
+        .lock()
+        .expect("index int64 position lookup cache poisoned")
+        .get(&identity)
+        .cloned()
+    {
+        return existing;
+    }
+    let mut map: FxHashMap<i64, usize> = FxHashMap::default();
+    map.reserve(values.len());
+    for (pos, &value) in values.iter().enumerate() {
+        map.insert(value, pos);
+    }
+    let arc = Arc::new(map);
+    let mut guard = cache
+        .lock()
+        .expect("index int64 position lookup cache poisoned");
+    if guard.len() >= INDEX_INT64_POS_LOOKUP_CACHE_MAX {
+        guard.clear();
+    }
+    Arc::clone(guard.entry(identity).or_insert(arc))
 }
 
 /// Shared contiguous-Utf8 label backing: a byte buffer + `n+1` offsets, row `i`
@@ -2210,6 +2253,43 @@ impl Index {
                 .iter()
                 .map(|label| match label {
                     IndexLabel::Int64(value) => values.binary_search(value).ok(),
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// Resolve a list-like selector against an UNSORTED unique all-Int64 index
+    /// using a first-occurrence `i64 -> position` hashtable cached by the
+    /// index's runtime label identity, instead of rebuilding the per-call
+    /// pointer-key `FxHashMap<&IndexLabel, Vec<usize>>` over the whole index.
+    ///
+    /// Returns `None` (so the caller keeps its duplicate-aware fallback) when
+    /// the index is strictly-ascending Int64 (use
+    /// [`Self::sorted_unique_int64_positions`]), has duplicate labels (pandas
+    /// returns every match, which needs the multimap), or is not all-Int64.
+    /// The index is unique here, so each requested label yields at most one
+    /// position; missing or non-Int64 selectors map to `None` and callers
+    /// preserve their own fail-closed error surface.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn unsorted_unique_int64_positions(
+        &self,
+        labels: &[IndexLabel],
+    ) -> Option<Vec<Option<usize>>> {
+        if matches!(self.sort_order(), SortOrder::AscendingInt64) {
+            return None;
+        }
+        if self.has_duplicates() {
+            return None;
+        }
+        let values = self.labels.int64_view()?;
+        let lookup = int64_position_lookup_cached(self.label_identity, &values);
+        Some(
+            labels
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Int64(value) => lookup.get(value).copied(),
                     _ => None,
                 })
                 .collect(),
@@ -16405,6 +16485,41 @@ mod tests {
     use std::sync::Arc;
 
     use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
+
+    #[test]
+    fn unsorted_unique_int64_positions_gating_and_resolution() {
+        // Unsorted unique Int64 ⇒ resolves via the cached hashtable.
+        let idx = Index::new(vec![
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(6),
+            IndexLabel::Int64(2),
+        ]);
+        let got = idx
+            .unsorted_unique_int64_positions(&[
+                IndexLabel::Int64(6),
+                IndexLabel::Int64(4),
+                IndexLabel::Int64(99),
+            ])
+            .expect("unsorted unique Int64 index should resolve");
+        assert_eq!(got, vec![Some(2), Some(0), None]);
+
+        // Sorted-ascending Int64 ⇒ None (binary-search path owns it).
+        let sorted = Index::new(vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(4),
+        ]);
+        assert!(sorted.unsorted_unique_int64_positions(&[IndexLabel::Int64(2)]).is_none());
+
+        // Duplicate labels ⇒ None (multimap semantics required).
+        let dup = Index::new(vec![
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(5),
+        ]);
+        assert!(dup.unsorted_unique_int64_positions(&[IndexLabel::Int64(5)]).is_none());
+    }
 
     use super::{
         CategoricalIndex, DateOffset, DateRangeError, DatetimeIndex, Index, IndexLabel,
