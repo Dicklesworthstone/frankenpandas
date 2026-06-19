@@ -58,6 +58,11 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | between (sweep bench_misc3) | 2M f64, both bounds | 0.924 ms | 0.629 ms | **1.47× faster** | ✅ already typed-fast |
 | duplicated typed f64-bits (uqf64) | 2M f64, ~1000 distinct | 14.06 ms | 47.34 ms | **0.30× (3.3× slower)** | ⚠️ IMPROVED — was 8.7× LOSS; FxHash f64-bits set + typed Bool output (2.6× FP-side); bit-identical (FloatBits key, 14 tests). Residual = khash throughput |
 | unique typed f64-bits (uqf64) | 2M f64, ~1000 distinct | 12.83 ms | 48.40 ms | **0.27× (3.8× slower)** | ⚠️ IMPROVED — was 5.9× LOSS; FxHash f64-bits set, first-seen (1.6× FP-side); bit-identical (FloatBits key, 68 tests). Residual = khash throughput + Scalar output |
+| median (sweep bench_misc4) | 2M f64 | 35.76 ms | 2.96 ms | **12.1× faster** | ✅ typed quickselect crushes pandas |
+| kurtosis (sweep bench_misc4) | 2M f64 | 38.66 ms | 7.74 ms | **5.0× faster** | ✅ typed numeric_values moments |
+| skew (sweep bench_misc4) | 2M f64 | 38.56 ms | 7.75 ms | **5.0× faster** | ✅ typed numeric_values moments |
+| sem (sweep bench_misc4) | 2M f64 | 42.41 ms | 9.47 ms | **4.5× faster** | ✅ typed |
+| mode (sweep bench_misc4) | 2M f64, ~1000 distinct | 17.32 ms | 51.46 ms | **0.34× (2.97× slower)** | ⚠️ LOSS — already typed (0loqz f64-bits tally); residual = FxHash-vs-khash throughput ceiling (same as unique/duplicated), no new safe-Rust lever |
 | diff (sweep bench_misc) | 2M f64, periods=1 | 0.86 ms | 1.86 ms | **0.46× (2.16× slower)** | 🔴 LOSS — rebuild-class (allocator-bound, mimalloc-fixable like shift/ffill) |
 | fillna(value) (sweep bench_misc) | 2M f64, ~10% NaN | 2.53 ms | 4.48 ms | **0.57× (1.77× slower)** | 🔴 LOSS — rebuild-class (allocator-bound, mimalloc-fixable) |
 | RangeIndex.asof closed-form (jlv2o) | 100k rows, 4,096 scalar probes | 232.02 ms | 60.42 µs | **3,840× faster** | ✅ KEEP — public scalar API; pandas CV 4.82% |
