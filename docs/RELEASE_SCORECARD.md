@@ -1,5 +1,22 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## Release-readiness verdict (gauntlet, measured)
+
+**Perf vs pandas 2.2.3: 11/16 realistic ops faster (median ≈5×); 5 losses, all
+kernel/structural with documented fix paths; 0 perf-lever regressions.** Conformance:
+3073/3081 fp-frame tests pass; the 6 failures are pre-existing behavioral/parity/math-golden
+gaps (NOT perf-lever-caused — every typed-lever conformance guard passes by execution).
+
+- **Ship-ready strengths:** value_counts (2.6×), drop_duplicates (2.0×), groupby int-key
+  (5.4×), reset/set_index (5–6.5×), std/var (11×), str case (6.5×), head/tail (17×), slice/
+  filter/sort/sum (1.2–1.3×) — fp beats pandas wherever typed access unlocks a cheaper
+  algorithm.
+- **Known gaps before "faster than pandas everywhere":** concat (24×) + shift (12×) need a
+  kernel-level single-pass column builder (avoid rebuild); max/min (5×) need SIMD; utf8
+  groupby (1.8×) needs key-factorize→dense. All 4 are kernel/structural, tracked.
+- **Conformance debt:** 6 behavioral/golden test failures (bug cosyd) — fix before release.
+
+
 Head-to-head vs **pandas 2.2.3** on realistic single-thread workloads. Numbers are
 measured (release binary run locally; see `docs/NEGATIVE_EVIDENCE.md` for method).
 ratio = pandas / fp (>1 ⇒ fp faster).
