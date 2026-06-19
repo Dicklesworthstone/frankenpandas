@@ -22,9 +22,13 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | shift | 2M, p=1 | 0.082× | 🔴 12× slower (structural) |
 | groupby.sum int key | 1M, 1000 keys | 5.4× | 🟢 dense grouping |
 | groupby.sum utf8 key | 1M, 1000 keys | 0.56× | 🔴 1.78× slower (Utf8 hashing) |
+| set_index int col | 1M, 2 cols | 6.5× | 🟢 |
 
-**Score: 10/15 measured ops faster than pandas; 5 losses (max, min, concat, shift,
+**Score: 11/16 measured ops faster than pandas; 5 losses (max, min, concat, shift,
 utf8-groupby); 0 regressions; 2 reverted ~0-gain attempts.**
+
+Median win among the 11 ≈ 5×; the 5 losses are all kernel/structural (SIMD, column-rebuild,
+Utf8-factorize) with documented fix paths — none are code-first fp-frame regressions.
 
 Pattern: typed-slice levers win 2–11× where they unlock a cheaper ALGORITHM (FxHash dedup,
 dense value_counts, Welford std/var, contiguous str). They LOSE on ops that just rebuild
