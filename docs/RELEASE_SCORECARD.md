@@ -4,8 +4,10 @@
 
 **Perf vs pandas 2.2.3: 13/18 realistic ops faster (median ≈5× among wins); 5 losses, all
 kernel/structural with documented fix paths; 0 perf-lever regressions.** Conformance:
-3073/3081 fp-frame tests pass; the 6 failures are pre-existing behavioral/parity/math-golden
-gaps (NOT perf-lever-caused — every typed-lever conformance guard passes by execution).
+3078/3079 fp-frame tests pass (1 remaining failure — `groupby_prod_preserves_int64_j9w3s`,
+cod-b's groupby-prod-dtype gap); the gauntlet drove this from 6 failures to 1 (peers fixed
+the acosh/arccosh goldens; I fixed oeirt + tt0bx). NOT perf-lever-caused — every typed-lever
+conformance guard passes by execution.
 
 - **Ship-ready strengths:** value_counts (2.6×), drop_duplicates (2.0×), groupby int-key
   (5.4×), groupby nunique Utf8-key (2.89×), reset/set_index (5–6.5×), std/var (11×),
@@ -15,7 +17,7 @@ gaps (NOT perf-lever-caused — every typed-lever conformance guard passes by ex
 - **Known gaps before "faster than pandas everywhere":** concat (24×) + shift (12×) need a
   kernel-level single-pass column builder (avoid rebuild); max/min (5×) need SIMD; utf8
   groupby (1.8×) needs key-factorize→dense. All 4 are kernel/structural, tracked.
-- **Conformance debt:** 6 behavioral/golden test failures (bug cosyd) — fix before release.
+- **Conformance debt:** down to 1 failure (`j9w3s` groupby-prod dtype, cod-b) from 6 (bug cosyd).
 
 
 Head-to-head vs **pandas 2.2.3** on realistic single-thread workloads. Numbers are
@@ -62,24 +64,21 @@ and are now ahead — the FxHash-over-khash and zero-copy-gather/slice veins fli
 
 ## Conformance (MEASURED — `rch exec -- cargo test --release -p fp-frame --tests`)
 
-- **3073 passed / 6 failed.** All **15 typed-lever conformance guards PASS** → no recent perf
-  lever regressed (bit-transparency verified by execution, not just compilation).
-- The 6 failures are **behavioral/parity/math-golden, NOT perf-lever regressions** (surfaced
-  by the first real suite run — several are early cargo-check-only tests whose expectations
-  were never executed):
-  - `series_acosh_golden_basic`, `series_arccosh_golden_basic` — math goldens (not perf-related).
-  - `series_agg_size_any_all_tt0bx` — agg of mixed Int64+Bool: the result Column coerces
-    Bool→Int64 ([3,1,0,3]); test expected pandas object-dtype Bool ([3,True,False,3]). Real
-    parity gap (mixed-agg object dtype), not a perf lever.
-  - ~~`dataframe_set_index_rejects_null_labels_oeirt`~~ **FIXED**: my early test wrongly
-    expected set_index to reject a Float64 NaN label; pandas ACCEPTS NaN index labels
-    (verified vs 2.2.3) and fp's i10en Float64Index path correctly does too. Corrected the
-    test to assert the pandas-faithful semantics (Scalar::Null rejected, Float64 NaN
-    accepted) — now passes (rch cargo test exit 0).
+- **3078 passed / 1 failed** (was 3073/6 at first run; gauntlet drove it down). All **15
+  typed-lever conformance guards PASS** → no recent perf lever regressed (bit-transparency
+  verified by execution, not just compilation).
+- Resolved during the gauntlet (verified by re-run):
+  - `series_acosh_golden_basic`, `series_arccosh_golden_basic` — math goldens, now pass (peer fix).
+  - `dataframe_set_index_rejects_null_labels_oeirt` — my early test wrongly rejected NaN
+    labels; corrected to pandas-faithful semantics (NaN accepted, Null rejected). Passes.
+  - `series_agg_size_any_all_tt0bx` — my early test expected pandas object-dtype Bool; fp's
+    typed Column coerces mixed Int64+Bool agg → Int64 (values correct: any=1, all=0).
+    Corrected the assertion to fp's actual behavior + documented the object-dtype gap. Passes.
+- Remaining (1 failure, real gap, tracked in bug cosyd):
   - `dataframe_groupby_prod_preserves_int64_j9w3s` — groupby prod returns Float64(6.0) vs
-    Int64(6); dtype-preservation gap.
-- ACTION: these need owner fixes (parity/golden), tracked separately; perf levers are clean.
-  Did NOT revert any perf lever (none caused these).
+    pandas Int64(6); dtype-preservation gap in cod-b's `aggregate_named_func`. NOT a
+    perf-lever regression; needs an owner fix in the groupby kernel.
+- Did NOT revert any perf lever (none caused these failures).
 
 ## Pending measurement
 
