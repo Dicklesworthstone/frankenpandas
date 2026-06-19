@@ -69,7 +69,10 @@ fn main() {
     let std_axis0 = best(iters, || {
         std::hint::black_box(df.std().expect("std"));
     });
-    println!("df_axis0 sum={sum_axis0}ns std={std_axis0}ns");
+    let count_axis1 = best(iters, || {
+        std::hint::black_box(df.count_axis1().expect("count_axis1"));
+    });
+    println!("df_axis0 sum={sum_axis0}ns std={std_axis0}ns count_axis1={count_axis1}ns");
     // transpose: small frame (transpose of 500k rows -> 500k cols is pathological; use a slice)
     let small = df.head(2000).expect("head");
     let transpose = best(iters, || {
