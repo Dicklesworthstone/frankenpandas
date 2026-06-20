@@ -815,3 +815,22 @@ wall l4vzc). NEGATIVE/DEFERRED = add_scalar (~0-gain rescan-bound), df_round (bi
 floor/ceil 100k (structural columnar). Net: fp DOMINATES pandas across the elementwise/reduction/
 reshape surface except (a) tiny-residual L3-resident per-column-alloc gaps and (b) the transpose
 n-column structural wall.
+
+### 2026-06-20 BlackThrush (cont.) — sort_index 7.6x loss → 300x+ WIN; index/reshape probe
+Probed set_index/reset_index/sort_index/melt/nlargest (min-of-iters vs pandas). Ratios (pandas/FP):
+| op | 100k | 1M |
+|---|---|---|
+| reset_index | **10.2x WIN** | **73.9x WIN** |
+| set_index | 0.61x | 5.9x WIN |
+| **sort_index** | **0.13x → 300x (FIXED)** | 2.15x → **76000x (FIXED)** |
+| melt | 0.56x | 0.70x |
+| nlargest | **0.18x** | 0.81x |
+
+**sort_index FIXED (bead lcah6):** df.sort_index() on a RangeIndex (default, always ascending) was
+radix-sorting its i64 labels + gathering all 10 columns to reproduce its own order (1440us@100k vs
+pandas 189us). pandas short-circuits a monotonic index. Added `is_monotonic_increasing/decreasing`
+check (O(1) for affine/RangeIndex) → `self.clone()` (stable sort of a sorted index = identity =
+bit-identical; same pattern sort_values' already-sorted path uses). **0.6us — 300x@100k / 76000x@1M
+vs pandas** (FP lazy Arc clone vs pandas full copy). 7 sort_index tests pass.
+OPEN: **nlargest 0.18x@100k** (algorithmic — investigating), melt 0.56-0.70x (long-output reshape,
+per-cell overhead), set_index 0.61x@100k (minor).

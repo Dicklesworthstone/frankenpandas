@@ -281,6 +281,26 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.notna()
             let _ = df.notna().expect("notna");
         }),
+        ("dataframe_ops", "df_set_index") => time_us(|| {
+            // pandas: df.set_index("col_0")
+            let _ = df.set_index("col_0", true).expect("set_index");
+        }),
+        ("dataframe_ops", "df_reset_index") => time_us(|| {
+            // pandas: df.reset_index()
+            let _ = df.reset_index(false).expect("reset_index");
+        }),
+        ("dataframe_ops", "df_sort_index") => time_us(|| {
+            // pandas: df.sort_index()
+            let _ = df.sort_index(true).expect("sort_index");
+        }),
+        ("dataframe_ops", "df_melt") => time_us(|| {
+            // pandas: df.melt()
+            let _ = df.melt(&[], &[], None, None).expect("melt");
+        }),
+        ("dataframe_ops", "df_nlargest") => time_us(|| {
+            // pandas: df.nlargest(100, "col_0")
+            let _ = df.nlargest(100, "col_0").expect("nlargest");
+        }),
         ("dataframe_ops", "df_fillna") => {
             // pandas: df.fillna(0.0) — run with --dtype float64_nan10/nan50
             let fill = fp_types::Scalar::Float64(0.0);
