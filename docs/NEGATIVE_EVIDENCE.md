@@ -642,3 +642,17 @@ Commits: f64 0e4c384c (br-5389h), sparse-i64 51b952db (br-70fke). Bit-identical 
 count; 26 nunique tests pass incl. new ±0.0/NaN canonicalization test. Same lever as the dedup
 vein: a single typed column the generic Scalar/ScalarKey framework handled row-by-row →
 direct-key FxHash probe over the raw typed slice (no `.values()` materialization).
+
+### 2026-06-20 BlackThrush (cont.) — Series::unique sparse-Int64 fast path
+Sibling of the nunique sparse-i64 path. `Series::unique()` had dense-i64/f64/utf8 typed paths
+but wide-range Int64 fell to `.values()`+ScalarKey+SipHash. Added first-seen-order
+`FxHashSet<i64>` dedup over `as_i64_slice`. Measured (best-of-30, 1M rows, vs pandas 2.2.3
+`s.unique()`): distinct=100 5973µs→3241µs (0.51x→0.95x), distinct=100000 13156µs→8642µs
+(1.09x→**1.66x**). Net faster both, no regression. Commit 96b4bfef (br-ciig0).
+
+**SESSION TALLY (BlackThrush, all pushed main+master, bit-transparent, differential-tested):**
+7 perf wins — affine take (fp-index); drop_duplicates f64/i64/Utf8; nunique f64/sparse-i64;
+unique sparse-i64. The unifying lever: a single typed column the Scalar/digest/ScalarKey
+framework processed row-by-row → direct-key FxHash probe over the raw typed slice (no
+`.values()` materialization). Declines: ewm_mean (bit-locked fdiv), df_dot (lazy/eager
+artifact). Conformance GREEN throughout.
