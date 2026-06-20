@@ -848,3 +848,14 @@ Residual 100k loss: the fast path still does a FULL radix argsort to build the o
 n of it), where pandas uses a partial heap (O(n log k), k=100). **OPEN: a stable top-k select**
 (quickselect/bounded-heap with first-occurrence tie-break) would skip the full sort — bigger lever,
 needs care to stay bit-identical to the stable descending sort's tie ordering.
+
+### 2026-06-20 BlackThrush (cont.) — melt 0.56x LOSS → 5.6x WIN (alloc-bound output build)
+df.melt() built its total_rows = n_rows*n_value_vars output with: Scalar::Utf8(String) per variable
+cell (1M String allocs at 100k×10), Scalar materialization for the value column, and total_rows
+IndexLabel::Int64 allocs for the index. Replaced all three: variable column → from_utf8_contiguous
+(byte-append + offset per row, zero String allocs); value column → typed from_f64_values for
+all-valid-f64 value vars; index → new_known_unique_int64_unit_range (lazy O(1)). Bit-identical (8
+melt tests). **100k 51381→5159us (10x; 0.56x→5.6x WIN), 1M 578359→87725us (6.6x; 0.70x→4.6x WIN).**
+LESSON: long-output reshape (melt/explode/stack) that builds rows cell-by-cell through Scalar/String
+is alloc-bound — typed-buffer + contiguous-Utf8 + lazy-index construction is the lever. (Distinct
+from the WIDE-output transpose wall, which is the n-COLUMN BTreeMap tax — unfixable without 2D block.)
