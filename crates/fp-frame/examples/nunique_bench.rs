@@ -49,11 +49,18 @@ fn main() {
         Series::new("c".to_string(), index, Column::from_f64_values(data)).expect("series")
     };
 
-    let ns = best(iters, || {
-        std::hint::black_box(s.nunique());
-    });
+    let op = args.get(5).map(String::as_str).unwrap_or("nunique");
+    let ns = if op == "unique" {
+        best(iters, || {
+            std::hint::black_box(s.unique());
+        })
+    } else {
+        best(iters, || {
+            std::hint::black_box(s.nunique());
+        })
+    };
     eprintln!(
-        "nunique_f64: rows={rows} distinct={distinct} got={} best={:.1}us",
+        "{op}_{dtype}: rows={rows} distinct={distinct} got={} best={:.1}us",
         s.nunique(),
         ns as f64 / 1000.0
     );
