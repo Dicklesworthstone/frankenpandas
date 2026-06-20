@@ -586,6 +586,50 @@ shows the single-span affine outputs regressed or a conformance witness proves
 name/order/descending-step semantics changed. Otherwise target the new
 multi-span representation bead for the recorded pandas loss.
 
+## 2026-06-20 - br-frankenpandas-uza04.168 - RangeIndex split symmetric_difference two-run backing
+
+- Status: measured KEEP; closes the residual split-span loss from
+  `br-frankenpandas-iatnc`.
+- Lever: represent an overlapping `RangeIndex::symmetric_difference` result as
+  two boxed affine Int64 runs when the left-only and right-only segments are
+  disjoint. This keeps construction/`len()` O(1), preserves materialization only
+  at the `labels()`/typed-view boundary, and avoids inflating every `Index`
+  instance by boxing the rare two-run descriptor.
+- Graveyard/artifact mapping: lazy multi-run region layout plus witness-ledger
+  preservation. The witness is explicit: the two runs are constructed only from
+  validated `RangeIndex` endpoints and steps; adjacent runs still collapse into
+  the existing single affine span; materialized and typed consumers generate the
+  exact same ordered Int64 labels.
+
+### 2026-06-20 measured evidence
+
+| Comparator | Workload | Time | Notes |
+|---|---|---:|---|
+| pandas 2.2.3 local p50 | 1M overlap, `len(left.symmetric_difference(right))` | 5.157781 ms | same-host head-to-head, best 5.050482 ms |
+| FrankenPandas local release | exact boxed two-run code, same workload | 0.000110 ms | `bench_range_setops`; ratio vs pandas **46,889x faster** |
+| FrankenPandas rch release | exact boxed two-run code, worker `vmi1227854` | 0.000140 ms | `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 overlap` |
+| FrankenPandas pre-change remote baseline | fresh-restart baseline, worker `vmi1293453` | 39.710381 ms | same command before the two-run backing; routing evidence for FP-side win |
+
+Win/loss/neutral ratio vs pandas for this pass: **1 / 0 / 0**.
+
+### Guards
+
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo check -p fp-index --all-targets` passed on worker `vmi1227854`.
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo clippy -p fp-index --all-targets -- -D warnings` passed locally. Remote clippy was attempted first and failed because worker `vmi1264463` lacked `cargo-clippy` for `nightly-2026-04-22`.
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo test -p fp-index range_index_set_ops_return_affine_spans_iatnc -- --nocapture` passed after boxing the two-run descriptor.
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo run -p fp-index --example golden_isin_symdiff_i64 --release` passed (`ALL GOLDEN CHECKS PASSED`).
+- `cargo fmt -p fp-index --check` still reports broad pre-existing formatting
+  drift in `crates/fp-index/src/lib.rs`; a targeted scan of the new two-run
+  hunk returned no matches after manual rustfmt-shape fixes.
+- `timeout 180s ubs crates/fp-index/src/lib.rs` exited 0. UBS reported the broad
+  existing `fp-index` warning inventory, no critical issues, and clean internal
+  fmt/clippy/check/test-build gates.
+
+Retry predicate: do not retry hash/set-membership micro-levers for overlapping
+`RangeIndex::symmetric_difference`. Reopen only if a forced materialization
+consumer becomes the next measured loss, or if a future multi-span generalization
+can subsume this two-run special case without regressing construction latency.
+
 ## 2026-06-18/19 - br-frankenpandas-29u49 - RangeIndex miss-heavy indexers
 
 - Status: measured; keep as FP-side improvement, not pandas-ready.

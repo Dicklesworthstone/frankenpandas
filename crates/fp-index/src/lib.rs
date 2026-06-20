@@ -676,6 +676,48 @@ impl Int64AffineLabels {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Int64TwoAffineLabels {
+    first: Int64AffineLabels,
+    second: Int64AffineLabels,
+}
+
+impl Int64TwoAffineLabels {
+    fn new(first: Int64AffineLabels, second: Int64AffineLabels) -> Option<Self> {
+        first.len.checked_add(second.len)?;
+        Some(Self { first, second })
+    }
+
+    fn len(self) -> usize {
+        self.first
+            .len
+            .checked_add(self.second.len)
+            .expect("validated two-run Int64 index length")
+    }
+
+    fn value_at(self, position: usize) -> i64 {
+        if position < self.first.len {
+            self.first.value_at(position)
+        } else {
+            self.second.value_at(position - self.first.len)
+        }
+    }
+
+    fn materialize(self) -> Vec<IndexLabel> {
+        let mut labels = Vec::with_capacity(self.len());
+        labels.extend(self.first.materialize());
+        labels.extend(self.second.materialize());
+        labels
+    }
+
+    fn materialize_i64(self) -> Vec<i64> {
+        let mut labels = Vec::with_capacity(self.len());
+        labels.extend(self.first.materialize_i64());
+        labels.extend(self.second.materialize_i64());
+        labels
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Int64StridedLabels {
     values: Arc<Vec<i64>>,
@@ -760,6 +802,7 @@ struct IndexLabels {
     materialized_slice: Option<Arc<MaterializedLabelSlice>>,
     int64_unit_range: Option<Int64UnitRangeLabels>,
     int64_affine: Option<Int64AffineLabels>,
+    int64_two_affine: Option<Box<Int64TwoAffineLabels>>,
     int64_strided: Option<Int64StridedLabels>,
     /// Lazy typed Int64 backing (br-frankenpandas-dxqpm). `Some(values)` once
     /// computed means every label is `IndexLabel::Int64` and `values` is the
@@ -786,6 +829,7 @@ impl IndexLabels {
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
+            int64_two_affine: None,
             int64_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
@@ -798,6 +842,7 @@ impl IndexLabels {
             materialized_slice: None,
             int64_unit_range: Some(Int64UnitRangeLabels::new(start, len)?),
             int64_affine: None,
+            int64_two_affine: None,
             int64_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
@@ -813,6 +858,20 @@ impl IndexLabels {
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: Some(Int64AffineLabels::new(start, step, len)?),
+            int64_two_affine: None,
+            int64_strided: None,
+            int64_typed: OnceLock::new(),
+            utf8_contiguous: None,
+        })
+    }
+
+    fn new_int64_two_affine(first: Int64AffineLabels, second: Int64AffineLabels) -> Option<Self> {
+        Some(Self {
+            materialized: OnceLock::new(),
+            materialized_slice: None,
+            int64_unit_range: None,
+            int64_affine: None,
+            int64_two_affine: Some(Box::new(Int64TwoAffineLabels::new(first, second)?)),
             int64_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
@@ -830,6 +889,7 @@ impl IndexLabels {
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
+            int64_two_affine: None,
             int64_strided: Some(Int64StridedLabels::new(values, start, step, len)?),
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
@@ -844,6 +904,7 @@ impl IndexLabels {
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
+            int64_two_affine: None,
             int64_strided: None,
             int64_typed,
             utf8_contiguous: None,
@@ -858,6 +919,7 @@ impl IndexLabels {
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
+            int64_two_affine: None,
             int64_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: Some((bytes, offsets)),
@@ -875,6 +937,10 @@ impl IndexLabels {
                 }
                 if let Some(range) = self.int64_affine {
                     return Arc::new(range.materialize());
+                }
+                if let Some(runs) = &self.int64_two_affine {
+                    let runs = **runs;
+                    return Arc::new(runs.materialize());
                 }
                 if let Some((bytes, offsets)) = &self.utf8_contiguous {
                     return Arc::new(
@@ -912,6 +978,10 @@ impl IndexLabels {
         }
         if let Some(range) = self.int64_affine {
             return range.len;
+        }
+        if let Some(runs) = &self.int64_two_affine {
+            let runs = **runs;
+            return runs.len();
         }
         if let Some(strided) = &self.int64_strided {
             return strided.len;
@@ -953,6 +1023,32 @@ impl IndexLabels {
             }
         }
 
+        if let Some(runs) = &self.int64_two_affine {
+            let runs = **runs;
+            if len == 0 {
+                if let Some(labels) = Self::new_int64_affine(runs.first.start, runs.first.step, 0) {
+                    return labels;
+                }
+            } else if start + len <= runs.first.len {
+                let offset = i64::try_from(start).expect("start within index length");
+                if let Some(delta) = runs.first.step.checked_mul(offset)
+                    && let Some(next_start) = runs.first.start.checked_add(delta)
+                    && let Some(labels) = Self::new_int64_affine(next_start, runs.first.step, len)
+                {
+                    return labels;
+                }
+            } else if start >= runs.first.len {
+                let second_start = start - runs.first.len;
+                let offset = i64::try_from(second_start).expect("start within index length");
+                if let Some(delta) = runs.second.step.checked_mul(offset)
+                    && let Some(next_start) = runs.second.start.checked_add(delta)
+                    && let Some(labels) = Self::new_int64_affine(next_start, runs.second.step, len)
+                {
+                    return labels;
+                }
+            }
+        }
+
         if let Some(strided) = &self.int64_strided
             && let Some(offset) = strided.step.checked_mul(start)
             && let Some(next_start) = strided.start.checked_add(offset)
@@ -978,6 +1074,7 @@ impl IndexLabels {
                 materialized_slice: Some(Arc::new(view)),
                 int64_unit_range: None,
                 int64_affine: None,
+                int64_two_affine: None,
                 int64_strided: None,
                 int64_typed: OnceLock::new(),
                 utf8_contiguous: None,
@@ -992,6 +1089,7 @@ impl IndexLabels {
                 materialized_slice: Some(Arc::new(view)),
                 int64_unit_range: None,
                 int64_affine: None,
+                int64_two_affine: None,
                 int64_strided: None,
                 int64_typed: OnceLock::new(),
                 utf8_contiguous: None,
@@ -1041,6 +1139,10 @@ impl IndexLabels {
                 if let Some(range) = self.int64_affine {
                     return Some(Arc::new(range.materialize_i64()));
                 }
+                if let Some(runs) = &self.int64_two_affine {
+                    let runs = **runs;
+                    return Some(Arc::new(runs.materialize_i64()));
+                }
                 if let Some(strided) = self.int64_strided.clone() {
                     return Some(Arc::new(strided.materialize_i64()));
                 }
@@ -1077,6 +1179,7 @@ impl IndexLabels {
     fn has_lazy_int64_backing(&self) -> bool {
         self.int64_unit_range.is_some()
             || self.int64_affine.is_some()
+            || self.int64_two_affine.is_some()
             || self.int64_strided.is_some()
             || matches!(self.int64_typed.get(), Some(Some(_)))
     }
@@ -1103,6 +1206,17 @@ impl IndexLabels {
                 let offset = i64::try_from(idx).ok()?;
                 let delta = range.step.checked_mul(offset)?;
                 out.push(range.start.checked_add(delta)?);
+            }
+            return Some(out);
+        }
+
+        if let Some(runs) = &self.int64_two_affine {
+            let runs = **runs;
+            for &idx in indices {
+                if idx >= runs.len() {
+                    return None;
+                }
+                out.push(runs.value_at(idx));
             }
             return Some(out);
         }
@@ -1144,6 +1258,7 @@ impl Clone for IndexLabels {
         // the label vector on demand, so skip the O(n) Vec<IndexLabel> deep clone.
         let has_lazy_backing = self.int64_unit_range.is_some()
             || self.int64_affine.is_some()
+            || self.int64_two_affine.is_some()
             || self.int64_strided.is_some()
             || self.materialized_slice.is_some()
             || self.utf8_contiguous.is_some()
@@ -1156,6 +1271,7 @@ impl Clone for IndexLabels {
             materialized_slice: self.materialized_slice.clone(),
             int64_unit_range: self.int64_unit_range,
             int64_affine: self.int64_affine,
+            int64_two_affine: self.int64_two_affine.clone(),
             int64_strided: self.int64_strided.clone(),
             int64_typed,
             utf8_contiguous: self.utf8_contiguous.clone(),
@@ -1400,6 +1516,23 @@ impl Index {
         if len <= 1 || step > 0 {
             let _ = index.sort_order_cache.set(SortOrder::AscendingInt64);
         }
+        Some(index)
+    }
+
+    fn new_known_unique_int64_two_affine_runs(
+        first: Int64AffineLabels,
+        second: Int64AffineLabels,
+    ) -> Option<Self> {
+        let labels = IndexLabels::new_int64_two_affine(first, second)?;
+        let index = Self {
+            labels,
+            name: None,
+            label_identity: next_index_label_identity(),
+            duplicate_cache: OnceLock::new(),
+            sort_order_cache: OnceLock::new(),
+            semantic_fingerprint_cache: OnceLock::new(),
+        };
+        let _ = index.duplicate_cache.set(false);
         Some(index)
     }
 
@@ -11558,6 +11691,21 @@ impl RangeIndex {
                         {
                             return index;
                         }
+                        if let (Some(left_run), Some(right_run)) = (
+                            Int64AffineLabels::new(self.value_at(left_first), self.step, left_len),
+                            Int64AffineLabels::new(
+                                other.value_at(right_first),
+                                other.step,
+                                right_len,
+                            ),
+                        ) && let Some(mut index) =
+                            Index::new_known_unique_int64_two_affine_runs(left_run, right_run)
+                        {
+                            if let Some(name) = shared_name {
+                                index = index.set_name(name);
+                            }
+                            return index;
+                        }
                     }
                 }
             }
@@ -16925,6 +17073,8 @@ mod tests {
     use std::sync::Arc;
 
     use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
+
+    use crate::Int64TwoAffineLabels;
 
     #[test]
     fn unsorted_unique_int64_positions_gating_and_resolution() {
@@ -27006,6 +27156,7 @@ mod tests {
         let intersection = left.intersection(&right);
         let union = left.union(&right);
         let difference = left.difference(&right);
+        let symmetric = left.symmetric_difference(&right);
 
         assert_eq!(
             intersection.labels.int64_affine_range(),
@@ -27037,6 +27188,30 @@ mod tests {
                 "single-span RangeIndex set ops should return lazy affine backing"
             );
         }
+        assert_eq!(symmetric.len(), 1_000_000);
+        assert!(
+            symmetric.labels.int64_affine_range().is_none(),
+            "split symmetric_difference should not lie as one affine span"
+        );
+        assert_eq!(
+            symmetric.labels.int64_two_affine.as_deref().copied(),
+            Some(Int64TwoAffineLabels {
+                first: Int64AffineLabels {
+                    start: 0,
+                    step: 1,
+                    len: 500_000,
+                },
+                second: Int64AffineLabels {
+                    start: 1_000_000,
+                    step: 1,
+                    len: 500_000,
+                },
+            })
+        );
+        assert!(
+            symmetric.labels.materialized.get().is_none(),
+            "split symmetric_difference should carry two lazy Int64 runs"
+        );
 
         let descending_left = super::RangeIndex::new(9, -3, -3).unwrap().set_name("k");
         let descending_right = super::RangeIndex::new(6, -6, -3).unwrap().set_name("k");

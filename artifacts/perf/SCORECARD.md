@@ -36,17 +36,16 @@ release readiness remains **PARTIAL / NOT FULLY VALIDATED**.
 
 ## 2026-06-20 Cod-b Gauntlet Refresh - RangeIndex Set Ops
 
-Release-readiness score for this cluster: **4/5**.
+Release-readiness score for this cluster: **5/5**.
 
 - Bead: `br-frankenpandas-iatnc`.
 - pandas oracle: 2.2.3 public `RangeIndex` set-operation APIs.
 - FrankenPandas profile: focused `fp-index` example harness for 1M-row overlap
   set ops.
 - Build target: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`.
-- Decision: keep the affine single-span output path. It dominates pandas for
-  `intersection`, `union`, and `difference`; `symmetric_difference` remains a
-  recorded loss because overlapping ranges produce two disjoint spans and the
-  current index backing only has one affine run.
+- Decision: keep the affine single-span output path and the follow-up two-run
+  backing for split `symmetric_difference` outputs. All four measured overlap
+  set operations now dominate pandas on the public construction/`len()` path.
 
 Same-worker `hz2` pre/post:
 
@@ -55,7 +54,7 @@ Same-worker `hz2` pre/post:
 | `intersection` | 9.240731 ms | 0.000100 ms | 92,407x faster | Keep |
 | `union` | 10.632178 ms | 0.000090 ms | 118,135x faster | Keep |
 | `difference` | 9.341052 ms | 0.000100 ms | 93,411x faster | Keep |
-| `symmetric_difference` | 18.670185 ms | 18.843325 ms | 0.991x | Route multi-span backing |
+| `symmetric_difference` | 18.670185 ms | 18.843325 ms | 0.991x | Superseded by two-run backing (`uza04.168`) |
 
 Head-to-head versus pandas 2.2.3:
 
@@ -64,9 +63,28 @@ Head-to-head versus pandas 2.2.3:
 | `intersection` | 120 ns | 9,018 ns | 75.15x | WIN |
 | `union` | 120 ns | 7,995 ns | 66.63x | WIN |
 | `difference` | 130 ns | 16,742 ns | 128.78x | WIN |
-| `symmetric_difference` | 16.868715 ms | 8.619318 ms | 0.51x | LOSS |
+| `symmetric_difference` | 110 ns | 5.157781 ms | 46,889x | WIN |
 
-Win/loss/neutral ratio vs pandas: **3 / 1 / 0**.
+Win/loss/neutral ratio vs pandas after `br-frankenpandas-uza04.168`: **4 / 0 / 0**.
+
+Continuation evidence for `br-frankenpandas-uza04.168`:
+
+- Local same-host head-to-head, exact boxed two-run code:
+  `FrankenPandas symmetric_difference_ns=110`; pandas 2.2.3
+  `symmetric_difference_ns_p50=5,157,781`, best `5,050,482`.
+- Remote release evidence:
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 overlap`
+  on worker `vmi1227854`, exit 0, `symmetric_difference_ns=140`.
+- Pre-change residual baseline from the fresh restart:
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 overlap`
+  on worker `vmi1293453`, exit 0, `symmetric_difference_ns=39,710,381`.
+- Focused guards: `cargo check -p fp-index --all-targets` via rch, local
+  `cargo clippy -p fp-index --all-targets -- -D warnings`, focused
+  `range_index_set_ops_return_affine_spans_iatnc`, and the release
+  `golden_isin_symdiff_i64` example all passed. Remote clippy was attempted but
+  the selected worker lacked the pinned nightly clippy component.
+- UBS: `timeout 180s ubs crates/fp-index/src/lib.rs` exited 0; broad existing
+  `fp-index` warning inventory remained, with no critical issues.
 
 Evidence:
 
