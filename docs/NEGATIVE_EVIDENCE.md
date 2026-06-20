@@ -870,3 +870,18 @@ won), stack's labels are all distinct → the fix needs a real row-MultiIndex ou
 same class as transpose's 2D-block). LESSON refined: long-output reshape is alloc-bound and fixable
 WHEN the labels are a lazy range (melt) — but a UNIQUE-composite-string index (stack) is a
 MultiIndex-model wall.
+
+### 2026-06-20 BlackThrush (cont.) — idxmax 4.5x loss → 1.45x WIN; to_numpy structural; probe batch
+Probed duplicated/idxmax/count/to_numpy/mode (min-of-iters vs pandas). WINS: duplicated 7x/51x,
+count 3500x+/20000x+ (lazy all-valid), mode 1.4x/2.9x. LOSSES:
+- **idxmax 0.22x@100k / 0.41x@1M FIXED → 0.51x / 1.45x WIN** (j75z3): Series::idxmin/idxmax scanned
+  for the arg position (typed f64, fast) but read the result label via `self.index.labels()[pos]`,
+  MATERIALIZING the whole Vec<IndexLabel> (32B/entry) to read one — O(n) per column, ×10 in
+  DataFrame.idxmax. New `Series::index_label_at(pos)`: unit-range Int64 computes arithmetically O(1),
+  typed Int64 reads the i64 view, else falls back. Bit-identical (19+26 tests). 100k 1608→706us
+  (2.28x), 1M 26489→7416us (3.57x). Residual 100k = per-column column_as_series + scan.
+- **to_numpy 3000-45000x slower = STRUCTURAL** (FP 2428us@100k / 31631@1M vs pandas 0.8us): pandas
+  to_numpy() on a homogeneous frame returns an O(1) 2D-block VIEW; FP builds Vec<Vec<f64>> (row-major
+  nested) from columnar storage — inherent materialization, no 2D block. Apples-to-oranges (view vs
+  copy); not a fixable algorithmic loss. LESSON: `labels()[pos]` to read ONE label is an O(n)
+  materialization smell — use an O(1) typed accessor (same vein as the lazy-Int64 materialization tax).

@@ -305,6 +305,26 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.stack()
             let _ = df.stack().expect("stack");
         }),
+        ("dataframe_ops", "df_duplicated") => time_us(|| {
+            // pandas: df.duplicated()
+            let _ = df.duplicated(None, DuplicateKeep::First).expect("duplicated");
+        }),
+        ("dataframe_ops", "df_idxmax") => time_us(|| {
+            // pandas: df.idxmax()
+            let _ = df.idxmax().expect("idxmax");
+        }),
+        ("dataframe_ops", "df_count") => time_us(|| {
+            // pandas: df.count()
+            let _ = df.count().expect("count");
+        }),
+        ("dataframe_ops", "df_to_numpy") => time_us(|| {
+            // pandas: df.to_numpy()
+            let _ = df.to_numpy();
+        }),
+        ("dataframe_ops", "df_mode") => time_us(|| {
+            // pandas: df.mode()
+            let _ = df.mode().expect("mode");
+        }),
         ("dataframe_ops", "df_fillna") => {
             // pandas: df.fillna(0.0) — run with --dtype float64_nan10/nan50
             let fill = fp_types::Scalar::Float64(0.0);
