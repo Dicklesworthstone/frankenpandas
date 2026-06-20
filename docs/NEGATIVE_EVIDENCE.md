@@ -834,3 +834,17 @@ bit-identical; same pattern sort_values' already-sorted path uses). **0.6us — 
 vs pandas** (FP lazy Arc clone vs pandas full copy). 7 sort_index tests pass.
 OPEN: **nlargest 0.18x@100k** (algorithmic — investigating), melt 0.56-0.70x (long-output reshape,
 per-cell overhead), set_index 0.61x@100k (minor).
+
+### 2026-06-20 BlackThrush (cont.) — nlargest/nsmallest partial top-n gather
+nlargest(n,col)/nsmallest sorted ALL rows by the key (gathering every column) then sliced to n.
+For a typed dense key the order is the same `typed_dense_sort_order` permutation, so gather only its
+first n positions: `take_rows_by_positions_unchecked(&order[..n])` — bit-identical to
+sort_values+head (21 nlargest + 16 nsmallest tests pass). Measured nlargest(100):
+| size | before | after | pandas | verdict |
+|---|---|---|---|---|
+| 100k | 9343us | **3507us** (2.66x) | 1648 | 0.18x → 0.47x |
+| 1M | 96891us | **40787us** (2.37x) | 78144 | 0.81x → **1.92x WIN** |
+Residual 100k loss: the fast path still does a FULL radix argsort to build the order (then uses only
+n of it), where pandas uses a partial heap (O(n log k), k=100). **OPEN: a stable top-k select**
+(quickselect/bounded-heap with first-occurrence tie-break) would skip the full sort — bigger lever,
+needs care to stay bit-identical to the stable descending sort's tie ordering.
