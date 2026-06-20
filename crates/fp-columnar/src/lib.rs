@@ -2302,6 +2302,18 @@ impl ScalarValues {
         }
     }
 
+    /// Read the cached all-finite witness for an all-valid Float64 backing, if
+    /// one has already been computed. Returns `None` when the variant carries no
+    /// witness or it has not been resolved yet — never forces a scan.
+    fn all_valid_float64_finite_witness(&self) -> Option<bool> {
+        match self {
+            Self::LazyAllValidFloat64 { all_finite, .. }
+            | Self::LazyAllValidFloat64Chunks { all_finite, .. }
+            | Self::LazyAllValidFloat64Slice { all_finite, .. } => all_finite.get().copied(),
+            _ => None,
+        }
+    }
+
     /// Share an existing `Arc` f64 buffer in O(1) (used by `Clone`).
     fn lazy_all_valid_float64_arc(data: Arc<[f64]>) -> Self {
         Self::lazy_all_valid_float64_arc_with_finite(data, None)
@@ -6549,6 +6561,28 @@ impl Column {
             dtype: DType::Float64,
             values: ScalarValues::lazy_all_valid_float64_with_finite(data, Some(all_finite)),
             validity,
+            data: None,
+        }
+    }
+
+    /// Read the cached all-finite witness of an all-valid Float64 column, if it
+    /// has already been resolved. Never forces a scan (`None` when unknown).
+    /// Used by finiteness-preserving maps (e.g. `abs`) to carry the input's
+    /// witness onto the output for free.
+    fn f64_finite_witness(&self) -> Option<bool> {
+        self.values.all_valid_float64_finite_witness()
+    }
+
+    /// Build an all-valid (no-NaN) Float64 column from a values buffer, carrying
+    /// an optional pre-known all-finite witness WITHOUT scanning. The caller
+    /// guarantees the buffer has no NaN (NaN ⇒ missing under pandas semantics);
+    /// `from_f64_values` is the scanning constructor for unproven input.
+    fn from_f64_all_valid_with_finite_opt(data: Vec<f64>, all_finite: Option<bool>) -> Self {
+        let len = data.len();
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_with_finite(data, all_finite),
+            validity: ValidityMask::all_valid(len),
             data: None,
         }
     }
@@ -14710,9 +14744,19 @@ impl Column {
             ));
         }
         if let Some(data) = self.as_f64_slice() {
-            return Ok(Self::from_f64_values(
-                data.iter().map(|&x| x.abs()).collect(),
-            ));
+            // `as_f64_slice` is all-valid (no NaN — NaN ⇒ missing ⇒ None), and
+            // |x| never introduces NaN and preserves finiteness EXACTLY
+            // (|finite|=finite, |±inf|=+inf). So the output is all-valid, its
+            // has_nan is provably false, and its all_finite equals the input's.
+            // Carry the input's cached finiteness witness onto the output for
+            // free (no scan) and run abs as one clean autovectorizable pass —
+            // skipping both `from_f64_values`' has_nan/all_finite rescan and any
+            // separate finiteness reduction. Bit-identical to
+            // `from_f64_values(map(abs))` (same values, same all-valid mask;
+            // the witness is only a perf hint and is exact here).
+            let witness = self.f64_finite_witness();
+            let out: Vec<f64> = data.iter().map(|&x| x.abs()).collect();
+            return Ok(Self::from_f64_all_valid_with_finite_opt(out, witness));
         }
 
         let mut out = Vec::with_capacity(self.values.len());

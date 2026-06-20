@@ -257,6 +257,30 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         ("dataframe_ops", "cumsum") => time_us(|| {
             let _ = df.cumsum().expect("cumsum");
         }),
+        ("dataframe_ops", "describe") => time_us(|| {
+            // pandas: df.describe()
+            let _ = df.describe().expect("describe");
+        }),
+        ("dataframe_ops", "rank") => time_us(|| {
+            // pandas: df.rank() — method='average', ascending=True, na_option='keep'
+            let _ = df.rank("average", true, "keep").expect("rank");
+        }),
+        ("dataframe_ops", "df_abs") => time_us(|| {
+            // pandas: df.abs()
+            let _ = df.abs().expect("abs");
+        }),
+        ("dataframe_ops", "df_round") => time_us(|| {
+            // pandas: df.round(2)
+            let _ = df.round(2).expect("round");
+        }),
+        ("dataframe_ops", "df_clip") => time_us(|| {
+            // pandas: df.clip(lower=0, upper=500000)
+            let _ = df.clip(Some(0.0), Some(500_000.0)).expect("clip");
+        }),
+        ("dataframe_ops", "df_isna") => time_us(|| {
+            // pandas: df.isna()
+            let _ = df.isna().expect("isna");
+        }),
         ("groupby", "groupby_sum_int64" | "groupby_mean_float64" | "groupby_agg_multi") => {
             // pandas: key = (col_0 % 100).astype(int64); groupby(key)[col_1].agg
             let keys: Vec<i64> = raw[0].iter().map(|&v| (v as i64).rem_euclid(100)).collect();
