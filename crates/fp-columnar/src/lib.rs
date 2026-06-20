@@ -15416,7 +15416,10 @@ impl Column {
     /// NaN so the output has none either, and the all-finite witness equals the
     /// input's (carried for free; the i64→f64 cast is always finite ⇒ `true`).
     /// Bit-identical to `typed_float_unary(f)` (same values, all-valid mask).
-    fn typed_float_unary_finite_preserving(&self, f: fn(f64) -> f64) -> Option<Self> {
+    /// Generic over `F` (not a `fn` pointer) so each call site monomorphizes
+    /// and `f` inlines — letting LLVM lower `f64::floor`/`ceil`/`trunc` to a
+    /// vectorized `roundpd` instead of a per-element indirect call.
+    fn typed_float_unary_finite_preserving<F: Fn(f64) -> f64>(&self, f: F) -> Option<Self> {
         if let Some(data) = self.as_f64_slice() {
             let witness = self.f64_finite_witness();
             let out: Vec<f64> = data.iter().map(|&x| f(x)).collect();
