@@ -301,6 +301,10 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.nlargest(100, "col_0")
             let _ = df.nlargest(100, "col_0").expect("nlargest");
         }),
+        ("dataframe_ops", "df_stack") => time_us(|| {
+            // pandas: df.stack()
+            let _ = df.stack().expect("stack");
+        }),
         ("dataframe_ops", "df_fillna") => {
             // pandas: df.fillna(0.0) — run with --dtype float64_nan10/nan50
             let fill = fp_types::Scalar::Float64(0.0);

@@ -859,3 +859,14 @@ melt tests). **100k 51381→5159us (10x; 0.56x→5.6x WIN), 1M 578359→87725us 
 LESSON: long-output reshape (melt/explode/stack) that builds rows cell-by-cell through Scalar/String
 is alloc-bound — typed-buffer + contiguous-Utf8 + lazy-index construction is the lever. (Distinct
 from the WIDE-output transpose wall, which is the n-COLUMN BTreeMap tax — unfixable without 2D block.)
+
+### 2026-06-20 BlackThrush (cont.) — stack partial fix (1.35x) + composite-label structural wall
+df.stack() was 0.26x@100k / 0.31x@1M. Hoisted per-(row,col) self.columns[name] gets + typed-f64
+value column (row-major from_f64_values). Bit-identical (12 stack tests). 100k 86648→62881us (1.38x;
+→0.36x), 1M 872484→658114us (1.33x; →0.41x). **STRUCTURAL WALL:** stack builds n_rows*n_cols UNIQUE
+composite "row|col" strings (1M format! allocs) into a FLAT Utf8 index; pandas returns a 2-level
+MultiIndex (two arrays, no string concat). Unlike melt (repeated variable strings → contiguous-Utf8
+won), stack's labels are all distinct → the fix needs a real row-MultiIndex output (architectural,
+same class as transpose's 2D-block). LESSON refined: long-output reshape is alloc-bound and fixable
+WHEN the labels are a lazy range (melt) — but a UNIQUE-composite-string index (stack) is a
+MultiIndex-model wall.
