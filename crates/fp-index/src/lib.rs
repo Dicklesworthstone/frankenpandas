@@ -2917,12 +2917,85 @@ impl Index {
 
     #[must_use]
     pub fn take(&self, indices: &[usize]) -> Self {
+        // Affine-in, affine-out fast path (br-frankenpandas, BlackThrush): when the
+        // backing is an Int64 affine range AND the requested positions are
+        // themselves arithmetic (constant stride), the gathered labels are
+        // `start + step*pos` evaluated at an arithmetic position sequence — which
+        // is again an affine range with `label_step = step * position_step`. A
+        // single O(len) stride-verification pass (no `Vec<i64>` materialization,
+        // no per-element gather + index rebuild — the dominant cost in the
+        // `affine_index_take` hot loop, ~1.5x slower than pandas' numpy gather)
+        // yields a lazy affine index in O(1). Mirrors `RangeIndex::take_
+        // arithmetic_positions`. Bit-transparent: produces the identical labels in
+        // the identical order as the materialize-then-rebuild path below; out-of-
+        // bounds or non-arithmetic positions return `None` and fall through to it.
+        if let Some(idx) = self.take_affine_positions(indices) {
+            return idx;
+        }
         if let Some(values) = self.labels.take_i64_values(indices) {
             return self.propagate_name(Self::from_i64_values(values));
         }
         self.propagate_name(Self::new(
             indices.iter().map(|&i| self.labels[i].clone()).collect(),
         ))
+    }
+
+    /// Lazy affine result for an affine-backed index taken at arithmetic
+    /// positions. Returns `None` (caller falls back to the materializing path)
+    /// when the backing is not an Int64 affine range, the positions are not a
+    /// constant-stride sequence, any position is out of bounds, or the resulting
+    /// affine parameters overflow `i64`.
+    fn take_affine_positions(&self, positions: &[usize]) -> Option<Self> {
+        let affine = self.labels.int64_affine_range()?;
+        let len = affine.len;
+        let value_at = |p: usize| -> Option<i64> {
+            let offset = i64::try_from(p).ok()?;
+            affine
+                .step
+                .checked_mul(offset)
+                .and_then(|delta| affine.start.checked_add(delta))
+        };
+        let result = match positions {
+            [] => Index::new_known_unique_int64_affine_range(affine.start, affine.step, 0)?,
+            &[p] => {
+                if p >= len {
+                    return None;
+                }
+                Index::new_known_unique_int64_affine_range(value_at(p)?, affine.step, 1)?
+            }
+            &[first, second, ..] => {
+                if first >= len {
+                    return None;
+                }
+                // `i64` (not `i128`) stride arithmetic: every position is a valid
+                // index `< len <= isize::MAX`, so the difference of any two fits
+                // `i64` without overflow — and the `i64` windows scan autovectorizes
+                // where the `i128` form could not (the hot loop of this fast path).
+                let position_step = second as i64 - first as i64;
+                if position_step == 0 {
+                    return None;
+                }
+                // Single pass: verify the constant position stride. Because the
+                // sequence is monotone with that stride, all positions lie in
+                // `[min(first,last), max(first,last)]`, so a single endpoint
+                // bounds check below suffices.
+                if !positions
+                    .windows(2)
+                    .all(|w| w[1] as i64 - w[0] as i64 == position_step)
+                {
+                    return None;
+                }
+                let last = *positions.last().expect("non-empty by match arm");
+                if first.max(last) >= len {
+                    return None;
+                }
+                let label_step =
+                    i64::try_from((affine.step as i128).checked_mul(position_step as i128)?).ok()?;
+                let first_label = value_at(first)?;
+                Index::new_known_unique_int64_affine_range(first_label, label_step, positions.len())?
+            }
+        };
+        Some(self.propagate_name(result))
     }
 
     #[must_use]
@@ -10175,27 +10248,50 @@ impl RangeIndex {
         i64::try_from(value).expect("validated RangeIndex value bounds")
     }
 
-    fn take_arithmetic_positions(&self, positions: &[usize]) -> Option<Index> {
+    fn take_arithmetic_positions(&self, positions: &[usize], len: usize) -> Option<Index> {
+        // Single O(len) pass: verify constant position stride AND in-bounds. The
+        // result of an affine RangeIndex taken at an arithmetic position sequence
+        // is again affine (`label_step = step * position_step`), so this returns a
+        // lazy affine index in O(1) without the separate bounds-check loop + the
+        // per-element `value_at` gather the materializing fall-back pays — the
+        // dominant cost in the `range_index_take` hot loop. Any out-of-bounds or
+        // non-arithmetic positions return `None`, falling through to the
+        // materializing path which reports the precise out-of-bounds error.
         let mut index = match positions {
             [] => Index::new_known_unique_int64_affine_range(self.start, self.step, 0)?,
-            [position] => {
-                let first_label = self.value_at(*position);
+            &[position] => {
+                if position >= len {
+                    return None;
+                }
+                let first_label = self.value_at(position);
                 Index::new_known_unique_int64_affine_range(first_label, self.step, 1)?
             }
-            [first, second, ..] => {
-                let position_step = (*second as i128) - (*first as i128);
+            &[first, second, ..] => {
+                if first >= len {
+                    return None;
+                }
+                // `i64` (not `i128`) stride arithmetic: positions are valid indices
+                // `< len <= isize::MAX`, so pairwise differences fit `i64`; the
+                // `i64` windows scan autovectorizes where the `i128` form could not.
+                let position_step = second as i64 - first as i64;
                 if position_step == 0 {
                     return None;
                 }
                 if !positions
                     .windows(2)
-                    .all(|window| (window[1] as i128) - (window[0] as i128) == position_step)
+                    .all(|w| w[1] as i64 - w[0] as i64 == position_step)
                 {
                     return None;
                 }
-                let label_step = i128::from(self.step).checked_mul(position_step)?;
+                let last = *positions.last().expect("non-empty by match arm");
+                // Monotone sequence ⇒ all positions lie within `[min, max]`; a
+                // single endpoint bounds check covers the whole range.
+                if first.max(last) >= len {
+                    return None;
+                }
+                let label_step = i128::from(self.step).checked_mul(position_step as i128)?;
                 let label_step = i64::try_from(label_step).ok()?;
-                let first_label = self.value_at(*first);
+                let first_label = self.value_at(first);
                 Index::new_known_unique_int64_affine_range(first_label, label_step, positions.len())?
             }
         };
@@ -10444,6 +10540,12 @@ impl RangeIndex {
     /// [`IndexError::OutOfBounds`].
     pub fn take(&self, positions: &[usize]) -> Result<Index, IndexError> {
         let len = self.len();
+        // Fast path first: a single pass verifies stride + bounds and returns a
+        // lazy affine index. Only when positions are non-arithmetic (or out of
+        // bounds) do we run the explicit bounds-check loop + materialize below.
+        if let Some(idx) = self.take_arithmetic_positions(positions, len) {
+            return Ok(idx);
+        }
         for &p in positions {
             if p >= len {
                 return Err(IndexError::OutOfBounds {
@@ -10451,9 +10553,6 @@ impl RangeIndex {
                     length: len,
                 });
             }
-        }
-        if let Some(idx) = self.take_arithmetic_positions(positions) {
-            return Ok(idx);
         }
         let labels: Vec<i64> = positions.iter().map(|&p| self.value_at(p)).collect();
         let mut idx = Index::from_i64_values(labels);
@@ -21104,6 +21203,81 @@ mod tests {
                 mat.get_indexer(&target),
                 "get_indexer iter={iter} targ={targ_vals:?}"
             );
+        }
+    }
+
+    #[test]
+    fn affine_take_arithmetic_positions_match_materialized_blackthrush() {
+        // Differential harness (BlackThrush): the affine-in/affine-out `take`
+        // fast paths (`Index::take_affine_positions` + `RangeIndex::take_
+        // arithmetic_positions`) must produce the identical labels, in the
+        // identical order, as a materialized gather — for arithmetic position
+        // sequences (the fast path) AND non-arithmetic ones (the fallback).
+        // Deterministic seeded LCG, no rand crate, no mocks.
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        for iter in 0..3000u32 {
+            let len = (next() % 40) as usize + 1;
+            let start = (next() % 21) as i64 - 10;
+            let step = (next() % 7) as i64 - 3; // -3..=3 (incl. 0)
+            let Some(affine) = Index::new_known_unique_int64_affine_range(start, step, len) else {
+                continue;
+            };
+            let vals: Vec<i64> = (0..len as i64)
+                .map(|i| start.checked_add(step.checked_mul(i).unwrap()).unwrap())
+                .collect();
+            let mat = Index::new(vals.iter().copied().map(IndexLabel::Int64).collect::<Vec<_>>());
+
+            // RangeIndex equivalent (positive step only; RangeIndex requires it).
+            let range = if step > 0 {
+                RangeIndex::new(start, start + step * len as i64, step).ok()
+            } else {
+                None
+            };
+
+            // Build a position sequence: arithmetic (constant stride) most of the
+            // time, occasionally non-arithmetic, occasionally empty/single.
+            let mode = next() % 5;
+            let positions: Vec<usize> = match mode {
+                0 => Vec::new(),
+                1 => vec![(next() as usize) % len],
+                2 | 3 => {
+                    // arithmetic in-bounds: pick pstart, pstep, count s.t. all < len.
+                    let count = (next() % 8) as usize + 2;
+                    let pstep = (next() % 3) as usize + 1;
+                    let max_start = len.saturating_sub(1 + pstep * (count - 1));
+                    if max_start == 0 && len <= pstep * (count - 1) {
+                        continue;
+                    }
+                    let pstart = (next() as usize) % (max_start + 1);
+                    (0..count).map(|k| pstart + pstep * k).collect()
+                }
+                _ => {
+                    // arbitrary (likely non-arithmetic) in-bounds positions.
+                    let count = (next() % 6) as usize + 1;
+                    (0..count).map(|_| (next() as usize) % len).collect()
+                }
+            };
+
+            let ctx = format!("iter={iter} start={start} step={step} len={len} pos={positions:?}");
+            let oracle: Vec<IndexLabel> = positions
+                .iter()
+                .map(|&p| IndexLabel::Int64(vals[p]))
+                .collect();
+
+            assert_eq!(affine.take(&positions).labels(), oracle, "affine take {ctx}");
+            assert_eq!(mat.take(&positions).labels(), oracle, "materialized take {ctx}");
+
+            if let Some(range) = &range {
+                let got = range.take(&positions).expect("range take in-bounds");
+                assert_eq!(got.labels(), oracle, "range take {ctx}");
+            }
         }
     }
 
