@@ -14857,7 +14857,13 @@ impl Column {
             ));
         }
         if let Some(data) = self.as_f64_slice() {
-            return Ok(Self::from_f64_values(data.iter().map(|&x| -x).collect()));
+            // -x preserves finiteness exactly (-finite=finite, -±inf=∓inf) and
+            // never makes NaN on an all-valid input, so carry the input's
+            // finiteness witness and skip the from_f64_values rescan (mirror of
+            // `abs`). Bit-identical to `from_f64_values(map(-x))`.
+            let witness = self.f64_finite_witness();
+            let out: Vec<f64> = data.iter().map(|&x| -x).collect();
+            return Ok(Self::from_f64_all_valid_with_finite_opt(out, witness));
         }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
@@ -15402,6 +15408,28 @@ impl Column {
         None
     }
 
+    /// `typed_float_unary` for maps that NEVER introduce NaN and preserve
+    /// finiteness EXACTLY (floor/ceil/trunc — `f(finite)` is finite and never
+    /// overflows, `f(±inf)=±inf`). The caller MUST only pass such `f`; passing
+    /// e.g. sqrt/exp/recip here would mis-witness the output. Skips
+    /// `from_f64_values`' has_nan/all_finite rescan: an all-valid input has no
+    /// NaN so the output has none either, and the all-finite witness equals the
+    /// input's (carried for free; the i64→f64 cast is always finite ⇒ `true`).
+    /// Bit-identical to `typed_float_unary(f)` (same values, all-valid mask).
+    fn typed_float_unary_finite_preserving(&self, f: fn(f64) -> f64) -> Option<Self> {
+        if let Some(data) = self.as_f64_slice() {
+            let witness = self.f64_finite_witness();
+            let out: Vec<f64> = data.iter().map(|&x| f(x)).collect();
+            return Some(Self::from_f64_all_valid_with_finite_opt(out, witness));
+        }
+        if let Some(data) = self.as_i64_slice() {
+            let out: Vec<f64> = data.iter().map(|&x| f(x as f64)).collect();
+            // i64→f64 is always finite and floor/ceil/trunc keep it finite.
+            return Some(Self::from_f64_all_valid_with_finite_opt(out, Some(true)));
+        }
+        None
+    }
+
     /// All-valid numeric column → an owned `f64` view (Float64 copied, Int64 cast
     /// `x as f64`), exactly as `Scalar::to_f64` would. `None` for nullable /
     /// non-numeric columns (so binary ufuncs fall back to the scalar loop).
@@ -15431,7 +15459,7 @@ impl Column {
     }
 
     pub fn floor(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::floor) {
+        if let Some(out) = self.typed_float_unary_finite_preserving(f64::floor) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -15456,7 +15484,7 @@ impl Column {
 
     /// Compute element-wise ceiling.
     pub fn ceil(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::ceil) {
+        if let Some(out) = self.typed_float_unary_finite_preserving(f64::ceil) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -15481,7 +15509,7 @@ impl Column {
 
     /// Compute element-wise truncation toward zero.
     pub fn trunc(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::trunc) {
+        if let Some(out) = self.typed_float_unary_finite_preserving(f64::trunc) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());

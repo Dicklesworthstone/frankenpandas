@@ -269,6 +269,18 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.abs()
             let _ = df.abs().expect("abs");
         }),
+        ("dataframe_ops", "df_neg") => time_us(|| {
+            // pandas: -df
+            let _ = df.neg().expect("neg");
+        }),
+        ("dataframe_ops", "df_floor") => time_us(|| {
+            // pandas: np.floor(df)
+            let _ = df.floor().expect("floor");
+        }),
+        ("dataframe_ops", "df_ceil") => time_us(|| {
+            // pandas: np.ceil(df)
+            let _ = df.ceil().expect("ceil");
+        }),
         ("dataframe_ops", "df_round") => time_us(|| {
             // pandas: df.round(2)
             let _ = df.round(2).expect("round");

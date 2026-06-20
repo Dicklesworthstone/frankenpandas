@@ -741,3 +741,26 @@ Small-size residual ~1.7x loss is STRUCTURAL: columnar does 10 separate per-colu
 vs pandas' single contiguous 2D-block abs. **OPEN: df_round 0.84x** (compute-bound; keeps
 parallel — different lever than abs). **df_abs/round/clip/isna NOT YET in vs_pandas_harness.py
 matrix** (fp-bench-only workloads) — add for durable tracking.
+
+### 2026-06-20 BlackThrush (cont.) — abs lever extended to neg/floor/ceil/trunc (split by op cost)
+Sibling bandwidth/unary ops shared abs's `from_f64_values` has_nan/all_finite rescan. Applied the
+1-pass + input finiteness-witness propagation (`Column::neg` directly; floor/ceil/trunc via new
+`typed_float_unary_finite_preserving` — they preserve finiteness exactly, never make NaN on
+all-valid input). Bit-identical (fp-columnar 430 pass + same 5 pre-existing fails; fp-frame floor
+16 + neg 48 pass). MEASURED vs pandas 2.2.3 (min-of-iters):
+| op | 100k before→after (pandas) | 1M before→after (pandas) |
+|---|---|---|
+| neg | 696→**305** (232) 0.33x→0.76x | 8717→**8136** (42522) **5.2x WIN** |
+| floor | 775→**739** (171) ~0.23x | 10557→**8194** (42388) 1.29x, **5.2x WIN** |
+| ceil | 841→**787** (170) ~0.22x | 9932→**8219** (44824) 1.21x, **5.5x WIN** |
+
+**NEGATIVE EVIDENCE — serial threshold is op-cost-specific, NOT a blanket bandwidth rule.**
+`DataFrame::neg` is pure bandwidth (sign-bit flip) so it takes abs's 4M serial floor → 696→305 at
+100k. **floor/ceil/trunc are NOT pure bandwidth** — the per-element `f64 roundsd` is compute-heavy
+(doesn't vectorize in `.map().collect()` like a sign-bit op), so forcing serial REGRESSED them
+2.4x at 100k (floor 775→1876, ceil 841→2237). REVERTED floor/ceil/trunc to the default parallel
+floor; they keep only the (bit-identical, rescan-removing) Column-level witness-prop, which is
+~1.05x at 100k but a solid 1.2–1.3x at 1M. LESSON: serial-vs-parallel for per-column elementwise
+depends on the OP's compute/byte ratio, not just total cells — sign-bit ops (abs/neg) go serial
+when L3-resident; roundsd/transcendental ops stay parallel. **OPEN: floor/ceil 100k ~0.22x —
+roundsd map not vectorizing (try explicit SIMD `roundsd` over the slice).**
