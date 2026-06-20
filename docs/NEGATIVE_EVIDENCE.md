@@ -780,3 +780,13 @@ Probed two more numpy-fast elementwise ops (min-of-iters vs pandas 2.2.3):
   mul/div genuinely need the rescan) — deferred. LESSON: the serial-threshold lever only pays when
   the op is BOTH pure-bandwidth AND already rescan-free (abs/neg via witness-prop). If the rescan
   stays (no finiteness preservation), serial-vs-parallel is a wash. **OPEN: add/sub_scalar 0.32x.**
+
+### 2026-06-20 BlackThrush (cont.) — cumsum phantom-debunked; elementwise-unary vein closed
+df.cumsum() clean MIN: FP 671µs vs pandas 11175µs @100k = **16.7x WIN**; 8577 vs 183531 @1M =
+**21.4x WIN** (the matrix's "cumsum ~1.0x" was harness-p50 phantom; pandas cumsum is slow). The
+DataFrame elementwise-UNARY perf vein is now CLOSED for the easy wins: every finiteness-PRESERVING
+op (abs/neg/floor/ceil/trunc/sign) takes the 1-pass + witness-prop treatment; finiteness-UNKNOWN
+ops (round, add/sub/mul/div scalar) genuinely need the from_f64_values all_finite pass and so have
+no rescan to skip — their residual small-size loss is structural (columnar per-column alloc +
+necessary finiteness pass vs pandas single 2D-block numpy ufunc). Remaining in-lane OPEN items are
+all structural-columnar or bit-locked-fdiv (df_round); no quick lever left.
