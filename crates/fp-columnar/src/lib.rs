@@ -211,6 +211,15 @@ impl ValidityMask {
         self.words.clone()
     }
 
+    /// Return LSB-first packed validity words for hot typed kernels that scan
+    /// many rows. This preserves the same sentinel and range semantics as
+    /// [`ValidityMask::get`] while avoiding one branchy call per element.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn packed_words_for_scan(&self) -> Vec<u64> {
+        self.materialized_words()
+    }
+
     fn words_are_all_valid(words: &[u64], len: usize) -> bool {
         if len == 0 {
             return words.is_empty();
