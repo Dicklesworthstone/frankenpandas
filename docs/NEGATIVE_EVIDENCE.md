@@ -703,3 +703,38 @@ Applied to factorize (commit 8c7b78f4). Measured 1M rows vs pandas `pd.factorize
 (pure-insert sets don't suffer the get+insert+codes-build amplification factorize did) →
 REVERTED per the no-0-gain rule. LESSON: don't pre-size a hash map to the row count when the
 distinct count is unknown/small — grow it; the over-allocation, not the hasher, is the cache killer.
+
+### 2026-06-20 BlackThrush (cont.) — matrix is phantom-saturated; df.abs() was the real loss
+**Re-measured every apparent vs-pandas LOSS in the 58-workload matrix with MIN-of-fixed-iters
+(not the harness p50, which inflates under high CV → PHANTOM losses).** Every benchmarked
+workload is actually an FP WIN:
+| harness verdict | clean MIN ratio (pandas/FP) |
+|---|---|
+| join_outer 0.71x (DROPPED_HIGH_CV) | **2.29x** (FP 3995 vs 9164µs) |
+| value_counts 0.96x | **1.20x** (4136 vs 4953) |
+| filter_bool_mask 1.09x | **1.40x** (1017 vs 1428) |
+| sort_values_single 1.10x | 1.02x (3995 vs 4091 — genuinely marginal, gather-bound, at floor) |
+The matrix is saturated. **DON'T chase harness p50 losses — re-measure MIN first.**
+
+**Found real losses by extending fp-bench coverage** (added df_abs/df_round/df_clip/df_isna/
+describe/rank workloads). Wins: df_clip 17.8x, df_isna 2.8x, describe 13.2x, **rank 20.6x**
+(pandas rank is 116ms — tie handling). Losses: **df_abs 0.25x (4x SLOWER)**, df_round 0.84x.
+
+**df_abs FIXED (commit f53a81ab, bead bqoqv):** two causes — (1) `apply_per_column` threaded the
+columns via `thread::scope` even when the frame is L3-resident, where ONE core already saturates
+bandwidth so spawn overhead is pure loss; (2) `Column::abs` rescanned every element for
+has_nan/all_finite (`from_f64_values`) after the abs map. Fix: parameterized parallelism floor
+(`par_map_columns_min`/`apply_per_column_min`, default 16384 unchanged for compute-bound
+round/clip/sqrt/exp/log/trig); abs floor=4M cells (serial while L3-resident, threaded only once
+multi-channel RAM helps). Column::abs f64 → ONE autovectorizable pass + propagate the input's
+cached finiteness witness (abs preserves finiteness exactly; all-valid ⇒ no NaN) via new
+`from_f64_all_valid_with_finite_opt`/`f64_finite_witness`. Bit-identical (35 abs tests pass).
+| size | main | fixed | pandas | verdict |
+|---|---:|---:|---:|---|
+| 10k | 378µs | **36µs** | 21 | 0.58x (was 0.055x) |
+| 100k | 718µs | **306µs** | 180 | 0.59x (was 0.25x) |
+| 1M | 10081µs | **5896µs** | 44351 | **7.5x WIN** (was 4.4x) |
+Small-size residual ~1.7x loss is STRUCTURAL: columnar does 10 separate per-column gathers+allocs
+vs pandas' single contiguous 2D-block abs. **OPEN: df_round 0.84x** (compute-bound; keeps
+parallel — different lever than abs). **df_abs/round/clip/isna NOT YET in vs_pandas_harness.py
+matrix** (fp-bench-only workloads) — add for durable tracking.
