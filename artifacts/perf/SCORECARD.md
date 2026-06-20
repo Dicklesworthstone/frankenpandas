@@ -91,6 +91,37 @@ Evidence:
 - `crates/fp-index/examples/bench_range_setops.rs`
 - `artifacts/optimization/negative-evidence-ledger-cod-b.md`
 
+## 2026-06-20 Cod-b No-Ship - Series.combine_first values residual
+
+Release-readiness score for this probe: **0/5 keep**, **5/5 evidence**.
+
+- Bead: `br-frankenpandas-3gsa7`.
+- Targeted loss: `Series.combine_first(...).values()` on the 2M same-index
+  Float64 NaN-fill workload remains slower than pandas because the public scalar
+  API boxes every f64 into `Scalar`.
+- Build target: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`.
+- RCH evidence: `rch exec -- cargo build -p fp-frame --example bench_combine_cc --release`
+  on `vmi1153651`, exit 0. A remote pre-change `cargo run` also completed on
+  `vmi1153651` with `values=45.391 ms`, but same-host local timings from the
+  retrieved release binary were used for accept/revert because the remote run
+  was much noisier than the CPU7 baseline.
+- Guards after revert: `cargo test -p fp-frame combine_first --lib` passed
+  12/12; `cargo test -p fp-conformance --lib` passed 1595/1595.
+- Decision: revert/no-ship both scalar-materialization probes. No code kept.
+
+Head-to-head versus pandas 2.2.3, local CPU7 best-of-50 unless noted:
+
+| Variant | FrankenPandas | pandas | Ratio vs pandas | FP-side delta | Verdict |
+|---|---:|---:|---:|---:|---|
+| Current baseline | 30.444 ms | 6.983 ms | 0.23x | baseline | LOSS |
+| Right-buffer scalar map + valid-left patch | 30.601 ms | 6.983 ms | 0.23x | 0.995x | REVERT |
+| Single-pass scalar push | 29.999 ms | 6.983 ms | 0.23x | 1.015x | NO-SHIP, too small |
+
+Typed lanes stayed green before the probes: `materialize=2.280 ms`,
+`construct=9.418 us`. The probes confirm that reshaping the enum-boxing loop is
+not the missing primitive; the next viable route is avoiding public
+`Vec<Scalar>` for numeric consumers or changing the scalar representation size.
+
 ### 2026-06-19 Cod-a Focused Std/Var Proof - `br-frankenpandas-uza04.202`
 
 Comparator: pandas 2.2.3 / numpy 2.4.3. Workload:

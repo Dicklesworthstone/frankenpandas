@@ -75,7 +75,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | Series.map Float64 `to_numpy()` | same workload, forced `out.to_numpy()` materialization | 5.24×; FP-side 32.95→2.30 ms | 🟢 p0irg exposes repeated Float64 slices through a direct owned f64 buffer for typed consumers; avoids public `values()` enum boxing |
 | Series.map Float64 `values()` | same workload, forced `out.values()` materialization | 0.44× residual; qngdp probes 0.38-0.40× reverted | 🔴 residual scalar consumption-path loss; lazy repeated-slice `Scalar` materialization is still heavier than pandas' numeric result buffer; threaded enum materialization and scalar-block cloning both lost |
 | Series.combine_first | 2M f64 same-index, ~50% NaN fill | 676× default construct; 2.84× typed materialize | 🟢 flipped from 0.48× loss; og9qm defers the all-valid Float64 select into a lazy tape and only materializes the selected f64 buffer for typed consumers |
-| Series.combine_first `values()` | same workload, forced `out.values()` materialization | 0.21× residual | 🔴 residual consumption-path loss; public `values()` still boxes every f64 into `Scalar`, 30.298 ms vs pandas 6.506 ms |
+| Series.combine_first `values()` | same workload, forced `out.values()` materialization | 0.21–0.23× residual | 🔴 residual consumption-path loss; public `values()` still boxes every f64 into `Scalar`; 3gsa7 scalar-materializer probes were measured and reverted/no-shipped |
 | reset_index | 1M int64-indexed | 5.1× | 🟢 |
 | loc[[labels]] sorted Int64 | 2M f64 step-2 idx, select 1000 | 1.58× | 🟢 flipped from 5340× SLOWER; 0pkt2 cached int64_view + binary-search batch resolver |
 | loc[[labels]] unsorted Int64 | 2M f64 shuffled unique idx, select 1000 | 13.7× | 🟢 flipped from 5147× SLOWER; 2pvdg identity-cached i64→pos hashtable |
@@ -108,7 +108,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | RangeIndex.reindex all-miss | 100k / 1M targets | 36.1× / 51.5× | 🟢 exact RangeIndex lattice fast path; `rch` same-worker FP-side 75.7× / 32.2× |
 
 **Score: 36/43 measured ops faster than pandas; 5 losses (max, min, concat, Series.map Float64 `values()`, Series.combine_first `values()`),
-2 neutral rows (add, mul pinned); 0 shipped regressions; 10 reverted/no-ship SIMD, allocation,
+2 neutral rows (add, mul pinned); 0 shipped regressions; 12 reverted/no-ship SIMD, allocation,
 or ~0-gain attempts.**
 
 Median win among the 36 ≈ 2.8×; the remaining losses are kernel/structural gaps with
@@ -140,7 +140,13 @@ all-valid select tape; CPU7 best-of-50 measured FP construction at 0.0091 ms vs 
 6.075 ms (2.84× faster). Forced public `out.values()` remains red at 30.298 ms vs
 pandas 6.506 ms (0.21×) because it boxes every f64 into `Scalar`. This pass is
 **2 wins / 1 loss / 0 neutral**; route deeper to typed numeric public consumption or
-lower-allocation scalar materialization, not another select-kernel trim.
+lower-allocation scalar materialization, not another select-kernel trim. The follow-up
+`3gsa7` scalar-materialization probes confirmed that loop reshaping alone is not enough:
+local CPU7 baseline was 30.444 ms vs pandas 6.983 ms (0.23×); a right-buffer+patch
+scalar fill regressed to 30.601 ms, and a single-pass scalar push reached only
+29.999 ms (~1.5% FP-side, still 0.23× vs pandas). Both code probes were reverted;
+the remaining route is an API/storage change that avoids public `Vec<Scalar>` for
+numeric consumers, or a fundamentally smaller scalar representation.
 The latest Series.map Float64 state keeps the earlier `0jdij` dense direct-address table
 and hbq6y's guarded periodic dense-code witness, lazy repeated-slice output, and rolling
 counter scan. Default Series construction is green at 7.04× vs pandas. p0irg adds the
