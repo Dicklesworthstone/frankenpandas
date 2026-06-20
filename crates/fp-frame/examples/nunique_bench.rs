@@ -34,12 +34,20 @@ fn main() {
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     };
-    // Float values drawn from `distinct` buckets (scaled) so distinct count is controlled.
-    let data: Vec<f64> = (0..rows)
-        .map(|_| (next() % distinct) as f64 * 1.5)
-        .collect();
+    let dtype = args.get(4).map(String::as_str).unwrap_or("f64");
     let index = Index::new_known_unique_int64_unit_range(0, rows);
-    let s = Series::new("c".to_string(), index, Column::from_f64_values(data)).expect("series");
+    let s = if dtype == "i64" {
+        // Wide/sparse i64 ids: spread across the full i64 range so the dense
+        // histogram path declines and the FxHashSet fast path is exercised.
+        let data: Vec<i64> = (0..rows)
+            .map(|_| (next() % distinct) as i64 * 0x1_0000_0001_i64)
+            .collect();
+        Series::new("c".to_string(), index, Column::from_i64_values(data)).expect("series")
+    } else {
+        // Float values drawn from `distinct` buckets (scaled) so distinct count is controlled.
+        let data: Vec<f64> = (0..rows).map(|_| (next() % distinct) as f64 * 1.5).collect();
+        Series::new("c".to_string(), index, Column::from_f64_values(data)).expect("series")
+    };
 
     let ns = best(iters, || {
         std::hint::black_box(s.nunique());
