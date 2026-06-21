@@ -1286,3 +1286,15 @@ catches (Float64 can carry a validity-true... no: NaN is validity-false, but the
 preserves the exact Scalar semantics; using hasnans is the safe equivalent, not validity().all()).
 Win: hasnans skips materialization for all-valid Int64/Bool/Utf8 and early-returns on any null; only
 applies to the uncommon skipna=false path, so MARGINAL but bit-identical + DRY. UNMEASURED.
+
+### 2026-06-21 BlackThrush — argmin/argmax typed Float64 path (CODE-ONLY, perf PENDING disk-low)
+DISK-LOW (38G, no cargo): code-only. Series.argmin/argmax (position of min/max) had a typed Int64
+scan but FLOAT64 fell to the generic path: .values() Scalar Vec + per-element
+compare_non_missing_scalars_for_sort dispatch. Added a typed Float64 branch mirroring the Int64 one
+(scan &[f64], keep first strictly-smaller/larger). **Bit-identity provable**:
+compare_non_missing_scalars_for_sort on two Float64 is `partial_cmp().unwrap_or(Equal)` (read &
+confirmed; same as the idxmin/idxmax helpers at fp-frame:13383/13461), so `data[i] < data[best]`
+(resp. `>`, IEEE) is exactly the Scalar path's `.is_lt()`/`.is_gt()`; as_f64_slice is all-valid AND
+no-NaN, so no missing to skip and the first-occurrence tie-break is preserved. This is a GENUINE
+(non-marginal) lever — argmin/argmax on float columns is common and currently materializes Scalars +
+dispatches per element. UNMEASURED — verify when disk recovers.
