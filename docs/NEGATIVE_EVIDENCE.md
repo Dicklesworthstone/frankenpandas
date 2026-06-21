@@ -2634,3 +2634,11 @@ EVERY major category is now verified-dominant INLINE this session: groupby (all 
 DOMINATES pandas across the entire measured surface, honestly. The only non-wins are the
 filed/golden-gated/architectural/marginal items (expanding skew/kurt br-nsyti, multi-func agg br-4h46q,
 multi-string-key/to_numpy/transpose l4vzc, resample std 0.92x, unique 0.96x). FRONTIER CONQUERED.
+
+### 2026-06-21 BlackThrush — groupby rank WINS 4.43x (build_groups != universal loss)
+Checked another unbenched sibling: SeriesGroupBy::rank uses build_groups (per the memory), so a value-agg-style
+loss candidate. But it WINS: groupby_rank_str @1M = 4.43x (fp 61ms vs pandas 270ms). pandas' groupby.rank is
+slow; fp's per-group rank (even via build_groups) beats it. CONFIRMS the build_groups path is NOT a universal
+loss — the value-aggs (sem/skew/nunique) lost specifically due to the scattered per-row values()[idx] gather
++ Scalar materialization + std-SipHash, all now fixed. groupby surface fully checked: every agg + rank +
+cumcount + transform WINS; only multi-func agg (br-4h46q) + multi-string-key (architectural) remain.
