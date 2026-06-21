@@ -2431,3 +2431,17 @@ Arc column clones + the alien-optimized corr (not a per-cell loss; the 48526 fla
 The per-cell-hoist / typed-slice lever is comprehensively applied. AXIS=1 FAMILY uniform ~2.6x (idx/arg) +
 6-340x (reductions). Tractable @1M frontier comprehensively conquered; only structural survivors remain
 (unstack string-MultiIndex, daily/sub-daily resample gather-agg, to_numpy/transpose 2D-block — br-ikq9a/l4vzc).
+
+### 2026-06-21 BlackThrush — 4th MEASUREMENT PHANTOM + real loss: STRING-KEY groupby aggs all lose
+CORRECTION: the earlier "groupby_mean_str 3.65x WIN" was a DATA MISMATCH — the fp bench is a SERIES groupby
+(val_series.groupby(key).mean(), 1 col) but I compared it to a pandas DATAFRAME groupby (dsk.groupby("k").
+mean(), 10 cols, which is ~17x slower in pandas). Correctly compared (Series vs Series, both 1 col):
+  groupby_mean_str 0.22x, groupby_std_str 0.25x, groupby_var_str 0.19x, groupby_median_str 0.61x — ALL LOSS.
+fp ~16-30ms (all aggs) vs pandas ~3-4ms. ROOT CAUSE: fp's string-key build_groups (SipHash on 1M strings ->
+~1000 groups) + agg_numeric's SCATTERED per-group gather (group indices are non-contiguous since the key
+derives from random col_0) — vs pandas factorize + cache-friendly C grouped reduction. The int64-dense
+bypass (memory) is INT64-ONLY; string keys have no fast path. FIX (filed): single-pass dense-by-code
+(factorize string keys -> codes, single pass accumulating sum/count/sumsq per code — no build_groups, no
+scattered gather) for the count-based aggs (mean/sum/std/var/count); median needs the gather (harder). Also
+check if build_groups uses std-SipHash (FxHashMap = partial). 4TH measurement phantom (--size, value_counts
+data-mismatch, no-warmup, now groupby DataFrame-vs-Series). LESSON: match the SHAPE (Series vs DataFrame) too.
