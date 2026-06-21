@@ -2270,3 +2270,13 @@ CONCLUSION: fp wins ~everything 2x-69680x at correctly-measured @1M. The ONLY re
 (fp representation, not perf bugs): unstack 0.21x (string-composite MultiIndex), daily/sub-daily resample
 0.75x/0.83x (gather-agg+bucket floor), to_numpy/transpose (2D-block, l4vzc). Three measurement-methodology
 phantoms found+corrected this session: --size default bug, value_counts data-mismatch, no-warmup sub-1x.
+
+### 2026-06-21 BlackThrush — to_json columns/index streaming: 0.30x->3.06x + 0.45x->2.85x@1M WIN (2 NEW losses found+fixed)
+Found 2 NEW real @1M losses by adding json_write_columns/json_write_index benches: to_json(orient=columns)
+0.30x (fp 3914ms), orient=index 0.45x (fp 2988ms) — same nested Value tree + per-cell name/index-key clones
+as records had. Applied the same streaming serde lever (ColumnsJson/ColumnValuesJson + IndexJson reusing
+RowJson/CellJson), precomputing the index keys ONCE (was n*m index_label_to_json_key recomputations).
+Bit-identical (to_json 18/0). MEASURED: columns 3914->386ms@1M = ~10x fp-side -> 3.06x WIN; index 2988->
+467ms = ~6.4x -> 2.85x WIN. The streaming-serialize / skip-the-Value-tree lever generalizes across ALL
+to_json orients. LESSON: when one orient's tree-build is fixed, the sibling orients have the SAME cost —
+sweep them (added benches confirm). 5 real @1M losses now fixed via streaming: records+columns+index.
