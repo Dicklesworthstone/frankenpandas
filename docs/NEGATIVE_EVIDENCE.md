@@ -1820,3 +1820,13 @@ dispatch WAS ~750us — a genuine (if partial) cost, UNLIKE the to_csv-hoist pha
 the SCATTER (ScalarKey HashMap + per-cell Vec) — zngxi's int64-dense scatter is the next lever (open).
 LESSON: hoisting a per-row .values() out of a loop is a safe bit-identical micro-lever worth checking on
 any hot per-row-Scalar-access path (cf the labels()[pos] materialization-tax smell).
+
+### 2026-06-21 BlackThrush — pivot_table FIXED: FxHashMap scatter + values()-hoist = ~47% (zngxi CLOSED)
+The remaining pivot_table scatter cost was std SipHash: 'groups' was the one HashMap (vs the FxHashSet
+unique-collection) left on the default hasher. Switched to FxHashMap => ~40% on top of the values()-hoist
++13%. COMBINED 6100->3220us (~47%): 0.25x->0.48x@10k, 1.0x->2.00x@100k (WIN), 8.8x->16.47x@1M. Bit-
+identical (output ordered by sorted col/idx keys, not HashMap iteration; each cell written once).
+Conformance GREEN (pivot 37/0). zngxi CLOSED — no int64-dense rewrite needed. KEY LESSON: the "input-
+independent ~6ms" that looked like a fixed cost was measurement noise masking the SipHash scaling; the
+scatter (ScalarKey,ScalarKey) SipHash WAS the dominant cost. ALWAYS check for a stray std HashMap on a
+hot per-row path when FxHashMap is already the crate convention.
