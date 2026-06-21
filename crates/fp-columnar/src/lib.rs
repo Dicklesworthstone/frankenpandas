@@ -1860,6 +1860,7 @@ enum ScalarValues {
     LazyAllValidFloat64Chunks {
         chunks: Arc<[Float64Chunk]>,
         len: usize,
+        data: OnceLock<Vec<f64>>,
         all_finite: OnceLock<bool>,
         values: OnceLock<Vec<Scalar>>,
     },
@@ -2331,6 +2332,7 @@ impl ScalarValues {
         Self::LazyAllValidFloat64Chunks {
             chunks,
             len,
+            data: OnceLock::new(),
             all_finite: OnceLock::new(),
             values: OnceLock::new(),
         }
@@ -3537,6 +3539,28 @@ impl ScalarValues {
         {
             return Some(
                 data.get_or_init(|| plan.materialize_column(*col))
+                    .as_slice(),
+            );
+        }
+        None
+    }
+
+    fn materialize_float64_chunks(chunks: &[Float64Chunk], len: usize) -> Vec<f64> {
+        let mut out = Vec::with_capacity(len);
+        for chunk in chunks {
+            out.extend_from_slice(chunk.as_slice());
+        }
+        debug_assert_eq!(out.len(), len);
+        out
+    }
+
+    fn chunks_float64_data(&self) -> Option<&[f64]> {
+        if let Self::LazyAllValidFloat64Chunks {
+            chunks, len, data, ..
+        } = self
+        {
+            return Some(
+                data.get_or_init(|| Self::materialize_float64_chunks(chunks, *len))
                     .as_slice(),
             );
         }
@@ -6969,6 +6993,9 @@ impl Column {
             {
                 let end = start.checked_add(*len)?;
                 return data.get(*start..end);
+            }
+            if let Some(data) = self.values.chunks_float64_data() {
+                return Some(data);
             }
             if let Some(data) = self.values.dot_float64_data() {
                 return Some(data);
@@ -19029,7 +19056,10 @@ mod tests {
 
         assert_eq!(column.len(), 5);
         assert!(column.validity().all());
-        assert!(column.as_f64_slice().is_none());
+        assert_eq!(
+            column.as_f64_slice(),
+            Some([1.0, 2.0, 3.0, 4.0, 5.0].as_slice())
+        );
         assert_eq!(
             column.values(),
             &[

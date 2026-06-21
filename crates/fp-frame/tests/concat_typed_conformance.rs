@@ -71,6 +71,10 @@ fn concat_float64_labeled_typed_matches_expected() {
     let a = mk(&[0, 1], &[1.5, 2.5]);
     let b = mk(&[2, 3], &[3.5, 4.5]);
     let out = concat_series_with_ignore_index(&[&a, &b], false).unwrap();
+    assert_eq!(
+        out.column().as_f64_slice(),
+        Some([1.5, 2.5, 3.5, 4.5].as_slice())
+    );
     let got: Vec<f64> = out
         .values()
         .iter()
