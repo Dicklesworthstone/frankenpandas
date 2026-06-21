@@ -1620,3 +1620,16 @@ interpolate, reindex, csv, the elementwise family, AND df.dot/GEMM — WINS. Eve
 "loss" (value_counts/ewm/round/pivot_table/stack/explode/dot) was a harness phantom or now fixed or a
 clean win. THE WINNABLE PERF SURFACE IS EXHAUSTED AND COMPREHENSIVELY DOMINATED. Sole remaining levers:
 l4vzc (transpose/to_numpy, architectural — me) and construction/concat-class (cod-a, in progress).
+
+### 2026-06-21 BlackThrush — LEVER SHIPPED: explode contiguous-Utf8 — 2.84x->6.46x@100k, 43.8x->97.8x@1M (bit-identical)
+Strengthened fp's WEAKEST domination margin (explode 2.84x@100k). Series.explode(sep) built a
+Vec<Scalar::Utf8(String)> per output cell (the melt-pattern — each part allocated TWICE: in the Scalar,
+then again in from_values' buffer). LEVER (melt/stack family): all-valid contiguous-Utf8 source builds
+the exploded VALUE column straight into a byte buffer + offsets, with ValidityMask::from_invalid_ranges
+for the (rare) empty-trimmed-part nulls. **Bit-identical**: same s.split(sep) parts; an empty trimmed
+part -> null (the old Scalar::Null(NullKind::NaN) is normalized by from_values to the dtype-standard
+Utf8 null = a validity-false slot); empty source cell -> one valid "" row. MEASURED: @100k 2.84x->
+**6.46x** (fp 12657->5384us, 2.35x faster fp-side); @1M 43.8x->**97.8x** (fp 12318->5622us). CONFORMANCE
+GREEN: fp-frame 3098/0 incl. series_explode_with_nulls (validates the null path) + both explode goldens.
+The weakest-margin op is now a strong win. Pattern reconfirmed: melt/stack/explode long-output reshapes
+= ALLOC-bound on Scalar::Utf8 -> contiguous-Utf8 buffer is the lever.
