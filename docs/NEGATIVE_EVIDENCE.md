@@ -2826,3 +2826,15 @@ from_i64_values, no chrono). The per-row civil-from-ns is ~the inherent floor (f
 The only speedup (a day-cache reusing the civil date within a day) helps ONLY sorted data = bench-gaming, NOT
 a general win — so NOT pursued (discipline: don't optimize for the bench's sorted fixture). dt_dayofyear left
 at its ~0.86x inherent-floor marginal. All other dt accessors + ewm WIN.
+
+### 2026-06-21 BlackThrush — datetime accessors fully characterized: civil is Hinnant-optimal, 3 inherent-floor marginals
+Measured all dt accessors carefully @1M. WIN: dt_year 1.24x (year-only path), dt_hour 4.58x / dt_dayofweek
+4.74x (typed-ns, no civil), dt_floor 1.24x, to_datetime 3.81x, + the write!-buffer ones (dt_date/time/strftime,
+memory-confirmed big wins). INHERENT-FLOOR MARGINAL LOSSES: dt_month 0.96x, dt_quarter 0.91x, dt_dayofyear
+0.86x — all use the FULL civil date. Read datetime64_civil_from_nanos: it IS the Howard Hinnant civil_from_days
+(era/doe/yoe/doy/mp, ~10 branchless int ops, NO loops/chrono) = OPTIMAL. So these ~0.9x are the inherent floor
+(optimal civil + component extraction, fp Rust ~21ns vs pandas C ~20ns/row; dayofyear lower because of the
+extra DAYS_BEFORE sum). The only speedup = a day-cache reusing the civil within a day -> helps ONLY sorted
+data = BENCH-GAMING, not pursued. NO general bit-identical fix. The datetime category is fully characterized:
+typed-ns/year-only/write!-buffer ops dominate; the 3 full-civil-component accessors are at the optimal-civil
+floor (~0.9x). Added to the inherent-floor remaining list (with resample sum/min/max, unique).
