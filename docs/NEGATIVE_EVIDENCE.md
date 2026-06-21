@@ -1079,3 +1079,19 @@ components are now both typed (month_name + day_name); only weekofyear (ISO) rem
 STACK awaiting build+test: micro/nano, days_in_month, 7 bool predicates, month_name, day_name — all
 provably-bit-identical-by-inspection, same proven pattern; first action on disk-recover is
 `cargo build -p fp-bench` + the dt differential/golden tests.
+
+### 2026-06-21 BlackThrush — dt.date typed civil fast path (CODE-ONLY, perf PENDING disk-CRITICAL)
+DISK-CRITICAL (38G, no cargo): code-only. dt.date's typed path called
+extract_component_typed_str(|ts| format!("{y:04}-{m:02}-{d:02}", ts.year/month/day)) — chrono
+Timestamp::from_nanos + THREE separate year()/month()/day() calls (each a full civil computation) per
+element. Added a String-output civil helper (typed_datetime_civil_string_component_all_valid — like
+the month_name &'static-str helper but returns an owned String) and wired dt.date with the closure
+|(y,m,d)| format!("{y:04}-{m:02}-{d:02}"). **Bit-identity TRIVIALLY provable**: same Scalar::Utf8 +
+Column::from_values builder, same format! producing the same string (civil y/m/d == Timestamp
+year/month/day, all verified); NaT/non-dense fall back. Bigger win than month_name (one civil
+computation replaces THREE chrono civil computations + from_nanos). Compile risk LOW (near-copy of the
+shipped month_name helper). UNMEASURED — VERIFY when disk recovers. DT ACCESSOR VEIN now fully typed
+EXCEPT weekofyear (ISO 8601 — deferred: depends on the still-unverified dayofyear matching
+Timestamp::dayofyear + iso_weeks_in_year edge cases; build it on the verified foundation, with tests,
+when disk recovers). Unverified code-only stack: micro/nano, days_in_month, 7 bools, month_name,
+day_name, date — first action on disk-recover: `cargo build -p fp-bench` + dt differential/golden tests.
