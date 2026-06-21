@@ -2766,3 +2766,13 @@ unchanged so it's NOT a MultiIndex rewrite (tractable) but the multi-key factori
 marginal 0.89x->~1.5x gain on a less-common op. DEFERRED (low EV, disk-tight). The single-string-key groupby
 (common) already wins via the contiguous-Utf8 dense path; only the multi-string composite is at the generic
 hash floor.
+
+### 2026-06-21 BlackThrush — multi-string-key groupby 0.89x->1.12x via GroupMap FxHashMap (br-buguz)
+The multi-string-key loss root was the GENERIC DataFrameGroupBy build_groups using std HashMap (SipHash) for
+the per-row composite GroupKey<&str,&str> hash (type GroupMap @1126 + 4 constructions, the generic @59740
+being the per-row one). Converted GroupMap to FxHashMap (rustc_hash). Bit-identical: the output group ORDER
+is group_order-determined (first-seen row order, separate from the map) and groups[key]=positions are the same
+regardless of hasher — only the internal bucketing changes. MEASURED: df_groupby_2strkey_sum 0.89x->1.12x@1M
+(122->94ms), groupby 202/0 green. This was the SIMPLE proven lever (FxHashMap), NOT the involved
+factorize+combine I'd assessed — and it helps ALL generic multi-key/composite/Bool/Float64-key groupby, not
+just multi-string. br-buguz resolved. The last tractable groupby loss is now a WIN.
