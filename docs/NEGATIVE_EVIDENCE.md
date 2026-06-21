@@ -2510,3 +2510,9 @@ closure). MEASURED @1M (NEW benches groupby_min_str/groupby_max_str): min 3.25x,
 vs pandas inline ~39.5ms). The helper is reusable — mean/sum could be rewired onto it (var stays two-pass);
 left inline for now (shipped+green). GROUPBY now: mean 3.45x/sum 6.88x/var 3.52x/std 2.45x/min 3.25x/max
 3.23x/median 2.09x/count 5.92x/cumcount 7.56x/transform 1.54x/multi-agg 1.33x — ALL WIN.
+
+### 2026-06-21 BlackThrush — consolidated mean/sum onto dense_group_fold (removed ~80 lines duplication)
+Refactored SeriesGroupBy mean+sum to call the dense_group_fold helper (mean: fold a+x, finish a/n; sum:
+fold a+x, finish a) instead of their duplicated inline gid+order blocks. Removed ~80 lines. Bit-identical
+(groupby 202/0; mean 3.54x, sum df 7.15x — unchanged within variance). Now the dense single-pass lever lives
+in ONE helper (mean/sum/min/max) + the var two-pass inline; no 5x duplication. Conformance green.
