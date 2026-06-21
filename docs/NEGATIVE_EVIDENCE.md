@@ -2681,3 +2681,14 @@ F64 buckets-once (build per-bin f64 buckets ONCE, apply each func) is bit-identi
 no-NaN + non-empty bins (n<2 var/std -> Null(NaN) matching nanvar). MEASURED: resample_agg3 87951->22445us@1M
 = 0.38x->1.48x WIN (3.9x fp-side). BOTH multi-func agg per-func-rebuild losses now fixed (groupby cbec50cd +
 resample). Rolling/Expanding/Ewm aggs don't share the pattern (online passes, no build_groups).
+
+### 2026-06-21 BlackThrush — turn summary: both multi-func agg per-func-rebuild losses FIXED
+Found + fixed the per-func-rebuild pattern in BOTH places it occurs (build_groups-based aggs):
+  groupby.agg(["mean","std","max"]) 0.63x->2.63x (buckets-once, cbec50cd, br-4h46q)
+  resample.agg(["mean","std","max"]) 0.38x->1.48x (F64 buckets-once, d6289821, br-833wx)
+Rolling/Expanding/Ewm aggs DON'T share it (online passes, no group rebuild). UNBLOCKED follow-up (marginal,
+not done): single-agg resample std/var 0.92x — now that fp_types::nanvar is verified == the mean-centered
+two-pass, a typed std/var fast path (skip the input Scalar materialization, like resample.mean) is provably
+bit-identical and would flip it to ~1.1x; left as a marginal ~parity candidate (lower value than the
+multi-func wins). Remaining non-wins: golden-gated (expanding skew/kurt br-nsyti), architectural
+(multi-string-key, to_numpy/transpose l4vzc), marginal (resample single std/var 0.92x, unique 0.96x).
