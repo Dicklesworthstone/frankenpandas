@@ -12125,7 +12125,10 @@ impl CategoricalIndex {
     }
 
     fn category_rank_unique_scan_is_bounded(&self) -> bool {
-        self.categories.len() <= self.labels.len().saturating_mul(16)
+        // Category-rank scans pay O(category_count) metadata work before the
+        // label pass. Keep this stricter than dense integer span heuristics so
+        // sparse category universes fall back to the O(label_count) hash path.
+        self.categories.len() <= self.labels.len().saturating_mul(8)
     }
 
     fn labels_are_unique_by_hash(&self) -> bool {

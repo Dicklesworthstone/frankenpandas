@@ -1122,7 +1122,9 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = monthly.aggregate(&["mean", "sem"])?;
     assert_eq!(monthly.keys().len(), 2);
     assert_eq!(
-        monthly.indices().get(&IndexLabel::Utf8("2024-01".into())),
+        monthly
+            .indices()
+            .get(&IndexLabel::Utf8("2024-01-31".into())),
         Some(&vec![0, 1])
     );
     assert_eq!(monthly.groups(), monthly.indices());
@@ -1131,7 +1133,7 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     assert_eq!(monthly.ngroups(), 2);
     assert_eq!(monthly.ndim(), 1);
     assert!(monthly.exclusions().is_empty());
-    assert_eq!(monthly.get_group("2024-01")?.len(), 2);
+    assert_eq!(monthly.get_group("2024-01-31")?.len(), 2);
     let _ = monthly.asfreq()?;
     let _ = monthly.ffill(None)?;
     let _ = monthly.bfill(None)?;
@@ -1240,7 +1242,7 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = drs.aggregate(&["sem", "size", "nunique"])?;
     assert_eq!(drs.keys().len(), 2);
     assert_eq!(
-        drs.indices().get(&IndexLabel::Utf8("2024-01".into())),
+        drs.indices().get(&IndexLabel::Utf8("2024-01-31".into())),
         Some(&vec![0, 1])
     );
     assert_eq!(drs.groups(), drs.indices());
@@ -1249,7 +1251,7 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     assert_eq!(drs.ngroups(), 2);
     assert_eq!(drs.ndim(), 2);
     assert!(drs.exclusions().is_empty());
-    assert_eq!(drs.get_group("2024-01")?.len(), 2);
+    assert_eq!(drs.get_group("2024-01-31")?.len(), 2);
     let _ = drs.asfreq()?;
     let _ = drs.ffill(None)?;
     let _ = drs.bfill(None)?;

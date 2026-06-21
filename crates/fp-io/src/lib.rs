@@ -608,6 +608,17 @@ pub fn read_fwf_str(input: &str, options: &FwfReadOptions) -> Result<DataFrame, 
 /// `raw` must be positionally aligned with `values` (same length).
 fn build_csv_object_aware_column(values: Vec<Scalar>, raw: &[String]) -> Result<Column, IoError> {
     let column = Column::from_values(values)?;
+    if column.dtype() == DType::Float64 {
+        let normalized = column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Null(_) => Scalar::Null(NullKind::NaN),
+                other => other.clone(),
+            })
+            .collect();
+        return Ok(Column::new(DType::Float64, normalized)?);
+    }
     if column.dtype() == DType::Utf8 && column.values().len() == raw.len() {
         let rebuilt: Vec<Scalar> = column
             .values()
@@ -4264,6 +4275,8 @@ fn apply_sql_coerce_float(columns: &mut [Vec<Scalar>]) {
         for (value, parsed) in column.iter_mut().zip(parsed_values) {
             if let Some(parsed) = parsed {
                 *value = Scalar::Float64(parsed);
+            } else if value.is_missing() {
+                *value = Scalar::Null(NullKind::NaN);
             }
         }
     }

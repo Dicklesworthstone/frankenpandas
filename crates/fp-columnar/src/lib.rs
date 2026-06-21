@@ -5965,6 +5965,16 @@ impl Column {
         }
     }
 
+    fn from_object_values(values: Vec<Scalar>) -> Self {
+        let validity = ValidityMask::from_values(&values);
+        Self {
+            dtype: DType::Utf8,
+            values: ScalarValues::from_vec(values),
+            validity,
+            data: None,
+        }
+    }
+
     /// Construct a column, coercing values to the target dtype.
     /// AG-03: takes ownership of the values vec and uses `cast_scalar_owned`
     /// to skip cloning when values already have the correct dtype.
@@ -6034,6 +6044,34 @@ impl Column {
         })
     }
 
+    fn from_inferred_float64_values(values: Vec<Scalar>) -> Result<Self, ColumnError> {
+        let coerced = values
+            .into_iter()
+            .map(|value| match value {
+                Scalar::Null(kind) => Ok(Scalar::Null(kind)),
+                other => cast_scalar_owned(other, DType::Float64),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let validity = ValidityMask::from_values(&coerced);
+        let data = Self::cached_data_for_values(DType::Float64, &coerced);
+        let values = match (&data, validity.all()) {
+            (Some(ColumnData::Float64(data)), true) => {
+                ScalarValues::lazy_all_valid_float64_arc_with_finite(
+                    Arc::clone(data),
+                    Some(data.iter().all(|value| value.is_finite())),
+                )
+            }
+            _ => ScalarValues::from_vec(coerced),
+        };
+
+        Ok(Self {
+            dtype: DType::Float64,
+            validity,
+            data,
+            values,
+        })
+    }
+
     pub fn from_values(values: Vec<Scalar>) -> Result<Self, ColumnError> {
         if matches!(values.first(), Some(Scalar::Float64(_))) {
             let mut data = Vec::with_capacity(values.len());
@@ -6056,7 +6094,16 @@ impl Column {
             }
         }
 
-        let dtype = infer_dtype(&values)?;
+        let dtype = match infer_dtype(&values) {
+            Ok(dtype) => dtype,
+            Err(TypeError::IncompatibleDtypes { .. }) => {
+                return Ok(Self::from_object_values(values));
+            }
+            Err(err) => return Err(ColumnError::Type(err)),
+        };
+        if dtype == DType::Float64 {
+            return Self::from_inferred_float64_values(values);
+        }
         Self::new(dtype, values)
     }
 
@@ -7734,16 +7781,12 @@ impl Column {
     /// `self` it already matches `self.dtype` (no coercion needed), so this
     /// skips the dtype-coercion and object-bucket detection scans that
     /// `Column::new` performs. All-valid source columns clone values directly
-    /// and emit an all-valid mask; missing-bearing columns fold the
-    /// missing-normalization and validity rebuild into a single pass.
+    /// and emit an all-valid mask; missing-bearing columns clone the stored
+    /// scalar exactly and rebuild validity from that scalar.
     ///
-    /// The output is bit-for-bit identical to
-    /// `Column::new(self.dtype(), positions.iter().map(|&p| self.values[p].clone()).collect())`
-    /// (the no-coercion branch `Column::new` takes for same-dtype input): each
-    /// gathered value is missing-normalized via `normalize_missing_for_dtype`
-    /// (generic `Null` → dtype-specific missing, e.g. `NaT` for datetime), and
-    /// the validity mask is recomputed from the normalized values'
-    /// `is_missing()` exactly as `ValidityMask::from_values` would.
+    /// Row gather is a structural reorder, not a dtype-construction boundary:
+    /// the output preserves the exact stored scalar/null kind at each selected
+    /// source row, and recomputes validity from those gathered scalars.
     ///
     /// # Panics
     /// Panics if any position is out of bounds (callers materialize from
@@ -7954,7 +7997,7 @@ impl Column {
         let mut values = Vec::with_capacity(n);
         let mut words = vec![0_u64; n.div_ceil(64)];
         for (out_idx, &pos) in positions.iter().enumerate() {
-            let value = Self::normalize_missing_for_dtype(self.values[pos].clone(), self.dtype);
+            let value = self.values[pos].clone();
             if !value.is_missing() {
                 words[out_idx / 64] |= 1_u64 << (out_idx % 64);
             }
@@ -9117,9 +9160,14 @@ impl Column {
         // Column::new revalidation. Missing slots (None or out-of-range)
         // produce exactly missing_for_dtype: Null(NullKind::Null) via the
         // nullable-Int64 backing, Null(NullKind::NaN) via the 0.0-datum
-        // nullable-Float64 convention; valid slots clone the raw datum.
+        // nullable-Float64 convention; valid slots clone the raw datum. These
+        // typed fast paths are all-valid only: nullable eager Float64 columns
+        // may carry per-position NullKind that must be preserved by the scalar
+        // fallback below.
         let n = positions.len();
-        if let Some(slice) = self.as_i64_slice() {
+        if self.validity.all()
+            && let Some(slice) = self.as_i64_slice()
+        {
             let mut data = Vec::with_capacity(n);
             let mut words = vec![0_u64; n.div_ceil(64)];
             for (out_idx, slot) in positions.iter().enumerate() {
@@ -9136,7 +9184,9 @@ impl Column {
                 ValidityMask::from_words(words, n),
             ));
         }
-        if let Some(slice) = self.as_f64_slice() {
+        if self.validity.all()
+            && let Some(slice) = self.as_f64_slice()
+        {
             let mut data = Vec::with_capacity(n);
             let mut words = vec![0_u64; n.div_ceil(64)];
             for (out_idx, slot) in positions.iter().enumerate() {
@@ -9231,7 +9281,60 @@ impl Column {
             })
             .collect::<Vec<_>>();
 
-        Self::new(self.dtype, values)
+        let validity = ValidityMask::from_values(&values);
+        Ok(Self {
+            dtype: self.dtype,
+            values: ScalarValues::from_vec(values),
+            validity,
+            data: None,
+        })
+    }
+
+    /// Reindex by optional source positions, using `absent` for missing target
+    /// rows while preserving the exact stored scalar for present source rows.
+    #[doc(hidden)]
+    pub fn reindex_by_positions_with_absent_scalar(
+        &self,
+        positions: &[Option<usize>],
+        absent: Scalar,
+    ) -> Result<Self, ColumnError> {
+        let mut present_positions = Vec::with_capacity(positions.len());
+        let mut all_present = true;
+        for position in positions {
+            match position {
+                Some(idx) if *idx < self.len() => present_positions.push(*idx),
+                Some(_) | None => {
+                    all_present = false;
+                    break;
+                }
+            }
+        }
+        if all_present {
+            return Ok(self.take_positions(&present_positions));
+        }
+
+        if absent == Scalar::missing_for_dtype(self.dtype) {
+            return self.reindex_by_positions(positions);
+        }
+
+        let values = positions
+            .iter()
+            .map(|slot| match slot {
+                Some(idx) => self
+                    .values
+                    .get(*idx)
+                    .cloned()
+                    .unwrap_or_else(|| absent.clone()),
+                None => absent.clone(),
+            })
+            .collect::<Vec<_>>();
+        let validity = ValidityMask::from_values(&values);
+        Ok(Self {
+            dtype: self.dtype,
+            values: ScalarValues::from_vec(values),
+            validity,
+            data: None,
+        })
     }
 
     /// AG-10: Attempt vectorized typed-array path for binary arithmetic.
@@ -10878,6 +10981,15 @@ impl Column {
     /// The mask must be a `Bool`-typed column of the same length.
     /// Missing values in the mask are treated as `false` (not selected).
     pub fn filter_by_mask(&self, mask: &Self) -> Result<Self, ColumnError> {
+        if mask.dtype == DType::Null {
+            if self.len() != mask.len() {
+                return Err(ColumnError::LengthMismatch {
+                    left: self.len(),
+                    right: mask.len(),
+                });
+            }
+            return Self::new(self.dtype, Vec::new());
+        }
         if mask.dtype != DType::Bool {
             return Err(ColumnError::InvalidMaskType { dtype: mask.dtype });
         }
@@ -11102,8 +11214,7 @@ impl Column {
             return Self::new(self.dtype, Vec::new());
         }
         let end = start.saturating_add(len).min(self.values.len());
-        let values = self.values[start..end].to_vec();
-        Self::new(self.dtype, values)
+        Ok(self.take_contiguous_range(start, end - start))
     }
 
     /// Return the first `n` values.
@@ -12195,6 +12306,18 @@ impl Column {
 
     /// Per-row check for NaN values.
     pub fn isnan(&self) -> Result<Self, ColumnError> {
+        if self.dtype == DType::Float64 && matches!(&self.values, ScalarValues::Eager(_)) {
+            let out: Vec<Scalar> = self
+                .values
+                .iter()
+                .map(|v| match v {
+                    Scalar::Float64(f) => Scalar::Bool(f.is_nan()),
+                    Scalar::Null(NullKind::NaN) => Scalar::Bool(true),
+                    _ => Scalar::Bool(false),
+                })
+                .collect();
+            return Self::new(DType::Bool, out);
+        }
         if let Some(out) = self.bool_values_from_f64(true, f64::is_nan) {
             return Ok(Self::from_bool_values(out));
         }

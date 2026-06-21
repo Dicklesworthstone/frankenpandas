@@ -2735,7 +2735,12 @@ impl Timestamp {
             return Ok(Self::nat());
         }
 
-        let (datetime_part, tz) = Self::split_timezone(s);
+        let Some((datetime_part, tz)) = Self::split_timezone(s) else {
+            return Err(TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "Timestamp".to_string(),
+            });
+        };
 
         let (date_part, time_part) = if datetime_part.contains('T') {
             datetime_part
@@ -2778,23 +2783,27 @@ impl Timestamp {
         })
     }
 
-    fn split_timezone(s: &str) -> (&str, Option<String>) {
+    fn split_timezone(s: &str) -> Option<(&str, Option<String>)> {
         if let Some(stripped) = s.strip_suffix('Z') {
-            (stripped, Some("UTC".to_string()))
+            Some((stripped, Some("UTC".to_string())))
         } else if let Some(idx) = s.rfind('+') {
             if idx > 10 && Self::is_timezone_offset(&s[idx..]) {
-                (&s[..idx], Some(s[idx..].to_string()))
+                Some((&s[..idx], Some(s[idx..].to_string())))
+            } else if idx > 10 {
+                None
             } else {
-                (s, None)
+                Some((s, None))
             }
         } else if let Some(idx) = s.rfind('-') {
             if idx > 10 && Self::is_timezone_offset(&s[idx..]) {
-                (&s[..idx], Some(s[idx..].to_string()))
+                Some((&s[..idx], Some(s[idx..].to_string())))
+            } else if idx > 10 {
+                None
             } else {
-                (s, None)
+                Some((s, None))
             }
         } else {
-            (s, None)
+            Some((s, None))
         }
     }
 
@@ -9735,7 +9744,7 @@ mod tests {
         assert!(ts.floor_to(10).is_nat());
 
         let safe = Timestamp::from_nanos(i64::MIN + 10);
-        assert_eq!(safe.floor_to(10).nanos, i64::MIN + 10);
+        assert_eq!(safe.floor_to(10).nanos, i64::MIN + 8);
 
         let tz = Timestamp::from_nanos_tz(-100, "UTC").floor_to(60);
         assert_eq!(tz.nanos, -120);
