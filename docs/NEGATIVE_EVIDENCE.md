@@ -1319,3 +1319,13 @@ left-fold over the same f64 values in the same order as the generic `product *= 
 as_f64_slice is all-valid so nothing is skipped — exactly as sum()'s typed path argues. Less common
 than min/max/sum but a real gap, provably bit-identical. Series numeric reductions (sum/mean/min/max/
 prod) are now ALL typed for Float64. UNMEASURED — verify when disk recovers.
+
+### 2026-06-21 BlackThrush — any()/all() typed Int64+Float64 paths (CODE-ONLY, perf PENDING disk-low)
+DISK-LOW (38G, no cargo): code-only. Series.any()/all() had a typed Bool fast path but NUMERIC columns
+(Int64/Float64) fell to the .values() Scalar + per-element scalar_truthy scan. Added typed Int64
+(`v != 0`) and Float64 (`v != 0.0`) paths. **Bit-identity provable**: scalar_truthy(Int64(v)) == v!=0
+and scalar_truthy(Float64(v)) == (!is_nan && v!=0.0); as_i64_slice/as_f64_slice are all-valid and
+as_f64_slice is no-NaN (so the is_nan guard is moot, and -0.0 != 0.0 is false == falsy, matching), no
+missing to skip. Benefits DataFrame.any()/all() on numeric frames (per-column reduction). UNMEASURED
+— verify when disk recovers. NOTE: verified the Series numeric/dedup family is now FULLY typed
+(min/max/sum/prod/argmin/argmax/unique/nunique/mode/value_counts/quantile/var/any/all + cum*).
