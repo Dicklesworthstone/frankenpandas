@@ -1119,7 +1119,7 @@ fn scalar_to_string_for_astype(value: Scalar) -> String {
     }
 }
 
-fn float_to_string_for_astype(value: f64) -> String {
+pub fn float_to_string_for_astype(value: f64) -> String {
     if value.is_nan() {
         return "nan".to_owned();
     }

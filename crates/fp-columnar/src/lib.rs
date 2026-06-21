@@ -14338,6 +14338,27 @@ impl Column {
             }
             return Ok(Self::from_utf8_contiguous(bytes, offsets));
         }
+        // Float64 -> Utf8: CALL the exact pandas float formatter
+        // (`fp_types::float_to_string_for_astype` — the very fn cast_scalar uses,
+        // so the complex "1.0"/shortest-round-trip/scientific spelling is NOT
+        // replicated) on each value, extending its bytes into a contiguous
+        // buffer. Skips the source Scalar::Float64 Vec + the output Scalar::Utf8
+        // Vec + from_values (the formatter's own String alloc remains).
+        // Bit-identical. as_f64_slice is all-valid AND no-NaN, so the formatter's
+        // NaN branch is never reached here (a NaN column declines as_f64_slice and
+        // takes the Scalar map, which renders "nan"); inf is still handled.
+        if target == DType::Utf8
+            && let Some(data) = self.as_f64_slice()
+        {
+            let mut bytes: Vec<u8> = Vec::with_capacity(data.len() * 6);
+            let mut offsets: Vec<usize> = Vec::with_capacity(data.len() + 1);
+            offsets.push(0);
+            for &v in data {
+                bytes.extend_from_slice(fp_types::float_to_string_for_astype(v).as_bytes());
+                offsets.push(bytes.len());
+            }
+            return Ok(Self::from_utf8_contiguous(bytes, offsets));
+        }
         let out: Vec<Scalar> = self
             .values
             .iter()

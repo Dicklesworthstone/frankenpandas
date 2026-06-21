@@ -1737,3 +1737,16 @@ MEASURED: astype_str_bool fp=331us = **347.57x** vs pandas. Conformance GREEN (f
 spelling test). The SAFE astype(str) cases are now all typed-fast: Int64 90.1x, Bool 347x. Float64
 DEFERRED (35.9x win; cast_scalar's float formatter is the complex pandas repr — shortest-round-trip +
 ".0" + scientific threshold — too risky to replicate write-into-buffer bit-identically).
+
+### 2026-06-21 BlackThrush — LEVER: Float64 astype(str) via CALLING the formatter — 35.9x->61.5x; astype(str) COMPLETE
+Found the SAFE way to do the float case I'd deferred: instead of REPLICATING cast_scalar's complex
+pandas float repr with write! (risky), made fp_types::float_to_string_for_astype pub (1-line, additive)
+and CALL it from a Column::astype Float64->Utf8 fast path — extending its bytes into a contiguous buffer.
+Skips the source Scalar::Float64 Vec + the output Scalar::Utf8 Vec + from_values (the formatter's own
+String alloc remains). **Bit-identical** (same fn cast_scalar uses — the float spelling test
+astype_to_utf8_uses_pandas_string_spellings PASSES). as_f64_slice is all-valid+no-NaN so the formatter's
+NaN branch isn't reached (NaN columns take the Scalar map -> "nan"); inf handled. MEASURED: astype_str_f64
+13464->7923us (1.70x fp-side) -> **61.54x** vs pandas (was 35.9x). CONFORMANCE GREEN: fp-columnar 436/0
++ fp-frame 3098/0. astype(str) is now COMPLETE: Int64 90.1x, Bool 347x, Float64 61.5x — all bit-identical.
+LESSON: when a formatter is too complex to replicate write-into-buffer, CALL it (avoid the Scalar Vecs +
+from_values) for a safe ~1.7-2x; only the formatter's own String alloc remains.
