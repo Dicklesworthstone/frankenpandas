@@ -1272,3 +1272,17 @@ materializations. **Bit-identity provable**: on an all-valid column position 0 (
 first (resp. last) non-missing, and index_label_at(pos) == labels()[pos] (the idxmax helper); empty ->
 None either way; a column WITH missing falls to the original loop. column.validity().all() is
 precedented in fp-frame (line 15031). UNMEASURED — verify when disk recovers.
+
+### 2026-06-21 BlackThrush — skipna missing-checks -> hasnans() (CODE-ONLY, perf PENDING disk-low)
+DISK-LOW (38G, no cargo): code-only. 10 Series skipna reduction methods (sum/mean/min/max/prod/std/
+var/sem_skipna + 2 more) gated their NaN-propagation branch on
+`!skipna && self.column.values().iter().any(Scalar::is_missing)` — materializing the full Scalar Vec
+even for Int64/Bool/Utf8 columns. Replaced with `!skipna && self.hasnans()` (the canonical optimized
+check). **Bit-identity carefully verified**: `values().any(is_missing)` == hasnans() — hasnans returns
+true on any validity-false bit (== a Null-materialized is_missing), else falls to the SAME
+`values().any(is_missing)` for Float64/Datetime64/Timedelta64 (in-band NaN/NaT). CRUCIAL: I nearly
+used `!validity().all()` instead, which would be a BUG — it misses in-band NaN/NaT that is_missing
+catches (Float64 can carry a validity-true... no: NaN is validity-false, but the hasnans dtype-match
+preserves the exact Scalar semantics; using hasnans is the safe equivalent, not validity().all()).
+Win: hasnans skips materialization for all-valid Int64/Bool/Utf8 and early-returns on any null; only
+applies to the uncommon skipna=false path, so MARGINAL but bit-identical + DRY. UNMEASURED.
