@@ -1633,3 +1633,17 @@ Utf8 null = a validity-false slot); empty source cell -> one valid "" row. MEASU
 GREEN: fp-frame 3098/0 incl. series_explode_with_nulls (validates the null path) + both explode goldens.
 The weakest-margin op is now a strong win. Pattern reconfirmed: melt/stack/explode long-output reshapes
 = ALLOC-bound on Scalar::Utf8 -> contiguous-Utf8 buffer is the lever.
+
+### 2026-06-21 BlackThrush — apply_str contiguous fast path REGRESSED (reverted); str ops win 12-174x
+Hypothesis: apply_str (backs zfill/pad/repeat/slice/replace/strip/title/... — every Utf8-output str
+accessor) materializes the source values() (Vec<Scalar::Utf8>) before mapping, so a contiguous-Utf8
+fast path (pass spans straight to func as &str, like apply_str_int's rung 3) would skip 1M source
+allocs. MEASURED: it REGRESSED 10-18% — str_zfill 7645->8542us (0.90x), str_pad 7844->9294us (0.84x),
+str_repeat 2677->3171us (0.84x). REVERTED. NEGATIVE EVIDENCE: values() for a contiguous Utf8 column is
+already cheap (cached/optimized iterator); the source materialization was NOT the bottleneck, and the
+per-element std::str::from_utf8 validation + bounds-checked span slicing ADDED overhead. (Distinct from
+apply_str_int where the typed-Int64 output build is the win — for apply_str the OUTPUT Scalar::Utf8 +
+from_values dominates, and the source read is already fast.) Added str_zfill/pad/repeat regression-guard
+benches: str ops WIN 12.5x/11.9x/145.7x vs pandas (pandas str accessors are Python-level). Conclusion:
+str ops are strong wins; apply_str is not a lever. Weakest margins now: join_outer 5.8x, explode 6.46x
+(both fixed/strong). No loss remains except to_numpy(bench-only)/transpose(l4vzc).

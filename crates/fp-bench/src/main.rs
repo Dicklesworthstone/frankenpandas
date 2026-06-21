@@ -831,6 +831,22 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 }),
             }
         }
+        // apply_str-backed transforms (zfill/pad/repeat): output Utf8 columns.
+        ("strings", "str_zfill" | "str_pad" | "str_repeat") => {
+            let frame = build_str_frame(rows);
+            let series = frame.get_column("name");
+            match workload {
+                "str_zfill" => time_us(|| {
+                    let _ = series.str().zfill(20).expect("str zfill");
+                }),
+                "str_pad" => time_us(|| {
+                    let _ = series.str().pad(20, "left", ' ').expect("str pad");
+                }),
+                _ => time_us(|| {
+                    let _ = series.str().repeat(2).expect("str repeat");
+                }),
+            }
+        }
         ("strings", "str_sort" | "str_value_counts" | "str_groupby_sum") => {
             let frame = build_str_frame(rows);
             match workload {
