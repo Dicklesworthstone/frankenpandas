@@ -959,6 +959,14 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = gdf.groupby(&["key"]).expect("groupby").sum().expect("sum");
             })
         }
+        ("groupby", "groupby_agg3_str") => {
+            let mut kb = Vec::with_capacity(rows * 5); let mut ko = Vec::with_capacity(rows + 1); ko.push(0usize);
+            for &v in raw[0].iter() { kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes()); ko.push(kb.len()); }
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
+            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
+            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").agg(&["mean","std","max"]).expect("agg"); })
+        }
         ("groupby", "df_groupby_int_var") => {
             let mut columns = BTreeMap::new();
             let key_vals: Vec<i64> = (0..rows).map(|i| (i % 1000) as i64).collect();

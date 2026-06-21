@@ -2557,3 +2557,14 @@ group-major), bit-identical (groupby 202/0; first-seen group + value order, miss
 190->134ms = 0.59x->0.83x (1.4x fp-side). STILL a marginal loss — residual is the 1M-Scalar output build
 (out_values Vec<Scalar> + from_values). NEXT: typed f64 output (collect uniques as Vec<f64> + from_f64_values,
 dedup on bits) to close to a win.
+
+### 2026-06-21 BlackThrush — multi-func groupby agg(["mean","std","max"]) 0.63x LOSS (per-func rebuild)
+SeriesGroupBy::agg(funcs) loops funcs calling each per-func method (self.mean(), self.std(), ...), so it
+REBUILDS the dense gids per func (and std re-derives via var = another build) — N gid builds + N full passes
+vs pandas' amortized grouper (factorize once + N reductions). @1M agg(["mean","std","max"]): fp=73120us vs
+pandas=46016us -> 0.63x LOSS. Bench groupby_agg3_str added. FIX (filed): (a) gid cache — OnceCell<Option<
+(Vec<usize>,usize)>> field on SeriesGroupBy (struct is 2 fields/1 ctor) + dense_group_ids returns &[usize]
+(no single-agg clone regression); amortizes the N gid builds (partial, ~0.79x est). (b) buckets-once (the
+real flip) — agg(funcs) builds gids+buckets ONCE then applies each func over the shared buckets, one result
+DataFrame. Focused rewrite, not an end-of-session blind edit. NOTE: this also caps the multi-agg gid-cache
+lever (1.33x->~1.75x).
