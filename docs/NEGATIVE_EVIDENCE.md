@@ -2532,3 +2532,12 @@ value order == nums.iter().product()'s left fold. New bench groupby_prod_str: 3.
 agg_numeric-using SeriesGroupBy reduction is single-pass (mean/sum/min/max/prod via the helper, var/std
 two-pass inline). Remaining: sem/skew (agg_values_scalar — need all values, like median; bit-identity vs
 nansem/nanskew not worth the risk) + median (bucket order stat) — both already WIN inline.
+
+### 2026-06-21 BlackThrush — agg_values_scalar dense-bucket: groupby sem 0.70x->1.19x, skew 0.72x->1.32x (REAL losses flipped)
+Found the LAST real groupby losses: sem 0.70x, skew 0.72x @1M (inline, fair). Root cause: agg_values_scalar
+(the path sem/skew/value-aggs use) still used build_groups + a SCATTERED per-group values()[idx] gather —
+the slow path agg_numeric escaped long ago. Added the dense-bucket fast path (dense_group_ids int64/Utf8 ->
+push each row's Scalar into its per-gid bucket in ONE sequential pass, no build_groups map, no scattered
+gather). Bit-identical (groupby 202/0; first-seen gids/labels, value-order buckets, same func, same nullable
+preservation). MEASURED @1M: sem 62000->36366us (0.70x->1.19x WIN), skew ->33936us (0.72x->1.32x WIN). This
+path is shared, so ALL agg_values_scalar aggs benefit. NOW the groupby surface has ZERO known losses.
