@@ -1211,3 +1211,14 @@ Timedelta64 column (no Utf8); NaT → fall back (Scalar path renders missing). U
 let-chain (117 in fp-frame). UNMEASURED — VERIFY when disk recovers (pandas tdelta.dt.total_seconds;
 expect a solid win — skips Scalar + the prefix scan). Opens the timedelta-accessor vein (next:
 .days/.seconds/.microseconds if exposed). Stack now spans fp-columnar too — build BOTH crates on recover.
+
+### 2026-06-21 BlackThrush — set_index typed Float64 label path (CODE-ONLY, perf PENDING disk-low)
+DISK-LOW (38G, no cargo): code-only. NON-dt lever for a real measured loss. set_index already had a
+typed Int64 path (as_i64_slice -> Index::from_i64_values) but the bench (set_index on float64 col_0)
+fell to the generic path: source.values() Scalar Vec + scalar_to_index_label map per row. set_index
+float64 was measured 0.61x@100k (loss), 5.9x@1M (win). Added a typed all-valid Float64 branch:
+as_f64_slice -> map each v to IndexLabel::Float64(OrderedF64(if v==0.0 {0.0} else {v})), VERBATIM the
+scalar_to_index_label Float64 arm (-0.0 normalized; all-valid so no Null to reject). **Bit-identity
+TRIVIALLY provable** (same labels as the generic path; the pattern IndexLabel::Float64(OrderedF64(..))
+is used 13x in fp-frame already). Win: skips the 100k Scalar materialization. UNMEASURED — VERIFY when
+disk recovers (expect ~parity at 100k, still a win at 1M). The set_index Int64 path was already typed.
