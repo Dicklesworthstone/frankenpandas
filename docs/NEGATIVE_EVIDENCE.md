@@ -1897,3 +1897,13 @@ series_categorical bench. MEASURED before/after: 2750us(std) -> 1570us(Fx) = ~43
 (codes = first-seen order via categories.len(), independent of map iteration). Conformance GREEN.
 SEVENTH FxHashMap-family win this session (pivot_table/pivot/crosstab/series_map/get_dummies/from_categorical
 + unstack O(N^2)). The std-HashMap-on-per-row lever extends beyond reshapes to categorical construction.
+
+### 2026-06-21 BlackThrush — resample LOSS (0.05x@10k); fix is int-period bucketing NOT FxHashMap (filed)
+series.resample("M").mean() = 0.05x@10k/0.17x@100k/1.70x@1M (fp ~14200us flat). Added resample_mean bench.
+The flat input-independence + code show the cost is the PER-ROW String key construction
+(resample_month_end_key builds a month-end date String per row = 1M format! allocs), NOT the std-SipHash
+groups (the to_csv/flat lesson — hashing would scale). VERIFIED FxHashMap alone fails: the 6 bucketing
+fns RETURN std::collections::HashMap so converting the local breaks the return type (E0308, multi-site) AND
+would be ~0-gain. REAL LEVER (filed): integer-period keys (year*12+month etc.) — O(N), labels built once
+per bucket not per row. Significant + golden-gated. NEGATIVE EVIDENCE: not every std HashMap is the cost;
+when a per-row String KEY feeds the map, the String construction is the smell (cf crosstab/get_dummies).
