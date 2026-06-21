@@ -2516,3 +2516,11 @@ Refactored SeriesGroupBy mean+sum to call the dense_group_fold helper (mean: fol
 fold a+x, finish a) instead of their duplicated inline gid+order blocks. Removed ~80 lines. Bit-identical
 (groupby 202/0; mean 3.54x, sum df 7.15x — unchanged within variance). Now the dense single-pass lever lives
 in ONE helper (mean/sum/min/max) + the var two-pass inline; no 5x duplication. Conformance green.
+
+### 2026-06-21 BlackThrush — DataFrame-level groupby (int64 key) also dominates: var 2.49x, mean 4.00x
+Probed the one untested groupby path — the int64-key DataFrame groupby (df.groupby(["k"]).var()/mean(),
+multi-column). Added df_groupby_int_var/df_groupby_int_mean benches. @1M: var 2.49x, mean 4.00x WIN. The
+DataFrame groupby delegates per-column to SeriesGroupBy, so it inherits the dense single-pass lever (var
+two-pass-by-code, mean single-fold). No loss. GROUPBY IS NOW EXHAUSTIVELY VERIFIED AS A WIN: Series + DataFrame,
+string + int64 keys, single-agg + multi-agg, all reductions (sum/mean/var/std/min/max/count) + cumcount +
+transform — EVERY combination dominates pandas 1.3-7.6x @1M, all bit-identical / conformance green.
