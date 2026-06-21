@@ -2754,3 +2754,15 @@ vs pandas @1M (honest, inline, multi-size where anomalies suspected):
 fp DOMINATES pandas across the ENTIRE measured surface, verified not assumed. The only non-wins are the
 filed/gated items: golden-gated (expanding skew/kurt powf br-nsyti), architectural (multi-string-key,
 to_numpy/transpose l4vzc, resample build_bin_ranges), inherent-floor ~parity (resample sum/min/max, unique).
+
+### 2026-06-21 BlackThrush — multi-string-key groupby 0.89x: root = GroupKey string hash; fix involved, deferred
+Assessed the last tractable-ish loss. DataFrameGroupBy::build_groups @59572 has a dense fast path gated on
+SINGLE key (self.by[0] + as_i64_slice + i64_dense_histogram_range). Multi-key (any count) falls to the generic
+GroupKey<'_> path: per-row hash of the composite key. For multi-INT keys that's a cheap i64 hash (2.45x WIN);
+for multi-STRING keys it's the expensive &str composite hash (0.89x LOSS) vs pandas' factorize-each-key.
+FIX (not done, low-EV): a multi-key dense path — factorize each key column to i64 codes, combine
+(code1*n2+code2 -> dense composite key), run the existing int64_dense_grouping; the GroupKey->index output is
+unchanged so it's NOT a MultiIndex rewrite (tractable) but the multi-key factorize+combine is involved for a
+marginal 0.89x->~1.5x gain on a less-common op. DEFERRED (low EV, disk-tight). The single-string-key groupby
+(common) already wins via the contiguous-Utf8 dense path; only the multi-string composite is at the generic
+hash floor.
