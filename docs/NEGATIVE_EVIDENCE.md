@@ -2642,3 +2642,12 @@ slow; fp's per-group rank (even via build_groups) beats it. CONFIRMS the build_g
 loss — the value-aggs (sem/skew/nunique) lost specifically due to the scattered per-row values()[idx] gather
 + Scalar materialization + std-SipHash, all now fixed. groupby surface fully checked: every agg + rank +
 cumcount + transform WINS; only multi-func agg (br-4h46q) + multi-string-key (architectural) remain.
+
+### 2026-06-21 BlackThrush — pivot_table value-aggs WIN (std 1.37x, median 1.20x) — pattern doesn't repeat
+Checked the last place the groupby value-agg scattered pattern could repeat: pivot_table with aggfunc=std/median
+(my agg_values_scalar fix was SeriesGroupBy-only). With INT keys (r=i%100, c=i%10) it WINS: df_pivot_table_std
+1.37x, df_pivot_table_median 1.20x @1M — the int-keyed pivot grouping is dense, no scattered gather. The
+groupby value-agg loss cluster was specific to STRING-keyed groupby (scattered + Scalar materialization +
+SipHash); int-keyed grouping (groupby OR pivot) is dense and wins. SWEEP COMPLETE: every benched op + every
+unbenched sibling checked (groupby aggs/rank/transform, hash-ops, joins, f64-df, rolling, pivot value-aggs)
+DOMINATES. Only filed/golden-gated/architectural/marginal items remain.

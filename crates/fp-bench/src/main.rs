@@ -336,6 +336,28 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                     .expect("pivot_table");
             })
         }
+        ("dataframe_ops", "df_pivot_table_std") => {
+            let r: Vec<i64> = (0..rows as i64).map(|i| i % 100).collect();
+            let c: Vec<i64> = (0..rows as i64).map(|i| i % 10).collect();
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let mut columns = BTreeMap::new();
+            columns.insert("r".to_string(), Column::from_i64_values(r));
+            columns.insert("c".to_string(), Column::from_i64_values(c));
+            columns.insert("v".to_string(), Column::from_f64_values(raw[0].clone()));
+            let pframe = DataFrame::new_with_column_order(index, columns, vec!["r".to_string(), "c".to_string(), "v".to_string()]).expect("pivot frame");
+            time_us(|| { let _ = pframe.pivot_table("v", "r", "c", "std").expect("pivot_table"); })
+        }
+        ("dataframe_ops", "df_pivot_table_median") => {
+            let r: Vec<i64> = (0..rows as i64).map(|i| i % 100).collect();
+            let c: Vec<i64> = (0..rows as i64).map(|i| i % 10).collect();
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let mut columns = BTreeMap::new();
+            columns.insert("r".to_string(), Column::from_i64_values(r));
+            columns.insert("c".to_string(), Column::from_i64_values(c));
+            columns.insert("v".to_string(), Column::from_f64_values(raw[0].clone()));
+            let pframe = DataFrame::new_with_column_order(index, columns, vec!["r".to_string(), "c".to_string(), "v".to_string()]).expect("pivot frame");
+            time_us(|| { let _ = pframe.pivot_table("v", "r", "c", "median").expect("pivot_table"); })
+        }
         ("dataframe_ops", "df_pivot") => {
             // pandas: df.pivot(index="r", columns="c", values="v"); UNIQUE (r,c)
             // pairs (pivot errors on dups): r=i/10 (rows/10 distinct), c=i%10.
