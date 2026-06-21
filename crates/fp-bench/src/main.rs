@@ -1036,14 +1036,20 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = series.resample("D").mean().expect("resample daily");
             })
         }
-        ("datetime", "resample_2d" | "resample_bday") => {
-            // hourly points -> 2D (N-day path) or B (business-day path) bins.
+        ("datetime", "resample_2d" | "resample_bday" | "resample_w" | "resample_q" | "resample_y") => {
+            // hourly points -> 2D / B / W / Q / Y bins.
             let base: i64 = 946_684_800_000_000_000;
             let nanos: Vec<i64> = (0..rows as i64).map(|i| base + i * 3_600_000_000_000).collect();
             let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
             let series = Series::new("s", Index::from_datetime64(nanos), vals)
                 .expect("resample series");
-            let freq = if workload == "resample_2d" { "2D" } else { "B" };
+            let freq = match workload {
+                "resample_2d" => "2D",
+                "resample_bday" => "B",
+                "resample_w" => "W",
+                "resample_q" => "Q",
+                _ => "Y",
+            };
             time_us(|| {
                 let _ = series.resample(freq).mean().expect("resample");
             })

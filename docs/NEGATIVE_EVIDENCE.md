@@ -1944,3 +1944,12 @@ both in the shared helper. Added resample_2d + resample_bday benches. CACHED (me
 199ms@1M vs fp 5.5ms). Bit-identical, conformance GREEN (resample 51/0). Baselines ~flat-slow by analogy
 to the measured D (21ms->5.7ms). FIVE freqs now cached (M/h-min-s/D/2D/B); only W/Q/Y remain (need bucket-id
 derived before key_of). The per-bin-key-cache lever covers nearly all of Series+DataFrame resample.
+
+### 2026-06-21 BlackThrush — resample WEEKLY(W) key-cache ~4.35x; RESAMPLE SWEEP COMPLETE
+Weekly was the last uncached common freq (Q/Y route through the cached monthly bucket_end_mo path —
+measured 5.24x/2.58x; W was a separate path). Cache key_of(bin_end(ord)) on bin_end(ord). Added
+resample_w/q/y benches. W: 20900 -> 4810us ~4.35x (0.24x@10k / 1.18x@100k WIN / 2.63x->11.48x@1M). Bit-
+identical, conformance GREEN (resample 51/0). RESAMPLE SWEEP COMPLETE — ALL freqs cached in the SHARED
+resample_build_groups (M/h-min-s/D/2D/B/W + Q/Y via monthly), covering BOTH Series.resample AND
+DataFrame.resample. The per-bin-key-cache lever (recompute key_of only on integer-bucket-id change for
+time-ordered data) eliminated the per-row String/DateTime alloc across the entire resample surface.
