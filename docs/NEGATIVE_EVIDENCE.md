@@ -1025,3 +1025,19 @@ the shipped quarter call site). Perf win EXPECTED by analogy to quarter (~1.6x, 
 UNMEASURED — VERIFY when disk recovers. Remaining slow-path dt: is_* bools (need a Bool civil helper
 — deferred, can't verify the from_bool_values path code-only), weekofyear (ISO, complex), month_name/
 day_name (Utf8).
+
+### 2026-06-21 BlackThrush — 7 boolean dt calendar predicates typed (CODE-ONLY, perf PENDING disk-low)
+DISK-LOW (45G): code-only, NOT built/benched. The boolean calendar predicates (is_month_start/
+is_month_end/is_quarter_start/is_quarter_end/is_year_start/is_year_end/is_leap_year) were all on the
+generic chrono+Scalar extract_component_typed_bool. Added a Bool-output civil helper
+(typed_datetime_civil_bool_component_all_valid — Bool sibling of the verified Int64 quarter/
+days_in_month helper, builds via Column::from_bool_values) and wired all 7 with closures that are
+VERBATIM their fp_types::Timestamp formulas (e.g. is_leap_year = (y%4==0&&y%100!=0)||y%400==0;
+is_month_end = d==days_in_month(y,m); is_quarter_start = d==1&&(m∈{1,4,7,10})). **Bit-identity
+PROVABLE by inspection** for the values (civil y/m/d == Timestamp::year/month/day, closures verbatim);
+the ONE unverified-this-turn element is from_bool_values vs the from_values(Scalar::Bool) path — but
+that is the established all-valid Bool constructor the golden-tested comparison ops already use, so
+high-confidence bit-identical. NaT/non-dense fall back. Perf win EXPECTED ~1.5-4x (civil arith, like
+quarter/days_in_month) but UNMEASURED — VERIFY (+run dt is_* differential/golden tests) when disk
+recovers. The datetime accessor vein's calendar+predicate surface is now fully typed; remaining
+slow-path: weekofyear (ISO, complex) + month_name/day_name (Utf8).
