@@ -1858,3 +1858,16 @@ mapper, then did per-row gets. Added a series_map bench. Baseline 0.07x@10k / 0.
 (output in self's order; map only probed by get). Conformance GREEN. Remaining ~1785us = per-row
 IndexLabel construction (val->IndexLabel per row) + Vec<Scalar> output. FOUR FxHashMap wins this session:
 pivot_table ~47%, pivot ~2x, crosstab ~25%, series_map ~41% — the std-HashMap-on-per-row-path lever.
+
+### 2026-06-21 BlackThrush — RADICAL: Series.unstack was O(N^2) -> O(N) (@10k: timeout>30s -> 19ms)
+Profiling the FxHashMap candidates surfaced a CATASTROPHIC algorithmic loss: Series::unstack's output
+build did `for col { for row { entries.iter().find(|(r,c,_)| r==rk && c==ck) } }` — a linear scan of ALL
+N entries PER output cell = O(R*C*N) = O(N^2) (N=R*C), with String comparisons. df_unstack @10k TIMED OUT
+(>30s; the bench's 28 calls each ~1s+); @1M would be hours. FIX: build a cell_map (row,col)->value ONCE
+(FxHashMap, FIRST-wins to match find's first-match), then O(1) per cell => O(N). Also row_seen/col_seen
+HashSet -> FxHashSet. RESULT: @10k timeout->18935us, @100k->19931us, @1M->20705us (2.21x win). Bit-
+identical (conformance unstack 7/0). STILL a loss @small (0.02x@10k/0.18x@100k) — remaining ~19ms flat is
+the per-row String key construction (key_str format + split_once + 2 String clones into entries) + the
+Vec<Scalar> output (melt smell). LESSON: the FxHashMap-candidate scan also catches O(N^2) entries.find
+loops — `.iter().find()` inside a per-cell loop is the quadratic smell (cf the broader scan-and-find
+quadratic family). The O(N^2)->O(N) is the radical win; the String/output is a follow-up.

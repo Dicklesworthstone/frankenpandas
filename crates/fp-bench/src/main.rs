@@ -347,6 +347,18 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = s.map_series(&mapper).expect("map");
             })
         }
+        ("dataframe_ops", "df_unstack") => {
+            // Series with "r, c" composite labels (r=i/10, c=i%10) -> unstack to
+            // (rows/10) x 10. Mirrors df_pivot shape via the composite-key path.
+            let labels: Vec<IndexLabel> = (0..rows)
+                .map(|i| IndexLabel::Utf8(format!("{}, {}", i / 10, i % 10)))
+                .collect();
+            let s = Series::new("s", Index::new(labels), Column::from_f64_values(raw[0].clone()))
+                .expect("unstack series");
+            time_us(|| {
+                let _ = s.unstack().expect("unstack");
+            })
+        }
         ("dataframe_ops", "df_quantile") => time_us(|| {
             // pandas: df.quantile(0.5)
             let _ = df.quantile(0.5).expect("quantile");
