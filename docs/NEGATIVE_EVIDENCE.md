@@ -2797,3 +2797,12 @@ Only br-buguz (DFGroupBy GroupMap, the per-row composite-key hash) had a real me
 (multi-string-key 0.89x->1.12x). The remaining open perf beads (head/tail zero-copy, dropna, RangeIndex isin,
 take_positions gathers) are unbenched zero-copy/general-path improvements on ops that ALREADY win — no
 measured loss to chase. EVERY measured loss this session is fixed; the surface is comprehensively dominant.
+
+### 2026-06-21 BlackThrush — final regression guard: ALL fixes intact (resample_std 0.77x was guard noise -> 1.29x)
+Zero-build regression guard on the session's key fixes @1M: groupby sem 1.25x / nunique 3.42x / agg3
+(multi-func) 2.60x / multi-string-key 1.17x / multi-int-key 2.82x / resample_agg3 1.29x — all WIN. The
+GroupMap FxHashMap change (shared DFGroupBy path) did NOT regress the multi-int-key (2.82x). resample_std
+showed 0.77x in the few-iteration guard (pm it=4, single fp read) — a SINGLE-MEASUREMENT ANOMALY (the 7th
+subtlety in action): careful re-measure (fp min-of-3, pandas min-of-8 warmed) = 1.29x WIN. LESSON REINFORCED:
+the regression GUARD itself needs adequate iterations or it false-alarms; trust the careful re-measure. ALL
+session fixes verified solid; no regression anywhere.
