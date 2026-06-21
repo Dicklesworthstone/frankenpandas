@@ -25,6 +25,7 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | std / var typed (0xdfx Welford) | 2M int64 | 19.5 ms | 1.72 ms | **11.3× faster** | ✅ KEEP — Welford crushes pandas std |
 | max 8-lane chunked accumulator (simdmx) | 2M int64 | 219 µs | 0.357 ms | **0.61× (1.63× slower)** | ✅ KEEP — 3.2× faster than scalar iter().max(); gap 5.2×→1.63× |
 | min 8-lane chunked accumulator (simdmx) | 2M int64 | 230 µs | 0.424 ms | **0.54× (1.86× slower)** | ✅ KEEP — 2.8× faster than scalar iter().min(); gap 5.1×→1.86× |
+| max/min 16-lane chunked accumulator (x7bp8) | 2M int64 `Series.max`/`Series.min`; code-only disk-low pass | PENDING | PENDING | **PENDING-BENCH** | 🧪 PENDING-BENCH — widened the safe-Rust Int64 extrema accumulator from 8 to 16 independent lanes in `i64_slice_max_simd`/`i64_slice_min_simd`. Bit-transparent for integer extrema because max/min are associative and commutative and empty handling is unchanged. No cargo build, test, or bench was started in this turn per DISK-LOW directive; next turn must run the existing max/min head-to-head and revert if neutral or regressive. |
 | max/min portable-SIMD `i64x8` (uza04.207) | 2M int64 | 185 / 182 µs | 0.811 / 0.811 ms | **0.23× / 0.22×** | ❌ REVERT — safe `std::simd` was 2.3× slower than the manual 8-lane accumulator |
 | max/min portable-SIMD `i64x4` (uza04.207) | 2M int64 | 185 / 182 µs | 1.087 / 1.108 ms | **0.17× / 0.16×** | ❌ REVERT — AVX2-width `std::simd` variant was 3.1× slower than the manual accumulator |
 
@@ -997,3 +998,17 @@ generic grouping pattern, NOT the dense int64 path that makes plain groupby sum/
 WIN. Fix (filed zngxi): dense int64 grouping for all-valid Int64 index/columns keys. NOT attempted
 this session — complex fn (dropna + ascending-sort-nulls-last both axes + aggfunc variants) needs
 careful bit-identity work; measured + root-caused only.
+
+### 2026-06-21 BlackThrush — dt.microsecond/nanosecond typed fast paths (CODE-ONLY, perf PENDING disk-low)
+DISK-LOW (47G): implemented code-only, NOT built/benched. The last two datetime sub-second
+components still on the generic chrono+Scalar extract_component_typed. Routed both through the
+existing typed_datetime_nanos_component_all_valid (the same shipped/tested helper hour/minute/second/
+dayofweek use) with closures that are VERBATIM the Timestamp formulas:
+  microsecond: (ns.rem_euclid(NANOS_PER_SEC) as u64 / 1000) as i64
+  nanosecond:  (ns.rem_euclid(NANOS_PER_SEC) as u64 % 1000) as i64
+**Bit-identity PROVABLE by inspection** (read fp_types::Timestamp::{microsecond,nanosecond} — those
+ARE the closures); NaT/non-dense fall back. Compilation certain (structurally identical to the
+shipped hour/minute/second call sites). Perf win EXPECTED by analogy (pure-mod → ~4x like
+hour/minute) but UNMEASURED — VERIFY when disk recovers. This was the last sub-second dt component;
+the dt accessor vein is now fully typed (year/month/day/hour/minute/second/microsecond/nanosecond/
+quarter/dayofyear/dayofweek).
