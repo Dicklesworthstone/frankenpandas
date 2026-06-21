@@ -1443,3 +1443,13 @@ the PHANTOM-SATURATION rule: the harness p50+CV drastically understates fp's dom
 re-measure MIN. The typed-datetime fast paths (civil_from_nanos + rem_euclid components, this session's
 hardened weekofyear/dayofyear among them) genuinely dominate pandas' Python-level .dt accessors.
 METHODOLOGY now reusable for the remaining PENDING levers once their fp-bench workloads exist.
+
+### 2026-06-21 BlackThrush — groupby vein MEASURED: 38-61x vs pandas @1M (clean MIN)
+Clean-MIN (fp-bench --category groupby --json MIN vs pandas 12-iter MIN; setup matched: key=(col_0%100)
+.astype(int64), groupby(key)[col_1].agg): groupby_first 60.6x, groupby_median 61.1x, groupby_max 48.2x,
+groupby_std 37.9x @1M. The int64-key groupby aggregations dominate pandas overwhelmingly. groupby_first
+(60.6x) exercises this session's SeriesGroupBy.first typed value-column path (int64-key dense agg, but
+the per-group value gather is the typed code). NOTE: these int64 keys hit agg_numeric's DENSE path, not
+the non-dense FALLBACK my agg_numeric fix targets (would need a Float64/Datetime grouping key to bench
+that fallback). Combined with the dt vein (6.5-37.5x), fp measured-dominates pandas across dt+groupby.
+No build (existing workloads). Disk 33G.
