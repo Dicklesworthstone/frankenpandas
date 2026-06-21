@@ -1984,3 +1984,14 @@ architectural transpose/to_numpy (l4vzc — pandas O(1) 2D-block view vs columna
 SWEEP: the loss-rich territory was wide-output reshapes + per-row-key time-series (all fixed this
 session, ~13 levers); everything else was always dominant — several memory "gaps" were no-warmup/
 small-size artifacts (joins 1.47x->28x, reindex declined->164x). clean-MIN MUST warm pandas.
+
+### 2026-06-21 BlackThrush — cut() all-valid contiguous-Utf8 ~2.1x; un-benched hidden loss
+pd.cut binning was un-benched + a hidden loss: 0.81x@100k (fp ~3220us). Labels were pre-formatted (one
+per bin, br-21a14) but the output still did n Scalar::Utf8(bin_labels[idx].clone()) + from_values =
+n String clones + a copy. Added an all-valid fast path: emit bin_labels[idx] bytes into ONE contiguous
+buffer -> from_utf8_contiguous (the write!-into-buffer/stack/explode/melt vein). Bit-identical (same
+bin_idx + labels; all-valid => no null-kind question; missing values fall through to the Scalar path to
+preserve the exact Null spelling). Added cut_bins bench. RESULT: 0.81x->1.75x@100k (WIN) / 7.19x->16.11x@1M
+~2.1x. Conformance GREEN (cut 15/0). qcut (37055) is the sibling — same n-Scalar::Utf8-clone smell,
+same fast path applies (follow-up). LESSON: keep benching un-benched ops — cut joins the reshape/resample
+family of hidden losses; the contiguous-Utf8 lever recurs wherever output = per-row label/category String.

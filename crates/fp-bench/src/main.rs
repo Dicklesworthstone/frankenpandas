@@ -1052,6 +1052,13 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = series.resample("h").mean().expect("resample hourly");
             })
         }
+        ("dataframe_ops", "cut_bins") => {
+            // pandas: pd.cut(s, 10) — bin a Float64 series into 10 bins.
+            let series = df.get_column("col_0");
+            time_us(|| {
+                let _ = fp_frame::cut(&series, 10).expect("cut");
+            })
+        }
         ("datetime", "resample_daily") => {
             // s.resample("D").mean(): `rows` hourly points -> daily bins
             // (24 rows/bin), exercises the daily-contiguous bucketing path.
