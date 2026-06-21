@@ -2212,3 +2212,12 @@ mult>1 path still uses get_mut; dense scatter there is the next lever). LESSON: 
 (DateTime::from_timestamp / naive_utc / format) is the recurring resample cost — the typed-ns arithmetic +
 strftime-write! vein replace it. The "structural floor" was a phantom; PROFILE (resample_label_to_date does
 a full chrono build per row) before declaring structural. Daily is now near-parity, not a structural loss.
+
+### 2026-06-21 BlackThrush — resample N-day (2D/3D) dense scatter + fast label: 2d 0.40x->1.01x@1M WIN
+The N-day (D mult>1) path still used per-row groups.get_mut(key) SipHash + a chrono d.format key_of (my
+earlier replace_all missed it — the closure param was bin_start not ord). Applied dense scatter (bidx =
+(ord-min)/mult) + the format! fast label. Bit-identical (resample 51/0). MEASURED: resample_2d 0.40x->1.01x@
+1M WIN, 1.27x@100k WIN. resample_daily (mult<=1, separate path, already dense+typed+fast-label) stays 0.75x@
+1M — it has 2x the buckets (41700 vs 20850 for 2d), so the per-bucket label + dense-Vec<Vec> alloc overhead
+is the residual (CSR-flatten the dense is the next micro-lever). RESAMPLE NEAR-COMPLETE: sub-daily 0.83x,
+monthly 0.96x/1.08x@100k WIN, 2d 1.01x WIN, bday 3.24x WIN; only daily 0.75x remains (highest bucket count).
