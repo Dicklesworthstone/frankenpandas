@@ -1704,3 +1704,15 @@ str so its bytes copy directly). Bit-identical (same names; NaT bails). MEASURED
 tests::dt_day_name + dt_month_name). Added both benches. THE dt-STRING write!/contiguous VEIN IS NOW
 COMPLETE: date 17.4x, time 36.7x, strftime 51.2x (RADICAL), day_name 293x, month_name 80x — every dt
 Utf8-output op now emits straight into a contiguous buffer with zero per-row String allocs.
+
+### 2026-06-21 BlackThrush — astype(str) is a WIN (i64 26.9x, f64 35.9x); bench added, no fix
+Dug numeric->string conversion (the broader per-row String-alloc class beyond dt). Series.astype(Utf8)
+goes through Column::astype -> .map(cast_scalar(v, Utf8)).collect() -> Vec<Scalar::Utf8> + from_values
+(alloc-bound). MEASURED via new astype_str_i64/f64 benches: i64 fp=5602us = **26.93x**, f64 fp=13464us
+= **35.85x** vs pandas (pandas astype(str) is Python-level per-element formatting). So astype(str) is a
+WIN, not a loss. A contiguous write!-into-buffer fix would strengthen it (~2x like the dt ops) BUT: (1)
+it's cross-crate (fp-columnar Column::astype), and (2) cast_scalar's Utf8 output matches pandas-specific
+string spellings (float "1.0", bool "True"/"False" — see test astype_to_utf8_uses_pandas_string_spellings),
+so replicating it with write! risks a float-formatting bit-identity break. NOT pursued (win, not loss;
+risk > reward). Added astype_str benches as regression guards. The clean in-fp-frame dt-string write!
+vein is harvested (date/time/strftime/day_name/month_name); numeric->string is a cross-crate win.
