@@ -2187,3 +2187,16 @@ groups only for Some-key buckets (None-key rows dropped as before). Bit-identica
 36950->23411us@1M = ~1.58x -> 0.60x->0.96x@1M (parity), 1.08x@100k WIN. The residual ~4%@1M is the floor
 (gather-agg + month_ords/dense allocs). The dense pattern now covers ns(sub-daily) + monthly; daily/weekly/
 N-day/bday remain (same get_mut-per-row -> dense). The std-SipHash-get_mut-per-row was the shared cost.
+
+### 2026-06-21 BlackThrush — resample daily dense scatter + daily/N-day/weekly fast label (bit-identical)
+Extended dense scatter to the daily (D mult<=1) path (bidx = ord - min) + replaced the 3 key_of closures'
+chrono d.format("%Y-%m-%d") with format!("{:04}-{:02}-{:02}", year, month, day) (strftime write! vein,
+bit-identical 4-digit years). Conformance 51/0. MEASURED @1M: resample_daily 0.46x->0.54x (fast label
+helped; STILL LOSES), resample_2d 0.34x (N-day path got fast label only, not dense scatter), resample_bday
+3.24x WIN (pandas bday is slow, 199ms). FINDING: daily/2d have MANY buckets (41700 daily / 20850 2d for 1M
+hourly) — the gather-agg over bucket indices + per-bucket dense-Vec allocs + 41700 labels is the FLOOR, and
+fp can't beat pandas C there (many small buckets). Contrast: sub-daily (16700 bins) 0.83x, monthly (1370
+bins) 0.96x/1.08x@100k — FEWER buckets => closer/win. The dense+fast-label pattern helps everywhere
+(bit-identical) but the WIN threshold depends on bucket count: few buckets -> win, many -> structural floor.
+bday WINS because pandas' business-day resample is itself slow. Net improvements shipped; daily/2d remain
+structural losses (many-buckets gather-agg floor, like to_numpy/transpose are structural).
