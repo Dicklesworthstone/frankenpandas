@@ -2597,3 +2597,9 @@ bench series-reuse caches values(), hiding input-materialization cost; real one-
 FIX (filed): typed output — output_skew_typed/output_kurt_typed -> (f64, present_bool), collect Vec<f64> +
 ValidityMask, Column::from_f64_values_with_validity (4x smaller, no re-scan). Bit-identity risk = the
 missing-slot underlying value (Null(NaN) vs validity-false NaN) -> golden gate. Bench expanding_skew added.
+
+### 2026-06-21 BlackThrush — multi-key int64 groupby WINS 2.45x (dense multi-key path)
+Checked whether multi-key groupby (df.groupby(["k1","k2"])) falls to the slow build_groups path (dense_group_ids
+is single-key only). For INT64 keys it does NOT: df_groupby_2key_sum @1M = 2.45x WIN (fp 23.8ms vs pandas 58ms)
+— the int64_dense_grouping combines the keys densely. Confirms the memory's "multi-key int64 already dense".
+Bench added. (Multi-string-key may differ — no int64 dense; checking next if disk allows.)

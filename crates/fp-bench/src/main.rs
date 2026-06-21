@@ -979,6 +979,17 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = gdf.groupby(&["key"]).expect("groupby").sum().expect("sum");
             })
         }
+        ("groupby", "df_groupby_2key_sum") => {
+            let mut columns = BTreeMap::new();
+            let k1: Vec<i64> = (0..rows).map(|i| (i % 100) as i64).collect();
+            let k2: Vec<i64> = (0..rows).map(|i| ((i / 100) % 50) as i64).collect();
+            columns.insert("k1".to_string(), Column::from_i64_values(k1));
+            columns.insert("k2".to_string(), Column::from_i64_values(k2));
+            let mut order = vec!["k1".to_string(), "k2".to_string()];
+            for c in 0..3 { let n = format!("v{c}"); columns.insert(n.clone(), Column::from_f64_values(raw[c].clone())); order.push(n); }
+            let gdf = DataFrame::new_with_column_order(Index::new_known_unique_int64_unit_range(0, rows), columns, order).expect("gb frame");
+            time_us(|| { let _ = gdf.groupby(&["k1","k2"]).expect("groupby").sum().expect("sum"); })
+        }
         ("groupby", "groupby_agg3_str") => {
             let mut kb = Vec::with_capacity(rows * 5); let mut ko = Vec::with_capacity(rows + 1); ko.push(0usize);
             for &v in raw[0].iter() { kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes()); ko.push(kb.len()); }
