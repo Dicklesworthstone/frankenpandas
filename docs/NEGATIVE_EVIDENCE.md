@@ -2244,3 +2244,15 @@ distinct f64 is SLOW (200ms); fp's FxHashMap<SetMemberKey> path already dominate
 — all-distinct is hash-insert-bound, the SetMemberKey wrapper was NOT the cost; as_f64_slice adds an
 extraction). REVERTED. LESSON: match the DATA when comparing (the value_counts loss joins the --size bug as
 a measurement-methodology phantom). f64 value_counts is a WIN; it was never a real loss. ikq9a: remove it.
+
+### 2026-06-21 BlackThrush — unstack index-based parse ~2x fp-side (359->177ms@1M); still loses 0.21x
+Replaced unstack's parse loop: it cloned row_key/col_key ~3x each + key_str + built a Vec<(String,String,
+Scalar)> entries — ~5-7M String clones for 1M rows. New: map each composite label to integer (row_idx,
+col_idx) positions (first-seen) via FxHashMap<String,usize> with &str lookups (no per-row clone; only the
+R+C UNIQUE keys cloned); Utf8 labels borrow their backing string (no key_str clone); cell stored by (ri,ci)
+position. Bit-identical (unstack 7/0; same first-seen order, first-wins cell, output grid). MEASURED: fp
+359->177ms@1M = ~2x fp-side, 17.3->7.3ms@100k = ~2.4x. STILL LOSES (0.21x@1M, pandas 37ms): the residual is
+the per-row split_once+trim PARSE + the cell_map (1M inserts) + the output (R*C=1M Scalar clones + from_
+values) — fp's string-composite MultiIndex vs pandas' structured codes is the fundamental gap. The clones
+WERE a real chunk (~2x), confirming the write!-vein lesson, but the parse/representation remains. Real
+improvement shipped; unstack is a structural loss pending a real MultiIndex (codes, not composite strings).
