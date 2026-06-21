@@ -1871,3 +1871,10 @@ the per-row String key construction (key_str format + split_once + 2 String clon
 Vec<Scalar> output (melt smell). LESSON: the FxHashMap-candidate scan also catches O(N^2) entries.find
 loops — `.iter().find()` inside a per-cell loop is the quadratic smell (cf the broader scan-and-find
 quadratic family). The O(N^2)->O(N) is the radical win; the String/output is a follow-up.
+
+### 2026-06-21 BlackThrush — unstack O(N^2) magnitude QUANTIFIED: 14.3s -> 19ms @10k (~750x)
+A delayed background baseline (pre-fix binary) captured the exact pre-fix cost: df_unstack @10k =
+14,302,014us (14.3 SECONDS) vs pandas 475us = 0.00003x (~30,000x slower). Post-fix (commit 061704bd,
+O(N^2)->O(N) cell_map): 18,935us (19ms) = ~750x FP-side speedup; the O(N^2) entries.iter().find-per-cell
+made it effectively unbounded at 1M (hours). Confirms unstack was UNUSABLE at any real scale before the
+fix. (The earlier ledger entry recorded only ">30s timeout"; this is the precise number.)
