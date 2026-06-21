@@ -2701,3 +2701,14 @@ is cached by the bench's series reuse). Bit-identical (resample 51/0): == fp_typ
 nanstd == sqrt; gated on f64 + no-NaN (Timedelta/NaN keep the nan_* path). MEASURED: resample_std
 25600->19724us@1M = 0.92x->1.21x WIN. THREE agg-investigation fixes this turn: groupby.agg 0.63->2.63x,
 resample.agg 0.38->1.48x, resample std/var 0.92->1.21x. resample_median still 1.04x (nanmedian sort, fine).
+
+### 2026-06-21 BlackThrush — resample typed min/max 0.80x->0.94x (~parity); build_groups is the floor
+Added Resample::resample_extremum_typed (min/max route through it): per-bin reduce with strict </> over
+as_f64_slice, bit-identical to nanmin/nanmax (keeps first extreme so -0.0/0.0 ties match; empty bin ->
+Null(NaN)). resample_max 21738->19573us@1M = 0.80x->0.94x (still ~parity), resample_sum 1.01x (~parity).
+RESIDUAL / FLOOR: the typed funcs eliminated the per-bin Vec<Scalar> gather, leaving build_groups (the per-bin
+Vec<usize> materialization, ~8MB@1M) as the shared floor — pandas computes bin BOUNDARIES and reduces over
+contiguous slices without materializing per-bin index vecs. The deeper lever for ALL single-agg resample
+(sum/min/max/std/var ~parity) is build_groups returning contiguous (start,end) ranges instead of Vec<usize>
+(architectural-ish, contiguous bins only). Typed mean/std/var/min/max done; remaining resample single-aggs
+are ~parity at the build_groups floor.
