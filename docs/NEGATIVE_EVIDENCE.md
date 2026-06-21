@@ -2672,3 +2672,12 @@ reuse the EXACT nan_func per func (guaranteed bit-identical, est 0.38x->~parity 
 materialization is the floor), or (b) F64 buckets + own funcs (a clear win, but ONLY if fp_types::nanvar ==
 the mean-centered two-pass sum((x-mean).powi(2))/(n-1) — must verify, else golden-breaking). Bench
 resample_agg3 added. Less common than groupby agg; focused effort.
+
+### 2026-06-21 BlackThrush — resample.agg(multi-func) 0.38x->1.48x WIN (buckets-once) — br-833wx CLOSED
+Fixed the resample multi-func agg with the F64 buckets-once (same lever as the groupby agg). Verified the
+nan_* bit-identity first: fp_types::nanvar IS the mean-centered two-pass (mean=sum/n; sum((x-mean).powi(2))/
+(n-ddof)) == my f64 var; nansum/nanmean/nanmin/nanmax/nanprod == plain fold/sum over a finite bucket. So the
+F64 buckets-once (build per-bin f64 buckets ONCE, apply each func) is bit-identical (resample 51/0), gated on
+no-NaN + non-empty bins (n<2 var/std -> Null(NaN) matching nanvar). MEASURED: resample_agg3 87951->22445us@1M
+= 0.38x->1.48x WIN (3.9x fp-side). BOTH multi-func agg per-func-rebuild losses now fixed (groupby cbec50cd +
+resample). Rolling/Expanding/Ewm aggs don't share the pattern (online passes, no build_groups).
