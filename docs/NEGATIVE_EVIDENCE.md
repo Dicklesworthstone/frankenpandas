@@ -1693,3 +1693,14 @@ CONFORMANCE GREEN: fp-frame 3098/0 incl. tests::dt_strftime (validates the token
 write!-into-buffer dt-string vein COMPLETE: date 17.4x, time 36.7x, strftime 51.2x — all bit-identical,
 all from killing the per-row format!/replace String allocs. RADICAL: chained per-row .replace() is the
 worst alloc pattern; pre-parse + write! is the lever.
+
+### 2026-06-21 BlackThrush — day_name/month_name contiguous static-byte write (293x/80x); dt-string vein COMPLETE
+The 2 &'static str dt helpers (typed_datetime_{civil,nanos}_str_component_all_valid — backing
+dt.month_name/day_name) did Scalar::Utf8(component(...).to_string()) — a per-row .to_string() ALLOC of
+the static name + Vec<Scalar> + from_values. Replaced with extend_from_slice(component(...).as_bytes())
+into a contiguous byte buffer -> from_utf8_contiguous (no per-row alloc; the component returns a &'static
+str so its bytes copy directly). Bit-identical (same names; NaT bails). MEASURED: dt_day_name fp=439us =
+**293.81x** vs pandas, dt_month_name fp=1325us = **80.11x**. Conformance GREEN (fp-frame 3098/0 incl.
+tests::dt_day_name + dt_month_name). Added both benches. THE dt-STRING write!/contiguous VEIN IS NOW
+COMPLETE: date 17.4x, time 36.7x, strftime 51.2x (RADICAL), day_name 293x, month_name 80x — every dt
+Utf8-output op now emits straight into a contiguous buffer with zero per-row String allocs.

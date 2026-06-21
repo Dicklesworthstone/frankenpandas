@@ -942,7 +942,7 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = series.dt().dayofyear().expect("dt dayofyear");
             })
         }
-        ("datetime", "dt_strftime" | "dt_date" | "dt_time") => {
+        ("datetime", "dt_strftime" | "dt_date" | "dt_time" | "dt_day_name" | "dt_month_name") => {
             let base: i64 = 946_684_800_000_000_000;
             // 1 day + 37 s per row so BOTH the date and the time-of-day vary.
             let nanos: Vec<i64> = (0..rows as i64)
@@ -961,6 +961,12 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 }),
                 "dt_time" => time_us(|| {
                     let _ = series.dt().time().expect("time");
+                }),
+                "dt_day_name" => time_us(|| {
+                    let _ = series.dt().day_name().expect("day_name");
+                }),
+                "dt_month_name" => time_us(|| {
+                    let _ = series.dt().month_name().expect("month_name");
                 }),
                 _ => time_us(|| {
                     let _ = series.dt().date().expect("date");
