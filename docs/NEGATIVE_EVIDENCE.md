@@ -2611,3 +2611,16 @@ pandas 108ms). The int64_dense_grouping combines INT keys densely, but multi-STR
 not filed as separate — marginal): a multi-key dense path that factorizes each key column to codes + combines
 (like int64_dense_grouping generalized to Utf8/mixed). Involved for a ~0.89x->~1.5x marginal gain; lower
 priority than the architectural/golden-gated items. Bench df_groupby_2strkey_sum added.
+
+### 2026-06-21 BlackThrush — comprehensive measurement-only confirmation sweep (no build): joins + hash-ops all WIN
+Disk-constrained (no rebuild), re-verified the categories most likely to hide a loss (after the groupby
+value-agg + grouper-caching finds). ALL WIN inline vs pandas @1M:
+  GROUPBY (warm binary, all intact, no regression): mean 3.55x/var 3.30x/std 2.64x/min 3.27x/max 3.39x/
+    prod 3.63x/median 2.08x/sem 1.21x/skew 1.36x/nunique 2.73x; unique 0.96x (~parity).
+  HASH-OPS (dataframe_ops): value_counts 4.53x, df_duplicated 48.8x, df_nunique 10.4x, df_mode 2.40x.
+  JOINS (inline, fair — NO grouper-caching/shape artifact here, unlike groupby): join_inner 2.31x,
+    join_left 3.75x, join_outer 3.38x, join_inner_str 9.72x.
+CONCLUSION: fp dominates pandas across groupby + hash-ops + joins, measured honestly. The session's ~14
+groupby fixes are confirmed intact. Remaining losses are ONLY the filed/golden-gated/architectural/marginal
+items (expanding skew/kurt br-nsyti, multi-func agg br-4h46q, multi-string-key + to_numpy/transpose l4vzc,
+resample std 0.92x). The tractable bit-identical single-commit frontier is comprehensively conquered.
