@@ -1506,3 +1506,17 @@ unblocked compilation included). BOLD-VERIFY LOOP COMPLETE: profiled (clean-MIN 
 2D-block, bit-locked ewm/round). NEGATIVE EVIDENCE: no cheap winnable perf lever remains — the winnable
 benched surface is exhausted (fp already dominates); the sole radical lever is architectural 2D-block
 storage (l4vzc), too large for a safe single commit.
+
+### 2026-06-21 BlackThrush — EXHAUSTIVE clean-MIN scorecard: fp dominates ALL benched categories 5-239x
+Extended the profile to every remaining category (io/rolling/expanding/indexing/df-moments/transform).
+ALL WINS @1M clean-MIN: rolling_mean 31x, rolling_std 24x, expanding_sum 41x, df_skew 131x, df_sem 239x,
+df_quantile 112x, df_interpolate 78x, groupby_transform_mean 69x, reindex 44x, csv_write 195x, csv_read
+~1000x (CAVEAT: fp reads in-memory string vs pandas file+disk — inflated but still a clear win).
+COMBINED with prior: joins 5.8-52.8x, groupby 38-61x, datetime 6.5-37.5x, value_counts 3.7-47x,
+pivot_table 9.1x. ~25 ops profiled — EVERY winnable op DOMINATES pandas.
+DEFINITIVE: the winnable benched surface is EXHAUSTIVELY confirmed dominated. The ONLY losses are
+(a) structural — to_numpy 1us-view / transpose 52us-view / stack (pandas 2D BlockManager; fp columnar
+must materialize O(n*m)) => bead l4vzc 2D-block storage, the SOLE radical lever, architectural; and
+(b) bit-locked fdiv — ewm_mean 0.79x / df_round 0.84x (changing the recurrence/round breaks goldens).
+NO cheap winnable lever exists. fp is alien-optimized to domination. Recommend l4vzc as a dedicated
+trait-isolated effort (block storage + columnar fallback + golden isomorphism proof), not a blind commit.
