@@ -24,7 +24,7 @@ or benched.** FIRST ACTION ON DISK-RECOVER, in order:
    (or via rch) — confirm the whole stack COMPILES.
 2. `cargo test --offline -p fp-frame --lib -- <component>` for each: month day hour minute second
    microsecond nanosecond quarter dayofyear dayofweek days_in_month is_month_start is_month_end
-   is_quarter_start is_quarter_end is_year_start is_year_end is_leap_year month_name day_name date time strftime
+   is_quarter_start is_quarter_end is_year_start is_year_end is_leap_year month_name day_name date time strftime weekofyear
    — plus the dt differential/golden tests. Confirm BIT-IDENTICAL.
 3. Bench each (add `dt_*` workloads to fp-bench) to record the wins (pure-mod ones ~4x like
    hour/minute already measured 4.2x; calendar/civil ones ~parity-to-1.5x; string date/time skip
@@ -36,9 +36,8 @@ day_name (cc8bf063), month_name (bd128716), 7 bool predicates (db4a5dfe), days_i
 micro/nano (8f0fb964). hour/minute/second (3be88c6b) ALGEBRAICALLY PROVEN == Timestamp formulas.
 
 RISK NOTES: hour/min/sec proven; dayofyear hardened to verbatim; all others mirror verified patterns.
-The one BLOCKED item: **dt.weekofyear** stays on the slow chrono path — `Timestamp::weekofyear`'s ISO
-clamps call `iso_weeks_in_year`, which is PRIVATE to fp_types (uncallable from fp-frame). Build it on
-the verified dayofyear/dayofweek foundation WITH tests once cargo is available.
+weekofyear is now ALSO typed (commit below) by replicating the private `iso_weeks_in_year` verbatim;
+no dt method remains on the slow chrono path.
 
 ## Results
 
@@ -1169,3 +1168,15 @@ proven); identical replace chain; NaT/non-dense fall back. Win: removes 6 chrono
 (String replaces remain). UNMEASURED — VERIFY when disk recovers. Now ALL dt string ops are typed
 (month_name/day_name/date/time/strftime); only weekofyear (blocked, private iso_weeks_in_year) stays
 on the slow path.
+
+### 2026-06-21 BlackThrush — dt.weekofyear typed fast path (CODE-ONLY, perf PENDING) — DT VEIN COMPLETE
+DISK-CRITICAL (39G, no cargo): code-only. The LAST slow-path dt method. Previously deferred because
+Timestamp::weekofyear's clamps call iso_weeks_in_year (private to fp_types). Resolved by replicating
+iso_weeks_in_year VERBATIM in fp-frame (clean dominical closed form: 53 weeks iff p(y)==4 || p(y-1)==3,
+p(y)=(y+⌊y/4⌋−⌊y/100⌋+⌊y/400⌋) mod 7) and a dedicated typed_datetime_weekofyear_all_valid that computes,
+all VERBATIM Timestamp: dayofyear via the days-before table + leap bump, dayofweek via ((days+3)%7+7)%7
+on div_euclid days, iso_dow=(dow==6?7:dow+1), week=(doy-iso_dow+10)/7, then the 53-week-aware clamps.
+**Bit-identity provable** (every sub-quantity is the exact formula the chrono path's
+self.dayofyear()/dayofweek()/iso_weeks_in_year use); NaT/non-dense fall back. `week` alias inherits it.
+**DT ACCESSOR VEIN NOW COMPLETE — every component typed.** UNMEASURED — verify when disk recovers
+(the differential test for weekofyear is critical given the ISO edge cases: 2021-01-01→53, 2026-12-31→53).
