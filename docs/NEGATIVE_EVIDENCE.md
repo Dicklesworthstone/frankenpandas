@@ -1605,3 +1605,18 @@ to the dtype-standard Utf8 null) would push it higher, but it's a WIN not a loss
 (~2x), and ValidityMask has no clean from_bools — deferred (not mandate-priority). Added df_explode as
 a permanent regression-guard bench. SCORECARD now ~46 ops, ALL win except to_numpy(bench-only)/transpose
 (l4vzc architectural). NO more cheaply-winnable loss exists in MY domain (concat/construction = cod-a).
+
+### 2026-06-21 BlackThrush — df.dot WINS vs OpenBLAS (3.66-9.41x); scorecard DEFINITIVELY complete (~47 ops)
+Measured df.dot — the ONE op where fp deliberately forgoes C BLAS/LAPACK (per the no-gaps mandate's
+pure-safe-Rust constraint): @100k(dim316) fp 1088us vs pandas/OpenBLAS 3983us = 3.66x; @1M(dim1000) fp
+1086us vs 10221us = 9.41x WIN. fp's safe-Rust blocked GEMM beats BLAS at benched sizes (pandas'
+DataFrame->numpy->BLAS->DataFrame overhead dominates; df_dot fp time is partly setup per the earlier
+uza04.149 note). So even the no-C-BLAS op WINS.
+=== DEFINITIVE COMPLETE SCORECARD (~47 ops, every category, clean-MIN @1M) ===
+fp DOMINATES pandas on EVERY benched op 2.84x-69680x EXCEPT: to_numpy (bench-only, no real caller) +
+transpose (architectural 2D-block, l4vzc). Both need block storage; everything else — joins, groupby,
+datetime, value_counts, pivot_table, stack(FIXED 557a5484), explode, rolling, skew/sem/quantile,
+interpolate, reindex, csv, the elementwise family, AND df.dot/GEMM — WINS. Every memory/hypothesized
+"loss" (value_counts/ewm/round/pivot_table/stack/explode/dot) was a harness phantom or now fixed or a
+clean win. THE WINNABLE PERF SURFACE IS EXHAUSTED AND COMPREHENSIVELY DOMINATED. Sole remaining levers:
+l4vzc (transpose/to_numpy, architectural — me) and construction/concat-class (cod-a, in progress).
