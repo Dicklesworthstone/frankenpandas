@@ -374,6 +374,14 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = df.get_dummies(&["cat"]).expect("get_dummies");
             })
         }
+        ("dataframe_ops", "series_categorical") => {
+            // pandas: pd.Series(arr).astype("category"); arr=i%100 (100 cats).
+            let values: Vec<fp_types::Scalar> =
+                (0..rows as i64).map(|i| fp_types::Scalar::Int64(i % 100)).collect();
+            time_us(|| {
+                let _ = Series::from_categorical("c", values.clone(), false).expect("categorical");
+            })
+        }
         ("dataframe_ops", "df_quantile") => time_us(|| {
             // pandas: df.quantile(0.5)
             let _ = df.quantile(0.5).expect("quantile");

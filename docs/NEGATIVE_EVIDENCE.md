@@ -1888,3 +1888,12 @@ RESHAPE SWEEP COMPLETE: pivot_table ~47%, pivot ~2x, crosstab ~25%, unstack O(N^
 ~41%, get_dummies ~37% — ALL had std-SipHash-on-per-row (and unstack also O(N^2)). Residual @10k losses
 are tiny-input fixed costs (pandas <1.5ms). The wide-output-reshape family (the structural-loss suspects
 per memory) is now DOMINATED at scale.
+
+### 2026-06-21 BlackThrush — from_categorical (astype category) FxHashMap ~43%; 7th lever this session
+Series::from_categorical (astype('category') path) built cat_positions: std::collections::HashMap<
+ScalarKey,i64> (std SipHash), per-row get/insert to assign category codes (first-seen order). Added a
+series_categorical bench. MEASURED before/after: 2750us(std) -> 1570us(Fx) = ~43%: 0.11x@10k / 0.64x@100k
+/ 5.52x@1M (incl. the bench's values.clone overhead, so from_categorical-only is larger). Bit-identical
+(codes = first-seen order via categories.len(), independent of map iteration). Conformance GREEN.
+SEVENTH FxHashMap-family win this session (pivot_table/pivot/crosstab/series_map/get_dummies/from_categorical
++ unstack O(N^2)). The std-HashMap-on-per-row lever extends beyond reshapes to categorical construction.
