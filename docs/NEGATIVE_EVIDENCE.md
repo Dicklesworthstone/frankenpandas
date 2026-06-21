@@ -2152,3 +2152,16 @@ entries Vec<(String, String, Scalar)> (2M String clones for 1M rows). Same lesso
 resample-typed-agg: the suspected output cost was a phantom; the real cost is the string-composite index
 (a fundamental fp representation vs pandas' MultiIndex codes). unstack's real fix is borrow-not-clone
 entries (&str slices into the index labels, no clone) + ultimately a real MultiIndex — deep, br-ikq9a.
+
+### 2026-06-21 BlackThrush — resample sub-daily DENSE scatter ~2.1x (0.28x->0.63x@1M); String clone+hash was the cost
+The resample bucketing bottleneck (confirmed) was the per-row `groups.entry(key.clone()).or_default()` —
+a String CLONE + hash EVERY row into the String-keyed map (even with the key-cache, the clone+hash stayed
+per-row). Replaced the ns/sub-daily path with a DENSE scatter: scatter row indices into a Vec<Vec<usize>>
+by integer bin_index, then build the String key ONCE per non-empty bin (ascending == bin_start order).
+Bit-identical (same per-bin row-order indices, same keys, same sorted order; out-of-range DateTime bins
+dropped as the per-row path skipped them); gated on bounded bin range, else fall back. MEASURED: 55155->
+26142us@1M = ~2.1x -> 0.28x->0.63x@1M (much closer; still loses to pandas C 16ms). Conformance GREEN
+(resample 51/0). The dense-direct-address pattern (value_counts beat khash) WORKS for resample bucketing.
+REMAINING: the other freqs (monthly/daily/weekly/N-day/bday) have their own String-keyed scatter — same
+dense treatment applies (per-freq). Residual cost: the bins Vec<Option<i64>> (n) + dense Vec<Vec> allocs
++ dt.format per bin. resample still loses 0.63x but 2.1x closer.
