@@ -1772,3 +1772,17 @@ is write!-ing the formatter output into the `out` accumulator (avoid the formatt
 CSV float formatting (.0 suffix/precision) is complex to replicate bit-identically — and to_csv is
 already a WIN (196x). Sibling to the apply_str revert: the suspected source/lookup overhead was a
 phantom; the OUTPUT formatting alloc is the real cost. br-3seq1 updated with this measurement.
+
+### 2026-06-21 BlackThrush — DEFINITIVE CAMPAIGN SCORECARD: all shipped levers hold (no regression)
+Consolidated re-measurement of every lever shipped this campaign (clean-MIN @1M vs pandas, WITH pandas
+warmup): df_stack 1.67x@100k/20.63x@1M, explode 149x, dt_date 16.2x, dt_time 34.4x, dt_strftime 51.2x,
+dt_day_name 267x, dt_month_name 76x, astype_str_i64 83.5x, astype_str_bool 379x, astype_str_f64 57.2x.
+ALL HOLD — no regression from the multi-agent churn. NOTE/LESSON: an initial it=6 NO-WARMUP pandas pass
+showed df_stack at a spurious 0.4x (pandas 2.2 DataFrame.stack first runs were anomalously fast / the
+FutureWarning machinery skews early iters); WITH 2 warmup calls + 20 iters it is a clean 1.67x/20.63x
+WIN. => clean-MIN methodology MUST warm pandas for variable ops (stack/pivot). The campaign's
+write!-into-buffer + call-the-formatter vein (per-row String alloc -> contiguous buffer) is fully
+harvested across dt accessors + reshape + astype(str int/bool/float); reverted phantoms apply_str +
+to_csv-BTreeMap-hoist (output-formatting alloc, not source/lookup, is always the real cost); deferred
+br-3seq1 (to_csv float-formatter-into-accumulator, to_csv near-optimal at 5ns/field/196x) + l4vzc
+(transpose/to_numpy architectural). Surface dominates pandas 1.67x-69680x except to_numpy(bench-only).
