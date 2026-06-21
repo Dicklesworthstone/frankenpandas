@@ -2200,3 +2200,15 @@ bins) 0.96x/1.08x@100k — FEWER buckets => closer/win. The dense+fast-label pat
 (bit-identical) but the WIN threshold depends on bucket count: few buckets -> win, many -> structural floor.
 bday WINS because pandas' business-day resample is itself slow. Net improvements shipped; daily/2d remain
 structural losses (many-buckets gather-agg floor, like to_numpy/transpose are structural).
+
+### 2026-06-21 BlackThrush — resample typed day_ords ~10ms (daily 0.54x->0.74x@1M, 0.97x@100k) — CORRECTS "structural" claim
+CORRECTION to the prior daily/2d "structural many-buckets floor" claim — it was WRONG. The real daily cost
+was resample_label_to_date(Datetime64(ns)) building a chrono DateTime::from_timestamp + naive_utc().date()
+PER ROW (1M constructions) for the day_ords. Typed fast path: num_days_from_ce = ns.div_euclid(NANOS_PER_DAY)
++ 719163 (CE ordinal of 1970-01-01) — pure arithmetic, no chrono. Bit-identical (resample 51/0 confirms the
+offset; floor division composes). MEASURED: daily 34141->24036us@1M = ~10ms -> 0.54x->0.74x@1M, 0.97x@100k
+(near parity!). 2d 0.34x->0.40x (it got typed day_ords + fast label but NOT the dense scatter — the N-day
+mult>1 path still uses get_mut; dense scatter there is the next lever). LESSON: per-row chrono construction
+(DateTime::from_timestamp / naive_utc / format) is the recurring resample cost — the typed-ns arithmetic +
+strftime-write! vein replace it. The "structural floor" was a phantom; PROFILE (resample_label_to_date does
+a full chrono build per row) before declaring structural. Daily is now near-parity, not a structural loss.
