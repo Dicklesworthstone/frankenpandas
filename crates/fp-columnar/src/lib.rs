@@ -17274,25 +17274,70 @@ impl Column {
         // before), and for the remaining values set_member_key equality matches
         // semantic_eq (the same key Column::unique uses; ±0.0 normalized).
         let mut counts: Vec<(Scalar, usize)> = Vec::new();
-        let mut index: rustc_hash::FxHashMap<SetMemberKey<'_>, usize> =
-            rustc_hash::FxHashMap::default();
         let mut missing_count = 0_usize;
 
-        for value in &self.values {
-            if value.is_missing() {
-                missing_count += 1;
-                continue;
-            }
-            let Some(key) = set_member_key(value) else {
-                // Unreachable: every non-missing scalar has a key.
-                counts.push((value.clone(), 1));
-                continue;
+        // Dense-int64 fast path: an all-valid Int64 column with a bounded value
+        // range -> O(1) direct-address counting (no hashing, no set_member_key,
+        // no Scalar materialization) — beats the khash-class hash tally. Pushes
+        // into `counts` in FIRST-SEEN order so the stable count-sort below breaks
+        // ties identically to the hash path. Bit-identical: all-valid => no
+        // missing (missing_count stays 0), and Scalar::Int64(v) is the same value
+        // the hash path stores. Falls back when range is too large (sparse keys).
+        let dense_done = 'dense: {
+            let Some(vals) = self.as_i64_slice() else {
+                break 'dense false;
             };
-            if let Some(&i) = index.get(&key) {
-                counts[i].1 += 1;
-            } else {
-                index.insert(key, counts.len());
-                counts.push((value.clone(), 1));
+            if vals.is_empty() {
+                break 'dense false;
+            }
+            let (mut lo, mut hi) = (vals[0], vals[0]);
+            for &v in vals {
+                if v < lo {
+                    lo = v;
+                }
+                if v > hi {
+                    hi = v;
+                }
+            }
+            let range = (hi as i128) - (lo as i128) + 1;
+            let cap = ((vals.len() as i128) * 4).max(1 << 16);
+            if range <= 0 || range > cap {
+                break 'dense false;
+            }
+            let mut dense = vec![0_usize; range as usize];
+            let mut first_seen: Vec<i64> = Vec::new();
+            for &v in vals {
+                let idx = (v - lo) as usize;
+                if dense[idx] == 0 {
+                    first_seen.push(v);
+                }
+                dense[idx] += 1;
+            }
+            for v in first_seen {
+                counts.push((Scalar::Int64(v), dense[(v - lo) as usize]));
+            }
+            true
+        };
+
+        if !dense_done {
+            let mut index: rustc_hash::FxHashMap<SetMemberKey<'_>, usize> =
+                rustc_hash::FxHashMap::default();
+            for value in &self.values {
+                if value.is_missing() {
+                    missing_count += 1;
+                    continue;
+                }
+                let Some(key) = set_member_key(value) else {
+                    // Unreachable: every non-missing scalar has a key.
+                    counts.push((value.clone(), 1));
+                    continue;
+                };
+                if let Some(&i) = index.get(&key) {
+                    counts[i].1 += 1;
+                } else {
+                    index.insert(key, counts.len());
+                    counts.push((value.clone(), 1));
+                }
             }
         }
 

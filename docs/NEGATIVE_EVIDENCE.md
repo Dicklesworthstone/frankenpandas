@@ -2131,3 +2131,14 @@ per row) dominates, NOT the Scalar agg. The REAL resample lever is the bucketing
 multi-site restructure (the 6 bucketing fns RETURN String-keyed groups). LESSON: the typed-probe pattern
 only wins where Scalar-materialization is the bottleneck; bucketing/hash-table-bound ops (resample,
 value_counts) need the hash-table/scatter reworked. Shipped the ~7% (real, bit-identical, right direction).
+
+### 2026-06-21 BlackThrush — value_counts dense-int64 path: i64 5.81x@1M WIN (beats khash); f64 still loses
+value_counts_with_options had an FxHashMap tally (set_member_key + lookup per Scalar). Added a dense-int64
+fast path: all-valid bounded Int64 -> O(1) direct-address count (no hash, no set_member_key, no Scalar
+materialize), first-seen order preserved so the stable count-sort ties match. Bit-identical (value_counts
+32/0). MEASURED (new value_counts_i64 bench, i%1000): 5.50x@100k / 5.81x@1M (fp 1297us vs pandas 7542us) —
+BEATS pandas C khash for bounded int (dense direct-address > hashing). NOTE: the existing f64 value_counts
+bench (0.14x@1M loss) is UNAFFECTED — f64 is not dense-indexable, so the khash floor remains there (needs
+a custom open-addressing f64 table, untried). But int value_counts (IDs/categoricals-as-int — common!) now
+WINS. Gate: range <= max(64Ki, 4*n) so sparse keys fall back to the hash path. The dense-direct-address
+pattern beats khash where the key space is bounded — a real lever for the hash-bound losses.

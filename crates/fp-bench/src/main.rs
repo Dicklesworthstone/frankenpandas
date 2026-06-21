@@ -248,6 +248,15 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                     .expect("drop_duplicates");
             })
         }
+        ("dataframe_ops", "value_counts_i64") => {
+            // value_counts on a bounded Int64 column (i%1000) — 1000 distinct.
+            let col = Column::from_i64_values((0..rows as i64).map(|i| i % 1000).collect());
+            let series = Series::new("s", Index::new_known_unique_int64_unit_range(0, rows), col)
+                .expect("vc i64 series");
+            time_us(|| {
+                let _ = series.value_counts().expect("value_counts");
+            })
+        }
         ("dataframe_ops", "value_counts") => {
             let series = df.get_column("col_0");
             time_us(|| {
