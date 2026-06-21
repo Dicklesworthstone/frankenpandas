@@ -1385,3 +1385,15 @@ in-bounds. **SKIPPED iloc** (1 site): its positions are user-supplied and index_
 arithmetically without the bounds-check that labels()[pos] does, so converting could change OOB
 behavior (panic→bogus label) — left as-is. Big win for nlargest(small_n) on large lazy-indexed Series.
 UNMEASURED. (Extends the "labels()[pos] = O(n) materialization tax" SMELL from idxmax to GATHER paths.)
+
+### 2026-06-21 BlackThrush — label_at() free fn for DataFrame/Series gather sites (CODE-ONLY, perf PENDING)
+DISK-LOW (38G, no cargo): code-only. Extends the labels()[pos]=O(n)-materialization fix to the
+DataFrame gather sites (Series::index_label_at was impl-Series-only). Added a module-level free fn
+label_at(&Index, pos) — identical proven body (RangeIndex arith / typed-i64 view / fallback),
+bit-identical to index.labels()[pos].clone() for in-bounds pos. Converted 5 `.map(|&i| self.index.
+labels()[i].clone())` gather sites: drop_duplicates_keep, to_string_table, drop, drop_rows_int,
+compare. Each gathers a subset of self's own rows (in-bounds by construction), so each materialized
+the FULL Vec<IndexLabel> just to read the kept rows — now O(1)/label for affine/typed indexes (no
+materialization). Big win for these ops on large lazy/RangeIndex frames. (iloc still uses labels()[pos]
+— user positions, OOB bounds-check concern, deliberately left.) UNMEASURED. Single-label sites
+(explode 16553, etc.) are next-turn candidates.
