@@ -14302,6 +14302,26 @@ impl Column {
             let out: Vec<i64> = data.iter().map(|&v| v as i64).collect();
             return Ok(Self::from_i64_values(out));
         }
+        // Int64 -> Utf8: `write!` each integer's decimal form straight into a
+        // contiguous byte buffer. cast_scalar(Int64(v), Utf8) is exactly
+        // `v.to_string()` (pandas spells ints plainly — unlike floats "1.0" and
+        // bools "True"/"False", which this path deliberately does NOT take), so
+        // this is bit-identical to the Scalar map below while skipping the
+        // Vec<Scalar::Utf8> + per-row String allocation. as_i64_slice is all-valid
+        // (no null spelling needed).
+        if target == DType::Utf8
+            && let Some(data) = self.as_i64_slice()
+        {
+            use std::io::Write as _;
+            let mut bytes: Vec<u8> = Vec::with_capacity(data.len() * 4);
+            let mut offsets: Vec<usize> = Vec::with_capacity(data.len() + 1);
+            offsets.push(0);
+            for &v in data {
+                let _ = write!(bytes, "{v}");
+                offsets.push(bytes.len());
+            }
+            return Ok(Self::from_utf8_contiguous(bytes, offsets));
+        }
         let out: Vec<Scalar> = self
             .values
             .iter()

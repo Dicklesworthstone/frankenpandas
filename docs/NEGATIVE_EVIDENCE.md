@@ -1716,3 +1716,15 @@ string spellings (float "1.0", bool "True"/"False" — see test astype_to_utf8_u
 so replicating it with write! risks a float-formatting bit-identity break. NOT pursued (win, not loss;
 risk > reward). Added astype_str benches as regression guards. The clean in-fp-frame dt-string write!
 vein is harvested (date/time/strftime/day_name/month_name); numeric->string is a cross-crate win.
+
+### 2026-06-21 BlackThrush — LEVER: Int64 astype(str) write!-into-buffer — 26.9x->90.1x (3.33x fp-side)
+Followed the astype(str) measurement: i64 was 26.9x (a win, but the alloc-bound cast_scalar path). The
+INT case is SAFE to write! (cast_scalar(Int64(v), Utf8) == v.to_string(), pandas spells ints plainly —
+verified vs test cast_scalar_to_utf8_uses_pandas_string_spellings: -7->"-7"). Added an all-valid
+Int64->Utf8 fast path to Column::astype (fp-columnar, mirroring the existing Int64->Float64 / Float64->
+Int64 typed casts): write! each integer straight into a contiguous byte buffer -> from_utf8_contiguous,
+skipping the Vec<Scalar> source materialization AND the per-row String alloc. MEASURED: astype_str_i64
+5602->1684us (3.33x fp-side) -> **90.10x vs pandas** (was 26.9x). CONFORMANCE GREEN: fp-columnar 436/0
+(incl. astype_to_utf8 spelling test) + fp-frame 3098/0. DELIBERATELY NOT float/bool (cast_scalar uses
+pandas-specific spellings "1.0"/"True" that Rust's {} does NOT produce — write! would break them). The
+write!-into-buffer vein extends to numeric->string for the safe int case.
