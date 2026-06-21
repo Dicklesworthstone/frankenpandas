@@ -281,6 +281,18 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.notna()
             let _ = df.notna().expect("notna");
         }),
+        ("dataframe_ops", "df_quantile") => time_us(|| {
+            // pandas: df.quantile(0.5)
+            let _ = df.quantile(0.5).expect("quantile");
+        }),
+        ("dataframe_ops", "df_skew") => time_us(|| {
+            // pandas: df.skew()
+            let _ = df.skew().expect("skew");
+        }),
+        ("dataframe_ops", "df_sem") => time_us(|| {
+            // pandas: df.sem()
+            let _ = df.sem().expect("sem");
+        }),
         ("dataframe_ops", "df_nunique") => time_us(|| {
             // pandas: df.nunique()
             let _ = df.nunique().expect("nunique");

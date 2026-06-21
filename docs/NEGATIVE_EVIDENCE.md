@@ -976,3 +976,15 @@ ALL wins — the dense int64 grouping path covers them:
 | max | 6.0x | 3.9x |
 No action. Added groupby_std/median/nunique/first/max workloads. groupby surface is FP-dominant
 (consistent with the dense-grouping bypass wins in memory).
+
+### 2026-06-21 BlackThrush — quantile/skew/sem all WIN; common-op fixable-loss vein exhausted
+Probed df.quantile(0.5)/skew()/sem() (min-of-iters vs pandas): quantile 7.8x/13.6x, skew 2.0x/18.8x,
+sem 23.3x/40.2x — all big WINS. The per-column reduction family is FP-dominant. Added df_quantile/
+df_skew/df_sem workloads. SESSION STATUS: the common-op surface is now exhaustively swept — last
+several probe batches (groupby std/median/nunique/first/max, strings, fill/scan, quantile/skew/sem)
+are ALL wins, new-loss hit-rate ~0. Fixed losses this session: abs/neg/sign, melt 5.6x, sort_index
+300x, nlargest, idxmax, shift, dt year/month/day/hour/minute/second/quarter/dayofyear/dayofweek.
+REMAINING (non-quick): structural walls (transpose/stack/to_numpy — need 2D-block/MultiIndex);
+total_seconds (needs new as_timedelta64_slice columnar infra); df_round (bit-locked fdiv); pivot_table
+(untested, complex setup); cod-b's fp-index lane (avoided). Quick-win probing has reached diminishing
+returns.
