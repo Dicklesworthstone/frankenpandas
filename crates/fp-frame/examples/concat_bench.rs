@@ -3,6 +3,7 @@
 //!
 //! Usage:
 //!   concat_bench bench <rows_per_frame> <frames> <iters>   # per-iter ms
+//!   concat_bench bench_sum <rows_per_frame> <frames> <iters>
 //!   concat_bench golden <rows_per_frame> <frames>          # deterministic dump
 //!   concat_bench bench_reset <rows> <iters>
 //!   concat_bench golden_reset <rows>
@@ -104,6 +105,32 @@ fn main() {
             let elapsed = start.elapsed();
             eprintln!(
                 "concat_bench: {iters} iters in {:.3}s ({:.3} ms/iter), sink={sink}",
+                elapsed.as_secs_f64(),
+                elapsed.as_secs_f64() * 1000.0 / iters as f64
+            );
+        }
+        "bench_sum" => {
+            let rows: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(250_000);
+            let frames_n: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8);
+            let iters: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let frames: Vec<DataFrame> = (0..frames_n)
+                .map(|k| build_frame(rows, 4, k as u64))
+                .collect();
+            let refs: Vec<&DataFrame> = frames.iter().collect();
+            let start = std::time::Instant::now();
+            let mut sink = 0u64;
+            for _ in 0..iters {
+                let out = concat_dataframes_with_ignore_index(&refs, true).expect("concat");
+                let sums = out.sum().expect("sum");
+                for value in sums.values() {
+                    if let Scalar::Float64(v) = value {
+                        sink ^= v.to_bits();
+                    }
+                }
+            }
+            let elapsed = start.elapsed();
+            eprintln!(
+                "concat_sum_bench: {iters} iters in {:.3}s ({:.3} ms/iter), sink={sink}",
                 elapsed.as_secs_f64(),
                 elapsed.as_secs_f64() * 1000.0 / iters as f64
             );

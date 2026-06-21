@@ -25,7 +25,7 @@ Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or
 | std / var typed (0xdfx Welford) | 2M int64 | 19.5 ms | 1.72 ms | **11.3× faster** | ✅ KEEP — Welford crushes pandas std |
 | max 8-lane chunked accumulator (simdmx) | 2M int64 | 219 µs | 0.357 ms | **0.61× (1.63× slower)** | ✅ KEEP — 3.2× faster than scalar iter().max(); gap 5.2×→1.63× |
 | min 8-lane chunked accumulator (simdmx) | 2M int64 | 230 µs | 0.424 ms | **0.54× (1.86× slower)** | ✅ KEEP — 2.8× faster than scalar iter().min(); gap 5.1×→1.86× |
-| max/min 16-lane chunked accumulator (x7bp8) | 2M int64 `Series.max`/`Series.min`; code-only disk-low pass | PENDING | PENDING | **PENDING-BENCH** | 🧪 PENDING-BENCH — widened the safe-Rust Int64 extrema accumulator from 8 to 16 independent lanes in `i64_slice_max_simd`/`i64_slice_min_simd`. Bit-transparent for integer extrema because max/min are associative and commutative and empty handling is unchanged. No cargo build, test, or bench was started in this turn per DISK-LOW directive; next turn must run the existing max/min head-to-head and revert if neutral or regressive. |
+| max/min 16-lane chunked accumulator (x7bp8) | 2M int64 `Series.max`/`Series.min`; code-only disk-low pass | PENDING | PENDING | **PENDING-BENCH** | 🧪 PENDING-BENCH — widened the safe-Rust Int64 extrema accumulator from 8 to 16 independent lanes in `i64_slice_max_simd`/`i64_slice_min_simd`, with explicit final lane reduction instead of an iterator adaptor. Bit-transparent for integer extrema because max/min are associative and commutative and empty handling is unchanged. No cargo build, test, or bench was started in this turn per DISK-LOW directive; next turn must run the existing max/min head-to-head and revert if neutral or regressive. |
 | max/min portable-SIMD `i64x8` (uza04.207) | 2M int64 | 185 / 182 µs | 0.811 / 0.811 ms | **0.23× / 0.22×** | ❌ REVERT — safe `std::simd` was 2.3× slower than the manual 8-lane accumulator |
 | max/min portable-SIMD `i64x4` (uza04.207) | 2M int64 | 185 / 182 µs | 1.087 / 1.108 ms | **0.17× / 0.16×** | ❌ REVERT — AVX2-width `std::simd` variant was 3.1× slower than the manual accumulator |
 
@@ -1012,3 +1012,16 @@ shipped hour/minute/second call sites). Perf win EXPECTED by analogy (pure-mod �
 hour/minute) but UNMEASURED — VERIFY when disk recovers. This was the last sub-second dt component;
 the dt accessor vein is now fully typed (year/month/day/hour/minute/second/microsecond/nanosecond/
 quarter/dayofyear/dayofweek).
+
+### 2026-06-21 BlackThrush — dt.days_in_month typed fast path (CODE-ONLY, perf PENDING disk-low)
+DISK-LOW (46G): code-only, NOT built/benched. dt.days_in_month was on the generic chrono+Scalar
+extract_component_typed. Routed it through the already-VERIFIED Int64 civil helper
+(typed_datetime_civil_component_all_valid — the one quarter uses) with a closure that is VERBATIM
+`fp_types::Timestamp::days_in_month` (leap check `(y%4==0 && y%100!=0)||y%400==0` + the
+[31,leap?29:28,31,30,...] days table). **Bit-identity PROVABLE by inspection**: the civil (year,
+month) equals Timestamp::year()/month() (already verified for month), and the closure is the
+Timestamp formula verbatim; NaT/non-dense fall back. Compilation certain (structurally identical to
+the shipped quarter call site). Perf win EXPECTED by analogy to quarter (~1.6x, civil arith) but
+UNMEASURED — VERIFY when disk recovers. Remaining slow-path dt: is_* bools (need a Bool civil helper
+— deferred, can't verify the from_bool_values path code-only), weekofyear (ISO, complex), month_name/
+day_name (Utf8).
