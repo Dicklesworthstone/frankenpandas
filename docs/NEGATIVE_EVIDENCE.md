@@ -2524,3 +2524,11 @@ DataFrame groupby delegates per-column to SeriesGroupBy, so it inherits the dens
 two-pass-by-code, mean single-fold). No loss. GROUPBY IS NOW EXHAUSTIVELY VERIFIED AS A WIN: Series + DataFrame,
 string + int64 keys, single-agg + multi-agg, all reductions (sum/mean/var/std/min/max/count) + cumcount +
 transform — EVERY combination dominates pandas 1.3-7.6x @1M, all bit-identical / conformance green.
+
+### 2026-06-21 BlackThrush — SeriesGroupBy prod single-pass via dense_group_fold: 3.75x
+Routed prod through dense_group_fold(1.0, |a,x| a*x, |a,_| Float64(a)) (after its Timedelta guard) — one
+sequential fold per gid, no buckets. Bit-identical (groupby 202/0): 1.0*x0*x1*... folds left-to-right in
+value order == nums.iter().product()'s left fold. New bench groupby_prod_str: 3.75x@1M WIN. Now EVERY
+agg_numeric-using SeriesGroupBy reduction is single-pass (mean/sum/min/max/prod via the helper, var/std
+two-pass inline). Remaining: sem/skew (agg_values_scalar — need all values, like median; bit-identity vs
+nansem/nanskew not worth the risk) + median (bucket order stat) — both already WIN inline.

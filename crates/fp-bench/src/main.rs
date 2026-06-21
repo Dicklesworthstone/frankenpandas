@@ -787,6 +787,19 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
             time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").max().expect("max"); })
         }
+        ("groupby", "groupby_prod_str") => {
+            let mut kb = Vec::with_capacity(rows * 5);
+            let mut ko = Vec::with_capacity(rows + 1);
+            ko.push(0usize);
+            for &v in raw[0].iter() {
+                kb.extend_from_slice(format!("g{:04}", (v as i64).rem_euclid(1000)).as_bytes());
+                ko.push(kb.len());
+            }
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let key_series = Series::new("key".to_string(), index.clone(), Column::from_utf8_contiguous(kb, ko)).expect("key");
+            let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
+            time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").prod().expect("prod"); })
+        }
         ("groupby", "groupby_transform_mean_str") => {
             // String-key variant: s.groupby(str_key).transform("mean"). key =
             // "g{col_0 % 1000:04}" (~1000 distinct categorical labels).
