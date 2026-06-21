@@ -1761,3 +1761,14 @@ is unsafe — needs a careful per-variant pass. to_csv is already a WIN (195x) s
 loss; FILED as a bead for a dedicated pass rather than rushing a fiddly multi-variant edit on winning
 ops. (Discipline: identified + filed > risky rushed commit.) The clean high-value string-output veins
 (dt accessors, astype int/bool/float, stack/explode) are harvested + shipped this campaign.
+
+### 2026-06-21 BlackThrush — to_csv BTreeMap hoist = ~0-gain (REVERTED); the formatter is the cost
+Tested the filed to_csv n*m BTreeMap-hoist hypothesis (br-3seq1): pre-resolved col_values once before
+the row loop (to_numpy tonp1 pattern). MEASURED: csv_write 49271us vs 49242us baseline = **1.00x, NO
+gain**. REVERTED (~0-gain churn; conformance was green but no benefit). NEGATIVE EVIDENCE: the n*m
+BTreeMap lookup + cached values() was already cheap — NOT the bottleneck. The real cost is the per-cell
+format_pandas_csv_float(*v) String alloc + push_str (the bench is a float frame). The only real lever
+is write!-ing the formatter output into the `out` accumulator (avoid the formatter String), but pandas-
+CSV float formatting (.0 suffix/precision) is complex to replicate bit-identically — and to_csv is
+already a WIN (196x). Sibling to the apply_str revert: the suspected source/lookup overhead was a
+phantom; the OUTPUT formatting alloc is the real cost. br-3seq1 updated with this measurement.
