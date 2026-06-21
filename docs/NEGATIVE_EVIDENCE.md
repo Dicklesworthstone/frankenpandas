@@ -2815,3 +2815,14 @@ the multi-string-key GroupMap FxHashMap — all preserve exact output. Combined 
 (all fixes WIN intact) and the all-category inline verification (every category dominant @1M), the session is
 COMPREHENSIVELY COMPLETE AND VERIFIED at every level: perf (every measured loss fixed), correctness (3098/0),
 no regression. Remaining non-wins are ONLY golden-gated/architectural/inherent-floor/~parity, all root-caused.
+
+### 2026-06-21 BlackThrush — ewm_mean WIN (noise); dt_dayofyear 0.86x marginal at inherent civil floor
+Re-verified the last benched ops (datetime accessors + ewm). ewm_mean: initial 0.82x was PANDAS UNDER-WARMED
+noise (pm it=4) — careful (fp min-of-3, pandas min-of-8) = 2.05x WIN across all spans (8th single-measurement
+anomaly this session; even re-checks need iterations). dt_floor 1.24x, to_datetime 3.81x WIN. dt_dayofyear is
+a GENUINE 0.86x marginal loss (careful: fp 15385 vs pandas 13305us@1M) — but it's ALREADY fully typed
+(typed_datetime_dayofyear_all_valid: as_datetime64_slice + datetime64_civil_from_nanos + DAYS_BEFORE +
+from_i64_values, no chrono). The per-row civil-from-ns is ~the inherent floor (fp ~15ns vs pandas ~13ns/row).
+The only speedup (a day-cache reusing the civil date within a day) helps ONLY sorted data = bench-gaming, NOT
+a general win — so NOT pursued (discipline: don't optimize for the bench's sorted fixture). dt_dayofyear left
+at its ~0.86x inherent-floor marginal. All other dt accessors + ewm WIN.
