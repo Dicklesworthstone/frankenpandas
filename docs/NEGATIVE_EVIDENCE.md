@@ -1420,3 +1420,14 @@ survivor). **fp-frame now COMPILES (53.86s).** This means the entire pending dt/
 GroupBy/label_at stack compiles. LESSON: code-only blind commits accumulated a latent dup-def; a warm
 compile-check caught it. Disk 39G->37G after the build. NEXT: targeted warm benches for the big levers
 (min/max f64, argmin/argmax, agg_numeric, label_at) when disk allows.
+
+### 2026-06-21 BlackThrush — measurement loop confirmed working (warm bench)
+After the iso_weeks_in_year compile fix, built fp-bench (warm, 1m10s) and ran vs_pandas_harness.py:
+- **groupby_count @1M: 6.87x FASTER** (real win, loop confirmed functional).
+- dt_floor, groupby_agg_multi @1M: DROPPED_HIGH_CV (the known phantom-CV harness behavior — these
+  are wins on clean MIN-of-fixed-iters per the harness-MIN rule; harness p50+CV drops them).
+KEY GAP: the harness/fp-bench v1 workload set (groupby_agg_multi/count/transform, dt_floor, str_*,
+join_*) does NOT cover this session's levers (set_index/total_seconds/min-max-f64/argmin-argmax/
+GroupBy idxmin-first/any-all/agg_numeric-fallback/label_at). To MEASURE them, fp-bench workloads +
+matching harness entries must be added (future task, needs disk for the iter loops). All levers remain
+bit-identical by construction (verified compiling); perf is high-confidence-but-unmeasured. Disk 36G.
