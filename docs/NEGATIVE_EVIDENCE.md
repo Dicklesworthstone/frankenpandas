@@ -2363,3 +2363,14 @@ scalar_slice) that BOTH Series::rank_with_pct and rank_axis1 call — rank_axis1
 directly with NO per-row Series. Alt: vectorized O(m^2) column-wise rank for the 'average' method (rank[i] =
 count(col_j<col_i)+0.5*count(==)). Bit-identity risk = the tie/na/pct/method handling, so this needs a
 focused effort + golden check, NOT an end-of-session blind lever. Bench df_rank_axis1 added (documents it).
+
+### 2026-06-21 BlackThrush — rank_axis1 VECTORIZED average fast path: 0.19x->2.87x@1M WIN (filed loss FIXED same session)
+The filed br-kj7cu loss (df.rank(axis=1) 0.19x, per-row Series build) was FIXABLE without the risky entangled
+rank-core refactor — via a GATED vectorized fast path. For the common case (method="average", not pct, all
+all-valid Float64, no NaN): rank each row's m values as count(a<b) + (count(a==b)+1)/2 in ONE pass over rows
+(O(m^2) per row in registers, m strided gather reads). NO per-row Series. Bit-identical: the existing
+dataframe_rank_axis1_basic("average") test passes (rank 48/0) + differential vs pandas (count-based avg rank
+matches incl ties) = True. MEASURED: 2112486->141555us@1M = ~14.9x fp-side -> 0.19x->2.87x WIN (fp 141ms vs
+pandas 407ms). Other methods (dense/min/max/first)/pct/non-f64/NaN fall back to the per-row path (less
+common). LESSON: a "needs-a-focused-refactor" loss can have a TRACTABLE gated fast path — verify test
+coverage (avg axis1 test existed) + differential before shipping. br-kj7cu CLOSED (average case).
