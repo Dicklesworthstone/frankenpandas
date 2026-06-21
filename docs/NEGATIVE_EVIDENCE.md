@@ -2374,3 +2374,14 @@ matches incl ties) = True. MEASURED: 2112486->141555us@1M = ~14.9x fp-side -> 0.
 pandas 407ms). Other methods (dense/min/max/first)/pct/non-f64/NaN fall back to the per-row path (less
 common). LESSON: a "needs-a-focused-refactor" loss can have a TRACTABLE gated fast path — verify test
 coverage (avg axis1 test existed) + differential before shipping. br-kj7cu CLOSED (average case).
+
+### 2026-06-21 BlackThrush — rank_axis1 vectorized path extended to min/max/first (avg 2.93x, min 2.70x); regression caught+fixed
+Extended the rank_axis1 vectorized fast path from average-only to average/min/max/first (all from the per-row
+pairwise counts: min=less+1, max=less+equal, first=less+count(equal at j<=i), verified vs pandas incl ties).
+DISCIPLINE CATCH: my first cut computed eq_le_i in the MAIN inner loop (for "first") — it REGRESSED the
+common average case 2.87x->1.62x (the extra branchless add per of 100M inner iters). Measured the regression,
+moved eq_le_i into the "first" match arm ONLY (its own inner pass; less common method pays it). Result:
+average back to 2.93x (no regression), min 2.70x WIN. Bit-identical (rank 48/0). MEASURED @1M: average
+144573us 2.93x, min 148965us 2.70x (was 0.19x both via per-row Series). dense/pct/non-f64/NaN still fall
+back. LESSON: adding a feature to a hot loop can regress the common path — MEASURE the common case after,
+gate the extra work to the path that needs it. Added df_rank_axis1_min bench.
