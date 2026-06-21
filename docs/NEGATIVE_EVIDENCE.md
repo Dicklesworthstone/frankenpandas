@@ -2692,3 +2692,12 @@ two-pass, a typed std/var fast path (skip the input Scalar materialization, like
 bit-identical and would flip it to ~1.1x; left as a marginal ~parity candidate (lower value than the
 multi-func wins). Remaining non-wins: golden-gated (expanding skew/kurt br-nsyti), architectural
 (multi-string-key, to_numpy/transpose l4vzc), marginal (resample single std/var 0.92x, unique 0.96x).
+
+### 2026-06-21 BlackThrush — resample single std/var 0.92x->1.21x (typed two-pass) — marginal loss flipped
+Flipped the last marginal resample loss now that nanvar's two-pass formula is verified. Added
+Resample::resample_var_typed (std/var route through it): typed two-pass per bin from as_f64_slice, skipping
+the per-bin Vec<Scalar> gather + nan_* dispatch aggregate_scalar pays per call (the per-call cost; values()
+is cached by the bench's series reuse). Bit-identical (resample 51/0): == fp_types::nanvar (n<=1 -> Null),
+nanstd == sqrt; gated on f64 + no-NaN (Timedelta/NaN keep the nan_* path). MEASURED: resample_std
+25600->19724us@1M = 0.92x->1.21x WIN. THREE agg-investigation fixes this turn: groupby.agg 0.63->2.63x,
+resample.agg 0.38->1.48x, resample std/var 0.92->1.21x. resample_median still 1.04x (nanmedian sort, fine).
