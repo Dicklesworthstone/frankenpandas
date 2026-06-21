@@ -1798,3 +1798,15 @@ Vec<f64>>) are sub-ms even @1M, so a fixed setup/alloc cost dominates. ROOT CAUS
 Scalar-Vec build). REOPENED zngxi with this; likely fix = int64-dense grouping (cf groupby 1432b615).
 INTEGRITY NOTE: two prior "phantom" closures (pivot_table, and the df_stack 0.4x) were NO-WARMUP
 artifacts — clean-MIN MUST warm pandas for variable ops; I'm re-auditing reshape ratios accordingly.
+
+### 2026-06-21 BlackThrush — PROFILED pivot_table (instrumented): scatter ~4ms dominant, INPUT-INDEPENDENT
+Instrumented pivot_table phases (timers added + reverted): uniq+sort ~1.9ms, SCATTER ~4ms (dominant),
+output ~0.1ms — ALL input-independent (10k~=100k~=1M ~6ms total). So the cost is NOT O(n_rows) hashing
+(would scale) but per-row fixed-ish overhead: scatter = HashMap<(ScalarKey,ScalarKey),Vec<f64>> via
+per-row entry+push, keys from idx_col.values()[i]/col_col.values()[i] (Scalar materialize + ScalarKey
+wrap per row) + val_col.values()[i].to_f64(). zngxi updated with the profiled breakdown + a MEASURABLE
+fix plan (int64-dense scatter: as_i64_slice -> dense sum[cell]+count[cell] flat array, no HashMap/no
+per-cell Vec, for mean/sum/count/min/max; ScalarKey fallback for median/std). CRITICAL per the to_csv-
+hoist lesson: the input-independence is anomalous (hashing would scale) — so VERIFY the typed-slice
+access is the win before assuming, don't guess. This is the disciplined profile-then-fix the mandate
+asks (/profiling-software-performance): perf/valgrind are restricted here, so source timers were used.
