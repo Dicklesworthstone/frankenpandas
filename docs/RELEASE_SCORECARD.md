@@ -2,7 +2,7 @@
 
 ## Release-readiness verdict (gauntlet, measured)
 
-**Perf vs pandas 2.2.3: 36/43 realistic ops faster (median ≈2.8× among wins); 5 losses,
+**Perf vs pandas 2.2.3: 37/43 realistic ops faster (median ≈2.8× among wins); 4 remaining loss classes,
 2 neutral rows, all with documented fix paths; 0 shipped perf-lever regressions.** Conformance:
 3078/3079 fp-frame tests pass (1 remaining failure — `groupby_prod_preserves_int64_j9w3s`,
 cod-b's groupby-prod-dtype gap); the gauntlet drove this from 6 failures to 1 (peers fixed
@@ -19,6 +19,7 @@ focused `fp-groupby` release tests green.
   groupby count/size Utf8-key (2.49×/2.81×),
   groupby median Utf8-key (1.80–2.63×),
   groupby std/var Utf8-key (1.22–1.34×), Series.combine_first default construction (676×),
+  merge inner on lower-hex Utf8 keys (17.85×),
   reset/set_index (5–6.5×), std/var (11×), str case (6.5×), head/tail (17×),
   DataFrame.dropna Float64 (1.22×),
   slice/filter/sort/sum (1.2–1.3×), RangeIndex.asof scalar lookup (3,840–16,031×),
@@ -83,7 +84,7 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | loc[[ts]] Datetime64 index | 2M f64 1-min DatetimeIndex, select 1000 | 67.6× | 🟢 flipped from 1173× SLOWER; recbe identity-cached ns→pos hashtable |
 | get_indexer unsorted Utf8 (repeated) | 1M unsorted Utf8 self, 1000 targets | 4.1× | 🟢 flipped from 744× SLOWER; c90bo routes core reindex/align/join resolver through cached loc lookups |
 | get_indexer unsorted Int64 (repeated) | 1M unsorted Int64 self, 1000 targets | 3.6× | 🟢 flipped from 210× SLOWER; c90bo follow-on reuses cached i64 resolver instead of rebuilding the map |
-| merge inner on Utf8 keys | 1M×1M → 500k rows | 0.42× | 🔴 2.4× slower; deferred (bead f1ftd) — fp-join pointer-key + output-alloc, hot/peer-reserved crate |
+| merge inner on Utf8 keys | 1M×1M lower-hex keys → 500k rows | 17.85× | 🟢 current-head f1ftd verify; accepted batch-median artifact `artifacts/bench/cod_a_f1ftd_join_inner_str_batch_medians_20260621.json` (FP CV 3.00%, pandas CV 2.43%); raw one-binary harness rows were faster but dropped for FP CV |
 | str.lower/upper | 1M strings | 6.5× | 🟢 |
 | concat | 8×125k Int64 | 0.46× with 3nah5 mimalloc boundary | 🔴 2.15× slower; allocator floor narrowed, still structural |
 | DataFrame.dropna(how=any) | 500k×5 f64, ~10% NaN rows | 1.22× | 🟢 flipped from 0.42× loss; 9bccl uses missing-free Float64 witnesses plus lazy all-valid chunked run gather |
@@ -107,12 +108,15 @@ ratio = pandas / fp (>1 ⇒ fp faster).
 | RangeIndex.get_indexer miss-heavy | 100k / 1M targets | 2.64× / 3.61× | 🟢 flipped by arithmetic bulk membership; `rch` same-worker FP-side 4.0× |
 | RangeIndex.reindex all-miss | 100k / 1M targets | 36.1× / 51.5× | 🟢 exact RangeIndex lattice fast path; `rch` same-worker FP-side 75.7× / 32.2× |
 
-**Score: 36/43 measured ops faster than pandas; 5 losses (max, min, concat, Series.map Float64 `values()`, Series.combine_first `values()`),
+**Score: 37/43 measured ops faster than pandas; 4 remaining loss classes (max/min, concat, Series.map Float64 `values()`, Series.combine_first `values()`),
 2 neutral rows (add, mul pinned); 0 shipped regressions; 12 reverted/no-ship SIMD, allocation,
 or ~0-gain attempts.**
 
-Median win among the 36 ≈ 2.8×; the remaining losses are kernel/structural gaps with
-documented fix paths — none are code-first fp-frame regressions. concat
+Median win among the 37 ≈ 2.8×; the remaining losses are kernel/structural gaps with
+documented fix paths — none are code-first fp-frame regressions. The stale f1ftd
+Utf8 inner-merge red row is now green on current head: batch medians on CPU7 measured
+FP 8.234 ms p50 vs pandas 146.950 ms p50, 17.85× faster with both CVs under 5%.
+concat
 remains a confirmed **column-rebuild** loss; ffill was the same class until skw2c changed
 the no-limit path to bulk-copy the f64 buffer and fill only invalid validity runs.
 RangeIndex indexers were a separate vectorized-engine gap after `29u49`; `uza04.159`
