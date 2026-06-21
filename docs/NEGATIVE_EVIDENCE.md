@@ -1680,3 +1680,16 @@ very slow); dt_date 17.53x. Conformance GREEN (fp-frame 3098/0). Added dt_time b
 date AND time-of-day both vary). The fixed-format-dt write!-into-buffer vein: date(17.4x)+time(36.7x)
 done; strftime is user-format (needs the formatter refactored to write into a buffer — deferred);
 day_name/month_name already return &'static str (no alloc).
+
+### 2026-06-21 BlackThrush — RADICAL LEVER: strftime token-parse + write! — 9.5x->51.2x (5.47x fp-side)
+strftime's closure did SIX CHAINED `.replace()` PER ROW (`fmt.replace("%Y",..).replace("%m",..)...`) —
+each a full format re-scan + String allocation (~12 allocs/row = ~12M allocs/sec @1M). That was the
+42ms. LEVER: pre-parse the format into literal/directive tokens ONCE, then write! each token DIRECTLY
+into the output byte buffer per row — ZERO per-row allocations. **Bit-identical**: same six directives
+(%Y/%m/%d/%H/%M/%S) zero-padded the same way, everything else literal; digit replacements never create
+new directives so left-to-right token substitution == chained .replace(). MEASURED: dt_strftime
+41939->7664us (5.47x vs the helper, 5.92x vs the 45380us original) -> **51.18x vs pandas** (was 9.5x).
+CONFORMANCE GREEN: fp-frame 3098/0 incl. tests::dt_strftime (validates the token parser). The
+write!-into-buffer dt-string vein COMPLETE: date 17.4x, time 36.7x, strftime 51.2x — all bit-identical,
+all from killing the per-row format!/replace String allocs. RADICAL: chained per-row .replace() is the
+worst alloc pattern; pre-parse + write! is the lever.
