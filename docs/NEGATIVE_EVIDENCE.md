@@ -1180,3 +1180,17 @@ on div_euclid days, iso_dow=(dow==6?7:dow+1), week=(doy-iso_dow+10)/7, then the 
 self.dayofyear()/dayofweek()/iso_weeks_in_year use); NaT/non-dense fall back. `week` alias inherits it.
 **DT ACCESSOR VEIN NOW COMPLETE — every component typed.** UNMEASURED — verify when disk recovers
 (the differential test for weekofyear is critical given the ISO edge cases: 2021-01-01→53, 2026-12-31→53).
+
+### 2026-06-21 BlackThrush — dt.total_seconds typed Timedelta64 fast path (CODE-ONLY, perf PENDING)
+DISK-CRITICAL (39G, no cargo): code-only, 2-file change. First TIMEDELTA (not datetime) lever.
+total_seconds materialized the Scalar Vec + ran a datetime-string-detection prefix scan + a per-
+element match. (1) fp-columnar: added `as_timedelta64_slice() -> Option<&[i64]>` — a clean ADDITIVE
+verbatim mirror of as_datetime64_slice (Timedelta64 stores nanos in ColumnData::Timedelta64; no lazy
+variant; merge-safe). (2) fp-frame: total_seconds typed fast path — if all-valid Timedelta64 (no NAT),
+map raw nanos through fp_types::Timedelta::total_seconds → from_f64_values. **Bit-identity provable**:
+the Scalar path maps each Scalar::Timedelta64(n) → Scalar::Float64(total_seconds(n)); from_f64_values
+== from_values of those floats (all finite — i64/1e9 never NaN); the Utf8-detect scan never fires on a
+Timedelta64 column (no Utf8); NaT → fall back (Scalar path renders missing). Used a precedented
+let-chain (117 in fp-frame). UNMEASURED — VERIFY when disk recovers (pandas tdelta.dt.total_seconds;
+expect a solid win — skips Scalar + the prefix scan). Opens the timedelta-accessor vein (next:
+.days/.seconds/.microseconds if exposed). Stack now spans fp-columnar too — build BOTH crates on recover.

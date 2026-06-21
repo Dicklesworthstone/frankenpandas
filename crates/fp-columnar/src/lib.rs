@@ -7082,6 +7082,21 @@ impl Column {
         None
     }
 
+    /// Borrow the raw `&[i64]` nanosecond backing of a `Timedelta64` column.
+    /// Sibling of [`Self::as_datetime64_slice`] (Timedelta64 stores its nanos in
+    /// `ColumnData::Timedelta64`; there is no lazy Timedelta64 variant). Missing
+    /// values are `Timedelta::NAT` in the buffer, so callers handle NaT inline.
+    /// Returns `None` for any other dtype or a non-materialized column.
+    pub fn as_timedelta64_slice(&self) -> Option<&[i64]> {
+        if self.dtype != DType::Timedelta64 {
+            return None;
+        }
+        if let Some(ColumnData::Timedelta64(data)) = &self.data {
+            return Some(data.as_slice());
+        }
+        None
+    }
+
     /// Return an Arc-backed all-valid Int64 buffer for lazy descriptor builders.
     /// Existing Arc-backed columns share in O(1); legacy cached `Vec<i64>`
     /// columns are copied once into immutable Arc storage.
