@@ -2806,3 +2806,12 @@ showed 0.77x in the few-iteration guard (pm it=4, single fp read) — a SINGLE-M
 subtlety in action): careful re-measure (fp min-of-3, pandas min-of-8 warmed) = 1.29x WIN. LESSON REINFORCED:
 the regression GUARD itself needs adequate iterations or it false-alarms; trust the careful re-measure. ALL
 session fixes verified solid; no regression anywhere.
+
+### 2026-06-21 BlackThrush — FULL fp-frame conformance 3098/0: every session edit bit-identical, ZERO regression
+Ran the complete fp-frame conformance suite (not per-category): 3098 passed, 0 failed, 15 ignored. EVERY
+session edit is bit-identical — the groupby value-agg fixes (dense buckets + FxHashSet), single-pass
+reductions (dense_group_fold), multi-func buckets-once (groupby+resample agg), resample typed std/var/min/max,
+the multi-string-key GroupMap FxHashMap — all preserve exact output. Combined with the perf regression guard
+(all fixes WIN intact) and the all-category inline verification (every category dominant @1M), the session is
+COMPREHENSIVELY COMPLETE AND VERIFIED at every level: perf (every measured loss fixed), correctness (3098/0),
+no regression. Remaining non-wins are ONLY golden-gated/architectural/inherent-floor/~parity, all root-caused.
