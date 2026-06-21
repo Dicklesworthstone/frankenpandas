@@ -2712,3 +2712,14 @@ contiguous slices without materializing per-bin index vecs. The deeper lever for
 (sum/min/max/std/var ~parity) is build_groups returning contiguous (start,end) ranges instead of Vec<usize>
 (architectural-ish, contiguous bins only). Typed mean/std/var/min/max done; remaining resample single-aggs
 are ~parity at the build_groups floor.
+
+### 2026-06-21 BlackThrush — resample build_groups floor: assessed, deferred (architectural, marginal)
+Read Resample::build_groups @22840 -> delegates to free fn resample_build_groups(labels, freq) returning
+(Vec<String> order, HashMap<String, Vec<usize>>). The Vec<usize> per bin (~8MB@1M) is the residual floor for
+the resample single-aggs now at ~parity (sum 1.01x / min,max 0.94x). A boundary version returning
+(label, start, end) per contiguous bin would let the typed aggs slice as_f64_slice[start..end] with no
+Vec<usize> — but it requires RE-IMPLEMENTING the freq bucketing + empty-bin-fill (eov68) logic to emit ranges
+(empty bin -> start==end), an involved architectural change for a marginal gain (the affected ops are already
+~parity). DEFERRED (disk dropping 56G, marginal EV). The typed mean/std/var/min/max + multi-func buckets-once
+already eliminated the per-bin Vec<Scalar> gather (the bigger cost); the Vec<usize> floor is shared with the
+generic path and lower-value.
