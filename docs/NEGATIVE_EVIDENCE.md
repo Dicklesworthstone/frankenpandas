@@ -2177,3 +2177,13 @@ fractional. Bit-identical (resample 51/0); chrono fallback for sub-second/extrem
 (1M, 16MB) + dense Vec<Vec> allocs + agg. Two-pass (inline bin_index, no bins Vec) may close it to ~1.0x.
 LESSON: chrono dt.format IS a real cost (~0.4us/call) — the strftime write! vein applies to ANY per-bin/
 per-row chrono format, not just strftime() itself.
+
+### 2026-06-21 BlackThrush — resample MONTHLY dense scatter ~1.58x (0.60x->0.96x@1M, 1.08x@100k WIN)
+Extended the dense-scatter pattern to the monthly resample path. Its per-row cost was groups.get_mut(key)
+= a std-SipHash hash EVERY row (the key-cache only avoided recomputing the key string, not the per-row
+hash). Replaced with a dense scatter by bucket index: bucket_end_mo(mo) is always first+k*bucket_months, so
+bidx=(bucket_end_mo(mo)-first)/bucket_months maps each row to its cursor bucket WITHOUT hashing; merge into
+groups only for Some-key buckets (None-key rows dropped as before). Bit-identical (resample 51/0). MEASURED:
+36950->23411us@1M = ~1.58x -> 0.60x->0.96x@1M (parity), 1.08x@100k WIN. The residual ~4%@1M is the floor
+(gather-agg + month_ords/dense allocs). The dense pattern now covers ns(sub-daily) + monthly; daily/weekly/
+N-day/bday remain (same get_mut-per-row -> dense). The std-SipHash-get_mut-per-row was the shared cost.
