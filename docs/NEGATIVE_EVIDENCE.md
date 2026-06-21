@@ -1222,3 +1222,19 @@ scalar_to_index_label Float64 arm (-0.0 normalized; all-valid so no Null to reje
 TRIVIALLY provable** (same labels as the generic path; the pattern IndexLabel::Float64(OrderedF64(..))
 is used 13x in fp-frame already). Win: skips the 100k Scalar materialization. UNMEASURED — VERIFY when
 disk recovers (expect ~parity at 100k, still a win at 1M). The set_index Int64 path was already typed.
+
+### 2026-06-21 BlackThrush — set_index typed Utf8 + Datetime64 label paths (CODE-ONLY, perf PENDING)
+DISK-LOW (38G, no cargo): code-only, extends last turn's set_index Float64 path. set_index built the
+index from the key column via scalar_to_index_label (per-row Scalar) for any non-Int64 dtype. Added
+two more typed branches (now Int64/Float64/Utf8/Datetime64 all typed; the 4 common index-key dtypes):
+- **Utf8** (common `set_index('name')`): as_utf8_contiguous (all-valid) -> IndexLabel::Utf8 per byte
+  span. The generic path allocates each label String TWICE (.values() Scalar::Utf8 materialization +
+  the .clone() in scalar_to_index_label); the typed path allocates ONCE. Mirrors the value_counts
+  byte-span pattern (used 10x in fp-frame).
+- **Datetime64** (common time-series `set_index('ts')`): as_datetime64_slice + a NaT-guard let-chain
+  -> IndexLabel::Datetime64; skips the Scalar Vec. The NaT guard preserves the generic path's
+  missing-label rejection (Err).
+**Bit-identity TRIVIALLY provable** (each branch produces the exact labels scalar_to_index_label does
+for that dtype; as_utf8_contiguous requires validity.all, the Datetime64 branch NaT-guards). UNMEASURED.
+Bool/Timedelta64 keys (rare as index) still use the generic path. The set_index loss vein is closed
+for the common dtypes.
