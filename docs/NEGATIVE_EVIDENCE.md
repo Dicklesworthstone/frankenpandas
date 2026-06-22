@@ -3183,3 +3183,15 @@ scope for an autonomous "bench, commit-if-green" turn (correctness change, golde
 oracle). FLAGGED for a directed correctness session. NOTE: suspected from code-read + pandas oracle; fp's actual
 i64-groupby-cumsum output dtype should be confirmed first (a conformance gap may exist). This is the first
 non-perf finding of the session — a possible latent dtype bug, surfaced by the perf lens.
+
+### 2026-06-22 CrimsonFinch — i64 groupby.cum* dtype divergence UPGRADED suspected->CONFIRMED (code-read decisive)
+Closed the verification on the prior flag: transform_groups (~25967) emits the closure's Vec<Scalar> VERBATIM via
+Column::from_values(out) with NO dtype recast, and the cumsum/cumprod/cummin/cummax closures emit Scalar::Float64
+(acc) on the non-dense (i64) path. So an Int64 groupby.cum* DOES return Float64, vs pandas Int64 (oracle-verified
+last turn). CONFIRMED real divergence (was "suspected"). Still DEFERRED — it is correctness + golden-breaking
+(output dtype Float64->Int64 changes current fp output; must regen goldens and verify vs live pandas across all 4
+cum ops + *_with_skipna + the timedelta path + int overflow semantics), which is a directed-correctness-session
+task, NOT an autonomous perf "commit-if-green" turn. End-to-end fp output confirmation (a tiny i64 groupby cumsum
+test) is the recommended first step for that session. Perf note: the same i64 path also boxes (transform_groups
+Scalar fallback) so a typed-i64 cum path would fix BOTH the dtype and the perf in one change. This remains the
+only open finding; all PERF losses are flipped (zero fixable perf losses repo-wide).
