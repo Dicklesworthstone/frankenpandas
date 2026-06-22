@@ -1081,6 +1081,30 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = val_series.groupby(&key_series).expect("groupby").sum().expect("sum");
             })
         }
+        ("groupby", "df_groupby_widekey_sum") => {
+            // DataFrameGroupBy sibling of groupby_widekey_sum: single WIDE-range
+            // i64 key col (~rows distinct) + 3 f64 value cols, df.groupby(key).sum().
+            let mut columns = BTreeMap::new();
+            let key_vals: Vec<i64> = (0..rows as i64)
+                .map(|i| (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as i64 >> 1)
+                .collect();
+            columns.insert("key".to_string(), Column::from_i64_values(key_vals));
+            let mut order = vec!["key".to_string()];
+            for c in 0..3 {
+                let n = format!("v{c}");
+                columns.insert(n.clone(), Column::from_f64_values(raw[c].clone()));
+                order.push(n);
+            }
+            let gdf = DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, rows),
+                columns,
+                order,
+            )
+            .expect("widekey gb frame");
+            time_us(|| {
+                let _ = gdf.groupby(&["key"]).expect("groupby").sum().expect("sum");
+            })
+        }
         ("groupby", "df_groupby_int_var") => {
             let mut columns = BTreeMap::new();
             let key_vals: Vec<i64> = (0..rows).map(|i| (i % 1000) as i64).collect();

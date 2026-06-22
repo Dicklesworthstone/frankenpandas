@@ -3307,3 +3307,15 @@ the bounded dense path exactly. Bit-identical (same first-seen order, nums per g
 by-name index; fp-frame 3098/0). groupby_widekey_sum @1M 410ms->82ms (5x fp-side), 0.36x->1.93x WIN. 8th loss-flip
 this session. FOLLOW-UP: DataFrameGroupBy wide-i64 (aggregate_named_func generic + all-int-bounded dense precompute)
 may have the same gap -- check next.
+
+### 2026-06-22 CrimsonFinch — DataFrameGroupBy wide-i64 sparse paths: 0.10x->0.25x @1M (2.5x fp-side; residual output-bound)
+Sibling of the SeriesGroupBy wide-i64 fix. df.groupby([widekey]).sum() was 0.10x (fp 2.18 SECONDS vs pandas 214ms,
+1M groups) — DataFrameGroupBy build_groups (60357) AND the aggregate_named_func dense precompute both gated dense
+on BOUNDED i64; a wide key fell to the generic Vec<ScalarKey>+SipHash build_groups + per-group Scalar gather. Added
+single-wide-i64 sparse paths to BOTH: build_groups (FxHashMap<i64,gid> -> group_order/groups) and the value-agg
+precompute (FxHashMap<i64,gid> -> gid_per_row + go_gid bridge). Bit-identical (fp-frame 3098/0). df_groupby_widekey_
+sum @1M 2.18s->859ms (2.5x fp-side), 0.10x->0.25x. STILL A LOSS (0.25x) — the residual is OUTPUT/SORT-bound for 1M
+groups: build_groups still materializes the full groups map (1M Vec<usize>) used only for the per-group first-row
+label, plus the sort of 1M group keys + the 3-col 1M-row output build. Kept (2.5x fp-side is NOT ~0-gain, bit-
+identical), residual filed as a follow-up (derive first-row labels from gid_per_row first-occurrence to skip the
+groups-map materialization on the dense path). 9th flip/extension this session.
