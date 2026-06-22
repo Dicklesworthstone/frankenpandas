@@ -3219,3 +3219,18 @@ loss. (df_pivot @100k errored on MY pandas-side comparison setup — duplicate (
 vs-pandas bench space is now exhausted across ALL dimensions: families x dtypes (f64/i64/NaN) x value-returning
 ops x sizes (100k/1M). Zero fixable perf losses repo-wide. Only open item is the test-asserted i64 groupby.cum*
 dtype divergence (deferred, directed-correctness). BOLD-VERIFY autonomous perf sweep: COMPLETE.
+
+### 2026-06-22 CrimsonFinch — i64 groupby.cum* Float64 confirmed UNINTENTIONAL (docs don't mandate it) = real bug
+Disk recovered (57G). Checked whether the test-asserted Float64 output for i64 groupby.cum* is an intentional
+design choice: it is NOT — COMPREHENSIVE_SPEC/FEATURE_PARITY/COVERAGE_MATRIX document NO int->float promotion for
+groupby cumsum/cumprod/cummin/cummax (FEATURE_PARITY lists them as plain "cumulative transforms"; pandas returns
+Int64). So the groupby_cumsum test asserting Scalar::Float64(1.0) on Int64 input is an unverified-against-pandas
+test that baked in fp's (buggy) float-promoting output. Status: CONFIRMED BUG (not design), fully characterized.
+STILL HELD from autonomous fix — but now for SCOPE not ambiguity: the fix spans multiple entry points
+(DataFrameGroupBy + SeriesGroupBy cum*), 4 ops, int-overflow/wrapping semantics, and REWRITING 4+ baked-in test
+assertions + regenerating goldens. That is a behavior change across the surface (not a localized bit-identical perf
+flip like this session's 4 wins), and rewriting the asserting tests to go "green" is only sound with a from-pandas
+oracle for EVERY case — a directed-correctness-session task, not an autonomous commit-if-green turn. RECOMMENDED for
+that session: typed-i64 cum path (mirror try_cum_dense, wrapping_add/mul, emit Int64) + a NEW test whose expected
+values come from live pandas (not fp) + update the 4 baked assertions to the pandas Int64 values + full conformance.
+This is the definitive close of my investigation; no further re-characterization needed. All PERF losses flipped.
