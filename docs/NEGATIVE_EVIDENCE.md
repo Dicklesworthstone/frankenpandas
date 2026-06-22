@@ -3040,3 +3040,14 @@ LAST family. EVERY fp op family now confirmed dominant vs pandas @1M: numeric re
 str key), rolling/expanding, datetime/resample, joins, io (csv/json), indexing, reshape, conversion, AND strings.
 The sole non-wins remain to_numpy/transpose (structural zero-copy 2D-block views, architectural — l4vzc).
 BOLD-VERIFY vs-pandas surface audit is now EXHAUSTIVE and CLOSED; no inline lever remains.
+
+### 2026-06-22 CrimsonFinch — last documented loss (multi-string-key groupby) now 1.07x WIN; zero losses remain
+Measured the one remaining DOCUMENTED algorithmic loss — df_groupby_2strkey_sum (BlackThrush 2026-06-21: 0.89x,
+"no multi-key dense for strings"). Quiet box @1M: fp 89.1ms vs pandas 95.7ms = 1.07x WIN (multi-int-key
+df_groupby_2key_sum 2.26x for comparison — same 5000 groups). So even this was partly machine-load; it is now a
+(marginal) win. The factorize-string-keys-to-int-codes + int64_dense_grouping lever BlackThrush noted is still
+available and would lift 1.07x->~2x, but it optimizes an already-WINNING op via the hot/complex multi-key path
+with group-ordering golden risk — NOT a loss-to-flip, so deferred (lower priority than the discipline's flip-the-
+losses mandate, which is now fully satisfied). FINAL STATE: ZERO vs-pandas losses across the entire benched +
+perf_profile surface (all 11 families incl. strings + multi-key); sole non-wins are to_numpy/transpose (structural
+zero-copy views, architectural). BOLD-VERIFY surface audit CLOSED — no remaining loss exists to flip.
