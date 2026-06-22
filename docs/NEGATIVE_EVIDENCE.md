@@ -2838,3 +2838,16 @@ extra DAYS_BEFORE sum). The only speedup = a day-cache reusing the civil within 
 data = BENCH-GAMING, not pursued. NO general bit-identical fix. The datetime category is fully characterized:
 typed-ns/year-only/write!-buffer ops dominate; the 3 full-civil-component accessors are at the optimal-civil
 floor (~0.9x). Added to the inherent-floor remaining list (with resample sum/min/max, unique).
+
+### 2026-06-21 BlackThrush — daily/sub-daily resample re-confirmed LOSS (0.69-0.80x) — FIXABLE (single-pass), not structural
+br-ikq9a had filed daily/sub-daily resample as "structural gather-agg floor". RE-MEASURED carefully @1M:
+resample_daily 0.69x, resample_hourly 0.80x (consistent with the old 0.75x/0.83x — REAL, not noise; though
+the pandas resample measurement IS noisy on this shared machine — monthly swung 0.73-1.10x across runs).
+ROOT (fixable, NOT structural): the resample MEAN typed path (lib.rs ~22883) does build_groups (per-bin
+Vec<usize>) + a per-bin GATHER (g.iter().map(|&i| vals[i]).sum()/g.len()) = TWO passes. More bins (daily/
+hourly) -> more pronounced. FIX: single-pass — the bin logic in resample_build_groups already computes bidx
+per row (dense[bidx].push(i)); return a bin_index-per-row (mapped to order position) instead of the Vec<usize>,
+then accumulate sum[bin]/count[bin] in ONE pass for mean (and sum/min/max/std/var). Value-aggs (median/sem/
+skew) still need the gather. ~2x (2-pass -> 1-pass). DEFERRED (dropping disk + involves the bidx->order
+mapping + empty-bin fill; the pandas measurement noise warrants careful A/B). Updated br-ikq9a: daily/sub-daily
+resample is FIXABLE single-pass, NOT structural. (Monthly mean ~parity, fewer bins.)
