@@ -5,10 +5,11 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 searchsorted
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 putmask_where
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_append_repeat
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_drop_labels
 
 use std::{hint::black_box, time::Instant};
 
-use fp_index::{Index, RangeIndex};
+use fp_index::{Index, IndexLabel, RangeIndex};
 
 fn best_ns(iters: usize, mut f: impl FnMut() -> usize) -> (u128, usize) {
     let mut sink = 0usize;
@@ -82,6 +83,13 @@ fn sequential_i64_values(start: i64, len: usize) -> Vec<i64> {
         .collect()
 }
 
+fn quarter_drop_labels(len: usize) -> Vec<IndexLabel> {
+    (0..len)
+        .step_by(4)
+        .map(|offset| IndexLabel::Int64(i64::try_from(offset).expect("offset fits i64")))
+        .collect()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args
@@ -150,6 +158,17 @@ fn main() {
         println!(
             "index_append_repeat n={n} append_ns={append_ns} repeat2_ns={repeat_ns} sink={sink}"
         );
+        return;
+    }
+    if scenario == "index_drop_labels" {
+        let index = Index::from_i64_values(sequential_i64_values(0, n)).set_name("row");
+        let labels_to_drop = quarter_drop_labels(n);
+        let drop_count = labels_to_drop.len();
+        let (drop_ns, sink) = best_ns(iters, || {
+            let output = index.drop_labels(&labels_to_drop);
+            int64_index_digest(&output)
+        });
+        println!("index_drop_labels n={n} drop_count={drop_count} drop_ns={drop_ns} sink={sink}");
         return;
     }
 

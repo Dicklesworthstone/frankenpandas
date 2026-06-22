@@ -1403,6 +1403,38 @@ fn combined_output_capacity(left: usize, right: usize) -> usize {
         .expect("index combined output length overflow")
 }
 
+fn int64_drop_values(labels_to_drop: &[IndexLabel]) -> Vec<i64> {
+    labels_to_drop
+        .iter()
+        .filter_map(|label| match label {
+            IndexLabel::Int64(value) => Some(*value),
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_non_decreasing_i64(values: &[i64]) -> bool {
+    values.windows(2).all(|window| window[0] <= window[1])
+}
+
+fn drop_sorted_i64_values(values: &[i64], mut drop_values: Vec<i64>) -> Vec<i64> {
+    drop_values.sort_unstable();
+    drop_values.dedup();
+
+    let mut kept = Vec::with_capacity(values.len());
+    let mut drop_index = 0usize;
+    for &value in values {
+        while drop_index < drop_values.len() && drop_values[drop_index] < value {
+            drop_index += 1;
+        }
+        if drop_index < drop_values.len() && drop_values[drop_index] == value {
+            continue;
+        }
+        kept.push(value);
+    }
+    kept
+}
+
 fn insert_output_capacity(len: usize) -> usize {
     len.checked_add(1)
         .expect("index insert output length overflow")
@@ -3364,16 +3396,13 @@ impl Index {
     #[must_use]
     pub fn drop_labels(&self, labels_to_drop: &[IndexLabel]) -> Self {
         if let Some(values) = self.labels.int64_view() {
-            let drop_set: FxHashSet<i64> = labels_to_drop
-                .iter()
-                .filter_map(|label| match label {
-                    IndexLabel::Int64(value) => Some(*value),
-                    _ => None,
-                })
-                .collect();
-            let kept = if drop_set.is_empty() {
+            let drop_values = int64_drop_values(labels_to_drop);
+            let kept = if drop_values.is_empty() {
                 values.as_ref().clone()
+            } else if is_non_decreasing_i64(values.as_slice()) {
+                drop_sorted_i64_values(values.as_slice(), drop_values)
             } else {
+                let drop_set: FxHashSet<i64> = drop_values.into_iter().collect();
                 values
                     .iter()
                     .copied()
@@ -19695,6 +19724,30 @@ mod tests {
             materialized
                 .drop_labels(&[IndexLabel::Int64(1), IndexLabel::Utf8("1".into())])
                 .labels()
+        );
+    }
+
+    #[test]
+    fn sorted_int64_drop_labels_preserves_typed_backing_codb() {
+        let index = Index::from_i64_values(vec![0, 1, 1, 2, 3, 4, 5, 6]).set_name("row");
+        assert!(index.labels.materialized.get().is_none());
+
+        let dropped = index.drop_labels(&[
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(100),
+            IndexLabel::Utf8("2".into()),
+        ]);
+
+        assert_eq!(dropped.name(), Some("row"));
+        assert_eq!(
+            dropped.labels.int64_view().unwrap().as_slice(),
+            &[0, 2, 3, 5, 6]
+        );
+        assert!(index.labels.materialized.get().is_none());
+        assert!(
+            dropped.labels.materialized.get().is_none(),
+            "sorted Int64 drop_labels should keep typed output backing"
         );
     }
 
