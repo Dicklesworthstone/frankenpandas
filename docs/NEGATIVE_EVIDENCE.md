@@ -3149,3 +3149,12 @@ value-returning op measured @1M; ZERO fixable vs-pandas losses remain. Non-loss 
 to_numpy/transpose (architectural) and the deferred multi-string-key groupby OPTIMIZATION (1.07x win, plan
 committed). BOLD-VERIFY mandate (flip every fixable loss) fully satisfied this session: expanding skew 0.07x->1.19x,
 resample median 0.87x->1.25x, groupby unique 0.61-0.89x->1.27-1.78x.
+
+### 2026-06-22 CrimsonFinch — groupby.unique() typed-i64 sibling: latent i64-value loss closed (1.64x)
+The f64 unique() fix (d38e5c73) was Float64-only — an Int64 VALUE column still hit the Scalar path (values()
+boxing + ScalarKey::Int64 + ~Scalar output), the same latent loss. Added the typed-i64 sibling branch (dedup on
+raw i64 == ScalarKey::Int64, emit from_i64_values; bit-identical) + a groupby_unique_i64 bench workload. Measured:
+fp 62.8ms vs pandas 102.9ms = 1.64x WIN (was ~0.85x by analogy to the f64 boxing). fp-frame 3098/0 incl
+test_series_groupby_unique_nt65g8 + series_unique_sparse_i64. Both typed value dtypes (f64+i64) now covered.
+Disk flat 50G. LESSON: when adding a typed fast path, cover BOTH common value dtypes (f64 AND i64) — a one-dtype
+fix leaves the sibling as a latent loss.
