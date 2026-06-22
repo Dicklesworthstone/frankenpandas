@@ -13,6 +13,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_sorted_setops
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_hash_setops
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 index_from_range
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_to_flat_index
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_take_repeat
 
 use std::{hint::black_box, time::Instant};
@@ -274,6 +275,15 @@ fn from_range_lookup_digest(start: i64, stop: i64, step: i64, target: i64) -> us
             .rotate_left(1)
 }
 
+fn range_to_flat_lookup_digest(index: &RangeIndex, target: i64) -> usize {
+    let flat = black_box(index).to_flat_index();
+    flat.len()
+        ^ flat
+            .get_loc(&IndexLabel::Int64(black_box(target)))
+            .unwrap_or(usize::MAX)
+            .rotate_left(1)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args
@@ -502,6 +512,39 @@ fn main() {
         let sink = unit_sink ^ strided_sink ^ descending_sink;
         println!(
             "index_from_range n={n} unit_ns={unit_ns} strided_ns={strided_ns} descending_ns={descending_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "range_to_flat_index" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let unit = RangeIndex::new(0, n_i64, 1)
+            .expect("valid unit range")
+            .set_name("row");
+        let strided = RangeIndex::new(
+            0,
+            n_i64.checked_mul(3).expect("benchmark range stop fits i64"),
+            3,
+        )
+        .expect("valid strided range")
+        .set_name("row");
+        let descending = RangeIndex::new(n_i64, 0, -1)
+            .expect("valid descending range")
+            .set_name("row");
+        let (unit_ns, unit_sink) = best_ns(iters, || range_to_flat_lookup_digest(&unit, n_i64 / 2));
+        let (strided_ns, strided_sink) = best_ns(iters, || {
+            range_to_flat_lookup_digest(
+                &strided,
+                (n_i64 / 2)
+                    .checked_mul(3)
+                    .expect("benchmark range target fits i64"),
+            )
+        });
+        let (descending_ns, descending_sink) = best_ns(iters, || {
+            range_to_flat_lookup_digest(&descending, n_i64 / 2)
+        });
+        let sink = unit_sink ^ strided_sink ^ descending_sink;
+        println!(
+            "range_to_flat_index n={n} unit_ns={unit_ns} strided_ns={strided_ns} descending_ns={descending_ns} sink={sink}"
         );
         return;
     }
