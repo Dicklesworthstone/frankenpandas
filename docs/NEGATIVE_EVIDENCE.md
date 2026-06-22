@@ -3246,3 +3246,17 @@ oracle per case — categorically a directed-correctness-session task, NOT an au
 INVESTIGATION CLOSED (confirmed bug, root-caused, scoped, recipe written across the prior 5 entries). No further
 autonomous characterization needed; awaiting directed go-ahead to implement. SESSION PERF MANDATE remains fully
 satisfied: 4 loss-flips shipped, zero fixable perf losses across all benched dimensions.
+
+### 2026-06-22 CrimsonFinch — multi-string-key groupby dense path SHIPPED: 1.07x->1.69x @1M (factorize->mixed-radix)
+Implemented the deferred multi-string-key lever (the biggest un-dominated perf workload). build_groups
+(DataFrameGroupBy, ~60357) had single-int/multi-int/single-str dense paths but MULTI-key with any string key fell
+to the generic per-row Vec<ScalarKey> heap-alloc + SipHash-over-vec path. Added a multi-column mixed Int64/
+contiguous-Utf8 dense path: factorize each Utf8 key to first-seen u32 codes (FxHash over raw byte spans, one pass/
+col), treat Int64 as (v-min), pack into one mixed-radix dense index (cap 1<<24, <=16n) — no per-row Vec alloc, no
+SipHash. BIT-IDENTICAL output: same first-seen group_order (GroupKey reconstructed from each group's first row, same
+ScalarKey variants), same groups map, same optional composite-key sort -> all downstream (labels, MultiIndex,
+aggregation) unchanged. df_groupby_2strkey_sum @1M: 89ms->64ms, 1.07x->1.69x WIN. fp-frame lib 3098/0 incl
+dataframe_groupby_multikey_sum_oracle_ev7sk + groupby_sum_multikey_attaches_row_multiindex + groupby_agg_named_
+multikey. (Gain is 1.4x fp-side not 2x: build_groups was ~half the cost; the per-group value gather is the rest.)
+Closes the last deferred PERF optimization. Remaining non-wins: structural to_numpy/transpose; the confirmed i64
+groupby.cum* dtype bug (correctness, directed session).
