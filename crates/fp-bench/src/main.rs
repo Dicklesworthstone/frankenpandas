@@ -1056,6 +1056,31 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let val_series = Series::new("col_1".to_string(), index, Column::from_f64_values(raw[1].clone())).expect("val");
             time_us(|| { let _ = val_series.groupby(&key_series).expect("groupby").agg(&["mean","std","max"]).expect("agg"); })
         }
+        ("groupby", "groupby_widekey_sum") => {
+            // Single WIDE-range i64 key (sparse, ~rows/2 distinct over a huge
+            // span): exercises the non-dense build_groups path (dense gate needs
+            // a bounded range). key = i * 0x9E3779B97F4A7C15 (wraps -> spread
+            // across full i64), value = col_1. groupby(key).sum().
+            let key_vals: Vec<i64> = (0..rows as i64)
+                .map(|i| (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as i64 >> 1)
+                .collect();
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let key_series = Series::new(
+                "key".to_string(),
+                index.clone(),
+                Column::from_i64_values(key_vals),
+            )
+            .expect("widekey key");
+            let val_series = Series::new(
+                "col_1".to_string(),
+                index,
+                Column::from_f64_values(raw[1].clone()),
+            )
+            .expect("widekey val");
+            time_us(|| {
+                let _ = val_series.groupby(&key_series).expect("groupby").sum().expect("sum");
+            })
+        }
         ("groupby", "df_groupby_int_var") => {
             let mut columns = BTreeMap::new();
             let key_vals: Vec<i64> = (0..rows).map(|i| (i % 1000) as i64).collect();

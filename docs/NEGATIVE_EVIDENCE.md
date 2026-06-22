@@ -3295,3 +3295,15 @@ accumulators (sum/mean/min/max/var/std/first/last/prod) run for multi-strkey ins
 same first-seen gids over the same rows, go_gid bridges by actual key values; fp-frame 3098/0. df_groupby_2strkey_
 sum @1M 64ms->50ms (1.28x more fp-side), 1.69x->2.22x. FULL multi-strkey arc this session: 89ms->50ms, 1.07x->
 2.22x WIN (build_groups dense + value-agg dense). 7th loss-flip/extension this session.
+
+### 2026-06-22 CrimsonFinch — wide/high-card i64 groupby sparse path: 0.36x->1.93x @1M (5x fp-side) — BIG new loss found
+FILED+fixed a bold new lever: single WIDE-range (high-cardinality) Int64 groupby key. build_groups/agg_numeric had
+dense paths only for BOUNDED i64 ranges; a sparse wide i64 key (~1M distinct over the full i64 span) bailed to the
+generic build_groups path (per-row Scalar .values() + ScalarKey + SipHash + per-group filter_map). Added bench
+groupby_widekey_sum (key = i*0x9E3779B97F4A7C15 >>1, 1M groups) -> measured 0.36x LOSS (fp 410ms vs pandas 149ms;
+pandas uses khash on raw i64). FIX: sparse-i64 dense-bucket path in SeriesGroupBy::agg_numeric -- FxHashMap<i64,gid>
+over the raw &[i64] key slice (inline i64 keys, no Scalar materialization), buckets values single-pass, mirroring
+the bounded dense path exactly. Bit-identical (same first-seen order, nums per group ascending, Float64(func(nums)),
+by-name index; fp-frame 3098/0). groupby_widekey_sum @1M 410ms->82ms (5x fp-side), 0.36x->1.93x WIN. 8th loss-flip
+this session. FOLLOW-UP: DataFrameGroupBy wide-i64 (aggregate_named_func generic + all-int-bounded dense precompute)
+may have the same gap -- check next.
