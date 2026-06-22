@@ -3,6 +3,7 @@
 //! Run:
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 overlap
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 searchsorted
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 putmask_where
 
 use std::{hint::black_box, time::Instant};
 
@@ -51,6 +52,29 @@ fn searchsorted_probes(n: usize) -> Vec<i64> {
         .collect()
 }
 
+fn alternating_mask(n: usize) -> Vec<bool> {
+    (0..n).map(|i| i % 2 == 1).collect()
+}
+
+fn int64_index_digest(index: &fp_index::Index) -> usize {
+    let values = index
+        .int64_label_values()
+        .expect("benchmark output keeps typed Int64 backing");
+    let mut digest = values.len();
+    for value in [values.first(), values.get(values.len() / 2), values.last()]
+        .into_iter()
+        .flatten()
+    {
+        digest = value
+            .to_ne_bytes()
+            .iter()
+            .fold(digest.rotate_left(1), |acc, byte| {
+                acc.wrapping_mul(131).wrapping_add(usize::from(*byte))
+            });
+    }
+    digest
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args
@@ -82,6 +106,24 @@ fn main() {
         });
         println!(
             "range_searchsorted n={n} probes={probe_count} searchsorted_ns={searchsorted_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "putmask_where" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let index = RangeIndex::new(0, n_i64 * 2, 2).expect("valid mask range");
+        let mask = alternating_mask(n);
+        let (putmask_ns, putmask_sink) = best_ns(iters, || {
+            let output = index.putmask(&mask, -7).expect("putmask");
+            int64_index_digest(&output)
+        });
+        let (where_ns, where_sink) = best_ns(iters, || {
+            let output = index.r#where(&mask, -7).expect("where");
+            int64_index_digest(&output)
+        });
+        let sink = putmask_sink ^ where_sink;
+        println!(
+            "range_putmask_where n={n} putmask_ns={putmask_ns} where_ns={where_ns} sink={sink}"
         );
         return;
     }
