@@ -1,5 +1,28 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## 2026-06-22 cod-pandas — fp-frame typed-key reshape/groupby sweep (measured, br-frankenpandas-1q4q4)
+
+Closed the Utf8/Datetime64 gap where `fp-frame` had Int64-only dense paths. All head-to-head best-of-N
+vs pandas 2.2.3 (warm `frankenpandas-cc`), each **bit-identical & oracle-EXACT on sparse workloads with
+missing cells**; full fp-frame lib (3101/3101) + full fp-conformance (1595/1595) green. Detail rows in
+`docs/NEGATIVE_EVIDENCE.md`. (Distinct from the `fp-groupby` streaming-counter Utf8 rows below — this is
+the `fp-frame` `DataFrameGroupBy.build_groups` / `pivot_table` / `crosstab` path.)
+
+| Op (1M rows unless noted) | Before | After | Lever |
+|---|---:|---:|---|
+| pivot_table Int64 keys (sum/mean/count/size) | 1.01× | **3.54×** | dense row-order scatter, skip 3×Scalar-materialize + Vec<f64> groups map |
+| pivot_table Utf8 keys | 1.10× | **3.76×** | factorize each axis → sorted-rank codes → dense scatter |
+| pivot_table Datetime64 / mixed axes | 1.14× | **3.48×** | unified per-axis extractor (Int64/Datetime64/Utf8), −96 LOC |
+| pivot_table min/max (Int64 & Utf8) | 1.00–1.12× | **3.57×** | shared dense builder f64::min/max fold |
+| crosstab Utf8 keys | 3.1× | **17.2×** | factorize → direct-address i64 count grid |
+| **get_dummies Utf8 (30 cats)** | **0.85× LOSS** | **1.20×** | per-row String clone → `&str` borrow |
+| **DataFrameGroupBy single Utf8 key** | **0.90× LOSS** | **2.68×** | `FxHashMap<&str,gid>`, kill per-row `Vec<ScalarKey>` |
+| **DataFrameGroupBy multi Utf8 key** | **0.87× LOSS** | **1.29×** | `KeyCol::StrScalar` mixed-radix dense |
+| SeriesGroupBy single Utf8 key | 1.12× | **2.80×** | one hash probe (was seen-set + groups-map) |
+
+3 genuine measured losses flipped; rest deepened from near-parity. One neutral experiment (generic
+dense-scatter that killed only the `Vec<f64>` churn, not string hashing) measured ~0-gain and reverted.
+
 ## Release-readiness verdict (gauntlet, measured)
 
 **Perf vs pandas 2.2.3: 39/44 realistic ops faster (median ≈2.8× among wins); 3 remaining loss classes,
