@@ -2863,3 +2863,14 @@ flips ~0.69x LOSS to ~1.9x WIN (pandas ~16879us). Monthly control unchanged (207
 over-deferred citing measurement noise — but the FP-SIDE drop (fp-bench min, robust) is verifiable even when the
 fp/pandas RATIO is noisy. The discipline is "measure trustworthy", and fp-vs-fp IS trustworthy here. The
 sub-daily/hourly (resample_hourly 0.80x) are the SAME pattern (a sub-daily ord-based single-pass) — follow-up.
+
+### 2026-06-21 BlackThrush — sub-daily (hourly) resample mean single-pass: 0.80x->~1.34x (fp 20748->12408us)
+Did the sub-daily follow-up (same pattern as daily). subdaily_mean_single_pass: bin = (ns-origin).div_euclid(
+mult*ns_per) over H/min/s/ms/us/ns, accumulate sum/count per bin in ONE pass + verbatim the sub-day path's
+bin_start key (fast civil "YYYY-MM-DDTHH:MM:SS" for whole-second 4-digit years, chrono fallback) + the
+dense-range gate (sparse falls back to build_groups) + EMPTY-BIN SKIP (sub-daily doesn't fill empties).
+Bit-identical (resample 51/0). fp-side: resample_hourly 20748->12408us (1.67x) -> ~0.80x LOSS to ~1.34x WIN
+(pandas ~16566us). Daily intact (8818us), monthly unchanged (20819us). BOTH daily AND sub-daily resample mean
+now WIN — the br-ikq9a "gather-agg floor" was fixable single-pass, fully done for the mean. Other resample aggs
+(sum/min/max/std/var) are ~parity (lower priority); only the architectural survivors (unstack, to_numpy/
+transpose l4vzc) genuinely remain in br-ikq9a.
