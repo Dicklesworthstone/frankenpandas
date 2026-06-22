@@ -6326,6 +6326,122 @@ fn contiguous_utf8_inner_positions(
     Some((left_positions, right_positions))
 }
 
+fn collect_contiguous_utf8_position_map<'a>(
+    bytes: &'a [u8],
+    offsets: &[usize],
+) -> FxHashMap<&'a [u8], JoinPositionBucket> {
+    let n = offsets.len() - 1;
+    let mut map =
+        FxHashMap::<&[u8], JoinPositionBucket>::with_capacity_and_hasher(n, Default::default());
+    for pos in 0..n {
+        let span = &bytes[offsets[pos]..offsets[pos + 1]];
+        map.entry(span).or_default().push(pos);
+    }
+    map
+}
+
+fn contiguous_utf8_left_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let (left_bytes, left_offsets) = left_key.as_utf8_contiguous()?;
+    let (right_bytes, right_offsets) = right_key.as_utf8_contiguous()?;
+    let left_n = left_offsets.len() - 1;
+    let right_map = collect_contiguous_utf8_position_map(right_bytes, right_offsets);
+
+    let mut out_len = 0usize;
+    for left_pos in 0..left_n {
+        let span = &left_bytes[left_offsets[left_pos]..left_offsets[left_pos + 1]];
+        out_len += right_map.get(span).map_or(1, JoinPositionBucket::len);
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    for left_pos in 0..left_n {
+        let span = &left_bytes[left_offsets[left_pos]..left_offsets[left_pos + 1]];
+        if let Some(matches) = right_map.get(span) {
+            for &right_pos in matches {
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(right_pos));
+            }
+        } else {
+            left_positions.push(Some(left_pos));
+            right_positions.push(None);
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
+fn contiguous_utf8_outer_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let (left_bytes, left_offsets) = left_key.as_utf8_contiguous()?;
+    let (right_bytes, right_offsets) = right_key.as_utf8_contiguous()?;
+    let left_n = left_offsets.len() - 1;
+    let right_n = right_offsets.len() - 1;
+
+    let left_map = collect_contiguous_utf8_position_map(left_bytes, left_offsets);
+    let right_map = collect_contiguous_utf8_position_map(right_bytes, right_offsets);
+    let mut seen = FxHashSet::<&[u8]>::with_capacity_and_hasher(
+        left_map.len() + right_map.len(),
+        Default::default(),
+    );
+    let mut keys = Vec::<&[u8]>::with_capacity(left_map.len() + right_map.len());
+    for pos in 0..left_n {
+        let span = &left_bytes[left_offsets[pos]..left_offsets[pos + 1]];
+        if seen.insert(span) {
+            keys.push(span);
+        }
+    }
+    for pos in 0..right_n {
+        let span = &right_bytes[right_offsets[pos]..right_offsets[pos + 1]];
+        if seen.insert(span) {
+            keys.push(span);
+        }
+    }
+    keys.sort_unstable();
+
+    let mut out_len = 0usize;
+    for &key in &keys {
+        out_len += match (left_map.get(key), right_map.get(key)) {
+            (Some(lefts), Some(rights)) => lefts.len() * rights.len(),
+            (Some(lefts), None) => lefts.len(),
+            (None, Some(rights)) => rights.len(),
+            (None, None) => 0,
+        };
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    for key in keys {
+        match (left_map.get(key), right_map.get(key)) {
+            (Some(lefts), Some(rights)) => {
+                for &left_pos in lefts {
+                    for &right_pos in rights {
+                        left_positions.push(Some(left_pos));
+                        right_positions.push(Some(right_pos));
+                    }
+                }
+            }
+            (Some(lefts), None) => {
+                for &left_pos in lefts {
+                    left_positions.push(Some(left_pos));
+                    right_positions.push(None);
+                }
+            }
+            (None, Some(rights)) => {
+                for &right_pos in rights {
+                    left_positions.push(None);
+                    right_positions.push(Some(right_pos));
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
 fn hash_i64_inner_positions_slices(left: &[i64], right: &[i64]) -> (Vec<usize>, Vec<usize>) {
     if right.is_empty() || left.is_empty() {
         return (Vec::new(), Vec::new());
@@ -6799,6 +6915,25 @@ pub fn merge_dataframes_on_with_options(
             &suffixes,
         );
     }
+    if matches!(join_type, JoinType::Left)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            contiguous_utf8_left_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_dense_left_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
     if matches!(join_type, JoinType::Right)
         && left_on.len() == 1
         && right_on.len() == 1
@@ -6935,6 +7070,25 @@ pub fn merge_dataframes_on_with_options(
         && validate_allows_fast_positions
         && let Some((left_positions, right_positions)) =
             dense_int64_outer_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_ordered_unique_outer_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Outer)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            contiguous_utf8_outer_positions(left_key_columns[0], right_key_columns[0])
     {
         return build_single_key_ordered_unique_outer_merge_output(
             left,
@@ -11289,6 +11443,118 @@ mod tests {
         assert_eq!(fused.index, generic.index);
         assert_eq!(fused.column_order, generic.column_order);
         assert_eq!(fused.columns, generic.columns);
+    }
+
+    #[test]
+    fn merge_left_contiguous_utf8_duplicates_matches_sorted_generic_route() {
+        let s = |v: &str| Scalar::Utf8(v.to_owned());
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                ("id", vec![s("a"), s("a"), s("b"), s("c")]),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                ("id", vec![s("a"), s("a"), s("c")]),
+                (
+                    "w",
+                    vec![Scalar::Int64(100), Scalar::Int64(101), Scalar::Int64(300)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Left).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Left,
+            MergeExecutionOptions {
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
+        assert_eq!(
+            fast.columns.get("id").unwrap().values(),
+            &[s("a"), s("a"), s("a"), s("a"), s("b"), s("c")]
+        );
+        assert!(fast.columns.get("w").unwrap().values()[4].is_missing());
+    }
+
+    #[test]
+    fn merge_outer_contiguous_utf8_duplicates_matches_sorted_generic_route() {
+        let s = |v: &str| Scalar::Utf8(v.to_owned());
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                ("id", vec![s("a"), s("a"), s("b"), s("d")]),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(11),
+                        Scalar::Int64(20),
+                        Scalar::Int64(40),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "w"],
+            vec![
+                ("id", vec![s("a"), s("c"), s("a")]),
+                (
+                    "w",
+                    vec![Scalar::Int64(100), Scalar::Int64(300), Scalar::Int64(101)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let fast = merge_dataframes(&left, &right, "id", JoinType::Outer).unwrap();
+        let generic = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Outer,
+            MergeExecutionOptions {
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fast.index, generic.index);
+        assert_eq!(fast.column_order, generic.column_order);
+        assert_eq!(fast.columns, generic.columns);
+        assert_eq!(
+            fast.columns.get("id").unwrap().values(),
+            &[s("a"), s("a"), s("a"), s("a"), s("b"), s("c"), s("d")]
+        );
+        assert!(fast.columns.get("v").unwrap().values()[5].is_missing());
+        assert!(fast.columns.get("w").unwrap().values()[4].is_missing());
+        assert!(fast.columns.get("w").unwrap().values()[6].is_missing());
     }
 
     #[test]
