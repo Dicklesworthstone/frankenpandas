@@ -14,14 +14,19 @@ the `fp-frame` `DataFrameGroupBy.build_groups` / `pivot_table` / `crosstab` path
 | pivot_table Utf8 keys | 1.10× | **3.76×** | factorize each axis → sorted-rank codes → dense scatter |
 | pivot_table Datetime64 / mixed axes | 1.14× | **3.48×** | unified per-axis extractor (Int64/Datetime64/Utf8), −96 LOC |
 | pivot_table min/max (Int64 & Utf8) | 1.00–1.12× | **3.57×** | shared dense builder f64::min/max fold |
+| **pivot_table var/std (Int64)** | **0.96× LOSS** | **3.21×** | dense two-pass Σ(v−mean)² == generic formula |
+| pivot_table median (Int64/Utf8) | 1.07–1.17× | **1.97–2.32×** | dense per-cell scatter + sort (skip Scalar/tuple-hash) |
 | crosstab Utf8 keys | 3.1× | **17.2×** | factorize → direct-address i64 count grid |
 | **get_dummies Utf8 (30 cats)** | **0.85× LOSS** | **1.20×** | per-row String clone → `&str` borrow |
 | **DataFrameGroupBy single Utf8 key** | **0.90× LOSS** | **2.68×** | `FxHashMap<&str,gid>`, kill per-row `Vec<ScalarKey>` |
 | **DataFrameGroupBy multi Utf8 key** | **0.87× LOSS** | **1.29×** | `KeyCol::StrScalar` mixed-radix dense |
 | SeriesGroupBy single Utf8 key | 1.12× | **2.80×** | one hash probe (was seen-set + groups-map) |
 
-3 genuine measured losses flipped; rest deepened from near-parity. One neutral experiment (generic
-dense-scatter that killed only the `Vec<f64>` churn, not string hashing) measured ~0-gain and reverted.
+4 genuine measured losses flipped (get_dummies, groupby single/multi Utf8, pivot var/std); rest deepened
+from near-parity. The pivot dense path now covers **sum/mean/count/size/min/max/var/std/median ×
+{Int64, Datetime64, Utf8} + mixed axes** — the full common aggfunc surface. One neutral experiment
+(generic dense-scatter that killed only the `Vec<f64>` churn, not string hashing) measured ~0-gain and
+reverted. Next reachable gap is `fp-join` Utf8-keyed merge (separate crate, not warm in the build dir).
 
 ## Release-readiness verdict (gauntlet, measured)
 
