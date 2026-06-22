@@ -3195,3 +3195,17 @@ task, NOT an autonomous perf "commit-if-green" turn. End-to-end fp output confir
 test) is the recommended first step for that session. Perf note: the same i64 path also boxes (transform_groups
 Scalar fallback) so a typed-i64 cum path would fix BOTH the dtype and the perf in one change. This remains the
 only open finding; all PERF losses are flipped (zero fixable perf losses repo-wide).
+
+### 2026-06-22 CrimsonFinch — i64 groupby.cum* divergence is TEST-ASSERTED (baked-in), not a gap — firmly deferred
+Resolved the status of the i64 groupby.cum* dtype finding decisively: the existing test `groupby_cumsum` (lib.rs
+~105466) feeds an Int64 value column [1,2,10,3,20] and EXPLICITLY ASSERTS Float64 output
+(assert_eq!(v.values()[0], Scalar::Float64(1.0)) ...). So fp's "Int64 groupby.cum* -> Float64" is BAKED INTO the
+test suite (cumsum/cumprod/cummin/cummax all have such tests), not an untested gap. pandas returns Int64 (oracle-
+verified). Implication: a parity fix would BREAK explicit assertions in 4 tests + their goldens — that is a
+DELIBERATE behavior change requiring intent/sign-off (someone chose, or mistakenly baked, Float64), NOT something
+an autonomous "commit-if-green" loop should flip (green would require rewriting the very assertions that encode the
+current contract). DEFINITIVELY DEFERRED to a directed correctness decision. This closes my investigation of the
+item: it is a KNOWN, TEST-ENCODED divergence, fully characterized (root: try_cum_dense f64-only -> transform_groups
+Float64 fallback; fix: typed-i64 cum path emitting Int64 + rewrite the 4 test assertions + regen goldens + pandas
+oracle + int overflow/wrapping semantics). No further autonomous action appropriate. All PERF losses remain
+flipped (zero fixable perf losses repo-wide).
