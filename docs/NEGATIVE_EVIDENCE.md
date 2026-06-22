@@ -2962,3 +2962,15 @@ dear. FIX (same dense-grid lever as unstack): map sorted row/col keys -> positio
 pair map. Bit-identical (pivot 37/0; same sorted order, same first-write/duplicate-error). df_pivot 284469->
 48602us (5.85x fp-side), 0.27x->1.34x WIN. pivot_table intact (34119us). REMAINING hidden loss: df_get_dummies
 0.70x (next). LESSON RE-RE-CONFIRMED: "fixed" claims are often PARTIAL (a sibling op) — sweep the whole family.
+
+### 2026-06-21 BlackThrush — df_get_dummies typed-i64: 0.70x->1.74x @1M (2.6x fp-side); reshape sweep closed
+The 2nd reshape-sweep hidden loss fixed. df_get_dummies stringified every i64 value TWICE (i.to_string) — once
+in the unique DISCOVERY loop and once in the ENCODING loop (2x 1M to_string allocs + string-key hash/lookups),
+pure waste for an i64 column. FIX: typed i64 fast path (gated as_i64_slice + !has_nulls) in BOTH loops — dedup
+raw i64 (then stringify only the ~100 uniques) + scatter the one-hot matrix via FxHashMap<i64,usize> (parse the
+effective_vals back to i64) on the raw slice. Bit-identical (get_dummies 14/0; i64 to_string is bijective so
+first-seen order + indicator cells match; all-valid i64 => dummy_na all-false). df_get_dummies 85270->32760us
+(2.6x fp-side), 0.70x->1.74x WIN. RESHAPE FAMILY SWEEP CLOSED: pivot 1.34x, get_dummies 1.74x, stack 1.63x,
+melt 4.79x, crosstab 1.27x, pivot_table 16x WIN; only unstack 0.67x remains (parse-limited string-composite,
+genuinely structural). Two big hidden losses (pivot 0.27x, get_dummies 0.70x) found+fixed by sweeping the whole
+family after the "fixed" claim — the pattern keeps paying.
