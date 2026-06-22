@@ -8,6 +8,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_drop_labels
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_get_indexer_non_unique
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_diff
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_position_lookup
 
 use std::{hint::black_box, time::Instant};
 
@@ -82,6 +83,23 @@ fn int64_index_digest(index: &fp_index::Index) -> usize {
 fn sequential_i64_values(start: i64, len: usize) -> Vec<i64> {
     (0..len)
         .map(|offset| start + i64::try_from(offset).expect("offset fits i64"))
+        .collect()
+}
+
+fn descending_i64_values(len: usize) -> Vec<i64> {
+    (0..len)
+        .rev()
+        .map(|offset| i64::try_from(offset).expect("offset fits i64"))
+        .collect()
+}
+
+fn lookup_probe_values(len: usize) -> Vec<i64> {
+    let len = len.max(1);
+    (0usize..4096)
+        .map(|offset| {
+            let value = offset.wrapping_mul(15_485_863) % len;
+            i64::try_from(value).expect("probe label fits i64")
+        })
         .collect()
 }
 
@@ -176,6 +194,19 @@ fn diff_digest(values: &[Option<IndexLabel>]) -> usize {
                     acc.wrapping_mul(131).wrapping_add(usize::from(byte))
                 }),
         };
+    }
+    digest
+}
+
+fn scalar_lookup_digest(index: &Index, probes: &[i64]) -> usize {
+    let mut digest = probes.len();
+    for &probe in probes {
+        let label = IndexLabel::Int64(probe);
+        digest ^= index.position(&label).unwrap_or(usize::MAX).rotate_left(1);
+        digest ^= index.get_loc(&label).unwrap_or(usize::MAX).rotate_left(3);
+        digest = digest
+            .wrapping_mul(131)
+            .wrapping_add(usize::from(index.contains(&label)));
     }
     digest
 }
@@ -286,6 +317,20 @@ fn main() {
             diff_digest(&output)
         });
         println!("index_diff n={n} periods={periods} diff_ns={diff_ns} sink={sink}");
+        return;
+    }
+    if scenario == "index_position_lookup" {
+        let sorted = Index::from_i64_values(sequential_i64_values(0, n)).set_name("row");
+        let unsorted = Index::from_i64_values(descending_i64_values(n)).set_name("row");
+        let probes = lookup_probe_values(n);
+        let probe_count = probes.len();
+        let (sorted_ns, sorted_sink) = best_ns(iters, || scalar_lookup_digest(&sorted, &probes));
+        let (unsorted_ns, unsorted_sink) =
+            best_ns(iters, || scalar_lookup_digest(&unsorted, &probes));
+        let sink = sorted_sink ^ unsorted_sink;
+        println!(
+            "index_position_lookup n={n} probes={probe_count} sorted_ns={sorted_ns} unsorted_ns={unsorted_ns} sink={sink}"
+        );
         return;
     }
 

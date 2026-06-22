@@ -421,8 +421,9 @@ fn next_index_label_identity() -> u64 {
 }
 
 /// Build-or-fetch the cached first-occurrence `i64 -> position` table for an
-/// index lineage. `values` must be the index's raw `i64` view; the caller has
-/// already proven the index is unique, so first occurrence == only occurrence.
+/// index lineage. `values` must be the index's raw `i64` view. Duplicate labels
+/// retain their first position, matching pandas `get_loc` scalar lookup
+/// semantics.
 fn int64_position_lookup_cached(identity: u64, values: &[i64]) -> SharedInt64PositionLookup {
     let cache = INDEX_INT64_POS_LOOKUP_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
     if let Some(existing) = cache
@@ -436,7 +437,7 @@ fn int64_position_lookup_cached(identity: u64, values: &[i64]) -> SharedInt64Pos
     let mut map: Int64PositionLookup = FxHashMap::default();
     map.reserve(values.len());
     for (pos, &value) in values.iter().enumerate() {
-        map.insert(value, pos);
+        map.entry(value).or_insert(pos);
     }
     let arc = Arc::new(map);
     let mut guard = cache
@@ -1859,7 +1860,9 @@ impl Index {
             return if matches!(self.sort_order(), SortOrder::AscendingInt64) {
                 values.binary_search(target).ok()
             } else {
-                values.iter().position(|value| value == target)
+                int64_position_lookup_cached(self.label_identity, &values)
+                    .get(target)
+                    .copied()
             };
         }
         match self.sort_order() {
