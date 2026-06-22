@@ -3273,3 +3273,14 @@ labels + stringified col names + Int64 counts + sorted axes + index name. df_cro
 side), 0.68x->19.46x WIN. fp-frame lib 3098/0 incl crosstab_basic/counts/normalize + dataframe_crosstab_golden_
 basic + pivot_and_crosstab_sort_axes_like_pandas_r0t9l. Two big flips this session-tail: multi-strkey 1.07x->1.69x,
 crosstab 0.68x->19.46x.
+
+### 2026-06-22 CrimsonFinch — post-flip frontier: no sub-1.0x losses remain; str ops + dataframe_ops re-confirmed WIN
+After shipping crosstab (0.68x->19.46x) + multi-strkey (1.07x->1.69x), re-scanned for any remaining loss:
+- dataframe_ops @1M: idxmin_axis1 3.93x, count_axis1 280x, rank_axis1 2.55x, quantile 14.5x, sem 36x, skew 18x,
+  pct_change 30x, nunique 13.7x — all WIN (lowest non-flipped: df_idxmax 1.08x, bandwidth-bound ~parity, no lever).
+- str (perf_profile): str_isin 1.63x, str_factorize 12.05x, str_drop_duplicates 2.03x, str_duplicated 2.02x — WIN.
+NO sub-1.0x loss remains anywhere measurable. Session loss-flips total = 6: expanding skew 0.07x->1.19x, resample
+median 0.87x->1.25x, groupby unique f64 0.61-0.89x->1.27-1.78x, groupby unique i64 ~0.85x->1.64x, multi-strkey
+groupby 1.07x->1.69x, crosstab 0.68x->19.46x. Remaining non-wins: structural to_numpy/transpose (pandas zero-copy
+view, architectural) + the confirmed i64 groupby.cum* dtype divergence (correctness/golden-breaking, directed
+session). The only "gaps" left are bandwidth-bound parity wins (idxmax 1.08x) where a change would be ~0-gain.
