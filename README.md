@@ -37,7 +37,7 @@
 | `GroupBy.agg_named()` | ✓ | ✓ (different syntax) | **✓** |
 | `merge_asof` with `tolerance` / `by` / `allow_exact_matches` | ✓ | Partial | **✓** |
 | Window operations (rolling / expanding / ewm / resample) | ✓ | Partial | **✓** |
-| 14+ IO formats (CSV/TSV/FWF/JSON/L/Parquet/Excel/Feather/IPC/SQL/HTML/XML/LaTeX/Markdown/Pickle/Stata/ORC/HDF5) | ✓ | Partial | **✓** (SQL is generic `SqlConnection` trait with default `rusqlite` backend; PostgreSQL/MySQL slices in progress) |
+| 14+ IO formats (CSV/TSV/FWF/JSON/L/Parquet/Excel/Feather/IPC/SQL/HTML/XML/LaTeX/Markdown/Pickle/Stata/HDF5, ORC fail-closed pending a Tokio-free backend) | ✓ | Partial | **✓** (SQL is generic `SqlConnection` trait with default `rusqlite` backend; PostgreSQL/MySQL slices in progress) |
 | Differential conformance against live pandas | ✗ | ✗ | **✓** (1,252 packets, 1,265 fixtures, live oracle in CI) |
 | Bayesian runtime policy + evidence ledger | ✗ | ✗ | **✓** |
 
@@ -98,7 +98,7 @@ The 2026-05-16 capability surface (~269k LOC of Rust across 12 crates):
 | **GroupBy** | DataFrame-level (`DataFrameGroupBy`) and Series-level (`SeriesGroupBy`). 3 execution paths (dense Int64, arena-backed Bumpalo, HashMap fallback) with property tests proving bitwise equivalence. 14 string-dispatch aggregations + `cumsum`/`cumprod`/`cummax`/`cummin`/`rank`/`shift`/`diff`/`nth`/`head`/`tail`/`pct_change`/`value_counts`/`describe`/`get_group`/`cumcount`/`ngroup`/`pipe`/`ohlc`/`transform`/`filter`/`apply`. Window ops (`rolling`/`expanding`/`ewm`/`resample`) on both levels. |
 | **Join engine** | Inner / Left / Right / Outer / Cross / Asof (Backward / Forward / Nearest). `merge_with_options` takes `MergeExecutionOptions { indicator_name, validate_mode, suffixes, sort }` with `MergeValidateMode::{OneToOne, OneToMany, ManyToOne, ManyToMany}`. `merge_asof_with_options` takes `MergeAsofOptions { allow_exact_matches, tolerance, by }`. |
 | **Expression engine** | `df.eval(expr)` and `df.query(expr)`. Modulo, FloorDiv, Pow with correct precedence (`**` > unary > `*`/`/`/`//`/`%`). Bitwise shorthand (`&`/`\|`/`~`). Chained-comparison pairwise AND. `@local` variable bindings. Backtick column names. |
-| **IO** | 14+ formats: CSV (with full pandas option matrix incl. `usecols`/`nrows`/`skiprows`/`dtype`/`parse_dates`/`comment`/`on_bad_lines`/`decimal`/`thousands`/`true_values`/`false_values`/`skipfooter`/`lineterminator`/`index_label`/`quote`/`escape`), TSV (`read_table`), Fixed-width (`read_fwf` with colspec inference), JSON (5 orients + Table Schema), JSONL (blank-line tolerant, key-union detection, row-cap protection), Parquet (Arrow RecordBatch), Excel (`.xlsx`/`.xls`/`.xlsb`/`.ods` with full option parity), Feather, Arrow IPC stream, SQL (generic `SqlConnection` trait + `SqlInspector` for SQLAlchemy-shaped introspection), HTML (read + write), XML (read + write + `to_xml` alias), LaTeX (file + string), Markdown (`tablefmt` accepts `"github"` / `"pipe"` / `"grid"` / `"plain"` / `"simple"`), Pickle (round-trip), Stata (round-trip), ORC (round-trip), HDF5 (snapshot, optional feature-gated backend). Deferred surfaces: `to_clipboard`, `to_gbq`, SAS reader. |
+| **IO** | 14+ formats: CSV (with full pandas option matrix incl. `usecols`/`nrows`/`skiprows`/`dtype`/`parse_dates`/`comment`/`on_bad_lines`/`decimal`/`thousands`/`true_values`/`false_values`/`skipfooter`/`lineterminator`/`index_label`/`quote`/`escape`), TSV (`read_table`), Fixed-width (`read_fwf` with colspec inference), JSON (5 orients + Table Schema), JSONL (blank-line tolerant, key-union detection, row-cap protection), Parquet (Arrow RecordBatch), Excel (`.xlsx`/`.xls`/`.xlsb`/`.ods` with full option parity), Feather, Arrow IPC stream, SQL (generic `SqlConnection` trait + `SqlInspector` for SQLAlchemy-shaped introspection), HTML (read + write), XML (read + write + `to_xml` alias), LaTeX (file + string), Markdown (`tablefmt` accepts `"github"` / `"pipe"` / `"grid"` / `"plain"` / `"simple"`), Pickle (round-trip), Stata (round-trip), HDF5 (snapshot, optional feature-gated backend). ORC APIs fail closed until a Tokio-free backend lands. Deferred surfaces: ORC backend, `to_clipboard`, `to_gbq`, SAS reader. |
 | **Type system** | `Scalar`, `DType`, `NullKind` (Null / NaN / NaT). `Timestamp`, `Timedelta`, `Period`, `Interval`, `PeriodFreq`, `IntervalClosed` as proper value types. `SparseDType` scaffolded. Coercion via `common_dtype()` / `cast_scalar()` matches pandas' Null < Bool < Int64 < Float64 hierarchy. Identity-cast fast path (AG-03) skips clone when source dtype already matches target. |
 | **Runtime** | Bayesian `RuntimePolicy` (Strict / Hardened). `EvidenceLedger` with full decision trace per materialization. `ConformalGuard` for distribution-shift detection. `RaptorQEnvelope` for repair-symbol-protected durable state (conformance fixtures, benchmark baselines, migration manifests). |
 | **Conformance** | 1,252 packet JSON files, 1,265+ fixture JSONs, 15 documented divergences in `DISCREPANCIES.md` (3 fully RESOLVED; remainder are ACCEPTED / INVESTIGATING / WILL-FIX with root-cause analysis), live pandas oracle in CI. Conformance tests pass (1,586 tests, 0 failures) excluding documented structural divergences. |
@@ -123,7 +123,8 @@ The 2026-05-16 capability surface (~269k LOC of Rust across 12 crates):
   ┌──────────┐      │ String/Datetime  │      │  SQL/HTML/XML/ │
   │fp-runtime│      │ Sparse/List/Str. │      │  LaTeX/Markdown│
   │ Policy   │      └────────┬─────────┘      │  /Pickle/Stata/│
-  │ Ledger   │               │                │  ORC/HDF5      │
+  │ Ledger   │               │                │  HDF5 + ORC    │
+  │          │               │                │  fail-closed   │
   └──────────┘    ┌──────────┼──────────┐     └────────────────┘
                   ▼          ▼          ▼
               fp-index  fp-groupby  fp-join
@@ -192,10 +193,10 @@ frankenpandas/
 | **Markdown** | — | `to_markdown` / `write_markdown_string_with_options` / `write_markdown` (path) | ✓ | ✓ | `MarkdownWriteOptions` (`include_index`, `na_rep`, `index_label`); `to_markdown` `tablefmt` accepts `"github"` / `"pipe"` / `"grid"` / `"plain"` / `"simple"`; default is `"github"` |
 | **Pickle** | `read_pickle_bytes` | `write_pickle_bytes` | ✓ | ✓ | Round-trip via serde + bincode |
 | **Stata** | `read_stata_bytes` | `write_stata_bytes` | ✓ | ✓ | Round-trip (subset of `.dta` features) |
-| **ORC** | `read_orc_bytes` | `write_orc_bytes` | ✓ | ✓ | Round-trip via Arrow |
+| **ORC** | `read_orc_bytes` | `write_orc_bytes` | — | — | API retained but fail-closed under the workspace no-Tokio policy until a native Tokio-free backend lands |
 | **HDF5** | `read_hdf_*` | `to_hdf` | ✓ | ✓ (optional `hdf5` feature) | Keyed-snapshot layout (PyTables-compatible table/storer pending) |
 
-CSV, JSON, JSONL, Parquet, Excel, Feather, SQL, HTML, XML, LaTeX, Markdown, Pickle, Stata, and ORC are accessible through `DataFrameIoExt` trait methods on `DataFrame` (e.g. `df.to_excel(path)?`, `df.to_feather(path)?`, `df.to_parquet(path)?`, `df.to_sql(&conn, "table", &opts)?`, `df.to_html_string()?`, `df.to_markdown(true, None)?`). The Arrow IPC stream format is reachable through the standalone `read_ipc_stream_bytes` / `write_ipc_stream_bytes` functions. Top-level `read_*` free functions are also re-exported through the `frankenpandas` facade.
+CSV, JSON, JSONL, Parquet, Excel, Feather, SQL, HTML, XML, LaTeX, Markdown, Pickle, and Stata are accessible through `DataFrameIoExt` trait methods on `DataFrame` (e.g. `df.to_excel(path)?`, `df.to_feather(path)?`, `df.to_parquet(path)?`, `df.to_sql(&conn, "table", &opts)?`, `df.to_html_string()?`, `df.to_markdown(true, None)?`). ORC methods remain present but return an explicit fail-closed error until a Tokio-free backend is implemented. The Arrow IPC stream format is reachable through the standalone `read_ipc_stream_bytes` / `write_ipc_stream_bytes` functions. Top-level `read_*` free functions are also re-exported through the `frankenpandas` facade.
 
 ## Installation
 
@@ -222,8 +223,8 @@ The `frankenpandas` umbrella forwards inner-crate feature flags so callers can o
 | Feature | Default | Forwards to | What it gates |
 |---------|---------|-------------|---------------|
 | `sql-sqlite` | **on** | `fp-io/sql-sqlite` | rusqlite-backed `SqlConnection` impl + `rusqlite::Connection` re-export via the facade |
-| `sql-postgresql` | off | `fp-io/sql-postgresql` | Placeholder for Phase 2 PostgreSQL adapter (no concrete bindings yet) |
-| `sql-mysql` | off | `fp-io/sql-mysql` | Placeholder for Phase 2 MySQL adapter |
+| `sql-postgresql` | off | `fp-io/sql-postgresql` | Placeholder for a future Tokio-free PostgreSQL adapter |
+| `sql-mysql` | off | `fp-io/sql-mysql` | MySQL-backed `SqlConnection` impl |
 | `hdf5` | off | `fp-io/hdf5` | Pulls in the hdf5-metno backend for `read_hdf` / `to_hdf` |
 | `tracing` | off | `fp-frame/tracing` | Emits `tracing` spans on hot paths (groupby, rolling, resample, IO) |
 | `asupersync` | off | `fp-runtime/asupersync` | Pulls in the optional `asupersync` runtime integration submodule |
@@ -1807,7 +1808,7 @@ A: At the time of this writing, **only 2 of 1,988 tracked beads remain open** (`
 |----------|---------|--------|
 | High | 0.1.0 release to crates.io with signed tag | Tracked by `br-frankenpandas-4clx`; release-plz workflow already in CI |
 | High | PyO3 Python bindings | Planned; would enable `import frankenpandas as fpd` from Python |
-| High | PostgreSQL `SqlConnection` adapter | Tracked by `br-frankenpandas-fd90` slices 2-3; `sql-postgresql` placeholder feature already in place |
+| High | Tokio-free PostgreSQL `SqlConnection` adapter | Tracked by `br-frankenpandas-fd90` slices 2-3; `sql-postgresql` placeholder feature already in place |
 | High | MySQL `SqlConnection` adapter | `br-frankenpandas-fd90` slice 3; `sql-mysql` placeholder feature already in place |
 | Medium | Native nullable Int64 (DISC-011 / DISC-014 fix) | Required to close 25 dtype-drift packets in `br-frankenpandas-ctmet` |
 | Medium | Parallel execution (rayon) | Architecture supports it (columns are independent) |
@@ -2186,7 +2187,7 @@ The last ~750 commits (2026-05-02 → 2026-05-16) focused on three big themes, a
 
 1. **Fork-wide "preserve index name" sweep (~76 commits, 70+ callsites)**. Every helper method that produces a new Series or DataFrame now propagates the source axis name correctly. The retrofit covered Rolling, Expanding, Ewm, Resample, SeriesGroupBy, DataFrameGroupBy, plus 40+ Series methods and the StringMethods / DatetimeAccessor surface. A single commit (`fe61bbd3`) converted 36 transform call sites to a shared helper in one swoop.
 2. **Typed-Index variant build-out (60+ methods on a single day)**. `DatetimeIndex`, `TimedeltaIndex`, `PeriodIndex`, `RangeIndex`, and `CategoricalIndex` each gained the full pandas method surface: time-of-day accessors, set ops, slice ops, `get_loc` / `get_indexer` family, `tz_localize` / `tz_convert`, `searchsorted`, `where` / `putmask`, `asof` / `asof_locs`, freq inference, mean/median/std/var, etc.
-3. **IO format surface expansion**. One day added HTML, XML, LaTeX, Markdown writers, Pickle round-trip, Stata round-trip, ORC round-trip, HDF5 snapshot (optional feature), `read_table` (TSV), and `read_fwf` (with automatic colspec inference).
+3. **IO format surface expansion**. One day added HTML, XML, LaTeX, Markdown writers, Pickle round-trip, Stata round-trip, ORC API coverage, HDF5 snapshot (optional feature), `read_table` (TSV), and `read_fwf` (with automatic colspec inference).
 4. **Algorithmic complexity sweep**. ~20 separate O(n²) → O(n) reductions: `value_counts`, `unique`, `nunique_with_dropna`, `duplicated`, `drop_duplicates`, `map`, `replace`, `isin`, `cut`, `qcut`, `mode_with_dropna`, `DataFrame::nunique`, `DataFrame::value_counts`, `DataFrame::append` column union, `Series::drop`, `Series::unstack`, `str.get_dummies`, `factorize`, `DataFrame::get_dummies`, CSV NA HashSet, Excel sheet HashSet.
 5. **Timedelta64 fast paths across the reduction family**. `nanmin`, `nanmax`, `nansum`, `nanmean`, `nancumsum`, `nancummin`, `nancummax`, `nanmedian`, `nanvar`, `nanstd`, `nansem`, `nanquantile`, `nanargmax`, `nanargmin`, `nanptp`, `nanprod`, Column `pct_change` / `diff`, Series `pct_change`, GroupBy `pct_change`, SeriesGroupBy `sum`/`mean`/`min`/`max`. Timedelta64 columns now produce the right type instead of silently coercing or panicking.
 6. **DataFrame plotting / sparse / style / xarray / duplicate-label-flag capabilities**: plot specs (`PlotSpec` / `BoxPlotSpec`), `DataFrame::to_xarray()`, sparse `density()` / `npoints()` metrics on `SparseAccessor`, persisted `allows_duplicate_labels` flag, `StyledDataFrame` HTML rendering via `df.style()`, Series `list` accessor, Series `r#struct` accessor.
@@ -2759,11 +2760,11 @@ Some IO formats have unusual gotchas worth knowing up-front:
 
 **HTML / XML / LaTeX / Markdown** are write-mostly. HTML and XML have readers too (HTML via DOM-style parsing, XML via stream-style). LaTeX and Markdown are write-only; pandas' read paths for these are practically unused in real code.
 
-**Pickle / Stata / ORC / HDF5** are all round-trip-tested but use simpler implementations than pandas:
+**Pickle / Stata / HDF5** are round-trip-tested but use simpler implementations than pandas. **ORC** is a retained API surface that fails closed until a Tokio-free native backend lands:
 
 - **Pickle** uses `serde` + `bincode` under the hood; it's semantically a Rust-canonical binary serde, not a literal pandas-pickle. Round-trip works *within* FrankenPandas; cross-tool interop with Python pandas pickle files is not supported.
 - **Stata** supports the common `.dta` formats (114–119); exotic Stata 11 / 12 / 13 features are not implemented.
-- **ORC** rides on top of Arrow → `arrow-orc`, with the same dtype-conversion behaviors as Parquet.
+- **ORC** previously rode on `orc-rust`, which pulled Tokio into the workspace. The `read_orc*` / `write_orc*` functions now return a deterministic policy error until a no-Tokio backend replaces it.
 - **HDF5** is feature-gated (`hdf5` cargo feature, requires the `hdf5-metno` system dependency). The implementation provides a keyed-snapshot layout: every DataFrame is one HDF5 group with one dataset per column. PyTables-compatible table/storer layouts are a future epic.
 
 ## How `eval()` / `query()` Differs From `df["col"] > 5`
@@ -2813,7 +2814,8 @@ A rough heat map of how compatible we are with pandas, by API family, as of 2026
 | Joins (Inner / Left / Right / Outer / Cross / Asof) | 🟢 | All directions + `tolerance` / `by` / `allow_exact_matches` on asof; `validate=` + `indicator=` + custom `suffixes=` on merge. |
 | MultiIndex (row + column) | 🟡 | DISC-006 notes scaffolded-not-full parity for advanced ops. Full parity for set / get / xs / IO round-trip. |
 | IO: CSV / JSON / JSONL / Parquet / Excel / Feather / IPC | 🟢 | All seven, including the full pandas option matrices. |
-| IO: HTML / XML / LaTeX / Markdown / Pickle / Stata / ORC | 🟢 | All seven, with the caveat that Pickle is FrankenPandas-canonical bincode, not Python-pickle compatible. |
+| IO: HTML / XML / LaTeX / Markdown / Pickle / Stata | 🟢 | All six, with the caveat that Pickle is FrankenPandas-canonical bincode, not Python-pickle compatible. |
+| IO: ORC | 🔴 | Public API retained, but fail-closed under the no-Tokio policy until a native Tokio-free backend lands. |
 | IO: HDF5 | 🟡 | Feature-gated; keyed-snapshot layout, not PyTables-compatible. |
 | IO: SQL (SQLite) | 🟢 | Full read / write / chunked / inspector surface. |
 | IO: SQL (PostgreSQL / MySQL / others) | 🔴 | Generic trait is in place; bundled adapters are not. Tracked under `br-frankenpandas-fd90`. |

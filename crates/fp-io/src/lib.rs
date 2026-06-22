@@ -2,9 +2,10 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 
 //! IO layer for **frankenpandas**: round-trips between `DataFrame` and the
-//! fifteen supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, ORC,
+//! fourteen supported on-disk / wire formats — CSV, JSON, JSONL, Parquet,
 //! HDF5, Excel (XLSX), Feather (Arrow IPC v2), SQL, Markdown, LaTeX, HTML,
-//! XML, Pickle, and Stata.
+//! XML, Pickle, and Stata. The ORC API surface is retained but fails closed
+//! until a Tokio-free native ORC backend is available.
 //!
 //! ## Format readers / writers
 //!
@@ -13,7 +14,8 @@
 //! - **JSON / JSONL**: [`read_json`], [`read_jsonl`], [`write_json`],
 //!   [`write_jsonl`]
 //! - **Parquet**: [`read_parquet`], [`write_parquet`]
-//! - **ORC**: [`read_orc`], [`write_orc`]
+//! - **ORC**: [`read_orc`], [`write_orc`] fail closed under the workspace
+//!   no-Tokio policy.
 //! - **HDF5**: [`read_hdf`], [`write_hdf`] for the keyed DataFrame snapshot
 //!   surface.
 //! - **Excel**: [`read_excel`], [`write_excel`]
@@ -86,8 +88,9 @@
 //!
 //! - `sql-sqlite` (**default**): bind [`SqlConnection`] for
 //!   `rusqlite::Connection`.
-//! - `sql-postgresql`, `sql-mysql`: placeholder feature flags for the fd90
-//!   Phase 2 backend integrations (no concrete bindings yet).
+//! - `sql-postgresql`: placeholder feature flag for a future Tokio-free
+//!   PostgreSQL adapter.
+//! - `sql-mysql`: opt-in concrete MySQL adapter.
 //!
 //! Use `default-features = false` to drop the rusqlite dep when only the
 //! non-SQL formats are needed.
@@ -126,9 +129,6 @@ use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
 use fp_types::{DType, NullKind, Scalar, Timedelta, Timestamp, cast_scalar_owned};
 #[cfg(feature = "hdf5")]
 use hdf5::File as Hdf5File;
-use orc_rust::{
-    ArrowReaderBuilder as OrcArrowReaderBuilder, ArrowWriterBuilder as OrcArrowWriterBuilder,
-};
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use quick_xml::{Reader as XmlReader, XmlVersion, events::Event};
 use scraper::{ElementRef, Html, Selector};
@@ -189,6 +189,13 @@ pub enum IoError {
     Frame(#[from] FrameError),
     #[error(transparent)]
     Index(#[from] IndexError),
+}
+
+const ORC_NO_TOKIO_MESSAGE: &str =
+    "ORC I/O is disabled until a Tokio-free native ORC backend is available";
+
+fn orc_no_tokio_error() -> IoError {
+    IoError::Orc(ORC_NO_TOKIO_MESSAGE.to_owned())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7112,68 +7119,26 @@ pub fn read_parquet(path: &Path) -> Result<DataFrame, IoError> {
 
 /// Write a DataFrame to an in-memory ORC buffer.
 ///
-/// Uses the shared Arrow conversion path, then delegates ORC physical encoding
-/// to `orc-rust`.
-pub fn write_orc_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
-    let batch = dataframe_to_record_batch(frame)?;
-    let mut buf = Vec::new();
-    let mut writer = OrcArrowWriterBuilder::new(&mut buf, batch.schema())
-        .try_build()
-        .map_err(|err| IoError::Orc(err.to_string()))?;
-    writer
-        .write(&batch)
-        .map_err(|err| IoError::Orc(err.to_string()))?;
-    writer
-        .close()
-        .map_err(|err| IoError::Orc(err.to_string()))?;
-    Ok(buf)
+/// This fails closed under the workspace no-Tokio policy. The previous
+/// implementation delegated to `orc-rust`, which unconditionally pulled Tokio
+/// into `fp-io` and therefore into the umbrella `frankenpandas` crate.
+pub fn write_orc_bytes(_frame: &DataFrame) -> Result<Vec<u8>, IoError> {
+    Err(orc_no_tokio_error())
 }
 
 /// Read a DataFrame from in-memory ORC bytes.
-pub fn read_orc_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
-    let bytes = bytes::Bytes::from(data.to_vec());
-    let reader = OrcArrowReaderBuilder::try_new(bytes)
-        .map_err(|err| IoError::Orc(err.to_string()))?
-        .build();
-
-    let mut all_frames: Vec<DataFrame> = Vec::new();
-    for batch_result in reader {
-        let batch = batch_result.map_err(|err| IoError::Orc(err.to_string()))?;
-        all_frames.push(record_batch_to_dataframe(&batch)?);
-    }
-
-    if all_frames.is_empty() {
-        return Ok(DataFrame::new_with_column_order(
-            Index::new(vec![]),
-            BTreeMap::new(),
-            vec![],
-        )?);
-    }
-
-    if all_frames.len() == 1 {
-        if let Some(frame) = all_frames.into_iter().next() {
-            return Ok(frame);
-        }
-        return Err(IoError::Orc(
-            "orc reader produced zero record batches".to_owned(),
-        ));
-    }
-
-    let refs: Vec<&DataFrame> = all_frames.iter().collect();
-    fp_frame::concat_dataframes(&refs).map_err(IoError::from)
+pub fn read_orc_bytes(_data: &[u8]) -> Result<DataFrame, IoError> {
+    Err(orc_no_tokio_error())
 }
 
 /// Write a DataFrame to an ORC file.
-pub fn write_orc(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
-    let bytes = write_orc_bytes(frame)?;
-    std::fs::write(path, bytes)?;
-    Ok(())
+pub fn write_orc(_frame: &DataFrame, _path: &Path) -> Result<(), IoError> {
+    Err(orc_no_tokio_error())
 }
 
 /// Read a DataFrame from an ORC file.
-pub fn read_orc(path: &Path) -> Result<DataFrame, IoError> {
-    let data = std::fs::read(path)?;
-    read_orc_bytes(&data)
+pub fn read_orc(_path: &Path) -> Result<DataFrame, IoError> {
+    Err(orc_no_tokio_error())
 }
 
 // ── Excel (xlsx) I/O ────────────────────────────────────────────────────
@@ -8798,7 +8763,7 @@ pub trait SqlConnection {
     /// Run `f` inside a transaction. The default impl runs `f` without
     /// BEGIN/COMMIT — backends that support transactions should override
     /// to wrap in their native transaction primitive (rusqlite `BEGIN`,
-    /// tokio-postgres `BEGIN`, mysql `START TRANSACTION`, ...). On `Err`
+    /// PostgreSQL `BEGIN`, MySQL `START TRANSACTION`, ...). On `Err`
     /// from `f`, transactional backends roll back; on `Ok` they commit.
     ///
     /// The default impl is intentionally a no-op so non-transactional
@@ -9971,232 +9936,16 @@ fn sql_column_definition<C: SqlConnection>(
 }
 
 // ============================================================================
-// PostgreSQL SqlConnection Implementation (feature = "sql-postgresql")
+// PostgreSQL SqlConnection placeholder (feature = "sql-postgresql")
 // ============================================================================
 
-#[cfg(any(feature = "sql-postgresql", feature = "sql-mysql"))]
+#[cfg(feature = "sql-mysql")]
 use std::cell::RefCell;
 
-/// Wrapper around `postgres::Client` providing interior mutability for the
-/// `SqlConnection` trait (which requires `&self`).
-#[cfg(feature = "sql-postgresql")]
-pub struct PostgresConnection {
-    client: RefCell<postgres::Client>,
-}
-
-#[cfg(feature = "sql-postgresql")]
-impl PostgresConnection {
-    pub fn new(client: postgres::Client) -> Self {
-        Self {
-            client: RefCell::new(client),
-        }
-    }
-}
-
-#[cfg(feature = "sql-postgresql")]
-impl SqlConnection for PostgresConnection {
-    fn query(&self, query_str: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
-        use postgres::types::ToSql;
-
-        let pg_params: Vec<Box<dyn ToSql + Sync>> = params
-            .iter()
-            .map(|s| -> Box<dyn ToSql + Sync> {
-                match s {
-                    Scalar::Null(_) => Box::new(Option::<i64>::None),
-                    Scalar::Bool(b) => Box::new(*b),
-                    Scalar::Int64(i) => Box::new(*i),
-                    Scalar::Float64(f) => Box::new(*f),
-                    Scalar::Utf8(s) => Box::new(s.clone()),
-                    _ => Box::new(Option::<i64>::None),
-                }
-            })
-            .collect();
-
-        let param_refs: Vec<&(dyn ToSql + Sync)> = pg_params.iter().map(|b| b.as_ref()).collect();
-        let rows = self
-            .client
-            .borrow_mut()
-            .query(query_str, &param_refs)
-            .map_err(|e| IoError::Sql(format!("PostgreSQL query failed: {e}")))?;
-
-        if rows.is_empty() {
-            return Ok(SqlQueryResult {
-                columns: Vec::new(),
-                rows: Vec::new(),
-            });
-        }
-
-        let columns: Vec<String> = rows[0]
-            .columns()
-            .iter()
-            .map(|c| c.name().to_owned())
-            .collect();
-
-        let mut out_rows = Vec::new();
-        for row in &rows {
-            let mut values = Vec::new();
-            for idx in 0..row.len() {
-                let value = pg_value_to_scalar(row, idx);
-                values.push(value);
-            }
-            out_rows.push(values);
-        }
-
-        Ok(SqlQueryResult {
-            columns,
-            rows: out_rows,
-        })
-    }
-
-    fn execute_batch(&self, sql: &str) -> Result<(), IoError> {
-        self.client
-            .borrow_mut()
-            .batch_execute(sql)
-            .map_err(|e| IoError::Sql(format!("PostgreSQL batch execute failed: {e}")))
-    }
-
-    fn table_exists(&self, table_name: &str) -> Result<bool, IoError> {
-        let rows = self
-            .client
-            .borrow_mut()
-            .query(
-                "SELECT 1 FROM information_schema.tables WHERE table_name = $1 LIMIT 1",
-                &[&table_name],
-            )
-            .map_err(|e| IoError::Sql(format!("PostgreSQL table_exists failed: {e}")))?;
-        Ok(!rows.is_empty())
-    }
-
-    fn insert_rows(&self, insert_sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError> {
-        let mut client = self.client.borrow_mut();
-        for row in rows {
-            let pg_params: Vec<Box<dyn postgres::types::ToSql + Sync>> = row
-                .iter()
-                .map(|s| -> Box<dyn postgres::types::ToSql + Sync> {
-                    match s {
-                        Scalar::Null(_) => Box::new(Option::<i64>::None),
-                        Scalar::Bool(b) => Box::new(*b),
-                        Scalar::Int64(i) => Box::new(*i),
-                        Scalar::Float64(f) => Box::new(*f),
-                        Scalar::Utf8(s) => Box::new(s.clone()),
-                        _ => Box::new(Option::<i64>::None),
-                    }
-                })
-                .collect();
-            let param_refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
-                pg_params.iter().map(|b| b.as_ref()).collect();
-            client
-                .execute(insert_sql, &param_refs)
-                .map_err(|e| IoError::Sql(format!("PostgreSQL insert failed: {e}")))?;
-        }
-        Ok(())
-    }
-
-    fn dtype_sql(&self, dtype: DType) -> &'static str {
-        match dtype {
-            DType::Bool | DType::BoolNullable => "BOOLEAN",
-            DType::Int64 | DType::Int64Nullable => "BIGINT",
-            DType::Float64 => "DOUBLE PRECISION",
-            DType::Utf8 => "TEXT",
-            DType::Datetime64 => "TIMESTAMP",
-            DType::Timedelta64 => "INTERVAL",
-            _ => "TEXT",
-        }
-    }
-
-    fn index_dtype_sql(&self, index: &Index) -> &'static str {
-        pg_sql_dtype_from_index(index)
-    }
-
-    fn dialect_name(&self) -> &'static str {
-        "postgresql"
-    }
-
-    fn parameter_marker(&self, ordinal: usize) -> String {
-        format!("${ordinal}")
-    }
-
-    fn supports_returning(&self) -> bool {
-        true
-    }
-
-    fn max_param_count(&self) -> Option<usize> {
-        Some(65535)
-    }
-
-    fn supports_schemas(&self) -> bool {
-        true
-    }
-
-    fn quote_identifier(&self, ident: &str) -> Result<String, IoError> {
-        if ident.contains('\0') {
-            return Err(IoError::Sql("invalid identifier: NUL byte".to_owned()));
-        }
-        Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
-    }
-
-    fn list_tables(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
-        let schema = schema.unwrap_or("public");
-        let rows = self
-            .client
-            .borrow_mut()
-            .query(
-                "SELECT table_name FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name",
-                &[&schema],
-            )
-            .map_err(|e| IoError::Sql(format!("PostgreSQL list_tables failed: {e}")))?;
-        Ok(rows.iter().map(|r| r.get(0)).collect())
-    }
-
-    fn list_schemas(&self) -> Result<Vec<String>, IoError> {
-        let rows = self
-            .client
-            .borrow_mut()
-            .query(
-                "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name",
-                &[],
-            )
-            .map_err(|e| IoError::Sql(format!("PostgreSQL list_schemas failed: {e}")))?;
-        Ok(rows.iter().map(|r| r.get(0)).collect())
-    }
-}
-
-#[cfg(feature = "sql-postgresql")]
-fn pg_sql_dtype_from_index(index: &Index) -> &'static str {
-    for label in index.labels() {
-        match label {
-            IndexLabel::Int64(_) => return "BIGINT",
-            IndexLabel::Utf8(_) => return "TEXT",
-            IndexLabel::Timedelta64(v) if *v != Timedelta::NAT => return "INTERVAL",
-            IndexLabel::Datetime64(v) if *v != i64::MIN => return "TIMESTAMP",
-            _ => {}
-        }
-    }
-    "TEXT"
-}
-
-#[cfg(feature = "sql-postgresql")]
-fn pg_value_to_scalar(row: &postgres::Row, idx: usize) -> Scalar {
-    if let Ok(Some(v)) = row.try_get::<_, Option<bool>>(idx) {
-        return Scalar::Bool(v);
-    }
-    if let Ok(Some(v)) = row.try_get::<_, Option<i64>>(idx) {
-        return Scalar::Int64(v);
-    }
-    if let Ok(Some(v)) = row.try_get::<_, Option<i32>>(idx) {
-        return Scalar::Int64(i64::from(v));
-    }
-    if let Ok(Some(v)) = row.try_get::<_, Option<f64>>(idx) {
-        return Scalar::Float64(v);
-    }
-    if let Ok(Some(v)) = row.try_get::<_, Option<f32>>(idx) {
-        return Scalar::Float64(f64::from(v));
-    }
-    if let Ok(Some(v)) = row.try_get::<_, Option<String>>(idx) {
-        return Scalar::Utf8(v);
-    }
-    Scalar::Null(crate::NullKind::Null)
-}
+// The `sql-postgresql` feature is intentionally a placeholder under the
+// workspace no-Tokio policy. The removed concrete adapter used the `postgres`
+// crate, which is built on tokio-postgres and pulled Tokio into all-features
+// builds even when users did not need PostgreSQL.
 
 // ============================================================================
 // MySQL SqlConnection Implementation (feature = "sql-mysql")
@@ -13114,6 +12863,17 @@ mod tests {
         HdfReadOptions, HdfWriteOptions, read_hdf, read_hdf_key, read_hdf_with_options, write_hdf,
         write_hdf_key, write_hdf_with_options,
     };
+
+    fn assert_orc_disabled(err: IoError) {
+        assert!(
+            matches!(
+                err,
+                IoError::Orc(ref message)
+                    if message.contains("Tokio-free native ORC backend")
+            ),
+            "expected ORC no-Tokio policy error, got {err:?}"
+        );
+    }
 
     #[test]
     fn csv_quoting_round_trip_special_chars_1h8ar() {
@@ -18028,10 +17788,10 @@ mod tests {
                 .len(),
             frame.index().len()
         );
-        let orc = frame.to_orc_bytes().expect("orc bytes through extension");
-        assert_eq!(
-            read_orc_bytes(&orc).expect("orc roundtrip").index().len(),
-            frame.index().len()
+        assert_orc_disabled(
+            frame
+                .to_orc_bytes()
+                .expect_err("ORC must fail closed under no-Tokio policy"),
         );
         let feather = frame
             .to_feather_bytes()
@@ -18291,38 +18051,14 @@ mod tests {
     }
 
     #[test]
-    fn orc_bytes_roundtrip_preserves_supported_columns() {
+    fn orc_bytes_fail_closed_under_no_tokio_policy() {
         let frame = make_test_dataframe();
-        let bytes = write_orc_bytes(&frame).expect("write orc");
-        assert!(bytes.starts_with(b"ORC"));
-
-        let frame2 = read_orc_bytes(&bytes).expect("read orc");
-        assert_eq!(frame2.index().len(), 3);
-        assert_eq!(
-            frame2
-                .column_names()
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>(),
-            vec!["ints", "floats", "names"]
-        );
-
-        assert_eq!(
-            frame2.column("ints").unwrap().values()[0],
-            Scalar::Int64(10)
-        );
-        assert_eq!(
-            frame2.column("floats").unwrap().values()[1],
-            Scalar::Float64(2.5)
-        );
-        assert_eq!(
-            frame2.column("names").unwrap().values()[2],
-            Scalar::Utf8("carol".into())
-        );
+        assert_orc_disabled(write_orc_bytes(&frame).expect_err("ORC writer must fail closed"));
+        assert_orc_disabled(read_orc_bytes(b"ORC").expect_err("ORC reader must fail closed"));
     }
 
     #[test]
-    fn orc_file_and_extension_aliases_roundtrip() {
+    fn orc_file_and_extension_aliases_fail_closed_under_no_tokio_policy() {
         use super::DataFrameIoExt;
 
         let frame = make_test_dataframe();
@@ -18337,50 +18073,28 @@ mod tests {
             line!()
         ));
 
-        write_orc(&frame, &free_path).expect("write orc path");
-        let free_roundtrip = read_orc(&free_path).expect("read orc path");
-        assert!(free_roundtrip.equals(&frame));
-
-        frame.to_orc_file(&trait_path).expect("trait orc path");
-        let trait_roundtrip = read_orc(&trait_path).expect("read trait orc path");
-        assert!(trait_roundtrip.equals(&frame));
-
-        let bytes = frame.to_orc_bytes().expect("trait orc bytes");
-        assert!(
-            read_orc_bytes(&bytes)
-                .expect("read trait orc bytes")
-                .equals(&frame)
-        );
-    }
-
-    #[test]
-    fn orc_row_multiindex_roundtrip_restores_logical_row_axis() {
-        let frame = make_row_multiindex_test_dataframe();
-        let bytes = write_orc_bytes(&frame).expect("write orc");
-        let roundtrip = read_orc_bytes(&bytes).expect("read orc");
-
-        assert!(roundtrip.equals(&frame));
-        assert!(roundtrip.column("__index_level_0__").is_none());
-        assert_eq!(
-            roundtrip
-                .row_multiindex()
-                .expect("row multiindex should be restored")
-                .get_level_values(0)
-                .unwrap()
-                .labels(),
+        assert_orc_disabled(write_orc(&frame, &free_path).expect_err("free ORC path writer"));
+        assert_orc_disabled(read_orc(&free_path).expect_err("free ORC path reader"));
+        assert_orc_disabled(
             frame
-                .row_multiindex()
-                .expect("source row multiindex")
-                .get_level_values(0)
-                .unwrap()
-                .labels()
+                .to_orc_file(&trait_path)
+                .expect_err("trait ORC path writer"),
+        );
+        assert_orc_disabled(frame.to_orc_bytes().expect_err("trait ORC bytes writer"));
+    }
+
+    #[test]
+    fn orc_row_multiindex_fails_closed_before_materialization() {
+        let frame = make_row_multiindex_test_dataframe();
+        assert_orc_disabled(
+            write_orc_bytes(&frame).expect_err("ORC writer must fail closed for any frame shape"),
         );
     }
 
     #[test]
-    fn orc_reader_rejects_malformed_input() {
+    fn orc_reader_rejects_malformed_input_without_loading_backend() {
         let err = read_orc_bytes(b"not an orc file").expect_err("malformed orc should fail");
-        assert!(matches!(err, IoError::Orc(_)));
+        assert_orc_disabled(err);
     }
 
     // ── Excel I/O tests ──────────────────────────────────────────────
