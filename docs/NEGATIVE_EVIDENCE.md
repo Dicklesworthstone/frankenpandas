@@ -3109,3 +3109,12 @@ emitted as ~1M Scalars vs pandas numpy arrays — see prior entry for the typed-
 recovery). Confirms the loss is ISOLATED to unique()'s value-output, not a systemic groupby issue (the broadcast
 transform + boolean all + cumcount all stay typed/fast). Net known vs-pandas losses repo-wide: groupby_unique_str
 (fixable, planned) + structural to_numpy/transpose (architectural). Everything else WINS.
+
+### 2026-06-22 CrimsonFinch — fp-io JSON family swept clean (all WIN); groupby_unique_str still sole fixable loss
+Per-crate bench of fp-io JSON variants (warm binary, no build, disk 49G still critical): json_write_records 4.03x,
+json_write_columns 3.33x, json_write_split 4.22x, json_write_values 4.38x, json_read_records 1.35x — all WIN
+(csv already 20x). fp-io dominated. No new loss. Sole fixable vs-pandas loss repo-wide remains groupby_unique_str
+0.61-0.89x (typed-f64 fix planned, DEFERRED: needs an fp-frame build and disk is still CRITICAL at 49G — has not
+recovered across many cycles; per the "no build until disk recovers" guard I am holding the fix and continuing the
+disk-safe no-build sweep). Structural to_numpy/transpose remain architectural. Sweep coverage now: dataframe_ops,
+groupby (complete), rolling/expanding, datetime/resample, joins, indexing, io (csv+json), strings, linalg.
