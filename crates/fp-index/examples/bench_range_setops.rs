@@ -6,6 +6,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 putmask_where
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_append_repeat
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_drop_labels
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_get_indexer_non_unique
 
 use std::{hint::black_box, time::Instant};
 
@@ -90,6 +91,56 @@ fn quarter_drop_labels(len: usize) -> Vec<IndexLabel> {
         .collect()
 }
 
+fn repeated_i64_values(len: usize, repeats: usize) -> Vec<i64> {
+    (0..len)
+        .map(|offset| i64::try_from(offset / repeats).expect("label fits i64"))
+        .collect()
+}
+
+fn non_unique_target_values(unique_len: usize) -> Vec<i64> {
+    let unique_len_i64 = i64::try_from(unique_len).expect("unique length fits i64");
+    (0..unique_len)
+        .map(|offset| {
+            let value = i64::try_from(offset).expect("target label fits i64");
+            if offset % 4 == 3 {
+                unique_len_i64 + value
+            } else {
+                value
+            }
+        })
+        .collect()
+}
+
+fn indexer_digest(indexer: &[isize], missing: &[usize]) -> usize {
+    let mut digest = indexer.len() ^ missing.len().rotate_left(1);
+    for value in [
+        indexer.first(),
+        indexer.get(indexer.len() / 2),
+        indexer.last(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        digest = value
+            .to_ne_bytes()
+            .iter()
+            .fold(digest.rotate_left(1), |acc, byte| {
+                acc.wrapping_mul(131).wrapping_add(usize::from(*byte))
+            });
+    }
+    for value in [
+        missing.first(),
+        missing.get(missing.len() / 2),
+        missing.last(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        digest = digest.wrapping_mul(131).wrapping_add(*value).rotate_left(1);
+    }
+    digest
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args
@@ -169,6 +220,23 @@ fn main() {
             int64_index_digest(&output)
         });
         println!("index_drop_labels n={n} drop_count={drop_count} drop_ns={drop_ns} sink={sink}");
+        return;
+    }
+    if scenario == "index_get_indexer_non_unique" {
+        let repeats = 4usize;
+        let unique_len = n / repeats;
+        let source = Index::from_i64_values(repeated_i64_values(n, repeats)).set_name("row");
+        let target_values = non_unique_target_values(unique_len);
+        let target = Index::from_i64_values(target_values);
+        let target_len = target.len();
+        let missing_count = target_len / 4;
+        let (non_unique_ns, sink) = best_ns(iters, || {
+            let (indexer, missing) = source.get_indexer_non_unique(&target);
+            indexer_digest(&indexer, &missing)
+        });
+        println!(
+            "index_get_indexer_non_unique n={n} repeats={repeats} target_len={target_len} missing_count={missing_count} non_unique_ns={non_unique_ns} sink={sink}"
+        );
         return;
     }
 

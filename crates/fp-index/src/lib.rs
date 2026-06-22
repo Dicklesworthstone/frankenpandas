@@ -1998,6 +1998,48 @@ impl Index {
         target.iter().map(|&v| map.get(&v).copied()).collect()
     }
 
+    fn get_indexer_non_unique_sorted_dense_i64(
+        source: &[i64],
+        targets: &[i64],
+    ) -> Option<(Vec<isize>, Vec<usize>)> {
+        if !is_non_decreasing_i64(source) {
+            return None;
+        }
+        let (min, span) = Self::i64_dense_span(source)?;
+        let mut starts = vec![usize::MAX; span];
+        let mut ends = vec![0usize; span];
+        for (position, &label) in source.iter().enumerate() {
+            let slot = (label as i128 - min as i128) as usize;
+            if starts[slot] == usize::MAX {
+                starts[slot] = position;
+            }
+            ends[slot] = position + 1;
+        }
+
+        let mut indexer = Vec::with_capacity(targets.len());
+        let mut missing = Vec::new();
+        let span = span as i128;
+        for (target_position, &label) in targets.iter().enumerate() {
+            let offset = label as i128 - min as i128;
+            if offset < 0 || offset >= span {
+                indexer.push(-1);
+                missing.push(target_position);
+                continue;
+            }
+            let slot = offset as usize;
+            let start = starts[slot];
+            if start == usize::MAX {
+                indexer.push(-1);
+                missing.push(target_position);
+                continue;
+            }
+            indexer.extend(
+                (start..ends[slot]).map(|position| isize::try_from(position).unwrap_or(isize::MAX)),
+            );
+        }
+        Some((indexer, missing))
+    }
+
     /// `(min, span)` of an `i64` slice when the span is dense enough for a
     /// direct-address bitset (≤ 2^26 slots and ≤ 16× the element count),
     /// else `None` (caller uses an inline-key hash set).
@@ -4537,12 +4579,16 @@ impl Index {
         if let (Some(source), Some(targets)) =
             (self.labels.int64_view(), target.labels.int64_view())
         {
+            if let Some(result) = Self::get_indexer_non_unique_sorted_dense_i64(&source, &targets) {
+                return result;
+            }
+
             let mut positions = FxHashMap::<i64, Vec<usize>>::default();
             for (position, &label) in source.iter().enumerate() {
                 positions.entry(label).or_default().push(position);
             }
 
-            let mut indexer = Vec::new();
+            let mut indexer = Vec::with_capacity(targets.len());
             let mut missing = Vec::new();
             for (target_position, &label) in targets.iter().enumerate() {
                 if let Some(source_positions) = positions.get(&label) {
@@ -22100,6 +22146,49 @@ mod tests {
             IndexLabel::Int64(5),
             IndexLabel::Int64(4),
             IndexLabel::Int64(2),
+        ]);
+        assert_eq!(
+            actual,
+            materialized_source.get_indexer_non_unique(&materialized_target)
+        );
+    }
+
+    #[test]
+    fn sorted_int64_get_indexer_non_unique_dense_runs_codb() {
+        let source = Index::from_i64_values(vec![1, 1, 2, 2, 2, 4, 4, 6]).set_name("source");
+        let target = Index::from_i64_values(vec![2, 3, 1, 6, 4, 0]);
+        assert!(source.labels.materialized.get().is_none());
+        assert!(target.labels.materialized.get().is_none());
+
+        let actual = source.get_indexer_non_unique(&target);
+
+        assert_eq!(actual, (vec![2, 3, 4, -1, 0, 1, 7, 5, 6, -1], vec![1, 5]));
+        assert!(
+            source.labels.materialized.get().is_none(),
+            "sorted dense Int64 source should stay on raw backing"
+        );
+        assert!(
+            target.labels.materialized.get().is_none(),
+            "sorted dense Int64 targets should stay on raw backing"
+        );
+
+        let materialized_source = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(6),
+        ]);
+        let materialized_target = Index::new(vec![
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(6),
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(0),
         ]);
         assert_eq!(
             actual,
