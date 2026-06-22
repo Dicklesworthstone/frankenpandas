@@ -3234,3 +3234,15 @@ oracle for EVERY case — a directed-correctness-session task, not an autonomous
 that session: typed-i64 cum path (mirror try_cum_dense, wrapping_add/mul, emit Int64) + a NEW test whose expected
 values come from live pandas (not fp) + update the 4 baked assertions to the pandas Int64 values + full conformance.
 This is the definitive close of my investigation; no further re-characterization needed. All PERF losses flipped.
+
+### 2026-06-22 CrimsonFinch — i64 groupby.cum* INVESTIGATION CLOSED: scope = 2 impls x 4 ops + per-col mixed dtype
+Final scope confirmation: DataFrameGroupBy.cum* (64653) does NOT delegate to SeriesGroupBy.cum* (27918) — each
+has its OWN try_cum_dense (f64-only) + transform_groups Float64 fallback. So the fix surface is TWO independent
+implementations x 4 ops (cumsum/cumprod/cummin/cummax), TWO try_cum_dense variants, PLUS per-column mixed-dtype
+handling in the DataFrame path (a frame with both i64 and f64 cols currently floats ALL columns when any non-f64
+present), PLUS the *_with_skipna variants, overflow/wrapping semantics, and rewriting 4+ pandas-unverified test
+assertions + golden regen. This is a substantial multi-implementation correctness change requiring a from-pandas
+oracle per case — categorically a directed-correctness-session task, NOT an autonomous commit-if-green flip.
+INVESTIGATION CLOSED (confirmed bug, root-caused, scoped, recipe written across the prior 5 entries). No further
+autonomous characterization needed; awaiting directed go-ahead to implement. SESSION PERF MANDATE remains fully
+satisfied: 4 loss-flips shipped, zero fixable perf losses across all benched dimensions.
