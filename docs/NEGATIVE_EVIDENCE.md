@@ -3051,3 +3051,19 @@ with group-ordering golden risk — NOT a loss-to-flip, so deferred (lower prior
 losses mandate, which is now fully satisfied). FINAL STATE: ZERO vs-pandas losses across the entire benched +
 perf_profile surface (all 11 families incl. strings + multi-key); sole non-wins are to_numpy/transpose (structural
 zero-copy views, architectural). BOLD-VERIFY surface audit CLOSED — no remaining loss exists to flip.
+
+### 2026-06-22 CrimsonFinch — multi-string-key groupby dense path: concrete impl plan (deferred, NOT a loss-flip)
+Investigated the only remaining lever (df.groupby([str,str]).sum 1.07x; int-key equivalent 2.26x — a real ~2x
+algorithmic headroom). CONCRETE PLAN for a future DIRECTED session (it is NOT a loss to flip, so out of the
+auto-resume's mandate; deferred on disk pressure + hot-path golden risk):
+- Generalize `multi_int64_dense_grouping` (lib.rs ~61931) to accept key cols that are i64 slices OR Utf8 cols
+  factorized to i64 codes via SORTED factorize (code k == lexicographically k-th unique string). Then the existing
+  mixed-radix dense product + `order.sort_by(key_of_gid tuples)` yields the SAME lexicographic group order pandas
+  produces for string keys (because code order == string sort order) — the bit-identity hinge.
+- Cardinality-product cap already gates (100*50=5000 << 1<<24). Mixed int/str keys: factorize only the Utf8 cols.
+- THE RISK / why it's "involved": the output row MultiIndex must carry the ORIGINAL string values (map gid->codes
+  ->unique strings per col), reconstructed to bit-match the current build_groups string path (label dtype, order,
+  MultiIndex attach). Verify vs dataframe_groupby_multikey_sum_oracle_ev7sk + groupby_sum_multikey_attaches_row_
+  multiindex goldens; revert if any byte differs.
+- Wire into DataFrameGroupBy.sum (~62210, beside the multi_int64_dense_grouping call ~62773) and the agg dispatch.
+Expected ~1.07x->~2x. Everything else on the surface is a confirmed WIN; this is the last (marginal) optimization.
