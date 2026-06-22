@@ -16,7 +16,14 @@ fn main() {
         labels,
         (0..n)
             .map(|i| {
-                let v = ((i as i64).wrapping_mul(2654435761) >> 13).rem_euclid(card);
+                let v = {
+                    let mut h = (i as u64).wrapping_mul(0x9E3779B97F4A7C15);
+                    h = (h ^ (h >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+                    h = (h ^ (h >> 27)).wrapping_mul(0x94D049BB133111EB);
+                    h ^= h >> 31;
+                    (h >> 1) as i64
+                }
+                .rem_euclid(card);
                 Scalar::Float64(v as f64)
             })
             .collect(),
