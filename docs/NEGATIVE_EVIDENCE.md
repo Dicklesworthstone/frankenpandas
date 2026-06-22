@@ -3169,3 +3169,17 @@ further unique work. Loss-hunt definitively complete: 4 real losses flipped this
 median, groupby unique f64, groupby unique i64), every other family/dtype/value-returning op confirmed WIN, zero
 fixable vs-pandas losses remain. Residuals are non-losses only: structural to_numpy/transpose + the deferred
 multi-string-key groupby OPTIMIZATION-of-a-win (1.07x, plan committed).
+
+### 2026-06-22 CrimsonFinch — FLAGGED (not fixed): i64 groupby.cumsum/cumprod/cummin/cummax — Scalar fallback + suspected Float64 dtype divergence
+Applying the f64-only-fast-path lens (the vein behind the unique fixes), found that SeriesGroupBy cum* (cumsum
+~27918, cumprod/cummin/cummax) gate their dense path on try_cum_dense -> as_f64_slice (F64-ONLY). An INT64 value
+column skips it and hits the transform_groups Scalar fallback, which (a) boxes (perf-loss candidate, same vein as
+unique) AND (b) emits Scalar::Float64(acc) — so an Int64 input appears to yield a FLOAT64 output, whereas pandas
+groupby int cumsum returns int64 (verified: pd .groupby('k')['v'].cumsum().dtype == int64). This is CORRECTNESS-
+adjacent (dtype), NOT a clean perf flip: a fix must (1) add a typed-i64 cum path AND (2) emit Int64 to match
+pandas, which CHANGES current fp output (Float64->Int64) => golden regen + oracle verification across cumsum/
+cumprod/cummin/cummax + the *_with_skipna variants + the timedelta path. DELIBERATELY NOT FIXED here: out of
+scope for an autonomous "bench, commit-if-green" turn (correctness change, golden-breaking, needs a live-pandas
+oracle). FLAGGED for a directed correctness session. NOTE: suspected from code-read + pandas oracle; fp's actual
+i64-groupby-cumsum output dtype should be confirmed first (a conformance gap may exist). This is the first
+non-perf finding of the session — a possible latent dtype bug, surfaced by the perf lens.
