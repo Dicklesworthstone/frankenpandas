@@ -3260,3 +3260,16 @@ dataframe_groupby_multikey_sum_oracle_ev7sk + groupby_sum_multikey_attaches_row_
 multikey. (Gain is 1.4x fp-side not 2x: build_groups was ~half the cost; the per-group value gather is the rest.)
 Closes the last deferred PERF optimization. Remaining non-wins: structural to_numpy/transpose; the confirmed i64
 groupby.cum* dtype bug (correctness, directed session).
+
+### 2026-06-22 CrimsonFinch — crosstab i64 dense 2D-histogram: 0.68x->19.46x @1M (22x fp-side) — BIG hidden loss
+After the multi-string-key flip, df_crosstab became the biggest gap — and re-measure showed it's a real LOSS @1M:
+0.68x (fp ~64ms vs pandas 44ms). Root: DataFrame::crosstab (~59805) materialized BOTH key columns to Vec<Scalar>,
+then per-row stringified BOTH keys (2x to_string()/row = ~2M String allocs) into a nested FxHashMap<String,
+FxHashMap<String,i64>>. For two bounded Int64 columns that is pure waste. FIX: typed-i64 dense 2D-histogram fast
+path (gate both cols as_i64_slice + bounded ranges within 1<<24 / 16n cap) — direct-address grid[(r-rmin)*crange
++(c-cmin)]+=1 in ONE pass, seen-bitsets track present rows/cols, output present values ascending (dense code order
+== sorted Int64). Bit-identical for pure-i64 (no Int64/Utf8 stringified-bucket merge quirk): same Int64 index
+labels + stringified col names + Int64 counts + sorted axes + index name. df_crosstab @1M 64ms->2.8ms (22x fp-
+side), 0.68x->19.46x WIN. fp-frame lib 3098/0 incl crosstab_basic/counts/normalize + dataframe_crosstab_golden_
+basic + pivot_and_crosstab_sort_axes_like_pandas_r0t9l. Two big flips this session-tail: multi-strkey 1.07x->1.69x,
+crosstab 0.68x->19.46x.
