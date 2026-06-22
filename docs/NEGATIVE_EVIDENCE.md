@@ -2913,3 +2913,16 @@ the monthly logic + extremum accumulator + Vec<Scalar> Null-for-empty emit). For
 LESS-COMMON op, with bit-identity risk on the empty-bin null path, the EV/effort says DEFER (filed br-ikq9a).
 The resample reductions cluster is COMPREHENSIVELY CLOSED for the common aggs (mean+sum all freqs); max is the
 lone marginal residual.
+
+### 2026-06-21 BlackThrush — resample max/min single-pass: 0.93x->1.00x; resample surface now has NO losses
+REVERSED last turn's deferral — the min/max single-pass was NOT blocked by the output mismatch; just emit
+Vec<Scalar> (Null(NaN) for empty) via from_values, matching resample_extremum_typed exactly. monthly_extremum_
+single_pass: strict >/< + ±inf init (keeps first extreme, -0.0/0.0 ties match the reduce) accumulate per bucket
+in ONE pass; intercept in resample_extremum_typed for M/Q/Y/A. Bit-identical (resample 51/0), mean intact
+(16866us). fp-side: resample_max 18960->18379us (0.93x->1.00x). SMALL gain (~3%) — unlike sum (which skipped
+the Scalar materialization, ~26%), the extremum was ALREADY typed (resample_extremum_typed), so the single-pass
+only removes the GATHER; the 1M civil month-ord dominates (inherent floor, like Q/Y ~0.97x and dt_month). NET:
+the resample surface now has ZERO losses (all WIN or ~parity at the civil floor). ALL resample reductions
+(mean/sum/min/max) single-pass at calendar freqs. LESSON (2nd time this session after the daily): I OVER-STATED
+a "blocker" (the Null-vs-NaN output) and deferred — it was a trivial output-path choice, not a blocker. Stop
+inflating deferral rationales; check the actual difficulty.
