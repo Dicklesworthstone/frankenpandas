@@ -2874,3 +2874,16 @@ Bit-identical (resample 51/0). fp-side: resample_hourly 20748->12408us (1.67x) -
 now WIN — the br-ikq9a "gather-agg floor" was fixable single-pass, fully done for the mean. Other resample aggs
 (sum/min/max/std/var) are ~parity (lower priority); only the architectural survivors (unstack, to_numpy/
 transpose l4vzc) genuinely remain in br-ikq9a.
+
+### 2026-06-21 BlackThrush — resample sum typed path + single-pass: 0.96x->~1.05x (no typed path before)
+resample sum was the BARE Scalar path (aggregate_scalar(nansum)) — NO typed fast path at all: column.values()
+O(n) Scalar materialization + per-bucket Vec<Scalar> clone + gather. 0.96x LOSS monthly (fp 22905 vs pandas
+22009), 1.11x slower than mean fp-side. FIX: added a typed-f64 path mirroring the mean — as_f64_slice + no-NaN
+-> resample_reduce_single_pass(is_sum=true) [daily/sub-daily ONE-pass accumulate, the SAME proven code as the
+mean's single-pass, is_sum just switches emit (sum vs sum/count) + daily empty-bin (0.0 vs NaN)] OR build_groups
++ typed sum [monthly: skip the Scalar materialization]. Generalized daily/subdaily_mean_single_pass ->
+*_reduce_single_pass(is_sum) + a resample_reduce_single_pass dispatch (mean=false, sum=true). Bit-identical
+(resample 51/0; mean 21095us + daily 9032us INTACT — generalization didn't regress them). fp-side: resample_sum
+22905->20907us (monthly, flips 0.96x->~1.05x via Scalar-skip; build_groups+typed-gather is still 2-pass so
+modest). Daily/sub-daily sum route through the mean's MEASURED single-pass (8939/12408us, ~2.7x/1.67x drops) —
+same code path, only the emit differs, so perf is inferred from the mean (not separately benched; honest note).
