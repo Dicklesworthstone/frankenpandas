@@ -2926,3 +2926,15 @@ the resample surface now has ZERO losses (all WIN or ~parity at the civil floor)
 (mean/sum/min/max) single-pass at calendar freqs. LESSON (2nd time this session after the daily): I OVER-STATED
 a "blocker" (the Null-vs-NaN output) and deferred — it was a trivial output-path choice, not a blocker. Stop
 inflating deferral rationales; check the actual difficulty.
+
+### 2026-06-21 BlackThrush — unstack dense grid: 0.22x->0.67x @1M (3x fp-side), another "structural" loss cracked
+df_unstack was SUPERLINEAR (0.43x@100k -> 0.22x@1M) — the prior memory called it "structural (string-composite
+MultiIndex)". PROFILED the framing: the superlinearity was the per-cell FxHashMap<(usize,usize), &Scalar>
+(1M inserts during parse + nrows*ncols lookups in output) CACHE-MISSING at 1M, NOT the representation. FIX:
+record (ri,ci) per cell during parse, then build a dense COL-MAJOR grid (Vec<u32> row-positions, sentinel
+u32::MAX, grid[ci*nrows+ri]) when bounded (nrows*ncols <= 2n) — direct indexing + SEQUENTIAL per-column output
+replaces the hash; sparse grids fall back to a hash map. First-write-wins == or_insert. Bit-identical (unstack
+7/0). df_unstack @1M 168010->55929us (3x fp-side), 0.22x->0.67x; @100k 7245->5134us, 0.43x->0.55x. The RESIDUAL
+0.67x is the string-composite PARSE (split_once + row/col string-key discovery) + Vec<Scalar> output — the
+genuinely structural fp representation. LESSON (recurring this session): "structural" framings keep being
+mostly ALLOC/cache-bound (stack, resample, now unstack) — profile the framing before accepting it.
