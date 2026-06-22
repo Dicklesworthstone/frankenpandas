@@ -2887,3 +2887,15 @@ mean's single-pass, is_sum just switches emit (sum vs sum/count) + daily empty-b
 22905->20907us (monthly, flips 0.96x->~1.05x via Scalar-skip; build_groups+typed-gather is still 2-pass so
 modest). Daily/sub-daily sum route through the mean's MEASURED single-pass (8939/12408us, ~2.7x/1.67x drops) —
 same code path, only the emit differs, so perf is inferred from the mean (not separately benched; honest note).
+
+### 2026-06-21 BlackThrush — M/Q/Y/A resample reduce single-pass: calendar freqs -17-19% fp; sum(M) ~1.30x
+Extended the single-pass to the LAST resample-reduction path (calendar M/Q/Y/A). monthly_reduce_single_pass:
+month ordinals (resample_label_to_month_ordinal) + period_end_mo/bucket_end_mo bucketing + DIRECT bidx =
+(bucket_end_mo(mo)-first)/bucket_months (no order map) + resample_month_end_key cursors + filled empties
+(mean->NaN, sum->0.0); accumulate sum/count per bucket in ONE pass vs build_groups Vec<usize> scatter + gather.
+Bit-identical (resample 51/0). fp-side @1M: resample_y 20703->16827 (0.79x->~0.97x), resample_q 20937->16873
+(0.87x->~0.97x), resample_mean(M) 20621->17153, resample_sum(M) 20907->16987 (~0.96x->~1.30x WIN). Daily 9063 /
+hourly 12392 INTACT. Q/Y now sit at the INHERENT civil-month-ord floor (~0.97x — the 1M civil year*12+month
+conversions, fp Rust vs pandas C, exactly like dt_month/dt_quarter ~0.9x); the single-pass removed the GATHER,
+the civil conversion is the irreducible remainder. ALL resample mean+sum now single-pass at EVERY freq family
+(D / sub-daily H-min-s-ms-us-ns / M-Q-Y-A). The br-ikq9a resample "gather-agg floor" is fully closed for mean+sum.
