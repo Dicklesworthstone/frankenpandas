@@ -3327,3 +3327,15 @@ fast path). @1M: fp 58ms vs pandas 142ms = 2.44x WIN. So fp's join hash path is 
 the groupby generic Vec<ScalarKey>+SipHash path that the wide-i64 fix addressed). No join wide-key gap. Bench added
 for coverage. Biggest remaining measured gap stays DataFrameGroupBy wide-i64 0.25x (output/double-hash bound,
 architectural-ish) + the i64 groupby.cum* correctness bug.
+
+### 2026-06-22 CrimsonFinch — wide-i64 single-pass bypass FLIPS DataFrameGroupBy: 0.25x->2.30x @1M (22x fp-side total)
+Closed the DataFrameGroupBy wide-i64 residual properly. The prior fix (sparse build_groups + sparse precompute)
+left the central path HASHING THE KEYS TWICE (build_groups for groups/labels, then the precompute for gid_per_row)
+plus an unused 1M-entry positions map. Mirrored the existing bounded aggregate_int64_dense -> int64_dense_grouping
+-> dense_aggregate_emit bypass with a SPARSE sibling: int64_sparse_grouping (FxHashMap<i64,gid>, one pass) +
+aggregate_int64_sparse, gated as a single-all-valid-i64-key as_index bypass in aggregate_named_func BEFORE
+build_groups. One grouping pass, no positions map, no double hash. Bit-identical (same first-seen gids + sort +
+dense_aggregate_emit as the bounded path; fp-frame 3098/0). df_groupby_widekey_sum @1M 859ms->99ms; FULL ARC
+2.18s->99ms = 22x fp-side, 0.10x->2.30x WIN. Wide-i64 high-card groupby now DOMINATES (Series 2.20x + DataFrame
+2.30x). 10th loss-flip this session. (Earlier sparse build_groups/precompute paths retained — they serve the
+non-bypass cases: as_index=False, non-dense-reducible funcs, multi-key.)
