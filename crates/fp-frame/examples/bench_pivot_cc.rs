@@ -48,6 +48,13 @@ fn main() {
                 .map(|i| Scalar::Utf8(format!("c{:04}", col_key(i)).into()))
                 .collect(),
         )
+    } else if keytype == "dt" {
+        (
+            (0..n)
+                .map(|i| Scalar::Datetime64(idx_key(i) * 86_400_000_000_000))
+                .collect(),
+            (0..n).map(|i| Scalar::Int64(col_key(i))).collect(),
+        )
     } else {
         (
             (0..n).map(|i| Scalar::Int64(idx_key(i))).collect(),
