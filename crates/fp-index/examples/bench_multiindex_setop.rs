@@ -5,8 +5,8 @@
 //!
 //! The packed-key path hashes identity-coded u64s instead of building a
 //! HashMap<Vec<IndexLabel>> from to_list() (per-row Vec + Utf8 clone).
-//! `FP_NO_MISETOP=1` forces the to_list baseline; the printed `chk` (FNV digest
-//! of the result tuples) must match between the two runs.
+//! The printed `chk` (FNV digest of the result tuples) should stay stable across
+//! set-op implementation changes.
 
 use std::{hint::black_box, time::Instant};
 

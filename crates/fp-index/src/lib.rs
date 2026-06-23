@@ -15383,6 +15383,9 @@ pub struct MultiIndex {
     names: Vec<Option<String>>,
 }
 
+type Utf8LevelPair<'a> = (&'a [IndexLabel], &'a [IndexLabel]);
+type Utf8LevelPairs<'a> = (Utf8LevelPair<'a>, Utf8LevelPair<'a>);
+
 fn multi_index_codes_memory_usage(nlevels: usize, len: usize) -> usize {
     nlevels
         .saturating_mul(len)
@@ -16833,6 +16836,52 @@ impl MultiIndex {
         Some((src, tgt))
     }
 
+    fn two_utf8_level_slices<'a>(&'a self, target: &'a Self) -> Option<Utf8LevelPairs<'a>> {
+        if self.nlevels() != 2 || target.nlevels() != 2 {
+            return None;
+        }
+        let self_l0 = self.levels[0].as_slice();
+        let self_l1 = self.levels[1].as_slice();
+        let target_l0 = target.levels[0].as_slice();
+        let target_l1 = target.levels[1].as_slice();
+        if [self_l0, self_l1, target_l0, target_l1]
+            .into_iter()
+            .all(|level| {
+                level
+                    .iter()
+                    .all(|label| matches!(label, IndexLabel::Utf8(_)))
+            })
+        {
+            Some(((self_l0, self_l1), (target_l0, target_l1)))
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn utf8_pair_at<'a>(levels: Utf8LevelPair<'a>, row: usize) -> (&'a str, &'a str) {
+        let IndexLabel::Utf8(left) = &levels.0[row] else {
+            unreachable!("two_utf8_level_slices pre-validates all labels")
+        };
+        let IndexLabel::Utf8(right) = &levels.1[row] else {
+            unreachable!("two_utf8_level_slices pre-validates all labels")
+        };
+        (left.as_str(), right.as_str())
+    }
+
+    fn two_utf8_result_from_pairs(pairs: Vec<(&str, &str)>, names: Vec<Option<String>>) -> Self {
+        let mut left = Vec::with_capacity(pairs.len());
+        let mut right = Vec::with_capacity(pairs.len());
+        for (l, r) in pairs {
+            left.push(IndexLabel::Utf8(l.to_owned()));
+            right.push(IndexLabel::Utf8(r.to_owned()));
+        }
+        Self {
+            levels: vec![left, right],
+            names,
+        }
+    }
+
     pub fn get_indexer_non_unique(&self, target: &Self) -> (Vec<isize>, Vec<usize>) {
         if self.nlevels() != target.nlevels() {
             return (vec![-1; target.len()], (0..target.len()).collect());
@@ -17323,6 +17372,27 @@ impl MultiIndex {
     /// Tuple intersection preserving left order and de-duplicating results.
     pub fn intersection(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_same_nlevels(other)?;
+        if let Some((self_levels, other_levels)) = self.two_utf8_level_slices(other) {
+            let mut other_set = FxHashSet::<(&str, &str)>::default();
+            for row in 0..other.len() {
+                other_set.insert(Self::utf8_pair_at(other_levels, row));
+            }
+            let mut seen = FxHashSet::<(&str, &str)>::default();
+            let mut pairs = Vec::new();
+            for row in 0..self.len() {
+                let key = Self::utf8_pair_at(self_levels, row);
+                if other_set.contains(&key) && seen.insert(key) {
+                    pairs.push(key);
+                    if seen.len() == other_set.len() {
+                        break;
+                    }
+                }
+            }
+            return Ok(Self::two_utf8_result_from_pairs(
+                pairs,
+                self.shared_names(other),
+            ));
+        }
         // Packed-key fast path (br-frankenpandas-misetop): identity-coded u64 per
         // row instead of to_list() (per-row Vec<IndexLabel> + Utf8 clone) and a
         // SipHash HashMap<Vec<IndexLabel>>. Keep self rows whose key is in other,
@@ -17355,6 +17425,22 @@ impl MultiIndex {
     /// Tuple union preserving first-seen order from `self` then `other`.
     pub fn union(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_same_nlevels(other)?;
+        if let Some((self_levels, other_levels)) = self.two_utf8_level_slices(other) {
+            let mut seen = FxHashSet::<(&str, &str)>::default();
+            let mut pairs = Vec::new();
+            for (levels, len) in [(self_levels, self.len()), (other_levels, other.len())] {
+                for row in 0..len {
+                    let key = Self::utf8_pair_at(levels, row);
+                    if seen.insert(key) {
+                        pairs.push(key);
+                    }
+                }
+            }
+            return Ok(Self::two_utf8_result_from_pairs(
+                pairs,
+                self.shared_names(other),
+            ));
+        }
         let mut seen = FxHashSet::<Vec<IndexLabel>>::with_capacity_and_hasher(
             combined_output_capacity(self.len(), other.len()),
             Default::default(),
@@ -17376,6 +17462,24 @@ impl MultiIndex {
     /// Tuple difference preserving left order and de-duplicating results.
     pub fn difference(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_same_nlevels(other)?;
+        if let Some((self_levels, other_levels)) = self.two_utf8_level_slices(other) {
+            let mut other_set = FxHashSet::<(&str, &str)>::default();
+            for row in 0..other.len() {
+                other_set.insert(Self::utf8_pair_at(other_levels, row));
+            }
+            let mut seen = FxHashSet::<(&str, &str)>::default();
+            let mut pairs = Vec::new();
+            for row in 0..self.len() {
+                let key = Self::utf8_pair_at(self_levels, row);
+                if !other_set.contains(&key) && seen.insert(key) {
+                    pairs.push(key);
+                }
+            }
+            return Ok(Self::two_utf8_result_from_pairs(
+                pairs,
+                self.shared_names(other),
+            ));
+        }
         // Packed-key fast path (br-frankenpandas-misetop): keep self rows whose
         // key is NOT in other, deduped first-seen. See intersection.
         if let Some((self_keys, other_keys)) = self.factorize_packed_keys(other) {
@@ -17405,6 +17509,34 @@ impl MultiIndex {
     /// Tuple symmetric difference preserving first-seen order.
     pub fn symmetric_difference(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_same_nlevels(other)?;
+        if let Some((self_levels, other_levels)) = self.two_utf8_level_slices(other) {
+            let mut self_set = FxHashSet::<(&str, &str)>::default();
+            for row in 0..self.len() {
+                self_set.insert(Self::utf8_pair_at(self_levels, row));
+            }
+            let mut other_set = FxHashSet::<(&str, &str)>::default();
+            for row in 0..other.len() {
+                other_set.insert(Self::utf8_pair_at(other_levels, row));
+            }
+            let mut seen = FxHashSet::<(&str, &str)>::default();
+            let mut pairs = Vec::new();
+            for row in 0..self.len() {
+                let key = Self::utf8_pair_at(self_levels, row);
+                if !other_set.contains(&key) && seen.insert(key) {
+                    pairs.push(key);
+                }
+            }
+            for row in 0..other.len() {
+                let key = Self::utf8_pair_at(other_levels, row);
+                if !self_set.contains(&key) && seen.insert(key) {
+                    pairs.push(key);
+                }
+            }
+            return Ok(Self::two_utf8_result_from_pairs(
+                pairs,
+                self.shared_names(other),
+            ));
+        }
         let self_keys: FxHashSet<Vec<IndexLabel>> = self.to_list().into_iter().collect();
         let other_keys: FxHashSet<Vec<IndexLabel>> = other.to_list().into_iter().collect();
         let mut seen = FxHashSet::<Vec<IndexLabel>>::with_capacity_and_hasher(
@@ -24066,6 +24198,73 @@ mod tests {
                 .collect();
             assert_eq!(a.difference(&b).unwrap().to_list(), ref_diff, "diff {sa:?}");
         }
+    }
+
+    #[test]
+    fn multi_index_two_utf8_setops_preserve_order_and_names_codb188() {
+        let left = MultiIndex::from_arrays(vec![
+            vec![
+                "a".into(),
+                "b".into(),
+                "a".into(),
+                "c".into(),
+                "d".into(),
+                "b".into(),
+            ],
+            vec![
+                "x".into(),
+                "y".into(),
+                "x".into(),
+                "z".into(),
+                "w".into(),
+                "y".into(),
+            ],
+        ])
+        .unwrap()
+        .set_names(vec![Some("L0".into()), Some("L1".into())]);
+        let right = MultiIndex::from_arrays(vec![
+            vec!["b".into(), "c".into(), "e".into(), "b".into()],
+            vec!["y".into(), "z".into(), "q".into(), "y".into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("L0".into()), Some("other".into())]);
+
+        assert_eq!(
+            left.intersection(&right).unwrap().to_list(),
+            vec![
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Utf8("y".into())],
+                vec![IndexLabel::Utf8("c".into()), IndexLabel::Utf8("z".into())],
+            ]
+        );
+        assert_eq!(
+            left.difference(&right).unwrap().to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("x".into())],
+                vec![IndexLabel::Utf8("d".into()), IndexLabel::Utf8("w".into())],
+            ]
+        );
+        assert_eq!(
+            left.union(&right).unwrap().to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("x".into())],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Utf8("y".into())],
+                vec![IndexLabel::Utf8("c".into()), IndexLabel::Utf8("z".into())],
+                vec![IndexLabel::Utf8("d".into()), IndexLabel::Utf8("w".into())],
+                vec![IndexLabel::Utf8("e".into()), IndexLabel::Utf8("q".into())],
+            ]
+        );
+        assert_eq!(
+            left.symmetric_difference(&right).unwrap().to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("x".into())],
+                vec![IndexLabel::Utf8("d".into()), IndexLabel::Utf8("w".into())],
+                vec![IndexLabel::Utf8("e".into()), IndexLabel::Utf8("q".into())],
+            ]
+        );
+        assert_eq!(
+            left.intersection(&right).unwrap().names(),
+            vec![Some("L0".to_owned()), None]
+        );
     }
 
     #[test]
