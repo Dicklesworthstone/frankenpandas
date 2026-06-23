@@ -12697,6 +12697,43 @@ impl CategoricalIndex {
         uniques
     }
 
+    fn unique_by_category_codes(&self, category_codes: &[usize]) -> Self {
+        if category_codes.len() != self.labels.len() {
+            return Self::from_parts(
+                self.unique_labels_by_category_rank(),
+                self.categories.clone(),
+                self.ordered,
+                self.name.clone(),
+            );
+        }
+        let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
+        let mut unique_labels =
+            Vec::<String>::with_capacity(self.labels.len().min(self.categories.len()));
+        let mut unique_category_codes =
+            Vec::<usize>::with_capacity(self.labels.len().min(self.categories.len()));
+        for &rank in category_codes {
+            let Some(category) = self.categories.get(rank) else {
+                return Self::from_parts(
+                    self.unique_labels_by_category_rank(),
+                    self.categories.clone(),
+                    self.ordered,
+                    self.name.clone(),
+                );
+            };
+            if mark_category_rank(&mut seen_ranks, rank) {
+                unique_labels.push(category.clone());
+                unique_category_codes.push(rank);
+            }
+        }
+        Self {
+            labels: unique_labels,
+            categories: self.categories.clone(),
+            ordered: self.ordered,
+            name: self.name.clone(),
+            category_codes: Some(unique_category_codes),
+        }
+    }
+
     fn value_counts_by_hash(&self) -> Vec<(String, usize)> {
         let mut order = Vec::<&str>::new();
         let mut counts = FxHashMap::<&str, usize>::default();
@@ -13984,6 +14021,11 @@ impl CategoricalIndex {
     /// ordered flag rolls through. The result keeps the index name.
     #[must_use]
     pub fn unique(&self) -> Self {
+        if let Some(codes) = &self.category_codes
+            && self.category_rank_unique_scan_is_bounded()
+        {
+            return self.unique_by_category_codes(codes);
+        }
         let labels = if self.category_rank_unique_scan_is_bounded() {
             self.unique_labels_by_category_rank()
         } else {
@@ -29381,6 +29423,18 @@ mod tests {
         .set_name("priority");
         assert!(repeated.category_rank_unique_scan_is_bounded());
         assert_unique_matches_oracle(&repeated);
+        assert_eq!(
+            repeated.unique().category_codes.as_deref(),
+            Some([0usize, 2, 1].as_slice())
+        );
+
+        let mut without_codes = repeated.clone();
+        without_codes.category_codes = None;
+        assert_unique_matches_oracle(&without_codes);
+
+        let mut malformed_codes = repeated.clone();
+        malformed_codes.category_codes = Some(vec![usize::MAX; repeated.len()]);
+        assert_unique_matches_oracle(&malformed_codes);
 
         let invalid = super::CategoricalIndex {
             labels: vec![
