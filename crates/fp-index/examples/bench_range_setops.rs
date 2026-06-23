@@ -19,6 +19,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_median 64
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_diff
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_join
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_isin
 
 use std::{hint::black_box, time::Instant};
 
@@ -184,6 +185,41 @@ fn non_unique_target_values(unique_len: usize) -> Vec<i64> {
             }
         })
         .collect()
+}
+
+fn range_isin_needles(len: usize, needle_count: usize) -> Vec<i64> {
+    let len = len.max(1);
+    let len_i64 = i64::try_from(len).expect("length fits i64");
+    (0..needle_count)
+        .map(|offset| {
+            let rank = (offset / 2).wrapping_mul(15_485_863) % len;
+            let hit = i64::try_from(rank).expect("needle label fits i64");
+            match offset % 4 {
+                0 | 1 => hit,
+                2 => len_i64 + hit + 1,
+                _ => -hit - 1,
+            }
+        })
+        .collect()
+}
+
+fn bool_mask_digest(mask: &[bool]) -> usize {
+    let mut digest = mask.len();
+    for (position, bit) in [
+        mask.first(),
+        mask.get(mask.len() / 3),
+        mask.get(mask.len() / 2),
+        mask.get(mask.len().saturating_sub(1)),
+    ]
+    .into_iter()
+    .flatten()
+    .enumerate()
+    {
+        digest = digest
+            .wrapping_mul(131)
+            .wrapping_add(usize::from(*bit) << position);
+    }
+    digest
 }
 
 fn indexer_digest(indexer: &[isize], missing: &[usize]) -> usize {
@@ -481,6 +517,23 @@ fn main() {
         });
         let sink = inner_sink ^ outer_sink;
         println!("range_join n={n} inner_ns={inner_ns} outer_ns={outer_ns} sink={sink}");
+        return;
+    }
+    if scenario == "range_isin" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let range = RangeIndex::new(0, n_i64, 1).expect("valid isin range");
+        let small_needles = range_isin_needles(n, 1024);
+        let large_needles = range_isin_needles(n, n / 2);
+        let (small_ns, small_sink) =
+            best_ns(iters, || bool_mask_digest(&range.isin(&small_needles)));
+        let (large_ns, large_sink) =
+            best_ns(iters, || bool_mask_digest(&range.isin(&large_needles)));
+        let sink = small_sink ^ large_sink;
+        println!(
+            "range_isin n={n} small_needles={} large_needles={} small_ns={small_ns} large_ns={large_ns} sink={sink}",
+            small_needles.len(),
+            large_needles.len()
+        );
         return;
     }
     if scenario == "index_append_repeat" {
