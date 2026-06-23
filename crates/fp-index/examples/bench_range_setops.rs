@@ -15,6 +15,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_list_aliases
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 index_from_range
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_to_flat_index
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 100 range_reindex
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_take_repeat
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_splice_outputs
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_median 64
@@ -369,6 +370,17 @@ fn range_to_flat_lookup_digest(index: &RangeIndex, target: i64) -> usize {
             .get_loc(&IndexLabel::Int64(black_box(target)))
             .unwrap_or(usize::MAX)
             .rotate_left(1)
+}
+
+fn range_reindex_digest(source: &RangeIndex, target: &RangeIndex) -> usize {
+    let (reindexed, indexer) = black_box(source).reindex(black_box(target));
+    reindexed.len() ^ indexer_digest(&indexer, &[])
+}
+
+fn range_reindex_legacy_target_values_digest(source: &RangeIndex, target: &RangeIndex) -> usize {
+    let target_values = black_box(target).values();
+    let indexer = black_box(source).get_indexer(black_box(&target_values));
+    target.len() ^ indexer_digest(&indexer, &[])
 }
 
 fn range_median_digest(index: &RangeIndex, calls: usize) -> usize {
@@ -774,6 +786,49 @@ fn main() {
         let sink = unit_sink ^ strided_sink ^ descending_sink;
         println!(
             "range_to_flat_index n={n} unit_ns={unit_ns} strided_ns={strided_ns} descending_ns={descending_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "range_reindex" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let span = n_i64.checked_mul(3).expect("benchmark range span fits i64");
+        let half_offset = (n_i64 / 2)
+            .checked_mul(3)
+            .expect("benchmark half offset fits i64");
+        let target_stop = half_offset
+            .checked_add(span)
+            .expect("benchmark target stop fits i64");
+        let source = RangeIndex::new(0, span, 3)
+            .expect("valid reindex source")
+            .set_name("row");
+        let target = RangeIndex::new(half_offset, target_stop, 3)
+            .expect("valid reindex target")
+            .set_name("target");
+        let descending_start = span
+            .checked_sub(half_offset)
+            .expect("benchmark descending start fits i64");
+        let descending_stop = descending_start
+            .checked_sub(span)
+            .expect("benchmark descending stop fits i64");
+        let descending_source = RangeIndex::new(span, 0, -3)
+            .expect("valid descending reindex source")
+            .set_name("row");
+        let descending_target = RangeIndex::new(descending_start, descending_stop, -3)
+            .expect("valid descending reindex target")
+            .set_name("target");
+        let (current_ns, current_sink) = best_ns(iters, || range_reindex_digest(&source, &target));
+        let (legacy_target_values_ns, legacy_sink) = best_ns(iters, || {
+            range_reindex_legacy_target_values_digest(&source, &target)
+        });
+        let (descending_ns, descending_sink) = best_ns(iters, || {
+            range_reindex_digest(&descending_source, &descending_target)
+        });
+        let (descending_legacy_target_values_ns, descending_legacy_sink) = best_ns(iters, || {
+            range_reindex_legacy_target_values_digest(&descending_source, &descending_target)
+        });
+        let sink = current_sink ^ legacy_sink ^ descending_sink ^ descending_legacy_sink;
+        println!(
+            "range_reindex n={n} current_ns={current_ns} legacy_target_values_ns={legacy_target_values_ns} descending_ns={descending_ns} descending_legacy_target_values_ns={descending_legacy_target_values_ns} sink={sink}"
         );
         return;
     }
