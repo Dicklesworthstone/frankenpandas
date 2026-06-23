@@ -15375,16 +15375,33 @@ pub fn bdate_range(
 ///
 /// This type exists alongside `Index` and can be converted to/from it.
 /// Full DataFrame integration is a future step.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiIndex {
     /// One `Vec<IndexLabel>` per level, all the same length (= nrows).
     levels: Vec<Vec<IndexLabel>>,
     /// Optional name for each level.
     names: Vec<Option<String>>,
+    /// Per-level first-seen identity codes, used by duplicate/unique kernels.
+    #[serde(skip)]
+    identity_codes: Option<Vec<Vec<u32>>>,
 }
 
 type Utf8LevelPair<'a> = (&'a [IndexLabel], &'a [IndexLabel]);
 type Utf8LevelPairs<'a> = (Utf8LevelPair<'a>, Utf8LevelPair<'a>);
+
+struct CompactIdentityCodeLayout<'a> {
+    level0: &'a [u32],
+    level1: &'a [u32],
+    level1_cardinality: usize,
+    slot_count: usize,
+}
+
+impl CompactIdentityCodeLayout<'_> {
+    #[inline]
+    fn slot(&self, row: usize) -> usize {
+        self.level0[row] as usize * self.level1_cardinality + self.level1[row] as usize
+    }
+}
 
 fn multi_index_codes_memory_usage(nlevels: usize, len: usize) -> usize {
     nlevels
@@ -15392,7 +15409,99 @@ fn multi_index_codes_memory_usage(nlevels: usize, len: usize) -> usize {
         .saturating_mul(std::mem::size_of::<isize>())
 }
 
+fn build_multi_index_identity_codes(levels: &[Vec<IndexLabel>]) -> Option<Vec<Vec<u32>>> {
+    if levels.len() != 2 {
+        return None;
+    }
+    let len = levels.first().map_or(0, Vec::len);
+    if len == 0 || levels[1].len() != len {
+        return None;
+    }
+    let slot_cap = len.saturating_mul(8).max(1024);
+
+    let mut level0_positions =
+        FxHashMap::<&IndexLabel, u32>::with_capacity_and_hasher(len, Default::default());
+    let mut level0_codes = Vec::with_capacity(len);
+    for label in &levels[0] {
+        if let Some(&code) = level0_positions.get(label) {
+            level0_codes.push(code);
+        } else {
+            let code = u32::try_from(level0_positions.len()).ok()?;
+            level0_positions.insert(label, code);
+            level0_codes.push(code);
+        }
+    }
+    let level0_cardinality = level0_positions.len();
+    if level0_cardinality > slot_cap {
+        return None;
+    }
+
+    let mut level1_positions =
+        FxHashMap::<&IndexLabel, u32>::with_capacity_and_hasher(len, Default::default());
+    let mut level1_codes = Vec::with_capacity(len);
+    for label in &levels[1] {
+        if let Some(&code) = level1_positions.get(label) {
+            level1_codes.push(code);
+        } else {
+            let next_cardinality = level1_positions.len().checked_add(1)?;
+            let slot_count = level0_cardinality.checked_mul(next_cardinality)?;
+            if slot_count > slot_cap {
+                return None;
+            }
+            let code = u32::try_from(level1_positions.len()).ok()?;
+            level1_positions.insert(label, code);
+            level1_codes.push(code);
+        }
+    }
+    Some(vec![level0_codes, level1_codes])
+}
+
+impl PartialEq for MultiIndex {
+    fn eq(&self, other: &Self) -> bool {
+        self.levels == other.levels && self.names == other.names
+    }
+}
+
 impl MultiIndex {
+    fn from_levels_and_names(levels: Vec<Vec<IndexLabel>>, names: Vec<Option<String>>) -> Self {
+        let identity_codes = build_multi_index_identity_codes(&levels);
+        Self {
+            levels,
+            names,
+            identity_codes,
+        }
+    }
+
+    fn compact_two_level_identity_layout(&self) -> Option<CompactIdentityCodeLayout<'_>> {
+        let codes = self.identity_codes.as_ref()?;
+        if codes.len() != 2 || codes[0].len() != self.len() || codes[1].len() != self.len() {
+            return None;
+        }
+        let level0_cardinality = codes[0]
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |code| code as usize + 1);
+        let level1_cardinality = codes[1]
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |code| code as usize + 1);
+        let slot_count = level0_cardinality.checked_mul(level1_cardinality)?;
+        if slot_count == 0 {
+            return None;
+        }
+        if slot_count > self.len().saturating_mul(8).max(1024) {
+            return None;
+        }
+        Some(CompactIdentityCodeLayout {
+            level0: &codes[0],
+            level1: &codes[1],
+            level1_cardinality,
+            slot_count,
+        })
+    }
+
     /// Number of levels in this MultiIndex.
     #[must_use]
     pub fn nlevels(&self) -> usize {
@@ -15672,10 +15781,7 @@ impl MultiIndex {
                 context: "MultiIndex.rename names length".to_owned(),
             });
         }
-        Ok(Self {
-            levels: self.levels.clone(),
-            names,
-        })
+        Ok(Self::from_levels_and_names(self.levels.clone(), names))
     }
 
     /// Rename one MultiIndex level, matching `pd.MultiIndex.rename(name, level=...)`.
@@ -15688,10 +15794,7 @@ impl MultiIndex {
         }
         let mut names = self.names.clone();
         names[level] = name;
-        Ok(Self {
-            levels: self.levels.clone(),
-            names,
-        })
+        Ok(Self::from_levels_and_names(self.levels.clone(), names))
     }
 
     fn shared_names(&self, other: &Self) -> Vec<Option<String>> {
@@ -15732,10 +15835,7 @@ impl MultiIndex {
                     .collect()
             })
             .collect();
-        Self {
-            levels,
-            names: self.names.clone(),
-        }
+        Self::from_levels_and_names(levels, self.names.clone())
     }
 
     fn missing_label_for_level(&self, level_idx: usize) -> IndexLabel {
@@ -16035,10 +16135,7 @@ impl MultiIndex {
                     .collect()
             })
             .collect();
-        Self {
-            levels,
-            names: self.names.clone(),
-        }
+        Self::from_levels_and_names(levels, self.names.clone())
     }
 
     /// Replace missing labels with one replacement per level.
@@ -16067,10 +16164,7 @@ impl MultiIndex {
                     .collect()
             })
             .collect();
-        Ok(Self {
-            levels,
-            names: self.names.clone(),
-        })
+        Ok(Self::from_levels_and_names(levels, self.names.clone()))
     }
 
     /// Replace tuples where `cond` is true with `value`.
@@ -16178,10 +16272,7 @@ impl MultiIndex {
             }
             levels.push(level);
         }
-        Ok(Self {
-            levels,
-            names: self.names.clone(),
-        })
+        Ok(Self::from_levels_and_names(levels, self.names.clone()))
     }
 
     /// Rebuild row labels using replacement codes and current level catalogs.
@@ -16226,10 +16317,7 @@ impl MultiIndex {
             }
             levels.push(level);
         }
-        Ok(Self {
-            levels,
-            names: self.names.clone(),
-        })
+        Ok(Self::from_levels_and_names(levels, self.names.clone()))
     }
 
     /// Drop unused level labels. This representation stores row labels directly,
@@ -16350,10 +16438,7 @@ impl MultiIndex {
             levels.push(selected);
         }
 
-        Ok(Self {
-            levels,
-            names: self.names.clone(),
-        })
+        Ok(Self::from_levels_and_names(levels, self.names.clone()))
     }
 
     /// Delete the tuple at a positional location.
@@ -16402,10 +16487,7 @@ impl MultiIndex {
         for (level_idx, label) in item.into_iter().enumerate() {
             levels[level_idx].insert(loc, label);
         }
-        Ok(Self {
-            levels,
-            names: self.names.clone(),
-        })
+        Ok(Self::from_levels_and_names(levels, self.names.clone()))
     }
 
     /// Drop every occurrence of the provided tuples.
@@ -16836,23 +16918,28 @@ impl MultiIndex {
         Some((src, tgt))
     }
 
-    fn two_utf8_level_slices<'a>(&'a self, target: &'a Self) -> Option<Utf8LevelPairs<'a>> {
-        if self.nlevels() != 2 || target.nlevels() != 2 {
+    fn two_utf8_levels(&self) -> Option<Utf8LevelPair<'_>> {
+        if self.nlevels() != 2 {
             return None;
         }
         let self_l0 = self.levels[0].as_slice();
         let self_l1 = self.levels[1].as_slice();
-        let target_l0 = target.levels[0].as_slice();
-        let target_l1 = target.levels[1].as_slice();
-        if [self_l0, self_l1, target_l0, target_l1]
-            .into_iter()
-            .all(|level| {
-                level
-                    .iter()
-                    .all(|label| matches!(label, IndexLabel::Utf8(_)))
-            })
+        if [self_l0, self_l1].into_iter().all(|level| {
+            level
+                .iter()
+                .all(|label| matches!(label, IndexLabel::Utf8(_)))
+        }) {
+            Some((self_l0, self_l1))
+        } else {
+            None
+        }
+    }
+
+    fn two_utf8_level_slices<'a>(&'a self, target: &'a Self) -> Option<Utf8LevelPairs<'a>> {
+        if let (Some(self_levels), Some(target_levels)) =
+            (self.two_utf8_levels(), target.two_utf8_levels())
         {
-            Some(((self_l0, self_l1), (target_l0, target_l1)))
+            Some((self_levels, target_levels))
         } else {
             None
         }
@@ -16876,10 +16963,7 @@ impl MultiIndex {
             left.push(IndexLabel::Utf8(l.to_owned()));
             right.push(IndexLabel::Utf8(r.to_owned()));
         }
-        Self {
-            levels: vec![left, right],
-            names,
-        }
+        Self::from_levels_and_names(vec![left, right], names)
     }
 
     pub fn get_indexer_non_unique(&self, target: &Self) -> (Vec<isize>, Vec<usize>) {
@@ -17023,6 +17107,44 @@ impl MultiIndex {
         if len == 0 {
             return out;
         }
+        if let Some(layout) = self.compact_two_level_identity_layout() {
+            match keep {
+                DuplicateKeep::First => {
+                    let mut seen = vec![0_u8; layout.slot_count];
+                    for (row, slot) in out.iter_mut().enumerate() {
+                        let key = layout.slot(row);
+                        if seen[key] == 0 {
+                            seen[key] = 1;
+                        } else {
+                            *slot = true;
+                        }
+                    }
+                }
+                DuplicateKeep::Last => {
+                    let mut seen = vec![0_u8; layout.slot_count];
+                    for row in (0..len).rev() {
+                        let key = layout.slot(row);
+                        if seen[key] == 0 {
+                            seen[key] = 1;
+                        } else {
+                            out[row] = true;
+                        }
+                    }
+                }
+                DuplicateKeep::None => {
+                    let mut counts = vec![0_usize; layout.slot_count];
+                    for row in 0..len {
+                        counts[layout.slot(row)] += 1;
+                    }
+                    for (row, slot) in out.iter_mut().enumerate() {
+                        if counts[layout.slot(row)] > 1 {
+                            *slot = true;
+                        }
+                    }
+                }
+            }
+            return out;
+        }
         // Materialize each row's composite key exactly once per pass. The prior
         // version built BOTH a counts and a first_seen map for every keep mode
         // (incl. a key.clone()) and then rebuilt the key again in the keep-mode
@@ -17135,6 +17257,20 @@ impl MultiIndex {
     /// Drop duplicated tuples with explicit keep behavior.
     #[must_use]
     pub fn drop_duplicates_keep(&self, keep: DuplicateKeep) -> Self {
+        if keep == DuplicateKeep::First
+            && let Some(layout) = self.compact_two_level_identity_layout()
+        {
+            let mut seen = vec![0_u8; layout.slot_count];
+            let mut positions = Vec::with_capacity(layout.slot_count.min(self.len()));
+            for row in 0..self.len() {
+                let key = layout.slot(row);
+                if seen[key] == 0 {
+                    seen[key] = 1;
+                    positions.push(row);
+                }
+            }
+            return self.take_existing_positions(&positions);
+        }
         let duplicated = self.duplicated(keep);
         let positions: Vec<usize> = duplicated
             .iter()
@@ -17156,6 +17292,18 @@ impl MultiIndex {
         let len = self.len();
         if len == 0 {
             return 0;
+        }
+        if let Some(layout) = self.compact_two_level_identity_layout() {
+            let mut seen = vec![0_u8; layout.slot_count];
+            let mut count = 0usize;
+            for row in 0..len {
+                let key = layout.slot(row);
+                if seen[key] == 0 {
+                    seen[key] = 1;
+                    count += 1;
+                }
+            }
+            return count;
         }
         if let Some(keys) = self.identity_packed_keys() {
             let mut seen: FxHashSet<u64> =
@@ -17215,10 +17363,7 @@ impl MultiIndex {
                 levels[level_idx].push(label);
             }
         }
-        let unique_index = Self {
-            levels,
-            names: self.names.clone(),
-        };
+        let unique_index = Self::from_levels_and_names(levels, self.names.clone());
         (codes, unique_index)
     }
 
@@ -17315,10 +17460,10 @@ impl MultiIndex {
             level.extend(other.levels[level_idx].iter().cloned());
             levels.push(level);
         }
-        Ok(Self {
+        Ok(Self::from_levels_and_names(
             levels,
-            names: self.shared_names(other),
-        })
+            self.shared_names(other),
+        ))
     }
 
     /// Repeat each tuple `repeats` times, matching `pd.MultiIndex.repeat`.
@@ -17337,10 +17482,7 @@ impl MultiIndex {
             }
             levels.push(repeated);
         }
-        Self {
-            levels,
-            names: self.names.clone(),
-        }
+        Self::from_levels_and_names(levels, self.names.clone())
     }
 
     /// Drop tuples containing any missing level label.
@@ -17634,10 +17776,7 @@ impl MultiIndex {
     /// Each inner Vec represents one row's labels across all levels.
     pub fn from_tuples(tuples: Vec<Vec<IndexLabel>>) -> Result<Self, IndexError> {
         if tuples.is_empty() {
-            return Ok(Self {
-                levels: Vec::new(),
-                names: Vec::new(),
-            });
+            return Ok(Self::from_levels_and_names(Vec::new(), Vec::new()));
         }
 
         let nlevels = tuples[0].len();
@@ -17660,10 +17799,7 @@ impl MultiIndex {
             }
         }
 
-        Ok(Self {
-            levels,
-            names: vec![None; nlevels],
-        })
+        Ok(Self::from_levels_and_names(levels, vec![None; nlevels]))
     }
 
     /// Construct a MultiIndex from parallel arrays (one per level).
@@ -17671,10 +17807,7 @@ impl MultiIndex {
     /// Matches `pd.MultiIndex.from_arrays(arrays)`.
     pub fn from_arrays(arrays: Vec<Vec<IndexLabel>>) -> Result<Self, IndexError> {
         if arrays.is_empty() {
-            return Ok(Self {
-                levels: Vec::new(),
-                names: Vec::new(),
-            });
+            return Ok(Self::from_levels_and_names(Vec::new(), Vec::new()));
         }
 
         let expected_len = arrays[0].len();
@@ -17689,10 +17822,7 @@ impl MultiIndex {
         }
 
         let nlevels = arrays.len();
-        Ok(Self {
-            levels: arrays,
-            names: vec![None; nlevels],
-        })
+        Ok(Self::from_levels_and_names(arrays, vec![None; nlevels]))
     }
 
     /// Construct a MultiIndex from frame-like columns.
@@ -17702,10 +17832,7 @@ impl MultiIndex {
     /// becoming the corresponding level name.
     pub fn from_frame(columns: Vec<(Option<String>, Vec<IndexLabel>)>) -> Result<Self, IndexError> {
         if columns.is_empty() {
-            return Ok(Self {
-                levels: Vec::new(),
-                names: Vec::new(),
-            });
+            return Ok(Self::from_levels_and_names(Vec::new(), Vec::new()));
         }
 
         let expected_len = columns[0].1.len();
@@ -17726,7 +17853,7 @@ impl MultiIndex {
             levels.push(values);
         }
 
-        Ok(Self { levels, names })
+        Ok(Self::from_levels_and_names(levels, names))
     }
 
     /// Construct a MultiIndex from the Cartesian product of iterables.
@@ -17734,20 +17861,17 @@ impl MultiIndex {
     /// Matches `pd.MultiIndex.from_product(iterables)`.
     pub fn from_product(iterables: Vec<Vec<IndexLabel>>) -> Result<Self, IndexError> {
         if iterables.is_empty() {
-            return Ok(Self {
-                levels: Vec::new(),
-                names: Vec::new(),
-            });
+            return Ok(Self::from_levels_and_names(Vec::new(), Vec::new()));
         }
 
         // Compute total size of the Cartesian product.
         let total = checked_cartesian_product_len(iterables.iter().map(Vec::len))?;
         if total == 0 {
             let nlevels = iterables.len();
-            return Ok(Self {
-                levels: (0..nlevels).map(|_| Vec::new()).collect(),
-                names: vec![None; nlevels],
-            });
+            return Ok(Self::from_levels_and_names(
+                (0..nlevels).map(|_| Vec::new()).collect(),
+                vec![None; nlevels],
+            ));
         }
 
         let nlevels = iterables.len();
@@ -17766,10 +17890,7 @@ impl MultiIndex {
             }
         }
 
-        Ok(Self {
-            levels,
-            names: vec![None; nlevels],
-        })
+        Ok(Self::from_levels_and_names(levels, vec![None; nlevels]))
     }
 
     /// Flatten this MultiIndex into a single-level Index by joining
@@ -17822,10 +17943,9 @@ impl MultiIndex {
             }
             Ok(MultiIndexOrIndex::Index(idx))
         } else {
-            Ok(MultiIndexOrIndex::Multi(Self {
-                levels: new_levels,
-                names: new_names,
-            }))
+            Ok(MultiIndexOrIndex::Multi(Self::from_levels_and_names(
+                new_levels, new_names,
+            )))
         }
     }
 
@@ -17843,10 +17963,7 @@ impl MultiIndex {
         let mut new_names = self.names.clone();
         new_levels.swap(i, j);
         new_names.swap(i, j);
-        Ok(Self {
-            levels: new_levels,
-            names: new_names,
-        })
+        Ok(Self::from_levels_and_names(new_levels, new_names))
     }
 
     /// Reorder levels according to the given order.
@@ -17887,10 +18004,7 @@ impl MultiIndex {
         let new_names: Vec<Option<String>> =
             order.iter().map(|&idx| self.names[idx].clone()).collect();
 
-        Ok(Self {
-            levels: new_levels,
-            names: new_names,
-        })
+        Ok(Self::from_levels_and_names(new_levels, new_names))
     }
 }
 
@@ -24265,6 +24379,55 @@ mod tests {
             left.intersection(&right).unwrap().names(),
             vec![Some("L0".to_owned()), None]
         );
+    }
+
+    #[test]
+    fn multi_index_two_level_dedup_counts_identity_codes_codb2tc1q() {
+        let mi = MultiIndex::from_arrays(vec![
+            vec![
+                "a".into(),
+                "b".into(),
+                "a".into(),
+                "c".into(),
+                "b".into(),
+                "d".into(),
+            ],
+            vec![
+                "x".into(),
+                "y".into(),
+                "x".into(),
+                "z".into(),
+                "y".into(),
+                "w".into(),
+            ],
+        ])
+        .unwrap()
+        .set_names(vec![Some("L0".into()), Some("L1".into())]);
+
+        assert_eq!(mi.nunique(), 4);
+        assert_eq!(
+            mi.duplicated(DuplicateKeep::First),
+            vec![false, false, true, false, true, false]
+        );
+        assert_eq!(
+            mi.duplicated(DuplicateKeep::Last),
+            vec![true, true, false, false, false, false]
+        );
+        assert_eq!(
+            mi.duplicated(DuplicateKeep::None),
+            vec![true, true, true, false, true, false]
+        );
+        let unique = mi.unique();
+        assert_eq!(
+            unique.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("x".into())],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Utf8("y".into())],
+                vec![IndexLabel::Utf8("c".into()), IndexLabel::Utf8("z".into())],
+                vec![IndexLabel::Utf8("d".into()), IndexLabel::Utf8("w".into())],
+            ]
+        );
+        assert_eq!(unique.names(), mi.names());
     }
 
     #[test]
