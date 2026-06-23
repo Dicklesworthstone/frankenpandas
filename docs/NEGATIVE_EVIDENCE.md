@@ -3439,3 +3439,16 @@ is supplied, and target labels are nondecreasing, stream the source cursor once 
 position per probe; unsorted targets, masked calls, descending ranges, and mixed-label targets keep the existing
 fallback paths. After: 2,624,860 ns = 21.65x FP-side and 7.81x faster than pandas. Ordering, duplicate-target,
 before-first, and after-last semantics match the existing `range_index_asof_locs_uses_direct_values_vuftp` oracle.
+
+### 2026-06-23 BlackThrush — RangeIndex.astype direct-path proof: 75.67x int64 / 5.15x string vs pandas @1M
+Closed br-frankenpandas-up4dq as proof/evidence for the existing RangeIndex direct cast path. Added `range_astype`
+to `crates/fp-index/examples/bench_range_setops.rs` to cover `RangeIndex(0, 3n, 3).astype("int64")`, ascending
+`astype("string")`, and descending `RangeIndex(3n, 0, -3).astype("string")`. Command:
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b cargo run -p fp-index --example
+bench_range_setops --release -- 1000000 50 range_astype`. Results: fp int64 170 ns vs pandas 12,864 ns = 75.67x;
+fp string 29,408,062 ns vs pandas 151,439,079 ns = 5.15x; fp descending string 29,404,614 ns vs pandas
+151,074,139 ns = 5.14x. No production code changed: `RangeIndex::astype("int64")` already returns the typed
+affine Int64 flat index, string/object casts already iterate `value_at(position)` directly, and the existing
+`range_index_astype_uses_direct_values_up4dq` unit test covers name propagation, descending values, typed Int64
+backing, and unsupported dtype errors. Kept the benchmark and evidence because all measured ratios are wins, not
+~0-gain.

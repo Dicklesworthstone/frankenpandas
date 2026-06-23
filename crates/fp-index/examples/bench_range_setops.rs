@@ -18,6 +18,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_to_flat_index
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 100 range_reindex
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_asof_locs
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_astype
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_take_repeat
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_splice_outputs
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_median 64
@@ -322,6 +323,16 @@ fn label_vec_digest(values: &[IndexLabel]) -> usize {
         .flatten()
     {
         digest = index_label_digest(digest, label);
+    }
+    digest
+}
+
+fn index_shape_digest(index: &Index) -> usize {
+    let mut digest = index.len();
+    if let Some(name) = index.name() {
+        for byte in name.bytes() {
+            digest = digest.wrapping_mul(131).wrapping_add(usize::from(byte));
+        }
     }
     digest
 }
@@ -892,6 +903,35 @@ fn main() {
         let (asof_locs_ns, sink) = best_ns(iters, || range_asof_locs_digest(&source, &where_index));
         println!(
             "range_asof_locs n={n} where_len={where_len} asof_locs_ns={asof_locs_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "range_astype" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let stop = n_i64.checked_mul(3).expect("benchmark range stop fits i64");
+        let ascending = RangeIndex::new(0, stop, 3)
+            .expect("valid ascending astype range")
+            .set_name("row");
+        let descending = RangeIndex::new(stop, 0, -3)
+            .expect("valid descending astype range")
+            .set_name("row");
+        let (int64_ns, int64_sink) = best_ns(iters, || {
+            let output = ascending.astype("int64").expect("astype int64");
+            index_shape_digest(&output)
+        });
+        let (string_ns, string_sink) = best_ns(iters, || {
+            let output = ascending.astype("string").expect("astype string");
+            label_vec_digest(output.labels())
+        });
+        let (descending_string_ns, descending_string_sink) = best_ns(iters, || {
+            let output = descending
+                .astype("string")
+                .expect("descending astype string");
+            label_vec_digest(output.labels())
+        });
+        let sink = int64_sink ^ string_sink ^ descending_string_sink;
+        println!(
+            "range_astype n={n} int64_ns={int64_ns} string_ns={string_ns} descending_string_ns={descending_string_ns} sink={sink}"
         );
         return;
     }
