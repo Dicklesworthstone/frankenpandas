@@ -12712,6 +12712,29 @@ impl CategoricalIndex {
         pairs
     }
 
+    fn value_counts_by_category_codes(&self, category_codes: &[usize]) -> Vec<(String, usize)> {
+        if category_codes.len() != self.labels.len() {
+            return self.value_counts_by_category_rank();
+        }
+        let mut counts = vec![0usize; self.categories.len()];
+        let mut order = Vec::<usize>::with_capacity(self.categories.len().min(self.labels.len()));
+        for &rank in category_codes {
+            let Some(count) = counts.get_mut(rank) else {
+                return self.value_counts_by_category_rank();
+            };
+            if *count == 0 {
+                order.push(rank);
+            }
+            *count += 1;
+        }
+        let mut pairs: Vec<(String, usize)> = order
+            .into_iter()
+            .map(|rank| (self.categories[rank].clone(), counts[rank]))
+            .collect();
+        pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        pairs
+    }
+
     fn factorize_by_hash(&self) -> (Vec<isize>, Self) {
         let mut positions = FxHashMap::<&str, isize>::default();
         let mut uniques = Vec::<String>::new();
@@ -13893,6 +13916,9 @@ impl CategoricalIndex {
     /// CategoricalIndex labels are non-null so the total equals `len()`.
     #[must_use]
     pub fn value_counts(&self) -> Vec<(String, usize)> {
+        if let Some(codes) = &self.category_codes {
+            return self.value_counts_by_category_codes(codes);
+        }
         if self.category_rank_unique_scan_is_bounded() {
             return self.value_counts_by_category_rank();
         }
@@ -29292,6 +29318,27 @@ mod tests {
             ]
         );
         assert_value_counts_matches_oracle(&repeated);
+        let same_public_state_without_sidecar = super::CategoricalIndex {
+            labels: repeated.labels().to_vec(),
+            categories: repeated.categories().to_vec(),
+            ordered: repeated.ordered(),
+            name: repeated.name().map(str::to_owned),
+            category_codes: None,
+        };
+        assert_eq!(
+            repeated.value_counts(),
+            same_public_state_without_sidecar.value_counts()
+        );
+        assert_value_counts_matches_oracle(&same_public_state_without_sidecar);
+        let malformed_sidecar = super::CategoricalIndex {
+            labels: repeated.labels().to_vec(),
+            categories: repeated.categories().to_vec(),
+            ordered: repeated.ordered(),
+            name: repeated.name().map(str::to_owned),
+            category_codes: Some(vec![usize::MAX; repeated.len()]),
+        };
+        assert_eq!(repeated.value_counts(), malformed_sidecar.value_counts());
+        assert_value_counts_matches_oracle(&malformed_sidecar);
 
         let tied = super::CategoricalIndex::with_categories(
             vec![
