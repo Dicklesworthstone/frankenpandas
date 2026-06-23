@@ -25,7 +25,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/fuzz/.target
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain

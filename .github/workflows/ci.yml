@@ -21,7 +21,7 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -66,7 +66,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target-lint
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -112,7 +112,7 @@ jobs:
       FP_ALLOW_SYSTEM_PANDAS_FALLBACK: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -167,7 +167,7 @@ jobs:
       FP_ALLOW_SYSTEM_PANDAS_FALLBACK: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -225,7 +225,7 @@ jobs:
       FP_ALLOW_SYSTEM_PANDAS_FALLBACK: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -297,7 +297,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target-audit
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -338,7 +338,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target-deny
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -366,7 +366,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -383,7 +383,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/fuzz/.target
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
