@@ -17,6 +17,7 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_take_repeat
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 20 range_splice_outputs
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 range_median 64
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_diff
 
 use std::{hint::black_box, time::Instant};
 
@@ -239,6 +240,20 @@ fn diff_digest(values: &[Option<IndexLabel>]) -> usize {
     digest
 }
 
+fn i64_option_digest(values: &[Option<i64>]) -> usize {
+    let mut digest = values.len();
+    for value in [values.first(), values.get(values.len() / 2), values.last()]
+        .into_iter()
+        .flatten()
+    {
+        let bits = value.unwrap_or(i64::MIN).to_ne_bytes();
+        digest = bits.iter().fold(digest.rotate_left(1), |acc, byte| {
+            acc.wrapping_mul(131).wrapping_add(usize::from(*byte))
+        });
+    }
+    digest
+}
+
 fn scalar_lookup_digest(index: &Index, probes: &[i64]) -> usize {
     let mut digest = probes.len();
     for &probe in probes {
@@ -424,6 +439,28 @@ fn main() {
         let sink = unit_sink ^ strided_sink ^ descending_sink;
         println!(
             "range_median n={n} calls={calls} unit_ns={unit_ns} strided_ns={strided_ns} descending_ns={descending_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "range_diff" {
+        let n_i64 = i64::try_from(n).expect("n fits i64");
+        let unit = RangeIndex::new(0, n_i64, 1).expect("valid unit range");
+        let strided = RangeIndex::new(
+            0,
+            n_i64.checked_mul(3).expect("benchmark range stop fits i64"),
+            3,
+        )
+        .expect("valid strided range");
+        let descending = RangeIndex::new(n_i64, 0, -1).expect("valid descending range");
+        let periods = 1i64;
+        let (unit_ns, unit_sink) = best_ns(iters, || i64_option_digest(&unit.diff(periods)));
+        let (strided_ns, strided_sink) =
+            best_ns(iters, || i64_option_digest(&strided.diff(periods)));
+        let (descending_ns, descending_sink) =
+            best_ns(iters, || i64_option_digest(&descending.diff(periods)));
+        let sink = unit_sink ^ strided_sink ^ descending_sink;
+        println!(
+            "range_diff n={n} periods={periods} unit_ns={unit_ns} strided_ns={strided_ns} descending_ns={descending_ns} sink={sink}"
         );
         return;
     }

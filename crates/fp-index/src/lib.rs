@@ -10834,9 +10834,29 @@ impl RangeIndex {
     /// Positional first differences for RangeIndex values.
     #[must_use]
     pub fn diff(&self, periods: i64) -> Vec<Option<i64>> {
-        positional_diff(self.len(), periods, |current, previous| {
-            self.value_at(current).checked_sub(self.value_at(previous))
-        })
+        let len = self.len();
+        if len == 0 {
+            return Vec::new();
+        }
+        if periods == 0 {
+            return vec![Some(0); len];
+        }
+        let Ok(offset) = usize::try_from(periods.unsigned_abs()) else {
+            return vec![None; len];
+        };
+        if offset >= len {
+            return vec![None; len];
+        }
+
+        let diff = i128::from(self.step) * i128::from(periods);
+        let diff = i64::try_from(diff).ok();
+        let mut out = vec![None; len];
+        if periods > 0 {
+            out[offset..].fill(diff);
+        } else {
+            out[..len - offset].fill(diff);
+        }
+        out
     }
 
     #[must_use]
@@ -26551,6 +26571,12 @@ mod tests {
         let descending = super::RangeIndex::new(9, 0, -3).unwrap();
         assert_eq!(descending.diff(1), vec![None, Some(-3), Some(-3)]);
         assert_eq!(descending.diff(-1), vec![Some(3), Some(3), None]);
+
+        let wide = super::RangeIndex::new(i64::MIN, i64::MAX, i64::MAX).unwrap();
+        assert_eq!(wide.diff(1), vec![None, Some(i64::MAX), Some(i64::MAX)]);
+        assert_eq!(wide.diff(-1), vec![Some(-i64::MAX), Some(-i64::MAX), None]);
+        assert_eq!(wide.diff(2), vec![None, None, None]);
+        assert_eq!(wide.diff(-2), vec![None, None, None]);
 
         let cat = super::CategoricalIndex::from_values(vec!["a".to_owned(), "b".to_owned()], false);
         let err = cat.diff(1).unwrap_err();
