@@ -12924,6 +12924,70 @@ impl CategoricalIndex {
         result
     }
 
+    fn duplicated_by_category_codes(
+        &self,
+        category_codes: &[usize],
+        keep: DuplicateKeep,
+    ) -> Vec<bool> {
+        if category_codes.len() != self.labels.len() {
+            return self.duplicated_by_category_rank(keep);
+        }
+        let n = category_codes.len();
+        let mut result = vec![false; n];
+        match keep {
+            DuplicateKeep::First | DuplicateKeep::Last => {
+                let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
+                let mut mark = |i: usize| {
+                    let rank = category_codes[i];
+                    let Some(_) = self.categories.get(rank) else {
+                        result = self.duplicated_by_category_rank(keep);
+                        return false;
+                    };
+                    if !mark_category_rank(&mut seen_ranks, rank) {
+                        result[i] = true;
+                    }
+                    true
+                };
+                if matches!(keep, DuplicateKeep::First) {
+                    for i in 0..n {
+                        if !mark(i) {
+                            return result;
+                        }
+                    }
+                } else {
+                    for i in (0..n).rev() {
+                        if !mark(i) {
+                            return result;
+                        }
+                    }
+                }
+            }
+            DuplicateKeep::None => {
+                let words = self.categories.len().div_ceil(64);
+                let mut seen_ranks = vec![0u64; words];
+                let mut duplicate_ranks = vec![0u64; words];
+                for &rank in category_codes {
+                    let Some(_) = self.categories.get(rank) else {
+                        return self.duplicated_by_category_rank(keep);
+                    };
+                    let word = rank >> 6;
+                    let bit = 1u64 << (rank & 63);
+                    if seen_ranks[word] & bit == 0 {
+                        seen_ranks[word] |= bit;
+                    } else {
+                        duplicate_ranks[word] |= bit;
+                    }
+                }
+                for (i, &rank) in category_codes.iter().enumerate() {
+                    let word = rank >> 6;
+                    let bit = 1u64 << (rank & 63);
+                    result[i] = duplicate_ranks[word] & bit != 0;
+                }
+            }
+        }
+        result
+    }
+
     fn category_ranks_are_monotonic(
         &self,
         mut ordered: impl FnMut(Option<usize>, Option<usize>) -> bool,
@@ -13898,6 +13962,12 @@ impl CategoricalIndex {
     /// `pd.CategoricalIndex.duplicated(keep)`.
     #[must_use]
     pub fn duplicated(&self, keep: DuplicateKeep) -> Vec<bool> {
+        if let Some(codes) = &self.category_codes {
+            if self.category_rank_unique_scan_is_bounded() {
+                return self.duplicated_by_category_codes(codes, keep);
+            }
+            return self.duplicated_by_hash(keep);
+        }
         if self.category_rank_unique_scan_is_bounded() {
             return self.duplicated_by_category_rank(keep);
         }
@@ -29147,6 +29217,42 @@ mod tests {
             vec![true, true, true, false, true, true]
         );
         assert_matches_flat(&repeated);
+        let same_public_state_without_sidecar = super::CategoricalIndex {
+            labels: repeated.labels().to_vec(),
+            categories: repeated.categories().to_vec(),
+            ordered: repeated.ordered(),
+            name: repeated.name().map(str::to_owned),
+            category_codes: None,
+        };
+        assert_matches_flat(&same_public_state_without_sidecar);
+        for keep in [
+            super::DuplicateKeep::First,
+            super::DuplicateKeep::Last,
+            super::DuplicateKeep::None,
+        ] {
+            assert_eq!(
+                repeated.duplicated(keep),
+                same_public_state_without_sidecar.duplicated(keep)
+            );
+        }
+        let malformed_sidecar = super::CategoricalIndex {
+            labels: repeated.labels().to_vec(),
+            categories: repeated.categories().to_vec(),
+            ordered: repeated.ordered(),
+            name: repeated.name().map(str::to_owned),
+            category_codes: Some(vec![usize::MAX; repeated.len()]),
+        };
+        assert_matches_flat(&malformed_sidecar);
+        for keep in [
+            super::DuplicateKeep::First,
+            super::DuplicateKeep::Last,
+            super::DuplicateKeep::None,
+        ] {
+            assert_eq!(
+                repeated.duplicated(keep),
+                malformed_sidecar.duplicated(keep)
+            );
+        }
 
         let invalid = super::CategoricalIndex {
             labels: vec![
