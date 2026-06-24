@@ -40,6 +40,10 @@ fn main() {
             "mean" => df.groupby(&["k"]).unwrap().mean(),
             "min" => df.groupby(&["k"]).unwrap().min(),
             "std" => df.groupby(&["k"]).unwrap().std(),
+            "prod" => df.groupby(&["k"]).unwrap().prod(),
+            "first" => df.groupby(&["k"]).unwrap().first(),
+            "last" => df.groupby(&["k"]).unwrap().last(),
+            "median" => df.groupby(&["k"]).unwrap().median(),
             _ => panic!(),
         };
         std::hint::black_box(r.unwrap());

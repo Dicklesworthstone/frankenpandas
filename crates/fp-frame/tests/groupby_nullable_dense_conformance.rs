@@ -109,3 +109,36 @@ fn groupby_nullable_dense_std() {
     assert_eq!(group_keys(&g), vec![0, 1, 2, 3]);
     assert_f64(&col_f64(&g, "v"), &[2.0, f64::NAN, f64::NAN, f64::NAN]);
 }
+
+// group 0 valid [2,4,6], group 1 valid [6], group 2 valid [], group 3 valid [5]
+#[test]
+fn groupby_nullable_dense_prod() {
+    // all-missing group 2 -> empty product 1.0 (pandas min_count=0)
+    let g = fixture().groupby(&["k"]).unwrap().prod().unwrap();
+    assert_eq!(group_keys(&g), vec![0, 1, 2, 3]);
+    assert_f64(&col_f64(&g, "v"), &[48.0, 6.0, 1.0, 5.0]);
+}
+
+#[test]
+fn groupby_nullable_dense_first() {
+    // first NON-missing in ascending row order; group 1 skips its leading NaN
+    let g = fixture().groupby(&["k"]).unwrap().first().unwrap();
+    assert_eq!(group_keys(&g), vec![0, 1, 2, 3]);
+    assert_f64(&col_f64(&g, "v"), &[2.0, 6.0, f64::NAN, 5.0]);
+}
+
+#[test]
+fn groupby_nullable_dense_last() {
+    // last NON-missing in ascending row order
+    let g = fixture().groupby(&["k"]).unwrap().last().unwrap();
+    assert_eq!(group_keys(&g), vec![0, 1, 2, 3]);
+    assert_f64(&col_f64(&g, "v"), &[6.0, 6.0, f64::NAN, 5.0]);
+}
+
+#[test]
+fn groupby_nullable_dense_median() {
+    // median over valid values; all-missing group 2 -> NaN
+    let g = fixture().groupby(&["k"]).unwrap().median().unwrap();
+    assert_eq!(group_keys(&g), vec![0, 1, 2, 3]);
+    assert_f64(&col_f64(&g, "v"), &[4.0, 6.0, f64::NAN, 5.0]);
+}

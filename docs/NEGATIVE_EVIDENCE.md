@@ -3481,3 +3481,31 @@ All four flip LOSS -> WIN. Correctness pinned by new `groupby_nullable_dense_con
 all-missing groups) — all pass. pandas baseline: float64 column with NaN, same splitmix-scrambled
 keys/values, best-of-6. Bench command:
 `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc cargo run -p fp-frame --example bench_gbnull --release -- <op>`.
+
+### 2026-06-24 SlateOtter — Nullable-Float64 dense groupby prod/first/last/median: 0.43–0.90x -> 3.02–3.64x win @1M
+Follow-up to the same-day nullable-f64 dense groupby reduction landing (c372fd4be), which only
+admitted sum/mean/count/min/max/var/std. The dense `dense_aggregate_emit` all-valid f64 arm ALSO
+implements prod/first/last/median, but the nullable gate excluded them, so a Float64 value column
+WITH missing values still fell to the generic `build_groups` path for those four funcs — measured
+0.43–0.50x pandas (prod/first/last) and 0.90x (median). Widened the nullable gate to admit
+prod/first/last/median and added their skipna arms to the `(data, validity)` branch: prod skips
+missing and folds from 1.0 (all-missing -> 1.0, bit-identical to `nanprod`); first/last take the
+first/last VALID value in ascending row order (all-missing -> NaN, matching the generic
+`find(|v| !v.is_missing())` / reverse-find); median uses a new `dense_group_median_f64_skipna`
+(CSR over valid values only + the same `typed_median_f64_slice`, all-missing -> NaN, bit-identical
+to `nanmedian(valid)`). Bench `bench_gbnull` @1M rows / 1000 groups / 20% missing, fp before =
+generic path (lib.rs change unstaged), fp after = dense path:
+
+| op     | before (generic) | after (dense) | pandas   | before->pandas | after->pandas | fp-side |
+|--------|------------------|---------------|----------|----------------|---------------|---------|
+| prod   | 40.47ms          | 5.25ms        | 19.13ms  | 0.47x          | 3.64x         | 7.71x   |
+| first  | 36.18ms          | 5.81ms        | 18.24ms  | 0.50x          | 3.14x         | 6.23x   |
+| last   | 43.41ms          | 6.10ms        | 18.45ms  | 0.43x          | 3.02x         | 7.12x   |
+| median | 43.30ms          | 12.79ms       | 39.01ms  | 0.90x          | 3.05x         | 3.39x   |
+
+All four flip to WINS (median 0.90x -> 3.05x is not ~0-gain). Correctness pinned by extending
+`groupby_nullable_dense_conformance` to 9 tests (added prod/first/last/median with hand-computed
+expected: all-missing prod -> 1.0, first/last skip leading/trailing NaN, median over valid) — all
+9 pass. pandas baseline: float64 column with NaN, same splitmix-scrambled keys/values, best-of-6.
+Bench command:
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc cargo run -p fp-frame --example bench_gbnull --release -- <op>`.

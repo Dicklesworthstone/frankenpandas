@@ -1,5 +1,21 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## 2026-06-24 SlateOtter — nullable-Float64 dense groupby prod/first/last/median (measured, loss→win)
+
+Follow-up to the reductions landing below: the nullable-f64 dense gate excluded prod/first/last/median,
+so those still fell to the generic `build_groups` path. Widened the gate + added skipna arms (prod
+folds from 1.0; first/last = first/last valid in row order; median = new `dense_group_median_f64_skipna`).
+Bit-identical (9-test `groupby_nullable_dense_conformance` green). `bench_gbnull` @1M / 1000 groups / 20% missing:
+
+| op     | before  | after   | pandas  | ratio     | fp-side |
+|--------|---------|---------|---------|-----------|---------|
+| prod   | 40.47ms | 5.25ms  | 19.13ms | **3.64×** | 7.71×   |
+| first  | 36.18ms | 5.81ms  | 18.24ms | **3.14×** | 6.23×   |
+| last   | 43.41ms | 6.10ms  | 18.45ms | **3.02×** | 7.12×   |
+| median | 43.30ms | 12.79ms | 39.01ms | **3.05×** | 3.39×   |
+
+Detail in `docs/NEGATIVE_EVIDENCE.md`.
+
 ## 2026-06-24 SlateOtter — nullable-Float64 dense groupby reductions (measured, loss→win)
 
 `DataFrameGroupBy` sum/mean/min/count/std on a dense Int64 key with a Float64 value column
