@@ -112,3 +112,21 @@ fn sgb_nullable_dense_max() {
     assert_eq!(group_keys(&r), vec![0, 1, 2, 3]);
     assert_f64(&vals_f64(&r), &[6.0, 6.0, f64::NAN, 5.0]);
 }
+
+// group 0 valid [2,4,6]: mean 4, ssd 8, var 8/2=4, std 2.
+// group 1 [6] / group 3 [5]: n<2 -> NaN ; group 2 []: n==0 -> Null(NaN)
+#[test]
+fn sgb_nullable_dense_var() {
+    let v = val_series();
+    let r = v.groupby(&key_series()).unwrap().var().unwrap();
+    assert_eq!(group_keys(&r), vec![0, 1, 2, 3]);
+    assert_f64(&vals_f64(&r), &[4.0, f64::NAN, f64::NAN, f64::NAN]);
+}
+
+#[test]
+fn sgb_nullable_dense_std() {
+    let v = val_series();
+    let r = v.groupby(&key_series()).unwrap().std().unwrap();
+    assert_eq!(group_keys(&r), vec![0, 1, 2, 3]);
+    assert_f64(&vals_f64(&r), &[2.0, f64::NAN, f64::NAN, f64::NAN]);
+}

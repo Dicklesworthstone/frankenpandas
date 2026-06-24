@@ -3539,3 +3539,29 @@ Null(NaN) per agg_numeric) — all green. NOT claimed: SeriesGroupBy nullable st
 (59.8ms, ~0.98x) use separate paths (std -> agg_numeric directly; median -> its own) and are UNCHANGED;
 left as documented follow-ups. pandas baseline: float64 Series with NaN, same splitmix keys, best-of-6.
 Bench: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc cargo run -p fp-frame --example bench_sgbnull --release -- <op>`.
+
+### 2026-06-24 SlateOtter — Dense SeriesGroupBy var/std (incl. nullable-f64): 0.42–0.43x -> 1.99x win @1M
+Continuation of the SeriesGroupBy nullable-f64 work (476402d66). `SeriesGroupBy::std` had NO dense path
+(it went straight to `agg_numeric` for ALL inputs), and `var`'s dense two-pass block gated `as_f64_slice()`/
+`as_i64_slice()` (all-valid only) — so a Float64 value column WITH missing values fell to the slow generic
+`agg_numeric` build_groups gather for BOTH var and std (measured 0.42–0.43x pandas). Extracted a single
+shared `dense_group_var_std(want_std)` helper that handles int64 / all-valid-f64 / nullable-f64 value
+columns over the dense gid layout: pass 1 sums+counts per gid (skipna: only non-missing fold/count), pass 2
+accumulates squared deviations, emit ssd/(n-1) (sqrt for std). `var()` now calls it (replacing its inline
+all-valid-only block) and `std()` calls it before its `agg_numeric` fallback. Bit-identical to agg_numeric's
+var/std closures: first-seen gids/labels, ascending value-order sums (== the `is_missing()`-skipped `to_f64()`
+order), `(x-mean).powi(2)`, and the emit matches the generic wrap exactly — all-missing group (n==0) ->
+`Null(NaN)`, n==1 -> `Float64(NaN)`, n>=2 -> `Float64(value)`. All-valid var is unchanged (n>=1, so the
+n==0 arm never fires); all-valid std becomes bit-identical (same ascending sums -> same mean/ssd -> same
+var.sqrt()). Bench `bench_sgbnull` @1M / 1000 groups / 20% missing, before (stashed helper) vs after under
+equal load (load-check sum 7.02 vs 7.03ms, median 60.0 vs 58.8ms):
+
+| op  | before (agg_numeric) | after (dense) | pandas   | before->pandas | after->pandas | fp-side |
+|-----|----------------------|---------------|----------|----------------|---------------|---------|
+| var | 49.29ms              | 10.48ms       | 20.90ms  | 0.42x          | 1.99x         | 4.70x   |
+| std | 49.80ms              | 10.80ms       | 21.54ms  | 0.43x          | 1.99x         | 4.61x   |
+
+Both flip LOSS -> WIN. Correctness pinned by extending `sgb_nullable_dense_conformance` to 6 tests (added
+var/std: group [2,4,6] -> var 4/std 2, singletons + all-missing -> NaN) — all green. pandas baseline:
+float64 Series with NaN, same splitmix keys, best-of-6. Remaining SeriesGroupBy nullable gap: median (~0.98x,
+near parity, separate path) — not pursued.

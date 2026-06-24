@@ -42,6 +42,7 @@ fn main() {
             "mean" => v.groupby(&by).unwrap().mean(),
             "min" => v.groupby(&by).unwrap().min(),
             "std" => v.groupby(&by).unwrap().std(),
+            "var" => v.groupby(&by).unwrap().var(),
             "median" => v.groupby(&by).unwrap().median(),
             _ => panic!(),
         };

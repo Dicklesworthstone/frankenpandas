@@ -1,5 +1,20 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## 2026-06-24 SlateOtter — dense SeriesGroupBy var/std incl. nullable-f64 (measured, loss→win)
+
+`SeriesGroupBy::std` had no dense path (always `agg_numeric`) and `var`'s dense block gated all-valid
+only, so var/std on a Float64 Series WITH missing values fell to the slow generic gather. Extracted one
+shared `dense_group_var_std(want_std)` (int64 / all-valid-f64 / nullable-f64; two-pass skipna; all-missing
+group -> `Null(NaN)`); `var()`/`std()` both route through it. Bit-identical (6-test
+`sgb_nullable_dense_conformance` green). `bench_sgbnull` @1M / 1000 groups / 20% missing, equal load:
+
+| op  | before  | after   | pandas  | ratio     | fp-side |
+|-----|---------|---------|---------|-----------|---------|
+| var | 49.29ms | 10.48ms | 20.90ms | **1.99×** | 4.70×   |
+| std | 49.80ms | 10.80ms | 21.54ms | **1.99×** | 4.61×   |
+
+Detail in `docs/NEGATIVE_EVIDENCE.md`.
+
 ## 2026-06-24 SlateOtter — nullable-Float64 dense SeriesGroupBy sum/mean/min/max (measured, loss→win)
 
 Parallel to the DataFrameGroupBy nullable work below, on the SeriesGroupBy side. `dense_group_fold`
