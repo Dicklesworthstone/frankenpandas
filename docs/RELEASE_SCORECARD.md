@@ -1,5 +1,18 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## 2026-06-24 SlateOtter — Series.autocorr typed f64 path (measured, 1.38×→13.4×)
+
+`Series::autocorr` materialized a 1M `Vec<Scalar>` (~32MB) + pair Vecs even for an all-valid Float64
+column. Added a typed `as_f64_slice` two-pass path (lag-offset, no Scalar materialization). Bit-identical
+(5-test `autocorr_typed_conformance` vs independent oracle, green). `bench_probe2 autocorr` @1M:
+
+| op       | before  | after  | pandas  | ratio          | fp-side |
+|----------|---------|--------|---------|----------------|---------|
+| autocorr | 13.66ms | 1.41ms | 18.83ms | 1.38→**13.4×** | 9.70×   |
+
+Same probe: fp already wins quantile 6.05×, nunique 2.23×, duplicated 1.17×; corr/cov ~parity
+(bandwidth-bound). Detail in `docs/NEGATIVE_EVIDENCE.md`.
+
 ## 2026-06-24 SlateOtter — typed nullable-f64 Series sum/mean/var/std (measured)
 
 Series-level reductions had all-valid f64 fast paths but a Float64 column WITH missing values fell to a

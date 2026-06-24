@@ -3621,3 +3621,25 @@ which an `Arc<Vec<f64>>` cannot provide without re-copying; and a Vec-backed var
 for an 8MB deep copy on clone. So it is a structural fp-columnar change with a real trade-off + many match
 sites (peer-contended file), NOT a contained fast-path add — deferred, consistent with the prior
 `f64-arc-copy-on-produce` note. No production code changed; `bench_probe` added as standing evidence.
+
+### 2026-06-24 SlateOtter — Series.autocorr typed f64 path: 1.38x -> 13.4x @1M (9.7x fp-side, bit-identical)
+Probed scalar-output Series ops (`bench_probe2`) for a non-arc-bound lever. corr/cov already have typed
+two-pass paths (cov_components) and sit ~parity (bandwidth-bound); but `Series::autocorr` had NO typed path
+— it materialized `self.column.values()` (a 1M-element Vec<Scalar> = ~32MB) and built two more pair Vecs,
+even for an all-valid Float64 column. Added a typed `as_f64_slice` fast path: two linear passes over the raw
+f64 buffer with a `lag` offset (means, then centered cross/var sums), no Scalar materialization, no pair
+Vecs. Bit-identical to the Scalar loop: an `as_f64_slice` column is all-valid with no NaN (from_f64_values
+marks NaN missing), so the original missing/NaN-skip never fired and count==n with x/y == data[0..n] /
+data[lag..len]; same sums in the same order, same `cov/sqrt(var_x*var_y)` with the identical
+`< f64::EPSILON => NaN` guard. Bench `bench_probe2 autocorr` @1M all-valid f64, before/after under equal
+load (unchanged corr path read 5.74 vs 5.66ms):
+
+| op       | before (Scalar) | after (typed) | pandas   | before->pandas | after->pandas | fp-side |
+|----------|-----------------|---------------|----------|----------------|---------------|---------|
+| autocorr | 13.66ms         | 1.41ms        | 18.83ms  | 1.38x          | 13.36x        | 9.70x   |
+
+Was already a marginal win (1.38x) but the Vec<Scalar> materialization dominated; removing it is a 9.7x
+fp-side speedup. Correctness pinned by new `autocorr_typed_conformance` (5 tests vs an independent oracle:
+lag1/lag5, linear->1.0, constant->NaN, short->NaN) — all green. Same probe confirms fp already WINS
+quantile 6.05x, nunique 2.23x, duplicated 1.17x; corr/cov ~parity (0.94x/0.95x, bandwidth-bound, typed paths
+already present — not pursued). pandas baseline best-of-6, float64 Series.
