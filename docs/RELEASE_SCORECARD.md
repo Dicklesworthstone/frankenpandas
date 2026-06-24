@@ -1,5 +1,23 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## 2026-06-24 SlateOtter — nullable-Float64 dense SeriesGroupBy sum/mean/min/max (measured, loss→win)
+
+Parallel to the DataFrameGroupBy nullable work below, on the SeriesGroupBy side. `dense_group_fold`
+(shared by sum/mean/min/max) only accepted all-valid `as_f64_slice()`, so a Float64 Series WITH
+missing values fell to the slow generic `agg_numeric` path. Added a skipna `as_f64_slice_with_validity`
+branch (all-missing group -> `Null(NaN)` to match agg_numeric). Bit-identical (4-test
+`sgb_nullable_dense_conformance` green). `bench_sgbnull` @1M / 1000 groups / 20% missing,
+before/after measured under equal load:
+
+| op   | before  | after  | pandas  | ratio     | fp-side |
+|------|---------|--------|---------|-----------|---------|
+| sum  | 64.88ms | 7.10ms | 25.45ms | **3.59×** | 9.14×   |
+| mean | 58.61ms | 6.49ms | 24.59ms | **3.79×** | 9.03×   |
+| min  | 57.34ms | 6.86ms | 24.38ms | **3.55×** | 8.36×   |
+
+(max shares min's path, conformance-verified.) Open follow-ups: SeriesGroupBy nullable std (0.50×) and
+median (~0.98×) use separate paths — unchanged. Detail in `docs/NEGATIVE_EVIDENCE.md`.
+
 ## 2026-06-24 SlateOtter — nullable-Float64 dense groupby prod/first/last/median (measured, loss→win)
 
 Follow-up to the reductions landing below: the nullable-f64 dense gate excluded prod/first/last/median,

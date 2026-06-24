@@ -3509,3 +3509,33 @@ expected: all-missing prod -> 1.0, first/last skip leading/trailing NaN, median 
 9 pass. pandas baseline: float64 column with NaN, same splitmix-scrambled keys/values, best-of-6.
 Bench command:
 `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc cargo run -p fp-frame --example bench_gbnull --release -- <op>`.
+
+### 2026-06-24 SlateOtter — Nullable-Float64 dense SeriesGroupBy sum/mean/min/max: 0.39–0.43x -> 3.55–3.79x win @1M
+Parallel to the same-day DataFrameGroupBy nullable-f64 dense work (c372fd4be/009bd97b1), but on the
+SeriesGroupBy side (`Series.groupby(int64_key).sum()/mean()/min()/max()`). `SeriesGroupBy::dense_group_fold`
+(the single-fold dense reducer that sum/mean/min/max share) gated on `as_f64_slice()`/`as_i64_slice()`
+(all-valid only), so a Float64 value column WITH missing values fell to the slow generic `agg_numeric`
+build_groups path (per-group `Vec<f64>` gather + closure re-scan) — measured 0.39–0.43x pandas. Added a
+nullable `as_f64_slice_with_validity` branch: skipna fold (only non-missing slots folded/counted), and
+the emit now maps `count==0 -> Scalar::Null(NullKind::NaN)` so an all-missing group matches `agg_numeric`'s
+`nums.is_empty() -> Null(NaN)` arm (applies to sum too — distinct from DataFrameGroupBy where all-missing
+sum is 0.0). Bit-identical to `agg_numeric`: same `is_missing()`-skip + `to_f64()` (inf kept, not dropped),
+same ascending-row fold order, same first-seen gid order/labels. The all-valid fold path is untouched
+(`count[g] > 0` always there, so the new `count==0` arm never fires for it). Bench `bench_sgbnull` @1M rows
+/ 1000 groups / 20% missing, fp before = generic path (lib.rs change stashed), fp after = dense path,
+measured back-to-back under the same machine load (std/median paths are unchanged by the edit and read
+52.7/64.8ms before vs 50.3/59.8ms after, confirming equal load):
+
+| op   | before (generic) | after (dense) | pandas   | before->pandas | after->pandas | fp-side |
+|------|------------------|---------------|----------|----------------|---------------|---------|
+| sum  | 64.88ms          | 7.10ms        | 25.45ms  | 0.39x          | 3.59x         | 9.14x   |
+| mean | 58.61ms          | 6.49ms        | 24.59ms  | 0.42x          | 3.79x         | 9.03x   |
+| min  | 57.34ms          | 6.86ms        | 24.38ms  | 0.43x          | 3.55x         | 8.36x   |
+
+max shares the identical `dense_group_fold` code (NEG_INFINITY/`f64::max`) — covered by conformance,
+not separately benched (~min). All flip LOSS -> WIN. Correctness pinned by new
+`sgb_nullable_dense_conformance` (4 tests: sum/mean/min/max, hand-computed with an all-missing group ->
+Null(NaN) per agg_numeric) — all green. NOT claimed: SeriesGroupBy nullable std (50.3ms, 0.50x) and median
+(59.8ms, ~0.98x) use separate paths (std -> agg_numeric directly; median -> its own) and are UNCHANGED;
+left as documented follow-ups. pandas baseline: float64 Series with NaN, same splitmix keys, best-of-6.
+Bench: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc cargo run -p fp-frame --example bench_sgbnull --release -- <op>`.
