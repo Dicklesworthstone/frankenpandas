@@ -3643,3 +3643,26 @@ fp-side speedup. Correctness pinned by new `autocorr_typed_conformance` (5 tests
 lag1/lag5, linear->1.0, constant->NaN, short->NaN) — all green. Same probe confirms fp already WINS
 quantile 6.05x, nunique 2.23x, duplicated 1.17x; corr/cov ~parity (0.94x/0.95x, bandwidth-bound, typed paths
 already present — not pursued). pandas baseline best-of-6, float64 Series.
+
+### 2026-06-24 SlateOtter — Series.skew/kurt typed f64 fused-pass: 5.1x -> ~14x @1M (2.7x fp-side, bit-identical)
+Probed scalar-output moment ops (`bench_probe3`). sem already uses typed Welford (`numeric_moments`, no
+copy) and median/prod already win — but `Series::skew`/`kurtosis` called `numeric_values`, which (even on
+its typed branch) COPIES the whole all-valid buffer into a `vals: Vec<f64>` and computes the mean over it,
+then skew/kurt re-scan `vals` TWICE more (m2+m3, or m2+m4) — ~5 passes over 8MB. Added a typed `as_f64_slice`
+fast path to both: compute the mean in one pass then a FUSED single pass accumulating m2 & m3 (skew) / m2 &
+m4 (kurt) straight off the slice — no vals Vec, 2 passes total. Bit-identical: `as_f64_slice` is all-valid
+no-NaN (from_f64_values marks NaN missing), so `numeric_values`' present-filter keeps everything =>
+`vals == data` (index order) and the same `Σdata/n` mean; m2/m3/m4 are the same `(v-mean).powi(k)` terms
+summed in the same order (fusing two independent sums into one pass changes no term). Nullable columns don't
+hit the gate and keep the existing path. Bench `bench_probe3` @1M all-valid f64, before/after equal load
+(unchanged sem path read 4.74ms both, median ~1.5ms):
+
+| op   | before  | after   | pandas   | before->pandas | after->pandas | fp-side |
+|------|---------|---------|----------|----------------|---------------|---------|
+| skew | 3.87ms  | 1.41ms  | 19.68ms  | 5.08x          | 13.96x        | 2.75x   |
+| kurt | 3.82ms  | 1.41ms  | 19.75ms  | 5.17x          | 14.01x        | 2.71x   |
+
+Already wins, but the vals copy + extra re-scans dominated — removing them is 2.7x fp-side. Correctness
+pinned by new `skew_kurt_typed_conformance` (4 tests vs independent oracle: skew/kurt match, constant->0.0,
+too-few->NaN) — all green. Same probe confirms fp already WINS sem 4.41x (typed Welford), median 12.6x,
+prod 1.52x. pandas baseline best-of-6.

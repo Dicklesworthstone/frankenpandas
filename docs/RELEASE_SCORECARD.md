@@ -1,5 +1,20 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## 2026-06-24 SlateOtter — Series.skew/kurt typed fused-pass (measured, 5.1×→~14×)
+
+`Series::skew`/`kurtosis` called `numeric_values` (copies the all-valid buffer into a `vals` Vec + mean
+scan) then re-scanned `vals` twice more. Added a typed `as_f64_slice` fused single-pass (mean, then m2+m3 /
+m2+m4 in one sweep, no copy). Bit-identical (4-test `skew_kurt_typed_conformance` vs oracle, green).
+`bench_probe3` @1M:
+
+| op   | before | after  | pandas  | ratio          | fp-side |
+|------|--------|--------|---------|----------------|---------|
+| skew | 3.87ms | 1.41ms | 19.68ms | 5.08→**13.96×** | 2.75×   |
+| kurt | 3.82ms | 1.41ms | 19.75ms | 5.17→**14.01×** | 2.71×   |
+
+Same probe: fp already wins sem 4.41× (typed Welford), median 12.6×, prod 1.52×. Detail in
+`docs/NEGATIVE_EVIDENCE.md`.
+
 ## 2026-06-24 SlateOtter — Series.autocorr typed f64 path (measured, 1.38×→13.4×)
 
 `Series::autocorr` materialized a 1M `Vec<Scalar>` (~32MB) + pair Vecs even for an all-valid Float64
