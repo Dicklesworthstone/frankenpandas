@@ -3967,3 +3967,26 @@ Both strengthen moderate -> dominant wins (pandas removeprefix/suffix are very s
 `str_removeprefix_suffix_typed_conformance` (3 tests: matching/passthrough/single-strip + missing-fallback,
 pandas-verified) green. pandas baseline best-of-6. (Also measured fp `write_csv` 40k×60 = 279.5ms vs pandas
 to_csv 668.3ms = 2.39x WIN — already fast, no change.)
+
+### 2026-06-24 SlateOtter — fp-io read_csv 9.82x / write_csv 2.39x WIN (measured evidence, no change)
+Probed the classic pandas-slow IO surface (untouched this session) for a winnable lever; fp DOMINATES, no
+change needed. Measured vs pandas 2.2.3:
+- read_csv (`read_csv_str`, cache-MISSING via probe_csv_read_uncached, 100k rows × 10 f64, 18.2MB): fp
+  15.65ms (1161 MB/s) vs pandas read_csv(StringIO) 153.76ms = **9.82x WIN**.
+- write_csv (`write_csv_string`, 40k rows × 60 mixed int/float/null via bench_to_csv): fp 279.5ms vs pandas
+  to_csv 668.3ms = **2.39x WIN**.
+Recorded as standing evidence (don't re-probe fp-io for a loss).
+
+### 2026-06-24 SlateOtter — surface-dominance checkpoint (after 19 str/reduction/index/join wins)
+After ~21 commits this session, the COMMON fp surfaces are fp-dominant vs pandas. Probed-and-confirmed WINS
+not to re-chase: the entire Series.str accessor (case transforms / replace / repeat / pad family / is*
+predicates / removeprefix-suffix — all on apply_str_utf8/apply_str_bool, 2-35x fp-side after this session's
+conversions); Series/DataFrame/Index nullable-f64 + autocorr/skew/kurt/axis1 reductions; fp-index Utf8 set-ops
+/ value_counts / get_indexer_non_unique; fp-io read_csv/write_csv; Series.map (typed Int64/dense). The
+REMAINING measured non-wins are all DOCUMENTED STRUCTURAL FLOORS, not quick levers: (1) f64-arc-copy-on-produce
+(cumsum/cummax/diff/abs ~0.4x — needs an owned-Vec<f64> ScalarValues variant, entangled with take_positions
+zero-copy slice sharing); (2) Series sum/mean nullable-f64 ~0.6-0.8x (numpy nansum is SIMD; safe scalar
+validity.get can't match, branchless forms break bit-identity); (3) fp-join merge OUTER 0.41x / RIGHT 0.79x
+(residual reindex_outer_join_column + collect_single_join_keys Vec<Scalar>/JoinKeyComponent String clones —
+intricate, the counting-sort already took outer 0.22x->0.41x). map_dict is DEAD CODE (Scalar: !Ord, BTreeMap
+arg unconstructable). These floors need coordinated structural work on a quiet box, not a per-op typed-path.
