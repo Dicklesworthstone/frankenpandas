@@ -37,6 +37,8 @@ fn main() {
             "islower" => s.str().islower(),
             "isalnum" => s.str().isalnum(),
             "isdigit" => s.str().isdigit(),
+            "removeprefix" => s.str().removeprefix("item_"),
+            "removesuffix" => s.str().removesuffix("_xyz"),
             _ => panic!(),
         };
         std::hint::black_box(r.unwrap());

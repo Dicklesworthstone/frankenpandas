@@ -3949,3 +3949,21 @@ predicate, typed Bool output == from_values over the equivalent Scalar::Bool (rc
 All strengthen already-winning predicates (isalnum best, 3.90x fp-side). Correctness: new
 `str_is_predicates_typed_conformance` (6 tests: islower/isalnum/isdigit/isalpha/isupper/istitle vs pandas-
 verified fixture) green. The Series.str bool-output surface is now fully on apply_str_bool. pandas best-of-6.
+
+### 2026-06-24 SlateOtter — Series.str.removeprefix/removesuffix contiguous output: 2.96x->20.75x @1M (7x fp-side, bit-identical)
+removeprefix/removesuffix used the slow `apply_str` — per-row `Scalar::Utf8(strip_*(..).unwrap_or(s).to_owned())`
+(a String alloc per row) + Vec<Scalar::Utf8> + from_values. But strip_prefix/strip_suffix return a BORROWED
+&str, so routed through `apply_str_utf8`: the write closure appends the stripped slice's bytes straight into
+one contiguous buffer — NO per-row temp String (the cheapest str transform yet), no Scalar boxing. Bit-
+identical: same single-occurrence strip / passthrough; missing -> Scalar fallback. Bench `bench_str_replace`
+@1M ASCII:
+
+| op           | before  | after   | pandas   | before->pandas | after->pandas | fp-side |
+|--------------|---------|---------|----------|----------------|---------------|---------|
+| removeprefix | 75.09ms | 10.71ms | 222.16ms | 2.96x           | 20.75x WIN     | 7.01x   |
+| removesuffix | 78.62ms | 10.70ms | 195.60ms | 2.49x           | 18.28x WIN     | 7.35x   |
+
+Both strengthen moderate -> dominant wins (pandas removeprefix/suffix are very slow). Correctness: new
+`str_removeprefix_suffix_typed_conformance` (3 tests: matching/passthrough/single-strip + missing-fallback,
+pandas-verified) green. pandas baseline best-of-6. (Also measured fp `write_csv` 40k×60 = 279.5ms vs pandas
+to_csv 668.3ms = 2.39x WIN — already fast, no change.)
