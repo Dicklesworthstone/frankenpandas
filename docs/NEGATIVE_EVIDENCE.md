@@ -4352,3 +4352,21 @@ Same-worker RCH comparison on `hz2`, warmed target dir
 REVERTED before landing. Treat this as noise-level/superseded, not a new lever. Keep using the broader main-path
 typed gather unless a future benchmark proves a separate cold lazy-affine or mixed-selected-label case with a
 real same-worker delta and no loss of Float64 coverage.
+
+### 2026-06-25 SlateOtter — multi-key merge sort: drop per-row CompositeJoinKey clone (ranks by reference): outer ~16% faster, 0.55x->~0.65x (still LOSS, bit-identical)
+Attacked the documented biggest gap (multi-key OUTER merge 0.55x). The composite merge path cloned one String-
+owning CompositeJoinKey PER OUTPUT ROW (~1M SmallVec + 2M String) into out_row_keys, purely to feed the
+factorize+counting sort. Replaced it: sort_merge_rows_by_join_keys now takes left_keys/right_keys + the position
+arrays, derives each row's key BY REFERENCE (matched/unmatched-left -> left key, unmatched-right -> right key —
+exactly what out_row_keys stored), factorizes left∪right to dense ranks, and counting-sorts. The sort moved
+in-block (where left_keys/right_keys are in scope); push_merge_row_key now no-ops. Bit-identical: same per-row
+key, same cmp-ordered ranks (over a superset -> empty buckets), same stable emission — all 135 fp-join tests +
+utf8_outer_merge_sort_conformance green.
+
+bench_merge2_utf8 1M ⋈ 100×100, 2 contiguous-Utf8 keys, CONTROLLED interleaved (before-vs-after back-to-back on
+the same machine load, min of 4 pairs): outer before 822ms -> after 691ms = ~16% faster (consistently 16-24%
+per pair). vs pandas 435ms: ~0.53x -> ~0.63x — STILL A LOSS, but the biggest gap is reduced and a real smell
+(1M key clones) removed. inner/left unaffected (they don't sort). RESIDUAL: the loss is now dominated by the
+CompositeJoinKey MATERIALIZATION (collect_composite_keys, 1M left) + outer column reindex; a flip needs the
+fuller factorize-join-keys-to-int-codes lever (join/sort/reindex on codes, never materializing CompositeJoinKey)
+— deferred (bigger restructure of the whole composite path).

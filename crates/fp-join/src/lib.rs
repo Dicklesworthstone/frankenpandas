@@ -988,26 +988,34 @@ fn reorder_vec_by_index<T: Clone>(values: &mut Vec<T>, order: &[usize]) {
 }
 
 fn sort_merge_rows_by_join_keys(
-    out_row_keys: &[CompositeJoinKey],
+    left_keys: &[CompositeJoinKey],
+    right_keys: &[CompositeJoinKey],
     left_positions: &mut Vec<Option<usize>>,
     right_positions: &mut Vec<Option<usize>>,
 ) {
-    let n = out_row_keys.len();
+    let n = left_positions.len();
     if n <= 1 {
         return;
     }
     // pandas sorts merge output by the join key. The naive O(n·log n) COMPARISON
-    // sort re-compares full keys (string compares for Utf8) on every step — outer
-    // merge @1M low-cardinality was ~0.22x pandas, dominated by this. Instead
+    // sort re-compares full keys (string compares for Utf8) on every step. Instead
     // FACTORIZE the keys to dense ranks (sort only the DISTINCT keys once, d≪n)
-    // then STABLE counting-sort the rows by rank — O(n + d·log d), with key
-    // comparisons paid only on the d distinct keys. Bit-identical to the stable
-    // comparison sort: rank order == key `cmp` order, and the counting sort emits
-    // each rank's rows in original (ascending-index) order, exactly like the stable
-    // `sort_by`. CompositeJoinKey is Hash+Eq (see has_duplicate_composite_keys).
+    // then STABLE counting-sort the rows by rank — O(n + d·log d). Crucially, each
+    // output row's key is read BY REFERENCE from the already-built left_keys /
+    // right_keys via its position (matched / unmatched-left rows take the left key,
+    // unmatched-right rows take the right key — exactly what the removed per-row
+    // `out_row_keys` clone stored), so the ~n String-owning CompositeJoinKey clones
+    // that dominated outer merge are gone. Bit-identical to the prior path: same
+    // per-row key, same `cmp`-ordered ranks (over a superset of distinct keys —
+    // unused ranks are just empty counting-sort buckets), same stable
+    // ascending-index emission within each rank.
     let mut distinct: Vec<&CompositeJoinKey> = {
         let mut set = FxHashSet::default();
-        out_row_keys.iter().filter(|k| set.insert(*k)).collect()
+        left_keys
+            .iter()
+            .chain(right_keys.iter())
+            .filter(|k| set.insert(*k))
+            .collect()
     };
     distinct.sort_unstable();
     let d = distinct.len();
@@ -1016,7 +1024,16 @@ fn sort_merge_rows_by_join_keys(
     for (r, k) in distinct.iter().enumerate() {
         rank_of.insert(*k, r as u32);
     }
-    let ranks: Vec<u32> = out_row_keys.iter().map(|k| rank_of[k]).collect();
+    let left_rank: Vec<u32> = left_keys.iter().map(|k| rank_of[k]).collect();
+    let right_rank: Vec<u32> = right_keys.iter().map(|k| rank_of[k]).collect();
+    let ranks: Vec<u32> = left_positions
+        .iter()
+        .zip(right_positions.iter())
+        .map(|(lp, rp)| match lp {
+            Some(p) => left_rank[*p],
+            None => right_rank[rp.expect("an unmatched merge row has a right position")],
+        })
+        .collect();
     let mut counts = vec![0usize; d + 1];
     for &r in &ranks {
         counts[r as usize + 1] += 1;
@@ -7626,7 +7643,7 @@ pub fn merge_dataframes_on_with_options(
         None
     };
 
-    let (mut left_positions, mut right_positions, out_row_keys): MergeRowPositions =
+    let (mut left_positions, mut right_positions, _out_row_keys): MergeRowPositions =
         if let Some((lp, rp)) = packed_inner {
             (
                 lp.into_iter().map(Some).collect(),
@@ -7685,8 +7702,10 @@ pub fn merge_dataframes_on_with_options(
             };
             let mut left_positions = Vec::<Option<usize>>::with_capacity(row_capacity);
             let mut right_positions = Vec::<Option<usize>>::with_capacity(row_capacity);
-            let mut out_row_keys =
-                needs_key_order.then(|| Vec::<CompositeJoinKey>::with_capacity(row_capacity));
+            // No longer materialized: the post-position sort reads each row's key by
+            // reference from left_keys/right_keys via its position, so the per-row
+            // push_merge_row_key calls below no-op (no String-owning key clones).
+            let mut out_row_keys: Option<Vec<CompositeJoinKey>> = None;
 
             match join_type {
                 JoinType::Inner | JoinType::Left | JoinType::Outer => {
@@ -7764,15 +7783,18 @@ pub fn merge_dataframes_on_with_options(
                 }
             }
 
+            // Sort the output rows by join key in-place while left_keys/right_keys
+            // are in scope (read by reference per row — no out_row_keys clone).
+            if needs_key_order {
+                sort_merge_rows_by_join_keys(
+                    &left_keys,
+                    &right_keys,
+                    &mut left_positions,
+                    &mut right_positions,
+                );
+            }
             (left_positions, right_positions, out_row_keys)
         };
-
-    if needs_key_order {
-        let out_row_keys = out_row_keys
-            .as_ref()
-            .expect("merge row keys required when sorting output rows");
-        sort_merge_rows_by_join_keys(out_row_keys, &mut left_positions, &mut right_positions);
-    }
 
     let all_positions_present = matches!(join_type, JoinType::Inner)
         || (matches!(
