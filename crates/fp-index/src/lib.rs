@@ -3085,6 +3085,30 @@ impl Index {
             result.name = self.shared_name(other);
             return result;
         }
+        // Typed all-Utf8 fast path: dedup the self-then-other concatenation with an
+        // FxHashSet of `&str` instead of `FxHashMap<&IndexLabel>` — hashes the
+        // string bytes directly, skipping the 32-byte enum load per probe.
+        // Bit-identical: self-then-other order, first-occurrence dedup.
+        let self_labels = self.labels();
+        let other_labels = other.labels();
+        if self_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+            && other_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+        {
+            let mut seen: FxHashMap<&str, ()> = FxHashMap::default();
+            seen.reserve(combined_output_capacity(self_labels.len(), other_labels.len()));
+            let mut labels: Vec<IndexLabel> =
+                Vec::with_capacity(combined_output_capacity(self_labels.len(), other_labels.len()));
+            for label in self_labels.iter().chain(other_labels.iter()) {
+                if let IndexLabel::Utf8(s) = label
+                    && seen.insert(s.as_str(), ()).is_none()
+                {
+                    labels.push(label.clone());
+                }
+            }
+            let mut result = Self::new(labels);
+            result.name = self.shared_name(other);
+            return result;
+        }
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let mut labels = Vec::with_capacity(combined_output_capacity(
             self.labels.len(),
@@ -3118,6 +3142,34 @@ impl Index {
                 &a_i64, &b_i64, false,
             )));
         }
+        // Typed all-Utf8 fast path: ONE FxHashMap<&str,()> seeded with other's
+        // labels doubles as membership AND self-dedup — `insert(s).is_none()` is
+        // true only when s is neither in other nor already emitted, so there is no
+        // separate `seen` set (one map instead of two). Bit-identical: self-order,
+        // labels not in other, first-occurrence dedup. The all-Utf8 gate (no Null)
+        // makes &str keys safe.
+        let self_labels = self.labels();
+        let other_labels = other.labels();
+        if self_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+            && other_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+        {
+            let mut set: FxHashMap<&str, ()> = FxHashMap::default();
+            set.reserve(other_labels.len());
+            for label in other_labels {
+                if let IndexLabel::Utf8(s) = label {
+                    set.insert(s.as_str(), ());
+                }
+            }
+            let mut labels: Vec<IndexLabel> = Vec::new();
+            for label in self_labels {
+                if let IndexLabel::Utf8(s) = label
+                    && set.insert(s.as_str(), ()).is_none()
+                {
+                    labels.push(label.clone());
+                }
+            }
+            return self.propagate_name(Self::new(labels));
+        }
         let other_set = other.position_map_first_ref();
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let labels: Vec<IndexLabel> = self
@@ -3140,6 +3192,52 @@ impl Index {
             let mut labels = Self::membership_filter_i64(&a_i64, &b_i64, false);
             labels.extend(Self::membership_filter_i64(&b_i64, &a_i64, false));
             let mut result = Self::from_i64_values(labels);
+            result.name = self.shared_name(other);
+            return result;
+        }
+        // Typed all-Utf8 fast path: the two halves are disjoint, so the shared
+        // `seen` only ever dedups WITHIN a half. Build self_set/other_set as
+        // FxHashMap<&str,()> and let each membership map ALSO carry its half's
+        // dedup: for the self-half, `other_set.insert(s).is_none()` is true only
+        // when s is not in other and not yet emitted; symmetrically for the
+        // other-half via self_set. Drops the separate `seen` map (3 maps -> 2) and
+        // hashes &str. Bit-identical: self-then-other order, label not in the
+        // opposite side, first-occurrence dedup within each half.
+        let self_labels = self.labels();
+        let other_labels = other.labels();
+        if self_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+            && other_labels.iter().all(|l| matches!(l, IndexLabel::Utf8(_)))
+        {
+            let mut self_set: FxHashMap<&str, ()> = FxHashMap::default();
+            self_set.reserve(self_labels.len());
+            for label in self_labels {
+                if let IndexLabel::Utf8(s) = label {
+                    self_set.insert(s.as_str(), ());
+                }
+            }
+            let mut other_set: FxHashMap<&str, ()> = FxHashMap::default();
+            other_set.reserve(other_labels.len());
+            for label in other_labels {
+                if let IndexLabel::Utf8(s) = label {
+                    other_set.insert(s.as_str(), ());
+                }
+            }
+            let mut labels: Vec<IndexLabel> = Vec::new();
+            for label in self_labels {
+                if let IndexLabel::Utf8(s) = label
+                    && other_set.insert(s.as_str(), ()).is_none()
+                {
+                    labels.push(label.clone());
+                }
+            }
+            for label in other_labels {
+                if let IndexLabel::Utf8(s) = label
+                    && self_set.insert(s.as_str(), ()).is_none()
+                {
+                    labels.push(label.clone());
+                }
+            }
+            let mut result = Self::new(labels);
             result.name = self.shared_name(other);
             return result;
         }

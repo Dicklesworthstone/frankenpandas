@@ -1,5 +1,20 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## 2026-06-24 SlateOtter — fp-index Utf8 union/difference/symdiff typed sweep (measured)
+
+Follow-up to the Utf8 intersection win. Typed all-Utf8 paths for the other set-ops: difference (one map
+doubling as membership+dedup), symdiff (each membership map carries the opposite half's dedup, 3→2 maps),
+union (`&str` keys). Bit-identical (4-test `utf8_setops_typed_conformance` vs oracles, green).
+`probe_str_setops` @1M:
+
+| op                   | before   | after    | pandas    | ratio          | fp-side |
+|----------------------|----------|----------|-----------|----------------|---------|
+| union                | 580.59ms | 314.04ms | 1753.10ms | 3.02→**5.58×** | 1.85×   |
+| difference           | 431.74ms | 167.74ms | 874.76ms  | 2.03→**5.21×** | 2.57×   |
+| symmetric_difference | 784.76ms | 357.40ms | 962.05ms  | 1.23→**2.69×** | 2.20×   |
+
+fp-index Utf8 set-op surface now fully typed (all WIN 1.2–5.6×). Detail in `docs/NEGATIVE_EVIDENCE.md`.
+
 ## 2026-06-24 SlateOtter — fp-index Utf8 Index.intersection loss→win (measured, 0.70×→1.19×)
 
 `Index::intersection` on unsorted Utf8 indexes built `FxHashMap<&IndexLabel>` of other + a separate `seen`

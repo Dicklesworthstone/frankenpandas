@@ -56,4 +56,9 @@ fn main() {
     bench("intersection", 6, || a.intersection(&b).labels().len());
     bench("unique", 6, || a.unique().labels().len());
     bench("isin", 6, || a.isin(&vals).iter().filter(|x| **x).count());
+    bench("union", 6, || a.union(&b).labels().len());
+    bench("difference", 6, || a.difference(&b).labels().len());
+    bench("symmetric_difference", 6, || {
+        a.symmetric_difference(&b).labels().len()
+    });
 }

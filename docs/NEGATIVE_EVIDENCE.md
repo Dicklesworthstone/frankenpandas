@@ -3713,3 +3713,28 @@ overlap+dup, disjoint, full-overlap self-order, all-dup self, empty, larger shuf
 get_indexer 4.52x, isin 2.97x already WIN. OPEN: union/difference/symmetric_difference Utf8 share the same
 `FxHashMap<&IndexLabel>` + seen pattern (pandas union is 1.49s — likely fp already wins but the same lever
 applies). pandas baseline best-of-6.
+
+### 2026-06-24 SlateOtter — fp-index Utf8 union/difference/symdiff typed sweep: 1.85–2.57x fp-side @1M (bit-identical)
+Follow-up to the Utf8 intersection win (a9dc31b19) — same lever applied to the other Utf8 set-ops. pandas
+object-Index is brutally slow here (union 1.75s, difference 875ms, symmetric_difference 962ms). fp already WON
+(union 3.02x, difference 2.03x, symdiff 1.23x) but each used pointer-keyed `FxHashMap<&IndexLabel>` with
+redundant maps. Added typed all-Utf8 paths (gate: both sides pure IndexLabel::Utf8, no Null):
+- **difference**: ONE `FxHashMap<&str,()>` seeded with other doubles as membership AND self-dedup —
+  `insert(s).is_none()` is true only when s is neither in other nor already emitted (2 maps -> 1).
+- **symmetric_difference**: the two halves are disjoint, so each membership map carries its OPPOSITE half's
+  dedup (self-half deduped via other_set, other-half via self_set) — drops the shared `seen` (3 maps -> 2).
+- **union_with**: dedup the self-then-other concat with `FxHashSet`-style `&str` keys instead of
+  `&IndexLabel` (skips the 32B enum load per probe; still one map).
+All bit-identical (same order, first-occurrence dedup, same labels). `probe_str_setops` @1M (intersection
+244ms unchanged from a9dc31b19 = stable load):
+
+| op                   | before   | after    | pandas    | before->pandas | after->pandas | fp-side |
+|----------------------|----------|----------|-----------|----------------|---------------|---------|
+| union                | 580.59ms | 314.04ms | 1753.10ms | 3.02x          | 5.58x         | 1.85x   |
+| difference           | 431.74ms | 167.74ms | 874.76ms  | 2.03x          | 5.21x         | 2.57x   |
+| symmetric_difference | 784.76ms | 357.40ms | 962.05ms  | 1.23x          | 2.69x         | 2.20x   |
+
+Correctness: new `utf8_setops_typed_conformance` (union/difference/symdiff vs independent oracles across
+overlap+dup, disjoint, full-overlap self-order, all-dup, empty-self, empty-other, larger shuffled) — all
+green; intersection conformance still green. pandas baseline best-of-4/6. The fp-index Utf8 set-op surface is
+now fully typed (intersection/union/difference/symdiff), all WIN 1.2–5.6x; get_indexer 4.5x, isin 3.0x.
