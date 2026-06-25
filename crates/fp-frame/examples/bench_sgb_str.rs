@@ -36,6 +36,7 @@ fn main() {
             "last" => v.groupby(&by).unwrap().last(),
             "max" => v.groupby(&by).unwrap().max(),
             "min" => v.groupby(&by).unwrap().min(),
+            "nunique" => v.groupby(&by).unwrap().nunique(),
             _ => panic!("op"),
         };
         std::hint::black_box(r.unwrap());

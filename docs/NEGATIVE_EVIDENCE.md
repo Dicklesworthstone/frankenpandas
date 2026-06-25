@@ -4454,3 +4454,13 @@ mishandled-as-Eager at worst). Confirmed: this needs the 44 edits + an audit of 
 the FULL fp-columnar/fp-frame conformance run to catch silent bugs — a quiet-box task with fast iteration, NOT a
 safe saturated-fleet 60m one-shot (a half-applied variant would leave broken/incorrect f64 handling). Standing
 biggest gap; concrete next lever fully scoped.
+
+### 2026-06-25 SlateOtter — SeriesGroupBy.nunique Utf8-value span: 0.92x LOSS->2.60x WIN @1M contiguous (bit-identical)
+v.groupby(by).nunique() over a CONTIGUOUS-Utf8 value was a marginal LOSS: agg_values_scalar materializes every
+value Scalar into a per-gid bucket then a FxHashSet<ScalarKey>. Added SeriesGroupBy try_nunique_str_dense (sibling
+of the DataFrameGroupBy one): a single pass inserts each row's &[u8] value span into a per-gid FxHash set; the set
+size is the distinct count — no Scalar Vec, no buckets. Bit-identical: all-valid (no missing to skip), distinct
+spans == distinct Utf8, same dense_group_ids first-seen gids/labels, same name. bench_sgb_str 1M gcard=100 high-
+card contiguous Utf8 v: 224.22->79.06ms (0.92x->2.60x vs pandas, 2.84x fp-side). conformance
+sgb_nunique_str_dense (dense==generic both first-seen; ==pandas for sorted-order); SeriesGroupBy max/min/first
+unaffected.
