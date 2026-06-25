@@ -4184,3 +4184,27 @@ Utf8 cols, card=100:
 Already a WIN; this strengthens it by removing the Scalar materialization for Int64/Utf8/mixed subsets.
 Correctness: new duplicated_multicol_typed_conformance (typed contiguous vs Scalar-backed == generic == pandas
 across keep=First/Last/None); existing fxhash_dedup_conformance green.
+
+### 2026-06-25 SlateOtter — multi-key OUTER merge 0.55x LOSS (root-caused) + standing bench; fix deferred (golden-gated, no-fallback)
+Probed multi-key (2 Utf8) merge via new bench_merge2_utf8 (1M fact ⋈ 100×100 dim, contiguous Utf8 keys). Measured
+vs pandas 2.2.3 (best-of-8):
+
+| how   | fp       | pandas   | ratio     |
+|-------|----------|----------|-----------|
+| inner | 158.58ms | 176.06ms | 1.11x WIN |
+| left  | 154.67ms | 188.07ms | 1.22x WIN |
+| outer | 785.06ms | 435.03ms | 0.55x LOSS |
+
+Inner/left marginal wins; OUTER is a clear LOSS (the documented residual, now reproduced for multi-key — single-
+key outer wins 1.22x). ROOT CAUSE (read, not guessed): the composite merge path (~7629) materializes left_keys
+(1M) + right_keys as Vec<CompositeJoinKey> = SmallVec<[JoinKeyComponent;1]> where Utf8 = IndexLabel::Utf8(String);
+then for needs_key_order (sort|Outer) `push_merge_row_key` CLONES one CompositeJoinKey PER OUTPUT ROW (~1M SmallVec
+allocs + 2M String clones) into out_row_keys, which sort_merge_rows_by_join_keys (already a factorize+counting
+sort) then hashes. CONTAINED LEVER: drop out_row_keys entirely — have sort_merge derive each row's key by
+reference from the positions (key_ref(i) = left_positions[i].map(|p| &left_keys[p]).unwrap_or(&right_keys[
+right_positions[i]])), bit-identical (matched rows use the left key today, unmatched-right use the right key).
+Requires MOVING the sort into the key-building block (left_keys/right_keys are block-local), i.e. modifying the
+golden-gated outer-sort path with NO fallback — distinct from the additive groupby dense bypass, so unsafe to
+one-shot on a saturated fleet. FULLER LEVER: factorize join keys to integer codes once (khash-style, like
+multi_mixed_dense_grouping) and run the join + sort + reindex on codes, never materializing CompositeJoinKey —
+helps inner/left too. Both deferred to a quiet box with fast iteration + the merge goldens.
