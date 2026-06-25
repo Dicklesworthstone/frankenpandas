@@ -65,7 +65,11 @@ fn col_f64(df: &DataFrame, name: &str) -> Vec<f64> {
 }
 
 fn assert_f64(got: &[f64], want: &[f64]) {
-    assert_eq!(got.len(), want.len(), "length mismatch: {got:?} vs {want:?}");
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "length mismatch: {got:?} vs {want:?}"
+    );
     for (i, (g, w)) in got.iter().zip(want).enumerate() {
         if w.is_nan() {
             assert!(g.is_nan(), "idx {i}: expected NaN got {g}");

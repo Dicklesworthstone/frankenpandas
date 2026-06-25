@@ -15,7 +15,13 @@ fn series(items: &[&str]) -> Series {
     Series::new(
         "v",
         Index::new_known_unique_int64_unit_range(0, n),
-        Column::from_values(items.iter().map(|s| Scalar::Utf8((*s).to_string())).collect()).unwrap(),
+        Column::from_values(
+            items
+                .iter()
+                .map(|s| Scalar::Utf8((*s).to_string()))
+                .collect(),
+        )
+        .unwrap(),
     )
     .unwrap()
 }
@@ -34,7 +40,10 @@ fn bools(s: &Series) -> Vec<bool> {
 #[test]
 fn contains_literal_typed() {
     let s = series(&["apple", "banana", "cherry", "apricot"]);
-    let r = s.str().contains_with_options("ap", true, None, false).unwrap();
+    let r = s
+        .str()
+        .contains_with_options("ap", true, None, false)
+        .unwrap();
     assert_eq!(bools(&r), vec![true, false, false, true]);
 }
 
@@ -42,21 +51,30 @@ fn contains_literal_typed() {
 fn contains_regex_typed() {
     let s = series(&["apple", "banana", "cherry", "apricot"]);
     // regex "an" matches "banana" only
-    let r = s.str().contains_with_options("an", true, None, true).unwrap();
+    let r = s
+        .str()
+        .contains_with_options("an", true, None, true)
+        .unwrap();
     assert_eq!(bools(&r), vec![false, true, false, false]);
 }
 
 #[test]
 fn contains_regex_anchored_typed() {
     let s = series(&["user_a", "admin", "user_b", "guest"]);
-    let r = s.str().contains_with_options("^user", true, None, true).unwrap();
+    let r = s
+        .str()
+        .contains_with_options("^user", true, None, true)
+        .unwrap();
     assert_eq!(bools(&r), vec![true, false, true, false]);
 }
 
 #[test]
 fn contains_case_insensitive_typed() {
     let s = series(&["Apple", "BANANA", "cherry"]);
-    let r = s.str().contains_with_options("a", false, None, true).unwrap();
+    let r = s
+        .str()
+        .contains_with_options("a", false, None, true)
+        .unwrap();
     // case-insensitive 'a' present in Apple, BANANA; not in cherry
     assert_eq!(bools(&r), vec![true, true, false]);
 }
@@ -64,6 +82,9 @@ fn contains_case_insensitive_typed() {
 #[test]
 fn empty_series_typed() {
     let s = series(&[]);
-    let r = s.str().contains_with_options("x", true, None, true).unwrap();
+    let r = s
+        .str()
+        .contains_with_options("x", true, None, true)
+        .unwrap();
     assert_eq!(bools(&r), Vec::<bool>::new());
 }

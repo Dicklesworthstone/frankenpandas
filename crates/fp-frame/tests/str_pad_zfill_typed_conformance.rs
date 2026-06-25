@@ -44,9 +44,23 @@ fn pad_both_cpython_center() {
 
 #[test]
 fn center_and_ljust_rjust() {
-    assert_eq!(strs(&series(vec![u("ab"), u("abc")]).str().center(6, '-').unwrap()), some(&["--ab--", "-abc--"]));
-    assert_eq!(strs(&series(vec![u("ab")]).str().ljust(5, '.').unwrap()), some(&["ab..."]));
-    assert_eq!(strs(&series(vec![u("ab")]).str().rjust(5, '.').unwrap()), some(&["...ab"]));
+    assert_eq!(
+        strs(
+            &series(vec![u("ab"), u("abc")])
+                .str()
+                .center(6, '-')
+                .unwrap()
+        ),
+        some(&["--ab--", "-abc--"])
+    );
+    assert_eq!(
+        strs(&series(vec![u("ab")]).str().ljust(5, '.').unwrap()),
+        some(&["ab..."])
+    );
+    assert_eq!(
+        strs(&series(vec![u("ab")]).str().rjust(5, '.').unwrap()),
+        some(&["...ab"])
+    );
 }
 
 #[test]

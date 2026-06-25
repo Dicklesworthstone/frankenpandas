@@ -55,7 +55,9 @@ fn oracle_kurt(data: &[f64]) -> f64 {
 
 #[test]
 fn skew_matches_oracle() {
-    let data: Vec<f64> = (0..500).map(|i| ((i * 131 + 7) % 89) as f64 + 0.25).collect();
+    let data: Vec<f64> = (0..500)
+        .map(|i| ((i * 131 + 7) % 89) as f64 + 0.25)
+        .collect();
     let got = series(data.clone()).skew().unwrap();
     let want = oracle_skew(&data);
     assert!((got - want).abs() < 1e-10, "got {got} want {want}");

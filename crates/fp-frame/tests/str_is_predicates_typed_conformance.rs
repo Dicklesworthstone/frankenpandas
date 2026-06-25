@@ -13,7 +13,13 @@ fn fixture() -> Series {
     Series::new(
         "v",
         Index::new_known_unique_int64_unit_range(0, n),
-        Column::from_values(items.iter().map(|s| Scalar::Utf8((*s).to_string())).collect()).unwrap(),
+        Column::from_values(
+            items
+                .iter()
+                .map(|s| Scalar::Utf8((*s).to_string()))
+                .collect(),
+        )
+        .unwrap(),
     )
     .unwrap()
 }
@@ -30,25 +36,43 @@ fn bools(s: &Series) -> Vec<bool> {
 
 #[test]
 fn islower_matches_pandas() {
-    assert_eq!(bools(&fixture().str().islower().unwrap()), vec![true, false, true, false, false, false, false]);
+    assert_eq!(
+        bools(&fixture().str().islower().unwrap()),
+        vec![true, false, true, false, false, false, false]
+    );
 }
 #[test]
 fn isalnum_matches_pandas() {
-    assert_eq!(bools(&fixture().str().isalnum().unwrap()), vec![true, true, true, false, false, true, false]);
+    assert_eq!(
+        bools(&fixture().str().isalnum().unwrap()),
+        vec![true, true, true, false, false, true, false]
+    );
 }
 #[test]
 fn isdigit_matches_pandas() {
-    assert_eq!(bools(&fixture().str().isdigit().unwrap()), vec![false, false, false, false, false, true, false]);
+    assert_eq!(
+        bools(&fixture().str().isdigit().unwrap()),
+        vec![false, false, false, false, false, true, false]
+    );
 }
 #[test]
 fn isalpha_matches_pandas() {
-    assert_eq!(bools(&fixture().str().isalpha().unwrap()), vec![true, true, false, false, false, false, false]);
+    assert_eq!(
+        bools(&fixture().str().isalpha().unwrap()),
+        vec![true, true, false, false, false, false, false]
+    );
 }
 #[test]
 fn isupper_matches_pandas() {
-    assert_eq!(bools(&fixture().str().isupper().unwrap()), vec![false, true, false, false, false, false, false]);
+    assert_eq!(
+        bools(&fixture().str().isupper().unwrap()),
+        vec![false, true, false, false, false, false, false]
+    );
 }
 #[test]
 fn istitle_matches_pandas() {
-    assert_eq!(bools(&fixture().str().istitle().unwrap()), vec![false, false, false, false, true, false, false]);
+    assert_eq!(
+        bools(&fixture().str().istitle().unwrap()),
+        vec![false, false, false, false, true, false, false]
+    );
 }

@@ -33,7 +33,13 @@ fn strs(s: &Series) -> Vec<Option<String>> {
 // pandas: ['hELLO world','Ab3Cd','ÉàB','mIxEd','']
 #[test]
 fn swapcase_ascii_and_unicode() {
-    let s = series(vec![u("Hello WORLD"), u("aB3cD"), u("éÀb"), u("MiXeD"), u("")]);
+    let s = series(vec![
+        u("Hello WORLD"),
+        u("aB3cD"),
+        u("éÀb"),
+        u("MiXeD"),
+        u(""),
+    ]);
     let r = s.str().swapcase().unwrap();
     assert_eq!(
         strs(&r),

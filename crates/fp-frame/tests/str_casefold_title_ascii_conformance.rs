@@ -34,7 +34,13 @@ fn strs(s: &Series) -> Vec<Option<String>> {
 // pandas: ['hello','mixed','strasse','éà','abc_123']
 #[test]
 fn casefold_ascii_and_unicode() {
-    let s = series(vec![u("HELLO"), u("MiXeD"), u("Straße"), u("ÉÀ"), u("abc_123")]);
+    let s = series(vec![
+        u("HELLO"),
+        u("MiXeD"),
+        u("Straße"),
+        u("ÉÀ"),
+        u("abc_123"),
+    ]);
     let r = s.str().casefold().unwrap();
     assert_eq!(
         strs(&r),

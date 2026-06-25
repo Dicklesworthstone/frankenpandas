@@ -19,7 +19,9 @@ fn main() {
     let mut order = Vec::new();
     for c in 0..k {
         let name = format!("c{c}");
-        let data: Vec<f64> = (0..n).map(|i| (sm(i, c as u64 + 1) % 100_000) as f64).collect();
+        let data: Vec<f64> = (0..n)
+            .map(|i| (sm(i, c as u64 + 1) % 100_000) as f64)
+            .collect();
         cols.insert(name.clone(), Column::from_f64_values(data));
         order.push(name);
     }
