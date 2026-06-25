@@ -992,11 +992,47 @@ fn sort_merge_rows_by_join_keys(
     left_positions: &mut Vec<Option<usize>>,
     right_positions: &mut Vec<Option<usize>>,
 ) {
-    if out_row_keys.is_empty() {
+    let n = out_row_keys.len();
+    if n <= 1 {
         return;
     }
-    let mut order: Vec<usize> = (0..out_row_keys.len()).collect();
-    order.sort_by(|a, b| out_row_keys[*a].cmp(&out_row_keys[*b]));
+    // pandas sorts merge output by the join key. The naive O(n·log n) COMPARISON
+    // sort re-compares full keys (string compares for Utf8) on every step — outer
+    // merge @1M low-cardinality was ~0.22x pandas, dominated by this. Instead
+    // FACTORIZE the keys to dense ranks (sort only the DISTINCT keys once, d≪n)
+    // then STABLE counting-sort the rows by rank — O(n + d·log d), with key
+    // comparisons paid only on the d distinct keys. Bit-identical to the stable
+    // comparison sort: rank order == key `cmp` order, and the counting sort emits
+    // each rank's rows in original (ascending-index) order, exactly like the stable
+    // `sort_by`. CompositeJoinKey is Hash+Eq (see has_duplicate_composite_keys).
+    let mut distinct: Vec<&CompositeJoinKey> = {
+        let mut set = FxHashSet::default();
+        out_row_keys.iter().filter(|k| set.insert(*k)).collect()
+    };
+    distinct.sort_unstable_by(|a, b| a.cmp(b));
+    let d = distinct.len();
+    let mut rank_of: FxHashMap<&CompositeJoinKey, u32> = FxHashMap::default();
+    rank_of.reserve(d);
+    for (r, k) in distinct.iter().enumerate() {
+        rank_of.insert(*k, r as u32);
+    }
+    let ranks: Vec<u32> = out_row_keys.iter().map(|k| rank_of[k]).collect();
+    let mut counts = vec![0usize; d + 1];
+    for &r in &ranks {
+        counts[r as usize + 1] += 1;
+    }
+    for i in 0..d {
+        counts[i + 1] += counts[i];
+    }
+    // `order[new_slot] = old_idx`, matching the comparison sort's permutation —
+    // stable because rows are scattered in ascending original-index order.
+    let mut cursor = counts;
+    let mut order = vec![0usize; n];
+    for (i, &r) in ranks.iter().enumerate() {
+        let slot = cursor[r as usize];
+        order[slot] = i;
+        cursor[r as usize] = slot + 1;
+    }
     reorder_vec_by_index(left_positions, &order);
     reorder_vec_by_index(right_positions, &order);
 }

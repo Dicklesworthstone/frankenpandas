@@ -3779,3 +3779,29 @@ Removing the 1M per-row String allocations is 2.33x fp-side. Correctness: new `u
 preservation, larger dup-heavy) — all green. SMELL CONFIRMED REUSABLE: `entry(k.clone())` over an
 `FxHashMap<IndexLabel,_>` in a per-row loop = a String alloc per row; the typed `&str` key removes it. pandas
 baseline best-of-6.
+
+### 2026-06-24 SlateOtter — fp-join merge output sort: factorize+counting-sort — outer 0.22x->0.41x @1M (1.85x fp-side, bit-identical)
+Probed Utf8 inner/left/outer/right merge (`bench_merge_utf8`, 1M ⋈ 10k) vs pandas 2.2.3. fp WINS inner
+2.20x, parity left 1.04x, but OUTER was a CATASTROPHIC LOSS (770ms vs pandas 172ms = 0.22x) and right 0.79x.
+pandas outer-merge output is sorted by the join key (verified: sort=False still yields key-sorted output), so
+fp must sort too — but `sort_merge_rows_by_join_keys` did an O(n·log n) COMPARISON sort
+(`order.sort_by(|a,b| out_row_keys[a].cmp(out_row_keys[b]))`), re-comparing full CompositeJoinKeys (string
+compares for Utf8) ~n·log n times. Replaced with FACTORIZE + STABLE COUNTING-SORT: dedup the keys, sort only
+the DISTINCT keys once (d≪n, here 10k), assign dense ranks, then counting-sort the n rows by rank — O(n +
+d·log d), key comparisons paid only on the d distinct keys. Generic (any CompositeJoinKey via its Hash+Eq+Ord),
+so it also speeds up sort=True inner/left/right. Bit-identical to the stable comparison sort: rank order == key
+`cmp` order; the counting sort emits each rank's rows in ascending original-index order == the stable `sort_by`
+permutation. Bench @1M/10k, load-normalized (inner load-check 65.6 vs 67.7ms):
+
+| op (merge)   | before   | after    | pandas   | before->pandas | after->pandas | fp-side |
+|--------------|----------|----------|----------|----------------|---------------|---------|
+| outer        | 770.27ms | 417.30ms | 172.13ms | 0.22x          | 0.41x         | 1.85x   |
+
+HONEST: outer is STILL A LOSS (0.41x) — the counting-sort removed the ~350ms O(n log n) string sort, but ~350ms
+of outer-specific overhead remains (reindex_outer_join_column rebuilding each output column by position +
+collect_single_join_keys materializing Vec<JoinKeyComponent>). Kept because it is a real bit-identical 1.85x
+fp-side improvement on the WORST join loss + speeds every key-sorted merge, not ~0-gain. Correctness: new
+`utf8_outer_merge_sort_conformance` (3 tests vs pandas-verified order incl. stable within-key + d==1 + all-
+distinct) + existing `merge_composite_outer_sorts_join_keys_lexicographically` lib test green. RESIDUAL LEVER
+(documented, next): typed reindex_outer_join_column + &str key extraction to close the remaining outer gap.
+pandas baseline best-of-8.
