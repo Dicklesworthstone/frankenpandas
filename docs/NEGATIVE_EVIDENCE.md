@@ -4474,3 +4474,20 @@ emit the per-group size as the Int64 count for every value column. Bit-identical
 Int64 counts. Value-type-AGNOSTIC (covers Utf8/Int64/Float64 values); falls back for a null-bearing value column or
 non-dense key. bench_gb_first 1M gcard=100 contiguous Utf8 k+v: count 178.65->11.03ms (0.36x->5.77x vs pandas,
 16.2x fp-side). conformance gb_count_dense (single + multi key, dense==generic==pandas).
+
+### 2026-06-25 SlateOtter — GroupBy.agg(dict/list) over Utf8 routes to dense methods: count 0.35x->5.42x, first 0.42x->6.91x @1M (bit-identical)
+agg_typed_pairs (behind agg_list / agg(dict)) built its per-func reductions by calling aggregate_named_func(func)
+DIRECTLY — which SKIPS the public gb.<func>() dense gates (try_count_dense / try_first_last_dense /
+try_minmax_str_dense). So agg({'v':'count'}) / agg(['first']) over a Utf8 value was ~3x SLOWER than the direct
+gb.count()/.first()/.max() despite those being fixed. One-line-per-func fix: dispatch count/first/last/min/max
+through the public methods (others keep aggregate_named_func). Bit-identical: each dense path is proven equal to
+its aggregate_named_func result (the gb_*_dense conformances), so by_func is unchanged, just faster.
+bench_gb_agglist 1M gcard=100 contiguous Utf8 v: count 174.60->11.39ms (0.35x->5.42x, 15.3x fp-side), first
+174.87->10.51ms (0.42x->6.91x), max ~15.5ms. conformance gb_agglist_str (agg_list == direct gb.<func>() ==
+pandas); groupby_nullable_dense + gb_count_dense green.
+
+### 2026-06-25 SlateOtter — measured WINS (don't re-probe): sort_values(utf8) 11-13x, df.idxmax/idxmin 1.28-1.58x, SeriesGroupBy.value_counts 3.68x @1M
+Dominance confirmation while loss-hunting: DataFrame.sort_values by a contiguous-Utf8 col fp 94-108ms vs pandas
+1199-1267ms = 11-13x WIN (str MSD-radix dominates pandas object sort); DataFrame.idxmax/idxmin axis=0 over 10 f64
+cols 7.4-7.5ms vs pandas 9.5-11.9ms = 1.28-1.58x WIN; SeriesGroupBy.value_counts high-card Utf8 485ms vs pandas
+1787ms = 3.68x WIN. All WINS — not losses. abs/cumsum arc-copy floor remains the sole standing structural gap.
