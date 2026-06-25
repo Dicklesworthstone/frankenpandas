@@ -1009,7 +1009,7 @@ fn sort_merge_rows_by_join_keys(
         let mut set = FxHashSet::default();
         out_row_keys.iter().filter(|k| set.insert(*k)).collect()
     };
-    distinct.sort_unstable_by(|a, b| a.cmp(b));
+    distinct.sort_unstable();
     let d = distinct.len();
     let mut rank_of: FxHashMap<&CompositeJoinKey, u32> = FxHashMap::default();
     rank_of.reserve(d);
@@ -6727,6 +6727,160 @@ fn contiguous_utf8_outer_positions(
     Some((left_positions, right_positions))
 }
 
+fn scalar_utf8_values(column: &Column) -> Option<&[Scalar]> {
+    if column.dtype() != DType::Utf8 || !column.validity().all() {
+        return None;
+    }
+    let values = column.values();
+    values
+        .iter()
+        .all(|value| matches!(value, Scalar::Utf8(_)))
+        .then_some(values)
+}
+
+fn scalar_utf8_span(value: &Scalar) -> Option<&[u8]> {
+    match value {
+        Scalar::Utf8(value) => Some(value.as_bytes()),
+        _ => None,
+    }
+}
+
+fn collect_scalar_utf8_position_map(
+    values: &[Scalar],
+) -> Option<FxHashMap<&[u8], JoinPositionBucket>> {
+    let mut map = FxHashMap::<&[u8], JoinPositionBucket>::with_capacity_and_hasher(
+        values.len(),
+        Default::default(),
+    );
+    for (pos, value) in values.iter().enumerate() {
+        map.entry(scalar_utf8_span(value)?).or_default().push(pos);
+    }
+    Some(map)
+}
+
+fn scalar_utf8_inner_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let left = scalar_utf8_values(left_key)?;
+    let right = scalar_utf8_values(right_key)?;
+    if left.is_empty() || right.is_empty() {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    let right_map = collect_scalar_utf8_position_map(right)?;
+    let mut left_positions = Vec::<usize>::with_capacity(left.len().min(right.len()));
+    let mut right_positions = Vec::<usize>::with_capacity(left_positions.capacity());
+    for (left_pos, value) in left.iter().enumerate() {
+        if let Some(matches) = right_map.get(scalar_utf8_span(value)?) {
+            for &right_pos in matches {
+                left_positions.push(left_pos);
+                right_positions.push(right_pos);
+            }
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
+fn scalar_utf8_left_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left = scalar_utf8_values(left_key)?;
+    let right = scalar_utf8_values(right_key)?;
+    let right_map = collect_scalar_utf8_position_map(right)?;
+
+    let mut out_len = 0usize;
+    for value in left {
+        out_len += right_map
+            .get(scalar_utf8_span(value)?)
+            .map_or(1, JoinPositionBucket::len);
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    for (left_pos, value) in left.iter().enumerate() {
+        if let Some(matches) = right_map.get(scalar_utf8_span(value)?) {
+            for &right_pos in matches {
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(right_pos));
+            }
+        } else {
+            left_positions.push(Some(left_pos));
+            right_positions.push(None);
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
+fn scalar_utf8_outer_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left = scalar_utf8_values(left_key)?;
+    let right = scalar_utf8_values(right_key)?;
+    let left_map = collect_scalar_utf8_position_map(left)?;
+    let right_map = collect_scalar_utf8_position_map(right)?;
+
+    let mut seen = FxHashSet::<&[u8]>::with_capacity_and_hasher(
+        left_map.len() + right_map.len(),
+        Default::default(),
+    );
+    let mut keys = Vec::<&[u8]>::with_capacity(left_map.len() + right_map.len());
+    for value in left {
+        let span = scalar_utf8_span(value)?;
+        if seen.insert(span) {
+            keys.push(span);
+        }
+    }
+    for value in right {
+        let span = scalar_utf8_span(value)?;
+        if seen.insert(span) {
+            keys.push(span);
+        }
+    }
+    keys.sort_unstable();
+
+    let mut out_len = 0usize;
+    for &key in &keys {
+        out_len += match (left_map.get(key), right_map.get(key)) {
+            (Some(lefts), Some(rights)) => lefts.len() * rights.len(),
+            (Some(lefts), None) => lefts.len(),
+            (None, Some(rights)) => rights.len(),
+            (None, None) => 0,
+        };
+    }
+
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(out_len);
+    for key in keys {
+        match (left_map.get(key), right_map.get(key)) {
+            (Some(lefts), Some(rights)) => {
+                for &left_pos in lefts {
+                    for &right_pos in rights {
+                        left_positions.push(Some(left_pos));
+                        right_positions.push(Some(right_pos));
+                    }
+                }
+            }
+            (Some(lefts), None) => {
+                for &left_pos in lefts {
+                    left_positions.push(Some(left_pos));
+                    right_positions.push(None);
+                }
+            }
+            (None, Some(rights)) => {
+                for &right_pos in rights {
+                    left_positions.push(None);
+                    right_positions.push(Some(right_pos));
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
 fn hash_i64_inner_positions_slices(left: &[i64], right: &[i64]) -> (Vec<usize>, Vec<usize>) {
     if right.is_empty() || left.is_empty() {
         return (Vec::new(), Vec::new());
@@ -6956,6 +7110,19 @@ fn merge_single_key_inner_unsorted(
     // materialization of the JoinKeyComponent path. Same pairing -> same output.
     if let Some((left_positions, right_positions)) =
         contiguous_utf8_inner_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_inner_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            suffixes,
+        );
+    }
+    if let Some((left_positions, right_positions)) =
+        scalar_utf8_inner_positions(left_key_columns[0], right_key_columns[0])
     {
         return build_single_key_inner_merge_output(
             left,
@@ -7219,6 +7386,25 @@ pub fn merge_dataframes_on_with_options(
             &suffixes,
         );
     }
+    if matches!(join_type, JoinType::Left)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            scalar_utf8_left_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_dense_left_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
     if matches!(join_type, JoinType::Right)
         && left_on.len() == 1
         && right_on.len() == 1
@@ -7392,6 +7578,25 @@ pub fn merge_dataframes_on_with_options(
         && validate_allows_fast_positions
         && let Some((left_positions, right_positions)) =
             contiguous_utf8_outer_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_ordered_unique_outer_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Outer)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            scalar_utf8_outer_positions(left_key_columns[0], right_key_columns[0])
     {
         return build_single_key_ordered_unique_outer_merge_output(
             left,
@@ -8810,6 +9015,7 @@ mod tests {
         join_series, join_series_with_options, join_series_with_trace,
         lower_hex_overlap_plan_from_certificates, ordered_unique_utf8_inner_position_plan,
         ordered_unique_utf8_inner_positions, ordered_utf8_lower_hex_overlap_len,
+        scalar_utf8_left_positions, scalar_utf8_outer_positions,
         strictly_increasing_utf8_key_spans, utf8_span_lower_bound,
     };
 
@@ -8842,6 +9048,52 @@ mod tests {
             vec!["id".to_owned(), value_name.to_owned()],
         )
         .expect("utf8 key frame")
+    }
+
+    fn scalar_utf8_column(values: &[&str]) -> Column {
+        Column::from_values(
+            values
+                .iter()
+                .map(|value| Scalar::Utf8((*value).to_owned()))
+                .collect(),
+        )
+        .expect("scalar utf8 column")
+    }
+
+    #[test]
+    fn scalar_utf8_left_positions_preserve_duplicate_order_blackthrush() {
+        let left = scalar_utf8_column(&["b", "a", "b", "x"]);
+        let right = scalar_utf8_column(&["a", "b", "b"]);
+
+        let (left_positions, right_positions) =
+            scalar_utf8_left_positions(&left, &right).expect("scalar utf8 left positions");
+
+        assert_eq!(
+            left_positions,
+            vec![Some(0), Some(0), Some(1), Some(2), Some(2), Some(3)]
+        );
+        assert_eq!(
+            right_positions,
+            vec![Some(1), Some(2), Some(0), Some(1), Some(2), None]
+        );
+    }
+
+    #[test]
+    fn scalar_utf8_outer_positions_sort_keys_and_keep_unmatched_blackthrush() {
+        let left = scalar_utf8_column(&["b", "a", "b", "x"]);
+        let right = scalar_utf8_column(&["a", "b", "b", "z"]);
+
+        let (left_positions, right_positions) =
+            scalar_utf8_outer_positions(&left, &right).expect("scalar utf8 outer positions");
+
+        assert_eq!(
+            left_positions,
+            vec![Some(1), Some(0), Some(0), Some(2), Some(2), Some(3), None,]
+        );
+        assert_eq!(
+            right_positions,
+            vec![Some(0), Some(1), Some(2), Some(1), Some(2), None, Some(3),]
+        );
     }
 
     #[test]
