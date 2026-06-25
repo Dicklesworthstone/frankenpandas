@@ -30,6 +30,7 @@ fn main() {
             "capitalize" => s.str().capitalize(),
             "title" => s.str().title(),
             "casefold" => s.str().casefold(),
+            "swapcase" => s.str().swapcase(),
             _ => panic!(),
         };
         std::hint::black_box(r.unwrap());

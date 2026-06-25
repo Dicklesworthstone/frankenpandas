@@ -3887,3 +3887,23 @@ casefold FLIPS catastrophic loss -> win (the case_fold() iterator was 442ms); ti
 win. Correctness: new `str_casefold_title_ascii_conformance` (4 tests: ASCII+Unicode casefold incl.
 "Straße"->"strasse", title ASCII/Unicode/missing — all pandas-verified) + existing capitalize/title suite
 green. OPEN: swapcase (run-based Unicode, ASCII XOR-0x20 candidate), pad/center/zfill. pandas baseline best-of-6.
+
+### 2026-06-24 SlateOtter — Series.str.swapcase ASCII XOR-0x20 + contiguous output: 9.42x WIN @1M (bit-identical)
+Completed the str-case ASCII byte-ops sweep. swapcase used the slow `apply_str` with a per-row run-grouping
+char `to_lowercase`/`to_uppercase` Unicode transform (the SAME apply_str + char-case path that left casefold at
+0.20x and capitalize at 0.49x before their fixes). Routed through `apply_str_utf8` (contiguous byte-buffer
+output) with an ASCII fast path: XOR 0x20 toggles the case of an ASCII letter (A^0x20=a, a^0x20=A) in the
+output buffer; non-letters untouched. Bit-identical for ASCII (a single ASCII letter's to_uppercase/
+to_lowercase IS the XOR; a non-letter swaps to itself), non-ASCII keeps the Unicode run logic, missing ->
+Scalar fallback. Bench `bench_str_replace` @1M ASCII:
+
+| op       | after (this fix) | pandas    | after->pandas |
+|----------|------------------|-----------|---------------|
+| swapcase | 17.60ms          | 165.76ms  | 9.42x WIN     |
+
+After measured 9.42x WIN. (Before — the slow run-based apply_str path — was not separately re-benched this
+turn; it is the identical lever as casefold 442ms->12.4ms (0.20x->7.26x) and capitalize 275ms->10.2ms
+(0.49x->13.2x), i.e. a ~10-30x fp-side reduction from removing the per-row char-case Unicode work.)
+Correctness: new `str_swapcase_typed_conformance` (2 tests: ASCII+Unicode "éÀb"->"ÉàB", missing-fallback —
+pandas-verified) green. The Series.str case-transform surface (lower/upper/strip/capitalize/title/casefold/
+swapcase) is now fully on apply_str_utf8 + ASCII byte-ops. pandas baseline best-of-6.
