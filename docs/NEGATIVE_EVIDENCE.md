@@ -4065,3 +4065,26 @@ now all four win. Residual: Right (173ms) is still ~1.8x the Left join (97ms) �
 the row_capacity=right_len under-allocation of the output position Vecs (a pre-existing realloc, present in both
 old and new) are the remaining gap; a 2-pass pre-size is a follow-up. Correctness: all 135 fp-join tests +
 new `utf8_right_merge_smallside_conformance` (2 tests, pandas-verified) green. pandas baseline best-of-6.
+
+### 2026-06-25 SlateOtter — Utf8/mixed multi-key groupby WINS 1.16x but skips the dense bypass (build_groups not avoided) — characterized lever
+Probed the documented OPEN "multi-Utf8 groupby" vein. df.groupby([k1_utf8, k2_utf8]).sum/mean/count @1M (g=100 =>
+~10k group combos) MEASURED (new bench_gb2_utf8):
+
+| op    | fp      | pandas   | ratio    |
+|-------|---------|----------|----------|
+| sum   | 90.70ms | 105.21ms | 1.16x WIN |
+| mean  | 89.63ms | 103.41ms | 1.15x WIN |
+| count | 90.87ms | 105.85ms | 1.16x WIN |
+
+A WIN, but a MARGINAL one — and the cause is a missing dense bypass, not a structural floor. The moments engine
+(agg_typed_pairs_dense_f64_moments) bypasses build_groups ONLY for single-Int64 (int64_dense_grouping) and
+multi-INT64 (multi_int64_dense_grouping) keys; for any Utf8 key it returns None, so Utf8/mixed multi-key falls
+through to the FULL generic build_groups (the 1M per-row Vec<ScalarKey> heap-alloc + composite SipHash — the
+documented dominant build_groups cost) AND THEN the dense gid precompute (64329) RE-factorizes the Utf8 columns
+to gid_per_row. Two grouping passes; build_groups' is the slow one. LEVER (deferred — quiet box): add a
+multi_mixed_dense_grouping() (the factorize-each-Utf8-to-u32 + mixed-radix gid_table already exists at ~64372)
+that ALSO emits group_order + the MultiIndex directly, so the moments path skips build_groups for Utf8/mixed
+multi-key (mirrors the int64 bypass). EST 90ms -> ~40ms (~2.5x). RISK: bit-identity requires reproducing
+build_groups' EXACT sorted group order (composite_key_cmp lexicographic) from the factorize maps + inverse
+code->str tables — intricate, golden-gated, shared hot path; NOT safe to iterate on a saturated fleet. The
+single-Utf8 dense path (64308) and single/multi-Int64 bypasses already exist; this is the multi-Utf8 sibling.
