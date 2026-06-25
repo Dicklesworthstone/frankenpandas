@@ -105,6 +105,31 @@ fn idxmax_dense_matches_generic_and_pandas() {
     assert_eq!(cells(&dense), vec!["3", "2", "0", "4"], "idxmax vs pandas");
 }
 
+// Mixed Int64 + Utf8 keys: k1=[2,1,2,1,3] (i64), k2=K2 (utf8), v=V (f64).
+// pandas sorts by (k1 numeric, k2 str): (1,x),(2,x),(2,y),(3,x); sum [6,3,1,5],
+// max [4,3,1,5]. dense path needs BOTH keys typed-contiguous; a scalar-backed k2
+// forces the generic build_groups path for the comparison.
+#[test]
+fn mixed_int_utf8_dense_matches_generic_and_pandas() {
+    let k1 = [2i64, 1, 2, 1, 3];
+    let mk = |k2: Column| -> DataFrame {
+        let index = Index::new((0..5i64).map(IndexLabel::Int64).collect());
+        let mut cols = std::collections::BTreeMap::new();
+        cols.insert("k1".to_string(), Column::from_i64_values(k1.to_vec()));
+        cols.insert("k2".to_string(), k2);
+        cols.insert("v".to_string(), Column::from_values(V.iter().map(|x| Scalar::Float64(*x)).collect()).unwrap());
+        DataFrame::new_with_column_order(index, cols, vec!["k1".into(), "k2".into(), "v".into()]).unwrap()
+    };
+    for (op, want) in [("sum", vec!["6", "3", "1", "5"]), ("max", vec!["4", "3", "1", "5"])] {
+        let dense = run(op, &mk(contig(&K2))); // contiguous k2 -> mixed dense path
+        let generic = run(op, &mk(scalar(&K2))); // scalar-backed k2 -> build_groups
+        assert_eq!(cells(&dense), cells(&generic), "{op}: mixed dense vs generic");
+        assert_eq!(idx_labels(&dense), idx_labels(&generic), "{op}: mixed index");
+        assert_eq!(cells(&dense), want, "{op}: mixed vs pandas");
+        assert_eq!(idx_labels(&dense), vec!["1, x", "2, x", "2, y", "3, x"], "{op}: numeric k1 sort");
+    }
+}
+
 // nunique needs i64 values (its dense bitset); pandas -> [2,1].
 #[test]
 fn nunique_i64_dense_matches_generic_and_pandas() {

@@ -4144,3 +4144,24 @@ i64-value case (dense == generic == pandas [2,1]). Correctness: groupby_multi_ut
 covers idxmax (f64, labels [3,2,0,4]) and nunique (i64, [2,1]) dense==generic==pandas; existing
 groupby_nullable_dense/fxhash conformance green. REMAINING multi_utf8 site: try_bool_reduce_dense (any/all) +
 the mixed Int64/Utf8 key variant. pandas baseline best-of-6.
+
+### 2026-06-25 SlateOtter — multi-key groupby dense bypass generalized to MIXED Int64+Utf8 keys: 1.00x->3.53x @1M (bit-identical)
+Generalized multi_utf8_dense_grouping -> multi_mixed_dense_grouping (DenseMultiUtf8Grouping -> DenseMultiMixed
+with a MixedKey{Int64,Utf8} enum). Each key column is bounded-Int64 (codes = value-min) OR contiguous-Utf8
+(factorize); requires >=1 Utf8 (all-Int64 stays on the faster multi_int64 path). So groupby([int_id, str_cat])
+— a common real pattern (e.g. year + category) — now skips build_groups too. Bit-identical: derived MixedKey::cmp
+orders per level by value (Int64 i64 cmp, Utf8 str cmp) == scalar_key_cmp, so the sorted group order ==
+composite_key_cmp; flat label joins each level's Display (Int64 plain, Utf8 verbatim) == generic. All 4 prior
+multi_utf8 call sites (moments sum/mean/count/var/std, aggregate min/max/first/last/prod/median, idxmax/idxmin,
+nunique) now use the mixed grouping + a shared multi_dense_index_mixed helper. bench_gb2_mixed 1M g=100 (k1 i64,
+k2 contiguous-Utf8, f64 values):
+
+| op  | before  | after   | pandas  | before->pandas | after->pandas | fp-side |
+|-----|---------|---------|---------|----------------|---------------|---------|
+| sum | 67.76ms | 20.54ms | 72.49ms | 1.07x           | 3.53x WIN      | 3.30x   |
+| max | 65.47ms | 19.89ms | 65.52ms | 1.00x (tied)    | 3.29x WIN      | 3.29x   |
+
+All-Utf8 path unchanged (no regression, ~29ms/3.6x — it is now the all-str case of the mixed grouping).
+Correctness: groupby_multi_utf8_dense_conformance extended with a mixed int+utf8 case (dense == generic ==
+pandas, incl. NUMERIC k1 sort: (1,x)<(2,x)); existing all-utf8/idxmax/nunique + groupby_nullable_dense/fxhash
+conformance green. The multi-Utf8/mixed groupby vein is now complete except try_bool_reduce_dense (any/all).
