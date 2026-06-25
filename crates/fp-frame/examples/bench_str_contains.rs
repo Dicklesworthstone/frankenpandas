@@ -17,14 +17,23 @@ fn main() {
             .collect(),
     )
     .unwrap();
+    // op: "simple" = str.contains (apply_str_bool); "regex"/"literal" =
+    // contains_with_options (str_boolean_with_na, pandas default regex=True path).
+    let op = a.get(3).map(String::as_str).unwrap_or("regex");
     let mut best = u128::MAX;
     for _ in 0..it {
         let t = Instant::now();
-        std::hint::black_box(s.str().contains("777").unwrap());
+        let r = match op {
+            "simple" => s.str().contains("777"),
+            "regex" => s.str().contains_with_options("777", true, None, true),
+            "literal" => s.str().contains_with_options("777", true, None, false),
+            _ => panic!(),
+        };
+        std::hint::black_box(r.unwrap());
         let e = t.elapsed().as_nanos();
         if e < best {
             best = e;
         }
     }
-    println!("str_contains n={n}: best={best}ns");
+    println!("str_contains_{op} n={n}: best={best}ns");
 }

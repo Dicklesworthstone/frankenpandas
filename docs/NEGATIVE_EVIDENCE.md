@@ -3805,3 +3805,24 @@ fp-side improvement on the WORST join loss + speeds every key-sorted merge, not 
 distinct) + existing `merge_composite_outer_sorts_join_keys_lexicographically` lib test green. RESIDUAL LEVER
 (documented, next): typed reindex_outer_join_column + &str key extraction to close the remaining outer gap.
 pandas baseline best-of-8.
+
+### 2026-06-24 SlateOtter — Series.str.contains/match/startswith typed Bool output: regex 4.69x->10.05x @1M (2.15x fp-side, bit-identical)
+`Series.str.contains(pat)` defaults to regex=True (pandas), routing through `str_boolean_with_na`, which had
+NO typed path — it materialized `column.values()` (Vec<Scalar>) AND boxed each result into a
+`Vec<Scalar::Float64/Bool>` (32B/elem, ~32MB @1M) + `from_values`. Added a typed Bool-output path (mirror of
+`apply_str_bool`): an all-valid contiguous-Utf8 input scans byte spans straight into a `Vec<bool>` (no
+`values()` materialization), and an all-valid non-contiguous Utf8 input still emits a `Vec<bool>` (na is moot
+with no missing rows) — both via `from_bool_values` (1B/elem). Serves str.contains/match/startswith/endswith
+with options. Bit-identical: every row is present Utf8, so the generic arm emits `Scalar::Bool(pred(s))` for
+each, which `from_bool_values(Vec<bool>)` reproduces exactly (rcvpj: from_bool_values == from_values for Bool).
+Bench `bench_str_contains` @1M (Scalar-backed Utf8, all-valid-Vec<bool> path):
+
+| op (contains)   | before  | after   | pandas   | before->pandas | after->pandas | fp-side |
+|-----------------|---------|---------|----------|----------------|---------------|---------|
+| regex (default) | 27.75ms | 12.93ms | 130.02ms | 4.69x          | 10.05x        | 2.15x   |
+| literal         | 39.44ms | 23.64ms | 88.05ms  | 2.23x          | 3.72x         | 1.67x   |
+
+Both already win; removing the Vec<Scalar::Bool> output boxing is 1.67–2.15x fp-side and strengthens every
+str predicate-with-options op. Correctness: new `str_boolean_typed_conformance` (5 tests: literal, regex,
+anchored, case-insensitive, empty) green. pandas baseline best-of-6. (A contiguous-Utf8 input would skip the
+values() materialization too, for an even bigger win — out of scope for the Scalar-backed bench.)
