@@ -29,6 +29,7 @@ fn main() {
             "repeat" => s.str().repeat(2),
             "capitalize" => s.str().capitalize(),
             "title" => s.str().title(),
+            "casefold" => s.str().casefold(),
             _ => panic!(),
         };
         std::hint::black_box(r.unwrap());

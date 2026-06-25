@@ -3867,3 +3867,23 @@ parity -> clear win via the contiguous output. Correctness: new `str_capitalize_
 (5 tests vs pandas-verified: ASCII, Unicode case folding "éXY"->"Éxy", empty/single, missing-fallback) green.
 OPEN: title could take the same ASCII byte-ops path (~8x more); other apply_str arms (pad/center/zfill/
 swapcase/casefold) remain. pandas baseline best-of-6.
+
+### 2026-06-24 SlateOtter — Series.str.casefold 0.20x->7.26x + title 1.94x->8.27x @1M (bit-identical)
+Continued the str ASCII byte-ops sweep (after capitalize 792e05b0a). casefold did `s.case_fold().collect()`
+(Unicode aggressive case-folding iterator) per row via the slow apply_str — a CATASTROPHIC 442ms (0.20x
+pandas). title was already on apply_str_utf8 (1.94x) but still used char `to_uppercase`/`to_lowercase`. Added
+ASCII byte-ops fast paths to BOTH: casefold ASCII-lowercases in the output buffer (ASCII case-folding == ASCII
+lowercasing — no multi-char foldings like ß->ss occur in pure ASCII); title walks the appended bytes marking
+cased runs (a-zA-Z == the cased ASCII set). Bit-identical: ASCII byte-maps == the char Unicode ops for ASCII;
+non-ASCII rows keep the Unicode path (case_fold / char iterators); missing -> Scalar fallback. Bench
+`bench_str_replace` @1M ASCII:
+
+| op       | before   | after   | pandas   | before->pandas | after->pandas | fp-side |
+|----------|----------|---------|----------|----------------|---------------|---------|
+| casefold | 442.34ms | 12.40ms | 89.99ms  | 0.20x LOSS      | 7.26x WIN      | 35.67x  |
+| title    | 83.90ms  | 19.67ms | 162.74ms | 1.94x           | 8.27x WIN      | 4.27x   |
+
+casefold FLIPS catastrophic loss -> win (the case_fold() iterator was 442ms); title parity-ish -> dominant
+win. Correctness: new `str_casefold_title_ascii_conformance` (4 tests: ASCII+Unicode casefold incl.
+"Straße"->"strasse", title ASCII/Unicode/missing — all pandas-verified) + existing capitalize/title suite
+green. OPEN: swapcase (run-based Unicode, ASCII XOR-0x20 candidate), pad/center/zfill. pandas baseline best-of-6.
