@@ -4227,3 +4227,17 @@ contiguous-Utf8 cols, card=100:
 Correctness: new df_value_counts_dense_conformance (typed contiguous vs Scalar-backed == generic == pandas,
 count desc + composite-key tiebreak); existing fxhash_dedup green. The contiguous-key factorize lever (groupby +
 dedup + now value_counts) keeps flipping composite-key ops from Scalar-materialization losses to ~3-7x wins.
+
+### 2026-06-25 SlateOtter — GroupBy.size dense bypass for >=2 keys: 1.72x->3.68x @1M (bit-identical)
+df.groupby([k1,k2]).size() already won 1.72x but still went through build_groups (per-row Vec<ScalarKey>) for
+its sole cost. Added a dense fast path: for >=2 keys, multi_int64_dense_grouping / multi_mixed_dense_grouping
+gives gid_per_row; histogram it for the per-group count and build the same ", "-joined multi-key labels (the
+generic group_key_label format) in the same sorted-key order. Flat Index, no MultiIndex — exactly what the
+generic size returns. bench_gb2_utf8 1M g=100 contiguous Utf8 keys:
+
+| op   | before  | after   | pandas  | before->pandas | after->pandas | fp-side |
+|------|---------|---------|---------|----------------|---------------|---------|
+| size | 56.94ms | 26.64ms | 98.06ms | 1.72x           | 3.68x WIN      | 2.14x   |
+
+Already a WIN; this strengthens it (build_groups was its whole cost). Correctness: groupby_multi_utf8_dense_
+conformance extended with size (dense == generic == pandas, sorted-key order); existing 4 cases green.

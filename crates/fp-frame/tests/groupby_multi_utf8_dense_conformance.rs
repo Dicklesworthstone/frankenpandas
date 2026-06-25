@@ -130,6 +130,44 @@ fn mixed_int_utf8_dense_matches_generic_and_pandas() {
     }
 }
 
+// groupby([k1,k2]).size() — rows per group in sorted-key order. pandas ->
+// [(a,x):2,(b,x):1,(b,y):1,(c,x):1]. Series (flat labels), no value column needed.
+#[test]
+fn size_dense_matches_generic_and_pandas() {
+    let read = |df: &DataFrame| -> Vec<(String, i64)> {
+        let s = df.groupby(&["k1", "k2"]).unwrap().size().unwrap();
+        let labels: Vec<String> = s
+            .index()
+            .labels()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        let counts: Vec<i64> = s
+            .column()
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Int64(x) => *x,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        labels.into_iter().zip(counts).collect()
+    };
+    let dense = read(&frame(contig(&K1), contig(&K2)));
+    let generic = read(&frame(scalar(&K1), scalar(&K2)));
+    assert_eq!(dense, generic, "size dense vs generic");
+    assert_eq!(
+        dense,
+        vec![
+            ("a, x".to_string(), 2),
+            ("b, x".to_string(), 1),
+            ("b, y".to_string(), 1),
+            ("c, x".to_string(), 1),
+        ],
+        "size vs pandas"
+    );
+}
+
 // nunique needs i64 values (its dense bitset); pandas -> [2,1].
 #[test]
 fn nunique_i64_dense_matches_generic_and_pandas() {

@@ -72,6 +72,9 @@ fn main() {
             "idxmax" => {
                 std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().idxmax().unwrap());
             }
+            "size" => {
+                std::hint::black_box(df.groupby(&["k1", "k2"]).unwrap().size().unwrap());
+            }
             _ => panic!("op"),
         }
         let e = t.elapsed().as_nanos();
