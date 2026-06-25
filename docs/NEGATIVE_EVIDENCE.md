@@ -3991,3 +3991,18 @@ validity.get can't match, branchless forms break bit-identity); (3) fp-join merg
 (residual reindex_outer_join_column + collect_single_join_keys Vec<Scalar>/JoinKeyComponent String clones —
 intricate, the counting-sort already took outer 0.22x->0.41x). map_dict is DEAD CODE (Scalar: !Ord, BTreeMap
 arg unconstructable). These floors need coordinated structural work on a quiet box, not a per-op typed-path.
+
+### 2026-06-25 BlackThrush — Series.filter same-index Bool mask gather: 21.40x LOSS->1.78x LOSS vs pandas @2M (bit-identical)
+`Series::filter(mask_series)` still cloned one `IndexLabel` plus one `Scalar` per kept row on the common
+identical-index, no-duplicate mask path, even though `loc_bool(&[bool])` already used a positions vector with
+`Index::take` + `Column::take_positions`. BOLD-verified the live gap with the warmed per-crate command
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a rch exec -- cargo run -p fp-frame --example
+bench_loc_bool --release -- 2000000 30`; RCH had no admissible worker and failed open locally, but the target dir
+was warm and the command stayed `-p fp-frame`. Baseline current-main `filter_series` best 62.63ms vs pandas
+2.93ms (21.40x pandas). The lever skips mask `Vec<Scalar>` materialization for Bool/Boolean dtype masks and
+routes the same-index path through positions + typed index/column gathers. After: 5.04ms best-of-30 and 5.22ms
+best-of-50, golden `0e95636b5d230bf5` unchanged; pandas comparator best 2.93ms with the same golden, so the
+remaining ratio is 1.72-1.78x pandas and the fp-side speedup is 12.44x. This is still a pandas loss, but it
+removes the catastrophic clone/materialization gap; next lever should attack the positions vector scan/gather
+itself or reuse bool affine witnesses for common masks. Post-format remote rerun on `vmi1149989` stayed green
+with the same golden and 4.24ms best-of-30; that is supplemental only, not used for the local pandas ratio.

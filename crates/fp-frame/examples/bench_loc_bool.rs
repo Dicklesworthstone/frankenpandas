@@ -1,14 +1,14 @@
-//! Bench + golden for `Series.loc_bool(mask)` on a large Int64 column — the
-//! flagship `df[mask]` / `s[s > x]` boolean-indexing workload. Exercises the
-//! collect-positions + zero-copy `Index::take` + `Column::take_positions` lever
-//! (br-frankenpandas-t0y8n): one position scan, then typed gathers, instead of a
-//! per-kept-row IndexLabel + Scalar clone.
+//! Bench + golden for boolean Series selection on a large Int64 column — the
+//! flagship `df[mask]` / `s[s > x]` workload. Reports both `Series.loc_bool(mask)`
+//! and same-index `Series.filter(mask_series)` so raw mask and aligned-mask
+//! paths can be compared independently.
 //! Golden = FNV-1a64 over the selected (index-label, value) pairs.
 //!
 //! Run: cargo run -p fp-frame --example bench_loc_bool --release -- 2000000 100
 
 use std::time::Instant;
 
+use fp_columnar::Column;
 use fp_frame::Series;
 use fp_index::IndexLabel;
 use fp_types::Scalar;
@@ -66,19 +66,42 @@ fn main() {
 
     let series = build(n);
     let mask = build_mask(n);
-    let golden = digest(&series.loc_bool(&mask).expect("loc_bool"));
+    let mask_series = Series::new(
+        "mask",
+        series.index().clone(),
+        Column::from_bool_values(mask.clone()),
+    )
+    .expect("mask series");
+    let loc_golden = digest(&series.loc_bool(&mask).expect("loc_bool"));
+    let filter_golden = digest(&series.filter(&mask_series).expect("filter"));
 
-    let mut best = u128::MAX;
+    let mut loc_best = u128::MAX;
     for _ in 0..iters {
         let t = Instant::now();
         let out = series.loc_bool(&mask).expect("loc_bool");
         let e = t.elapsed().as_nanos();
         std::hint::black_box(&out);
-        if e < best {
-            best = e;
+        if e < loc_best {
+            loc_best = e;
+        }
+    }
+
+    let mut filter_best = u128::MAX;
+    for _ in 0..iters {
+        let t = Instant::now();
+        let out = series.filter(&mask_series).expect("filter");
+        let e = t.elapsed().as_nanos();
+        std::hint::black_box(&out);
+        if e < filter_best {
+            filter_best = e;
         }
     }
 
     let kept = mask.iter().filter(|&&b| b).count();
-    println!("loc_bool n={n} kept={kept} iters={iters}: best={best}ns golden={golden:016x}");
+    println!(
+        "loc_bool n={n} kept={kept} iters={iters}: best={loc_best}ns golden={loc_golden:016x}"
+    );
+    println!(
+        "filter_series n={n} kept={kept} iters={iters}: best={filter_best}ns golden={filter_golden:016x}"
+    );
 }
