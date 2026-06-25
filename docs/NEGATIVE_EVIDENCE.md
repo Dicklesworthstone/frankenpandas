@@ -3666,3 +3666,26 @@ Already wins, but the vals copy + extra re-scans dominated — removing them is 
 pinned by new `skew_kurt_typed_conformance` (4 tests vs independent oracle: skew/kurt match, constant->0.0,
 too-few->NaN) — all green. Same probe confirms fp already WINS sem 4.41x (typed Welford), median 12.6x,
 prod 1.52x. pandas baseline best-of-6.
+
+### 2026-06-24 SlateOtter — DataFrame std/var/skew axis=1 typed f64 output: ~10x -> ~13-15x @1M×8 (1.2-1.3x fp-side)
+Probed DataFrame row-axis (axis=1) reductions (`bench_probe_df`, 1M rows × 8 f64 cols). pandas axis=1 is
+TERRIBLE (block-manager gather + Python per-row): std 213ms, var 206ms, skew 334ms, sum 82ms — fp already
+WINS everything 6-12x. But sum/mean/max axis=1 use the typed `reduce_rows_f64` while std/var/sem/skew/kurt
+use `reduce_rows_func_f64`, which boxed each row's result into a `Vec<Scalar::Float64>` (32B/elem, ~32MB @1M)
+then re-inferred dtype in `from_values`. Switched it to collect a `Vec<f64>` and ingest via `from_f64_values`
+(typed, like the sum path). Bit-identical: `from_f64_values` marks a NaN-result row missing exactly as
+`from_values` does for a `Scalar::Float64(NaN)` (both => missing), present rows store the same `Float64(v)`;
+the per-row gather + reducer closure are untouched. Bench @1M×8, before/after equal load (unchanged sum path
+11.32/11.28ms):
+
+| op (axis=1) | before  | after   | pandas    | before->pandas | after->pandas | fp-side |
+|-------------|---------|---------|-----------|----------------|---------------|---------|
+| std         | 20.78ms | 16.43ms | 213.28ms  | 10.26x         | 12.98x        | 1.26x   |
+| var         | 17.72ms | 14.00ms | 205.51ms  | 11.60x         | 14.68x        | 1.27x   |
+| skew        | 38.39ms | 34.65ms | 333.74ms  | 8.69x          | 9.63x         | 1.11x   |
+
+Already dominant wins; the typed output strengthens std/var ~1.27x fp-side (skew ~1.11x, its row_skew compute
+dominates). sem/kurt axis=1 share `reduce_rows_func_f64` so they inherit it too. Correctness: new
+`df_axis1_f64_typed_conformance` (var/std vs independent oracle + zero-variance-row 0.0 guard) + existing
+`row_reduction_conformance` green. Same probe: sum 7.27x, mean 6.41x, max 6.39x already win (typed
+`reduce_rows_f64`). pandas baseline best-of-6.

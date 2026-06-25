@@ -1,5 +1,20 @@
 # FrankenPandas Release-Readiness Scorecard
 
+## 2026-06-24 SlateOtter — DataFrame std/var/skew axis=1 typed output (measured)
+
+pandas axis=1 is terrible (std 213ms, skew 334ms @1M×8); fp already wins 6-12×. std/var/sem/skew/kurt
+axis=1 used `reduce_rows_func_f64` with a `Vec<Scalar>` output — switched to typed `from_f64_values`
+(like sum/mean/max). Bit-identical (new `df_axis1_f64_typed_conformance` vs oracle + zero-var guard, green).
+`bench_probe_df` @1M×8:
+
+| op (axis=1) | before  | after   | pandas   | ratio           | fp-side |
+|-------------|---------|---------|----------|-----------------|---------|
+| std         | 20.78ms | 16.43ms | 213.28ms | 10.3→**13.0×**  | 1.26×   |
+| var         | 17.72ms | 14.00ms | 205.51ms | 11.6→**14.7×**  | 1.27×   |
+| skew        | 38.39ms | 34.65ms | 333.74ms | 8.7→**9.6×**    | 1.11×   |
+
+(sum/mean/max already win 6-7× via typed `reduce_rows_f64`.) Detail in `docs/NEGATIVE_EVIDENCE.md`.
+
 ## 2026-06-24 SlateOtter — Series.skew/kurt typed fused-pass (measured, 5.1×→~14×)
 
 `Series::skew`/`kurtosis` called `numeric_values` (copies the all-valid buffer into a `vals` Vec + mean
