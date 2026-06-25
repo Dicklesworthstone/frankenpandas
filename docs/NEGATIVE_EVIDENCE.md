@@ -4388,3 +4388,26 @@ bench_gb_first 1M, gcard=100, contiguous Utf8 k + Utf8 v:
 Correctness: new gb_first_last_utf8_dense_conformance (contiguous-key dense == scalar-backed generic == pandas,
 first/last row per group, sorted-key index); existing groupby_nullable_dense + multi_utf8_dense conformance
 green (the Int64-key path is preserved — its gate just moved inside the new key-type branch).
+
+### 2026-06-25 SlateOtter — GroupBy.max/min Utf8-value dense path: 1.33x->11.81x, 1.38x->13.67x @1M (bit-identical)
+groupby(k).max()/min() over a Utf8 value column was only a marginal WIN (pandas object aggregation is slow): the
+numeric dense_aggregate_emit can't reduce Utf8, so it fell to the generic build_groups + per-group Scalar gather.
+Added try_minmax_str_dense (single key Int64/Utf8 factorize): per group, the argmax/argmin ROW is found by &[u8]
+span comparison, then take_positions (zero-copy, value-agnostic) gathers it — same lever as first/last. Bit-
+identical: gathered value IS the group's lexicographic max/min string; sorted-key index. bench_gb_first 1M
+gcard=100 contiguous Utf8 k+v: max 179.35->20.14ms (1.33x->11.81x vs pandas, 8.9x fp-side), min 180.87->18.29ms
+(1.38x->13.67x, 9.9x). conformance gb_first_last_utf8_dense extended (max/min dense==generic==pandas); first/last
++ int64 min/max unaffected.
+
+### 2026-06-25 SlateOtter — LEDGER REJECT: Series abs 0.36x / cumsum 0.93x @5M — arc-copy-on-produce floor (structural blocker)
+Re-measured the biggest gap-vs-pandas. Series.abs @5M f64: fp 63.20ms vs pandas 22.54ms = 0.36x LOSS. cumsum:
+fp 65.68ms vs pandas 60.96ms = 0.93x (marginal LOSS). CAUSE (documented f64-arc-copy-on-produce): all f64 storage
+is Arc<[f64]>; producing a Vec<f64> output then from_f64_values does Arc::from(Vec) = a 40MB REALLOC+COPY. abs is
+|x| (trivial compute) so it is dominated by traffic: ~120MB (read 40 + Vec write 40 + Arc copy 40) vs pandas ~80MB
+-> 0.36x. NO contained fix: Arc<[f64]> requires the copy (ArcInner-prefix layout); avoiding it needs storing f64
+as Arc<Vec<f64>> (move, no copy) — a deep type change cascading through the slice-sharing variants
+(LazyAllValidFloat64Slice/Dot/Strided share Arc<[f64]> for zero-copy take_positions) — OR an additive
+Float64Owned(Arc<Vec<f64>>) variant whose as_f64_slice returns &v[..]. The additive variant is COMPILER-GUIDED
+(exhaustive ScalarValues matches -> every site is a compile error to fix, no silent bugs) but ~44 arms + golden-
+risky; deferred to a quiet box with fast iteration. in-place (Arc::get_mut) doesn't apply: abs(&self) shares the
+input Arc. REJECTED zero-gain attempts: none tried (structural). This is the standing biggest gap.

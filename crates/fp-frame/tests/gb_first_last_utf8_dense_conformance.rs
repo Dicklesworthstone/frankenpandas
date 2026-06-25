@@ -55,11 +55,19 @@ fn first_last_dense_matches_generic_and_pandas() {
     let expected: &[(&str, Vec<(&str, &str)>)] = &[
         ("first", vec![("a", "x2"), ("b", "x1"), ("c", "x5")]),
         ("last", vec![("a", "x4"), ("b", "x3"), ("c", "x5")]),
+        ("max", vec![("a", "x4"), ("b", "x3"), ("c", "x5")]),
+        ("min", vec![("a", "x2"), ("b", "x1"), ("c", "x5")]),
     ];
     for (op, want) in expected {
         let run = |df: &DataFrame| -> DataFrame {
             let gb = df.groupby(&["k"]).unwrap();
-            if *op == "first" { gb.first().unwrap() } else { gb.last().unwrap() }
+            match *op {
+                "first" => gb.first().unwrap(),
+                "last" => gb.last().unwrap(),
+                "max" => gb.max().unwrap(),
+                "min" => gb.min().unwrap(),
+                _ => unreachable!(),
+            }
         };
         let dense = run(&frame(true)); // contiguous key -> factorize dense path
         let generic = run(&frame(false)); // scalar-backed key -> generic aggregate

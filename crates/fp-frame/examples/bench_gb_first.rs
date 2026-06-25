@@ -42,6 +42,15 @@ fn main() {
             "last" => {
                 black_box(df.groupby(&["k"]).unwrap().last().unwrap());
             }
+            "max" => {
+                black_box(df.groupby(&["k"]).unwrap().max().unwrap());
+            }
+            "min" => {
+                black_box(df.groupby(&["k"]).unwrap().min().unwrap());
+            }
+            "nunique" => {
+                black_box(df.groupby(&["k"]).unwrap().nunique().unwrap());
+            }
             _ => panic!("op"),
         }
         let e = t.elapsed().as_nanos();
