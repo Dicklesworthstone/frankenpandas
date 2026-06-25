@@ -4241,3 +4241,29 @@ generic size returns. bench_gb2_utf8 1M g=100 contiguous Utf8 keys:
 
 Already a WIN; this strengthens it (build_groups was its whole cost). Correctness: groupby_multi_utf8_dense_
 conformance extended with size (dense == generic == pandas, sorted-key order); existing 4 cases green.
+
+### 2026-06-25 BlackThrush — Series Bool mask direct typed gather: 1.25x LOSS->1.35x WIN vs pandas @2M (bit-identical)
+Followed the 2026-06-25 residual above: `Series::filter(mask_series)` and `Series::loc_bool(&[bool])` still
+materialized a `Vec<usize>` positions buffer, then gathered the Int64 index and Int64 payload in separate
+generic passes. The new path recognizes all-valid Bool masks over Int64-labelled, all-valid Int64/Float64
+Series and emits typed labels + typed payload in one mask scan; duplicate-index, nullable-mask, non-typed, and
+aligned fallback semantics stay on the existing paths. This is the selection-vector/rank-select lever from the
+graveyard: carry the mask witness straight to dense output construction instead of first expanding it to row
+ids.
+
+BOLD head-to-head on CPU 7, warmed target dir `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`,
+per-crate only (`cargo build --release -p fp-frame --example bench_loc_bool`), 2M rows / 999,998 kept:
+
+| case | before | after | pandas | before->pandas | after->pandas | fp-side |
+|------|--------|-------|--------|----------------|---------------|---------|
+| `filter_series` | 5.459ms | 2.754ms | 3.737ms | 1.25x LOSS | 1.35x WIN | 1.98x |
+| `loc_bool` | 5.019ms | 2.740ms | 3.737ms | 1.34x LOSS | 1.36x WIN | 1.83x |
+
+Golden stayed `0e95636b5d230bf5` across baseline and after runs. A first after run showed allocator noise
+(`filter_series` 6.045ms), but two immediate same-binary reruns stabilized at 2.956ms and 2.820ms, and the
+100-iteration confirmation was 2.754ms. The pandas comparator used the same mixed-hash mask and pandas Series
+index/mask alignment shape.
+
+Post-rebase release rebuild confirmation on the final source: `loc_bool=2.793ms`, `filter_series=3.149ms`,
+pandas aligned Series bool mask `4.244ms` (pandas 2.2.3), preserving the `filter_series` 1.35x WIN and
+strengthening `loc_bool` to 1.52x on that run.
