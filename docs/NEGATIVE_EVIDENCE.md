@@ -4006,3 +4006,17 @@ remaining ratio is 1.72-1.78x pandas and the fp-side speedup is 12.44x. This is 
 removes the catastrophic clone/materialization gap; next lever should attack the positions vector scan/gather
 itself or reuse bool affine witnesses for common masks. Post-format remote rerun on `vmi1149989` stayed green
 with the same golden and 4.24ms best-of-30; that is supplemental only, not used for the local pandas ratio.
+
+### 2026-06-25 SlateOtter — str.get typed nullable-Utf8 output = ~0-gain (REVERTED); char-iteration-bound not output-bound
+Tried extending the apply_str_utf8 lever to NULL-producing str ops (str.get): added an `apply_str_opt_utf8`
+helper (write closure returns bool present/null -> contiguous bytes+offsets+validity via
+`from_utf8_values_with_validity` = LazyNullableUtf8, no Vec<Scalar::Utf8> boxing) and routed str.get through
+it. Measured @1M ASCII (get(3)): before (apply_str) 79.99ms, after (helper) 76.71ms = **1.04x fp-side = ~0-gain
+-> REVERTED**. CAUSE: str.get is dominated by the per-row `s.chars().count()` (bound check) + `s.chars().nth(i)`
+O(len) iteration, NOT the output boxing — and an ASCII byte-index fast path doesn't help either because
+`s.is_ascii()` scans the whole string per row (same O(len) cost as chars().count()). str.get already WINS 1.55x
+vs pandas (126ms) on the char-iteration alone. LESSON: the typed-OUTPUT lever only pays when per-row COMPUTE is
+trivial (replace/repeat/pad/case ops) — for char-iteration ops (get) or regex ops (extract/contains-regex) the
+compute dominates and output-boxing removal is ~0-gain. Don't re-attempt typed-output for str.get/extract/
+slice_replace. (The `apply_str_opt_utf8` helper + LazyNullableUtf8 path is sound and available if a trivial-
+compute null-producing str op ever appears.)
