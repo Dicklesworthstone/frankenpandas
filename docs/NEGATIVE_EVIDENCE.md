@@ -4716,3 +4716,22 @@ Correctness: new conformance td_loc_conformance (4) — unique-TD fast path payl
 index, duplicate-TD index returns all matches ascending (slow path), missing fails closed, warm-cache repeated
 calls stable; fp-frame loc lib tests (96) + fp-index positions/get_indexer (25) green. Mirrors the Datetime64 fix
 (recbe, 1173x->67x) — same pathology, same lever.
+
+### 2026-06-26 BlackThrush — REJECT: Index.union over Utf8 is a string-hash-dedup (khash) floor — 0.55x, contiguous-output zero-gain
+Probed the Utf8-keyed Index set-op surface @200k (new bench_idx_utf8_isin). Findings: isin 7.74x WIN (58.00ms
+pandas / 7.49ms fp — pandas object isin is slow; fp's pointer-key fallback still wins, no fix needed),
+intersection 4.29x WIN (already has the &str fast path), difference/symmetric_difference already carry Utf8 &str
+fast paths. The ONE loss is Index.union over Utf8: fp ~24ms vs pandas ~13.5ms = 0.55x (stable best-of-6 x3 both
+sides, same data). union_with already has a Utf8 &str fast path (FxHashSet dedup, self-then-other first-occurrence).
+ROOT: the cost is the n+m FxHashMap<&str> dedup over the scattered Scalar-backed label strings, NOT the output —
+pandas hashes the concatenation with khash then SORTS and still beats fp's no-sort dedup, i.e. fp's string dedup
+alone is ~4x slower than pandas' khash unique. This is the documented khash floor for strings (sister to the
+wide-i64 high-card khash floor). ATTEMPTED LEVER (REVERTED, zero-gain): emit the unique labels straight into a
+contiguous byte buffer + offsets via Index::from_utf8_contiguous instead of cloning a String per unique label into
+Vec<IndexLabel> + Self::new — bit-identical, but 24ms -> ~22ms (within noise), proving the per-String output clone
+is NOT the bottleneck; the input-side &str dedup dominates. SECOND control: re-ran with CONTIGUOUS-Utf8-backed
+inputs (Index::from_utf8_contiguous, as read_csv produces) — union is still ~24.6ms, backing-INDEPENDENT, so
+neither labels() materialization nor the output clone is the cost: it is purely the n+m string dedup. A real fix
+needs a custom open-addressing string table (inline hash + offset, cache-friendly) to beat khash — a large,
+golden-risky change, DEFERRED. Bench committed for reproducibility; no source change landed. DON'T re-chase the
+contiguous-output idea or the labels()-materialization idea — both disproven by measurement.
