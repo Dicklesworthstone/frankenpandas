@@ -4516,3 +4516,44 @@ nested loop as before. Distinct funcs are memoized so transform([f,f]) calls tra
 gcard=100 contiguous Utf8 k+v: tflist(first) 363.51->54.27ms (0.21x->1.40x vs pandas 75.76ms, 6.70x fp-side),
 tflcount(count) 214.19->11.83ms (0.28x->5.08x vs pandas 60.04ms, 18.1x fp-side). lib tests transform_list (2) +
 groupby_transform (13) green.
+
+### 2026-06-26 BlackThrush — composite OUTER merge borrowed sort keys: 0.60x->0.85x vs pandas @1M (partial keep, residual loss)
+No unlanded measured `.scratch` / `.worktrees` win was found on the current `origin/main` scan: the stale
+`set_index(drop=true)` retained-column clone worktree hunk is already represented on main by the
+`DataFrame::set_index(drop=true)` ledger entry and commit, and the remaining dirty worktree files are either
+bench artifacts or peer-owned stale probes. Dug the documented largest current gap instead: multi-key OUTER
+merge (`bench_merge2_utf8`, 1M fact rows, 100x100 Utf8 dimension keys).
+
+Root: the generic sorted/composite merge path already factorized the output keys for counting-sort, but it first
+cloned one full `CompositeJoinKey` per emitted output row into `out_row_keys`. On a two-Utf8-key OUTER merge this
+means roughly 1M extra `SmallVec` writes plus 2M `String` clones before sort ranking. The new path keeps the
+existing `left_keys` / `right_keys` arrays for hash/probe, then derives each output row's sort key by borrowing
+through `(left_position, right_position)`: matched and left-only rows use `left_keys[left_pos]`, right-only rows
+use `right_keys[right_pos]`. Rank order and stable row order are unchanged, so the output is bit-identical to the
+old cloned-key sorter.
+
+Bench evidence, per-crate only, warmed `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`:
+`rch exec -- cargo bench -p fp-join --no-run` passed the bench-profile build gate; `cargo bench --release` is not
+a Cargo-valid flag, so timing used the standing release driver
+`rch exec -- cargo run -p fp-join --example bench_merge2_utf8 --release -- 1000000 100 8 outer`. FP baseline and
+candidate both ran on `vmi1227854`; pandas 2.2.3 comparator used the same generated key distribution, best-of-8.
+
+| path | timing | ratio vs pandas |
+|------|--------|-----------------|
+| pandas | 342.852ms | 1.00x |
+| current fp baseline | 574.727ms | 0.60x LOSS |
+| borrowed-position-key sorter | 405.099ms | 0.85x LOSS |
+
+Result: **1.42x fp-side improvement** and the measured ratio improves from 0.60x to 0.85x, but OUTER merge still
+does not beat pandas. KEEP PARTIAL because this is not zero-gain and removes the exact cloned-key cost called out
+in the previous root-cause note; residual work is now output materialization / shared-key column rebuild, not the
+sort-key clone ledger.
+
+Correctness / gates: `cargo check -p fp-join --all-targets`; `cargo clippy -p fp-join --all-targets --no-deps -- -D warnings`; `cargo test -p fp-join merge_composite_outer -- --nocapture`; `cargo test -p fp-join --test
+utf8_outer_merge_sort_conformance -- --nocapture`; `cargo test -p fp-conformance
+conformance_merge_outer_sort_true_with_suffixes -- --nocapture`; `cargo test -p fp-conformance
+live_oracle_dataframe_merge_outer_basic -- --nocapture`. The two `fp-conformance` tests compiled and passed but
+skipped live pandas assertions because this detached worktree has no `legacy_pandas_code/pandas` oracle root.
+`rustfmt --check crates/fp-join/src/lib.rs` is clean; full `cargo fmt -p fp-join --check` still reports
+pre-existing unrelated formatting diffs in `bench_merge2_utf8.rs` and `utf8_right_merge_smallside_conformance.rs`,
+which were not touched or staged.
