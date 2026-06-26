@@ -15917,6 +15917,39 @@ impl Column {
         None
     }
 
+    fn f64_floor_ceil_trunc_identity(x: f64) -> bool {
+        const SIGN_MASK: u64 = 0x8000_0000_0000_0000;
+        const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+        const FRAC_MASK: u64 = 0x000f_ffff_ffff_ffff;
+        const EXP_BIAS: i32 = 1023;
+        const FRAC_BITS: i32 = 52;
+
+        let bits = x.to_bits();
+        let abs_bits = bits & !SIGN_MASK;
+        let exp = ((bits & EXP_MASK) >> FRAC_BITS) as i32;
+        let frac = bits & FRAC_MASK;
+        if exp == 0x7ff {
+            return frac == 0;
+        }
+        let unbiased = exp - EXP_BIAS;
+        if unbiased < 0 {
+            return abs_bits == 0;
+        }
+        if unbiased >= FRAC_BITS {
+            return true;
+        }
+        let fractional_mask = (1_u64 << (FRAC_BITS - unbiased)) - 1;
+        bits & fractional_mask == 0
+    }
+
+    fn typed_float_integral_identity(&self) -> Option<Self> {
+        let data = self.as_f64_slice()?;
+        if data.iter().all(|&x| Self::f64_floor_ceil_trunc_identity(x)) {
+            return Some(self.clone());
+        }
+        None
+    }
+
     /// All-valid numeric column → an owned `f64` view (Float64 copied, Int64 cast
     /// `x as f64`), exactly as `Scalar::to_f64` would. `None` for nullable /
     /// non-numeric columns (so binary ufuncs fall back to the scalar loop).
@@ -15946,6 +15979,9 @@ impl Column {
     }
 
     pub fn floor(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_integral_identity() {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_finite_preserving(f64::floor) {
             return Ok(out);
         }
@@ -15971,6 +16007,9 @@ impl Column {
 
     /// Compute element-wise ceiling.
     pub fn ceil(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_integral_identity() {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_finite_preserving(f64::ceil) {
             return Ok(out);
         }
@@ -15996,6 +16035,9 @@ impl Column {
 
     /// Compute element-wise truncation toward zero.
     pub fn trunc(&self) -> Result<Self, ColumnError> {
+        if let Some(out) = self.typed_float_integral_identity() {
+            return Ok(out);
+        }
         if let Some(out) = self.typed_float_unary_finite_preserving(f64::trunc) {
             return Ok(out);
         }
@@ -22020,6 +22062,37 @@ mod tests {
                             ),
                         }
                     }
+                }
+            }
+        }
+
+        #[test]
+        fn floor_ceil_trunc_integral_identity_preserves_edges_blackthrush() {
+            let expected = vec![
+                f64::NEG_INFINITY,
+                -9.0,
+                -0.0,
+                0.0,
+                7.0,
+                4_503_599_627_370_496.0,
+                f64::INFINITY,
+            ];
+            let input = Column::from_f64_values(expected.clone());
+            let outputs = [
+                ("floor", input.floor().expect("floor")),
+                ("ceil", input.ceil().expect("ceil")),
+                ("trunc", input.trunc().expect("trunc")),
+            ];
+
+            for (op, output) in outputs {
+                let got = output.as_f64_slice().expect("all-valid float output");
+                assert_eq!(got.len(), expected.len(), "{op} length drift");
+                for (pos, (&got, &expected)) in got.iter().zip(&expected).enumerate() {
+                    assert_eq!(
+                        got.to_bits(),
+                        expected.to_bits(),
+                        "{op} pos={pos}: got {got:?}, expected {expected:?}"
+                    );
                 }
             }
         }

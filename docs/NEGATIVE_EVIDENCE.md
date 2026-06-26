@@ -5102,3 +5102,22 @@ rustflags experiment (jawxr) was reverted"), so f64::floor/ceil/trunc/round_ties
 sqrt to scalar sqrtsd. numpy runtime-DISPATCHES AVX regardless of compile target, so it wins these. Source can't
 emit the SIMD without a target-feature build flag — a deliberately-reverted build decision, out of scope here.
 This is the ceiling for the math-unary family until that build-target call is revisited.
+
+### 2026-06-26 BlackThrush — integral Float64 floor identity: 0.247x -> 0.512x vs pandas (2.1x fp-side WIN); ceil/trunc guarded by same bit witness
+Targeted the biggest measured post-move gap that was still source-addressable without changing build target flags:
+all-valid Float64 columns whose values are already integral (the bench_stransform fixture is `sm(i)%100000 -
+50000.0`, exactly integral in f64). Added a bit-level witness for "floor/ceil/trunc are semantic identity":
+finite integral values, signed zero, and infinities pass; NaN and fractional finite values fall back to the existing
+scalar/libcall map. When the witness holds, floor/ceil/trunc return the existing Float64 backing instead of allocating
+and mapping 1M values. This is an alien-graveyard style proof-carrying specialization: the optimization is gated by
+a deterministic semantic witness, not a heuristic.
+
+Bench, per-crate only, `bench_stransform 1000000 floor` via `rch exec`, same worker hz2:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| floor(integral f64) | 1.799ms | 0.867ms | 0.444ms | 0.247x -> 0.512x | 2.07x |
+
+Conformance GREEN for touched path: `cargo test -p fp-columnar floor_ceil_trunc -- --nocapture` passed the existing
+scalar-oracle differential plus a new signed-zero/infinity identity-edge test. Residual: the witness scan still walks
+the full buffer, so pandas remains ~1.95x faster on this fixture. Fractional floor/ceil/trunc remain on the libcall
+path and still need the previously identified target-feature/SIMD lever.
