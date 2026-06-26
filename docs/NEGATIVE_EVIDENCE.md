@@ -4584,3 +4584,26 @@ with pre-existing example unused-import warnings; `cargo clippy -p fp-columnar -
 crates/fp-frame/src/lib.rs` remains blocked by pre-existing unformatted hunks around groupby dense paths, outside
 this set_index change. Bounded `timeout 180s ubs crates/fp-columnar/src/lib.rs crates/fp-frame/src/lib.rs`
 timed out with no reported focused finding before exit 124.
+
+### 2026-06-26 BlackThrush — SeriesGroupBy sem/skew/kurt over Utf8 key: sem 0.69x->2.31x, skew 0.84x->2.73x, kurt 1.45x->5.34x @1M (bit-identical)
+SeriesGroupBy std/var already had a Utf8-key dense path (dense_group_var_std uses dense_group_ids, which handles
+Int64 + contiguous-Utf8 + scalar-backed-Utf8 keys), but sem/skew/kurt routed through group_moment_dense whose key
+gate was `self.by.column.as_i64_slice()?` — Int64-ONLY. So a Utf8-keyed sem/skew/kurt bailed to agg_values_scalar
+(materialize a Vec<Scalar> per group, then nansem/nanskew/nankurt over Scalars): sem 58.63ms (0.69x pandas), skew
+49.81ms (0.84x). Fix: rebuild group_moment_dense on dense_group_ids() (the proven dense_group_var_std grouping) and
+construct each gid's label from ki(Int64)/ku(contiguous-Utf8) in first-seen order, identical to dense_group_var_std.
+The Int64 branch is bit-identical (dense_group_ids yields the same first-seen gid order the old i64 histogram did;
+same ascending-row sum, same powi moments, same finalize). f64-value-only + Int64/contiguous-Utf8-key-only as
+before; nullable value or scalar-backed key still bails to agg_values_scalar.
+
+Bench, per-crate only, CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc, bench_sgb_moment 1M gcard=100
+contiguous-Utf8 key + f64 value, pandas 2.2.3 same key distribution best-of-6:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| sem  | 58.63ms | 17.64ms | 40.69ms | 0.69x -> 2.31x | 3.32x |
+| skew | 49.81ms | 15.34ms | 41.91ms | 0.84x -> 2.73x | 3.25x |
+| kurt | 55.55ms | 15.03ms | 80.28ms | 1.45x -> 5.34x | 3.70x |
+(std/var unchanged controls: 13.1ms, already dense.) Correctness: new differential conformance
+sgb_moment_utf8_conformance (4) asserts contiguous-Utf8 dense == scalar-backed-Utf8 generic agg_values_scalar for
+sem/skew/kurt bit-for-bit incl. small-group NaN branches; groupby_sem/skew/kurtosis (7) + moments_typed (3) +
+skew_kurt_typed (4) green.
