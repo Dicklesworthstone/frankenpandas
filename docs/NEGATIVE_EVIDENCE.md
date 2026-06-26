@@ -5075,3 +5075,15 @@ abs's residual is pandas' SIMD vfabs (0.17ms) vs fp's scalar map — now compute
 (fp was 50x SLOWER) is gone. Conformance GREEN: fp-columnar 436, fp-frame lib 3103, 0 failed. NEW finding (separate
 path, follow-up): Series.round(decimals) is 14.4ms vs pandas 0.56ms = 0.039x — a slow per-element round-compute
 loop (NOT the arc-copy path); needs its own lever.
+
+### 2026-06-26 BlackThrush — Series/Column.round(decimals): 0.039x -> 0.090x (2.3x fp-side, arc-copy removed); residual = round_ties_even libcall (SIMD-rint lever, golden-risky)
+round's f64 path was 14.36ms (the previously-flagged biggest gap): `(x*factor).round_ties_even()/factor` then
+from_f64_values' Arc::from(Vec) cold-realloc-copy. Routed it through from_f64_values_owned (move) — round of all-
+valid finite/inf is never NaN, so bit-identical. bench_stransform 1M decimals=2: 14.36 -> 6.24ms (2.3x fp-side);
+pandas 0.56ms, so 0.039x -> 0.090x. Conformance GREEN: fp-columnar 436, fp-frame round lib 29 + conformance
+binaries, 0 failed. RESIDUAL (still 11x pandas): the ~5.9ms is the per-element f64::round_ties_even, which does NOT
+auto-vectorize here (confirmed: splitting into numpy-style mul;rint;div passes measured 6.0ms == fused, so it's a
+libcall per element, not a fusion/div issue) — pandas uses SIMD rint (roundpd). Flipping it needs a vectorized
+round-to-nearest-even (magic-number (y+2^52)-2^52 with copysign + |y|<2^52 select, OR explicit roundpd via
+std::simd), whose tie/>=2^52/subnormal/-0.0 bit-identity is NOT fully covered by current goldens — DEFERRED to a
+dedicated pass with an exhaustive differential test vs round_ties_even. (floor/ceil/trunc share the libcall risk.)

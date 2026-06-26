@@ -17032,7 +17032,12 @@ impl Column {
         // from_f64_values re-marks any NaN result as missing exactly as
         // `Self::new(Float64, ..)` would (all-valid ⇒ no is_missing branch).
         if let Some(data) = self.as_f64_slice() {
-            return Ok(Self::from_f64_values(
+            // Move the rounded output Vec into the backing (Arc::new) instead of
+            // from_f64_values' Arc::from(Vec) cold-realloc-copy (~5.7ms/1M).
+            // round of all-valid finite/inf never yields NaN, so owned (all-valid)
+            // is bit-identical; from_f64_values_owned's NaN scan routes any stray
+            // NaN to the identical Arc path.
+            return Ok(Self::from_f64_values_owned(
                 data.iter()
                     .map(|&x| (x * factor).round_ties_even() / factor)
                     .collect(),
