@@ -4636,3 +4636,42 @@ contiguous-Utf8, pandas 2.2.3 same data best-of-6: str.slice(0,5) fp 79.49ms -> 
 forward-ASCII / negative / step / reverse / multi-byte-char cases and that scalar nulls are preserved; lib str_slice
 + str_slice_negative_and_step + slice_replace + series_str_slice_golden_basic (5) green. (replace was already on
 apply_str_utf8; its 2.10x is the inherent per-row s.replace temp-String cost, not a slow-path artifact.)
+
+### 2026-06-26 cod-pandas — composite OUTER merge shared Utf8 key coalesce: 0.85x/near-parity -> 1.03x vs pandas @1M (bit-identical)
+Scanned `.scratch` / `.worktrees` first: no measured worktree commit was ahead of current `origin/main`; stale
+`set_index(drop=true)` hunks were already represented by the landed `set_index` commit, and remaining dirty files
+were bench artifacts or peer-owned stale probes. Dug the standing multi-key OUTER merge residual from the
+BlackThrush borrowed-sort-key entry instead.
+
+Root: after sort-key cloning was removed, the generic composite OUTER merge still rebuilt each same-name shared key
+column via `Vec<Scalar>`: every output row cloned either `left_key_col.values()[pos]` or `right_key_col.values()[pos]`
+into an owned `Scalar::Utf8(String)`, then `Column::from_values` repacked it. The new helper is a narrow fast path
+for all-valid contiguous Utf8 shared key columns: it coalesces left/right positions directly into one contiguous
+byte buffer plus offsets, preserving the same row-order source rule (`left` when present, otherwise `right`) and
+falling back to the old Scalar path for nullable, scalar-backed, mixed-type, or impossible `(None,None)` rows.
+
+Bench evidence, per-crate only, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`, current main
+checkout source to avoid detached-worktree shared-target artifact confusion:
+`rch exec -- cargo bench -p fp-join --no-run` passed. `cargo bench --release` is not a Cargo-valid flag, so timing
+used the standing release driver
+`rch exec -- cargo run -p fp-join --example bench_merge2_utf8 --release -- 1000000 100 32 outer`.
+
+| path | timing | ratio vs pandas |
+|------|--------|-----------------|
+| pandas 2.2.3 local best-of-32 | 405.650ms | 1.00x |
+| pre-change main local same-window best-of-16 | 700.132ms | 0.58x LOSS |
+| candidate local best-of-32 | 394.586ms | 1.03x WIN |
+| candidate remote hz2 best-of-32 | 305.675ms | routing datapoint only |
+
+Earlier uncontended local samples were noisier (`main` 423.654ms, candidate 402.135ms, pandas 424.061ms; then
+candidate 354.932/438.656ms, pandas 407.859/448.604ms), but the conservative recorded comparison still flips the
+standing OUTER merge residual over pandas and gives a same-window 1.77x fp-side improvement versus the measured
+main baseline. Correctness: new unit guard
+`merge_composite_outer_contiguous_utf8_key_coalesce_matches_scalar_route_blackthrush` verifies the contiguous fast
+path matches the scalar-backed generic route for matched, left-only, and right-only rows and keeps contiguous Utf8
+storage for both shared keys. Gates: `rch exec -- cargo bench -p fp-join --no-run`; `rch exec -- cargo clippy -p
+fp-join --all-targets --no-deps -- -D warnings`; `rch exec -- cargo test -p fp-join merge_composite_outer --
+--nocapture`; `rch exec -- cargo test -p fp-join --test utf8_outer_merge_sort_conformance -- --nocapture`;
+`rustfmt --check crates/fp-join/src/lib.rs`; `git diff --check`. `timeout 180s ubs crates/fp-join/src/lib.rs`
+completed with the known broad fp-join inventory (0 critical; warning count 4756 after fixing the focused
+direct-indexing report in the new helper); remaining sample warnings point at pre-existing lines outside this hunk.

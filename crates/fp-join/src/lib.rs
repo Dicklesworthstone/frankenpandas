@@ -348,6 +348,51 @@ fn reindex_outer_join_column(
     Ok(Column::new(fp_types::DType::Float64, values)?)
 }
 
+fn coalesce_utf8_contiguous_key_column(
+    left_key_col: &Column,
+    right_key_col: &Column,
+    left_positions: &[Option<usize>],
+    right_positions: &[Option<usize>],
+) -> Option<Column> {
+    let (left_bytes, left_offsets) = left_key_col.as_utf8_contiguous()?;
+    let (right_bytes, right_offsets) = right_key_col.as_utf8_contiguous()?;
+    if left_positions.len() != right_positions.len() {
+        return None;
+    }
+
+    let mut byte_len = 0usize;
+    for (left_pos, right_pos) in left_positions.iter().zip(right_positions.iter()) {
+        let (bytes, offsets, pos) = match (left_pos, right_pos) {
+            (Some(pos), _) => (left_bytes, left_offsets, *pos),
+            (None, Some(pos)) => (right_bytes, right_offsets, *pos),
+            (None, None) => return None,
+        };
+        let end = pos.checked_add(1)?;
+        let start_offset = *offsets.get(pos)?;
+        let end_offset = *offsets.get(end)?;
+        if end_offset < start_offset || end_offset > bytes.len() {
+            return None;
+        }
+        byte_len = byte_len.checked_add(end_offset - start_offset)?;
+    }
+
+    let mut bytes = Vec::with_capacity(byte_len);
+    let mut offsets = Vec::with_capacity(left_positions.len() + 1);
+    offsets.push(0);
+    for (left_pos, right_pos) in left_positions.iter().zip(right_positions.iter()) {
+        let (source_bytes, source_offsets, pos) = match (left_pos, right_pos) {
+            (Some(pos), _) => (left_bytes, left_offsets, *pos),
+            (None, Some(pos)) => (right_bytes, right_offsets, *pos),
+            (None, None) => return None,
+        };
+        let start = *source_offsets.get(pos)?;
+        let end = *source_offsets.get(pos.checked_add(1)?)?;
+        bytes.extend_from_slice(source_bytes.get(start..end)?);
+        offsets.push(bytes.len());
+    }
+    Some(Column::from_utf8_contiguous(bytes, offsets))
+}
+
 enum SharedOptionalUtf8GatherPlan {
     NullableRange {
         null_prefix: usize,
@@ -7643,7 +7688,7 @@ pub fn merge_dataframes_on_with_options(
         None
     };
 
-    let (mut left_positions, mut right_positions, _out_row_keys): MergeRowPositions =
+    let (left_positions, right_positions, _out_row_keys): MergeRowPositions =
         if let Some((lp, rp)) = packed_inner {
             (
                 lp.into_iter().map(Some).collect(),
@@ -7864,16 +7909,25 @@ pub fn merge_dataframes_on_with_options(
                     take_positions_typed(left_key_col, positions)
                 } else {
                     let right_key_col = right_key_columns[*right_key_idx];
-                    let values = left_positions
-                        .iter()
-                        .zip(right_positions.iter())
-                        .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
-                            (Some(pos), _) => left_key_col.values()[*pos].clone(),
-                            (None, Some(pos)) => right_key_col.values()[*pos].clone(),
-                            (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
-                        })
-                        .collect::<Vec<_>>();
-                    Column::from_values(values)?
+                    coalesce_utf8_contiguous_key_column(
+                        left_key_col,
+                        right_key_col,
+                        &left_positions,
+                        &right_positions,
+                    )
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        let values = left_positions
+                            .iter()
+                            .zip(right_positions.iter())
+                            .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
+                                (Some(pos), _) => left_key_col.values()[*pos].clone(),
+                                (None, Some(pos)) => right_key_col.values()[*pos].clone(),
+                                (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
+                            })
+                            .collect::<Vec<_>>();
+                        Column::from_values(values)
+                    })?
                 };
                 insert_merged_output_column(
                     &mut columns,
@@ -14062,6 +14116,90 @@ mod tests {
                 Scalar::Float64(200.0),
                 Scalar::Float64(300.0)
             ]
+        );
+    }
+
+    #[test]
+    fn merge_composite_outer_contiguous_utf8_key_coalesce_matches_scalar_route_blackthrush() {
+        let contiguous_frame =
+            |k1: &[&str], k2: &[&str], value_name: &str, values: &[i64]| -> DataFrame {
+                let index = Index::new(
+                    (0..k1.len())
+                        .map(|row| IndexLabel::Int64(row as i64))
+                        .collect(),
+                );
+                let mut columns = std::collections::BTreeMap::new();
+                columns.insert("k1".to_owned(), contiguous_utf8_column(k1));
+                columns.insert("k2".to_owned(), contiguous_utf8_column(k2));
+                columns.insert(
+                    value_name.to_owned(),
+                    Column::from_i64_values(values.to_vec()),
+                );
+                DataFrame::new_with_column_order(
+                    index,
+                    columns,
+                    vec!["k1".to_owned(), "k2".to_owned(), value_name.to_owned()],
+                )
+                .expect("contiguous frame")
+            };
+        let scalar_frame =
+            |k1: &[&str], k2: &[&str], value_name: &str, values: &[i64]| -> DataFrame {
+                DataFrame::from_dict(
+                    &["k1", "k2", value_name],
+                    vec![
+                        (
+                            "k1",
+                            k1.iter()
+                                .map(|value| Scalar::Utf8((*value).to_owned()))
+                                .collect(),
+                        ),
+                        (
+                            "k2",
+                            k2.iter()
+                                .map(|value| Scalar::Utf8((*value).to_owned()))
+                                .collect(),
+                        ),
+                        (
+                            value_name,
+                            values.iter().copied().map(Scalar::Int64).collect(),
+                        ),
+                    ],
+                )
+                .expect("scalar frame")
+            };
+
+        let left_fast =
+            contiguous_frame(&["b", "a", "c"], &["y", "x", "z"], "left_v", &[20, 10, 30]);
+        let right_fast = contiguous_frame(&["b", "d"], &["y", "w"], "right_v", &[200, 400]);
+        let left_scalar = scalar_frame(&["b", "a", "c"], &["y", "x", "z"], "left_v", &[20, 10, 30]);
+        let right_scalar = scalar_frame(&["b", "d"], &["y", "w"], "right_v", &[200, 400]);
+
+        let fast =
+            merge_dataframes_on(&left_fast, &right_fast, &["k1", "k2"], JoinType::Outer).unwrap();
+        let scalar =
+            merge_dataframes_on(&left_scalar, &right_scalar, &["k1", "k2"], JoinType::Outer)
+                .unwrap();
+
+        for name in ["k1", "k2", "left_v", "right_v"] {
+            assert_eq!(
+                fast.columns.get(name).unwrap().values(),
+                scalar.columns.get(name).unwrap().values(),
+                "column {name}"
+            );
+        }
+        assert!(
+            fast.columns
+                .get("k1")
+                .unwrap()
+                .as_utf8_contiguous()
+                .is_some()
+        );
+        assert!(
+            fast.columns
+                .get("k2")
+                .unwrap()
+                .as_utf8_contiguous()
+                .is_some()
         );
     }
 
