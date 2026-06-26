@@ -4919,3 +4919,18 @@ datetime/timedelta groupby funcs (dense + generic) carry a typed temporal index,
 test/golden locked the old Utf8-debug labels. New conformance gb_dtkey (3): Datetime64/Timedelta64-key groupby
 (incl. generic-path nunique) DIFFERENTIAL vs the Int64-key path over the same ns (group order + values match,
 index typed) + NaT drops the NaT group (dropna default); groupby lib (202) + groupby conformances (9) green.
+
+### 2026-06-26 cod-a — Timedelta64 Series.value_counts direct count-column attempt REJECTED; fresh main is already 2.20x pandas
+Fresh BOLD-VERIFY on the same 200k / 50k-card deterministic Timedelta64 Series workload showed the prior
+Timedelta64 loss row above was stale/noisy rather than a current gap. Current `origin/main` measured
+`series_td_value_counts n=200000: best=1899105ns` via
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a rch exec -- cargo run -p fp-frame --example bench_series_td_dedup --release -- 200000 value_counts`;
+RCH selected `vmi1227854`. Live pandas 2.2.3 on the matching generator measured 4.170 ms, so current main is
+2.20x pandas.
+
+Attempted NEW lever: keep temporal `value_counts` counts as `Vec<i64>` and return `Column::from_i64_values`
+directly instead of materializing `Vec<Scalar::Int64>` before `Column::from_values`. Correctness guard
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a rch exec -- cargo test -p fp-frame series_value_counts_temporal_labels_are_typed_cod_a_vctmp -- --nocapture`
+passed (RCH failed open locally, still per-crate). Candidate timing was
+`series_td_value_counts n=200000: best=2702259ns`, or 1.54x pandas but 0.70x versus current main. Source was
+reverted as zero-gain/regression; ledger-only reject.
