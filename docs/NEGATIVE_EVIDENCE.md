@@ -5261,3 +5261,25 @@ The integer/parity scalarizer is dramatically slower than `f64::round_ties_even`
 float-to-`u64` conversion plus branchy tie handling defeats the hardware/libm path despite avoiding one constructor
 scan. Do not re-chase bounded scalar half-even. Remaining viable lever is still real vector rounding / build-target
 math lowering, or a benchmark-specific domain proof that deletes rounding entirely without per-element integer casts.
+
+### 2026-06-26 BlackThrush — REJECT Series.idxmax/idxmin manual-unrolled lane reducer: ~0.60x vs pandas; source reverted
+No live non-prunable `.scratch`/`.worktrees` bench worktree head was unmerged from `main`, so this was a dig path.
+Fresh `bench_misc2 1000000 12` showed the only remaining non-round losses on current main were `idxmax` / `idxmin`
+and slight `abs`; `nunique`, `pct_change`, `cumprod`, and `cummin` were ahead of pandas. Tested a new
+alien-graveyard/vectorized-execution variant on the existing typed Float64 arg-extrema primitive: replace the
+`chunks_exact(8)` + inner lane loop with a fully manual-unrolled 8-lane scan to reduce loop/control overhead while
+preserving first-occurrence tie semantics.
+
+Bench, per-crate only, `bench_misc2 1000000 12` via
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec`; pandas 2.2.3 local comparator uses the
+same LCG Float64 generator:
+| op | fp current-main sample | fp candidate | pandas | ratio candidate vs pandas | decision |
+|----|------------------------|--------------|--------|---------------------------|----------|
+| idxmax | 428231ns | 379553ns | 229245ns | 0.604x | REVERT |
+| idxmin | 280539ns | 378272ns | 225378ns | 0.596x | REVERT |
+
+The candidate was also slower than the previously landed same-worker `hz2` lane-reducer evidence in this ledger
+(`idxmax=328073ns`, `idxmin=327762ns`). Fully spelling out the eight lanes increased code size / instruction pressure
+without improving the reduction. Source was restored to the existing `chunks_exact(8)` helper before commit. Do not
+re-chase manual unrolling here; the residual needs a different primitive (for example true SIMD reduction or a
+metadata-level answer that avoids scanning).
