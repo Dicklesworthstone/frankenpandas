@@ -5141,3 +5141,22 @@ including the new signed-zero/infinity identity edge test plus explicit overflow
 the witness scan and Series wrapper cost still leave FP ~2.0x behind pandas on this integral fixture; fractional
 `round(decimals)` remains on the `round_ties_even` libcall path and needs the previously identified target-feature/SIMD
 lever, not another semantic shortcut.
+
+### 2026-06-26 BlackThrush — sqrt nullable Float64 owned-validity output: 0.080x -> 0.180x vs pandas (2.25x fp-side WIN); residual scalar sqrt/SIMD-bound
+Targeted the largest remaining math-unary gap that was still source-addressable without target-feature flags:
+`Series.sqrt()` on the 1M mixed-sign Float64 `bench_stransform` fixture. The old typed path wrote the output Vec,
+scanned for NaN, fell back to `from_f64_values`, scanned/build validity again, and copied into `Arc<[f64]>` because
+negative inputs produce NaNs. Added a fused nullable-owned Float64 output primitive that writes values, builds validity
+words, records the finite witness, and moves the Vec into the existing lazy Float64 backing. Routed only sqrt through
+the primitive; NaN-as-missing, signed zero, infinity, and Int64 negative semantics are covered by
+`sqrt_nullable_owned_preserves_nan_missing_semantics_blackthrush`.
+
+Bench, per-crate only, `bench_stransform 1000000 sqrt` via `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec`, same worker hz2:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| sqrt(mixed-sign f64) | 13.494ms | 5.992ms | 1.077ms | 0.080x -> 0.180x | 2.25x |
+
+Conformance GREEN for touched path: `cargo test -p fp-columnar sqrt -- --nocapture` passed the focused sqrt test.
+KEEP PARTIAL because this is a measured same-worker materialization win, but the residual remains ~5.6x behind pandas:
+the hot loop is now scalar `sqrt` plus Series wrapper cost, not NaN materialization. Closing the remaining gap needs
+the previously identified target-feature/SIMD sqrt lever, not another nullable-output rewrite.

@@ -6843,6 +6843,20 @@ impl Column {
         }
     }
 
+    fn from_f64_values_owned_with_validity(
+        data: Vec<f64>,
+        validity: ValidityMask,
+        all_finite: Option<bool>,
+    ) -> Self {
+        debug_assert_eq!(data.len(), validity.len());
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_owned_with_finite(data, all_finite),
+            validity,
+            data: None,
+        }
+    }
+
     /// Build an all-valid Float64 column from immutable chunks that are already
     /// in output row order. The caller must have proven that every value in
     /// every chunk is non-NaN; otherwise pandas missing-value semantics require
@@ -15389,7 +15403,7 @@ impl Column {
 
     /// Square root of numeric values. Matches numpy's sqrt ufunc.
     pub fn sqrt(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary(f64::sqrt) {
+        if let Some(out) = self.typed_float_unary_nullable_owned(f64::sqrt) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -15890,6 +15904,58 @@ impl Column {
             ));
         }
         None
+    }
+
+    /// `typed_float_unary`, but fuses output validity construction with the map
+    /// and moves the hot output Vec even when the operation creates NaNs.
+    ///
+    /// This targets operations like `sqrt`/`log` on mixed-sign inputs: the
+    /// ordinary owned path writes the Vec, scans for NaN, falls back to
+    /// `from_f64_values`, scans again, then copies into `Arc<[f64]>`. Here the
+    /// same NaN-as-missing mask is built while writing the output, and the Vec is
+    /// kept in the move-backed Float64 representation.
+    fn typed_float_unary_nullable_owned<F: Fn(f64) -> f64>(&self, f: F) -> Option<Self> {
+        let len = self.len();
+        let mut out = Vec::with_capacity(len);
+        let mut validity_words = vec![0_u64; len.div_ceil(64)];
+        let mut all_valid = true;
+        let mut all_finite = true;
+
+        if let Some(data) = self.as_f64_slice() {
+            for (idx, &x) in data.iter().enumerate() {
+                let y = f(x);
+                all_finite &= y.is_finite();
+                if y.is_nan() {
+                    all_valid = false;
+                } else {
+                    validity_words[idx / 64] |= 1_u64 << (idx % 64);
+                }
+                out.push(y);
+            }
+        } else {
+            let data = self.as_i64_slice()?;
+            for (idx, &x) in data.iter().enumerate() {
+                let y = f(x as f64);
+                all_finite &= y.is_finite();
+                if y.is_nan() {
+                    all_valid = false;
+                } else {
+                    validity_words[idx / 64] |= 1_u64 << (idx % 64);
+                }
+                out.push(y);
+            }
+        }
+
+        let validity = if all_valid {
+            ValidityMask::all_valid(len)
+        } else {
+            ValidityMask::from_words(validity_words, len)
+        };
+        Some(Self::from_f64_values_owned_with_validity(
+            out,
+            validity,
+            Some(all_finite),
+        ))
     }
 
     /// `typed_float_unary` for maps that NEVER introduce NaN and preserve
@@ -22069,6 +22135,37 @@ mod tests {
             let infinite_factor = Column::from_f64_values(vec![f64::INFINITY]);
             let rounded = infinite_factor.round(400).expect("round infinite factor");
             assert!(rounded.values()[0].is_missing());
+        }
+
+        #[test]
+        fn sqrt_nullable_owned_preserves_nan_missing_semantics_blackthrush() {
+            let input = Column::from_f64_values(vec![4.0, -1.0, -0.0, 0.0, f64::INFINITY]);
+            let output = input.sqrt().expect("sqrt");
+            assert_eq!(output.dtype(), DType::Float64);
+            assert_eq!(output.values().len(), 5);
+            assert!(
+                output.as_f64_slice().is_none(),
+                "NaN output must be nullable"
+            );
+            assert!(output.validity().get(0));
+            assert!(!output.validity().get(1));
+            assert!(output.validity().get(2));
+            assert!(output.validity().get(3));
+            assert!(output.validity().get(4));
+            assert_eq!(output.values()[0], Scalar::Float64(2.0));
+            assert!(output.values()[1].is_missing());
+            assert_eq!(
+                output.values()[2].to_f64().map(f64::to_bits),
+                Ok((-0.0_f64).to_bits())
+            );
+            assert_eq!(output.values()[3], Scalar::Float64(0.0));
+            assert_eq!(output.values()[4], Scalar::Float64(f64::INFINITY));
+
+            let ints = Column::from_i64_values(vec![9, -1]);
+            let ints_out = ints.sqrt().expect("int sqrt");
+            assert_eq!(ints_out.values()[0], Scalar::Float64(3.0));
+            assert!(ints_out.values()[1].is_missing());
+            assert!(!ints_out.validity().get(1));
         }
 
         #[test]
