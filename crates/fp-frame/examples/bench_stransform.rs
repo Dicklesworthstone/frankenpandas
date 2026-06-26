@@ -30,6 +30,43 @@ fn main() {
     let mut best = u128::MAX;
     for _ in 0..6 {
         let t = std::time::Instant::now();
+        // Isolation probes (no Series/Column): measure just the work to attribute
+        // cumsum's cost between the prefix-scan and the output construction.
+        if op == "rawscan" {
+            let data = s.column().as_f64_slice().unwrap();
+            let mut acc = 0.0_f64;
+            let out: Vec<f64> = data
+                .iter()
+                .map(|&v| {
+                    acc += v;
+                    acc
+                })
+                .collect();
+            std::hint::black_box(&out);
+            let e = t.elapsed().as_nanos();
+            if e < best {
+                best = e;
+            }
+            continue;
+        }
+        if op == "rawscan_arc" {
+            let data = s.column().as_f64_slice().unwrap();
+            let mut acc = 0.0_f64;
+            let out: Vec<f64> = data
+                .iter()
+                .map(|&v| {
+                    acc += v;
+                    acc
+                })
+                .collect();
+            let arc: std::sync::Arc<[f64]> = std::sync::Arc::from(out);
+            std::hint::black_box(&arc);
+            let e = t.elapsed().as_nanos();
+            if e < best {
+                best = e;
+            }
+            continue;
+        }
         let r = match op {
             "cumsum" => s.cumsum(),
             "cummax" => s.cummax(),

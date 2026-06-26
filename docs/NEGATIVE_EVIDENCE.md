@@ -5015,3 +5015,25 @@ f64 arc-copy-on-produce floor (from_f64_values -> Arc::from(Vec) realloc) PLUS a
 cross 1.0x. The real fix stays the deferred Vec-backed/Arc<Vec<f64>> ScalarValues variant (structural fp-columnar).
 bench_str_extract + bench_stransform (now defaults to a pandas-fair unit-range index; pass "mat" for materialized)
 committed for reproducibility. No source change (the temporal-TypedDedupCol attempt last cycle was zero-gain).
+
+### 2026-06-26 BlackThrush — ROOT-CAUSE + spec: f64 arc-copy floor is Arc::from(Vec) fresh-alloc faults = ~5.7ms (NOT ~1ms); Vec-move variant = ~3-4x lever (the biggest remaining gap)
+Decomposed cumsum @1M f64 on a quiet box (load ~9) with isolation probes in bench_stransform (rawscan = prefix-sum
+into a Vec only; rawscan_arc = that + Arc::from(out); cumsum = full): rawscan 0.71ms, rawscan_arc 6.47ms, cumsum
+8.2ms. So Arc::from(Vec<f64>) costs ~5.7ms — ~70% of cumsum — and the prefix-scan is only 0.71ms. This OVERTURNS
+the prior "arc-copy ~1ms / contention-inflated" reading: the cost is a FRESH 8MB Arc<[f64]> allocation copied from
+the Vec each call, dominated by first-touch PAGE FAULTS on the cold buffer (the source Vec is warm/allocator-reused
+across iters; the Arc buffer is freed+re-allocated cold every call). ~1.4 GB/s effective confirms fault-bound, not
+bandwidth-bound.
+
+THE LEVER (move-not-copy): add ScalarValues::LazyAllValidFloat64Vec { data: Arc<Vec<f64>>, .. } and make
+Column::from_f64_values build it via Arc::new(vec) (MOVES the warm buffer — no fresh alloc, no copy, no faults);
+as_f64_slice returns &data[..]. Estimated cumsum ~8.2ms -> ~2ms = 0.5x -> ~2x pandas; FLIPS the whole f64-produce
+family (abs 0.35x, cumsum/cummax/cummin/cumprod ~0.5x, diff 0.67x, clip — all arc-copy-bound). This is the single
+biggest remaining gap vs pandas.
+
+BLOCKER (why not landed this cycle): the change touches 41+ exhaustive ScalarValues match sites (to_scalars/len/
+validity/clone/every accessor) in fp-columnar, which is HOT and PEER-CONTENDED (active concurrent commits). Adding
+a variant there in a 60-min shared-checkout window risks rebase conflicts + a missed arm across the full f64
+conformance surface. Needs a DEDICATED, non-contended fp-columnar pass (or the fp-columnar owner). Isolation bench
+committed (bench_stransform rawscan/rawscan_arc) so the win can be re-confirmed and the variant landed surgically.
+No source change this cycle (the prefix-scan itself is already optimal at 0.71ms).
