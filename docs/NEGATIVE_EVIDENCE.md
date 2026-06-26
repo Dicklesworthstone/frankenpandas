@@ -5058,3 +5058,20 @@ Isolation probe confirmed: rawscan_arc (Arc::from copy) 8.08ms vs rawscan (Vec o
 copy, now eliminated. Conformance GREEN: fp-columnar 436, fp-frame lib 3103, 49 fp-frame conformance binaries, 0
 failed. FOLLOW-UP (infra now landed, each a 1-line from_f64_values->from_f64_values_owned): abs (0.35x, the worst),
 clip, diff, and other all-valid-f64-producing ops.
+
+### 2026-06-26 BlackThrush — extend f64 move-not-copy to the typed-float-unary family: sign 0.07x->1.47x WIN, abs 0.02x->~parity (43-51x fp-side), bit-identical
+Follow-up to the cumsum/cummax move-not-copy win: routed Column::from_f64_all_valid_with_finite_opt (the all-valid
+f64 producer used by abs/fabs/sign + typed_float_unary => sqrt/exp/log/sin/cos/floor/ceil/...) through the owned
+Vec move (Arc::new, witness-carrying) instead of lazy_all_valid_float64_with_finite's Arc::from(Vec) cold-realloc-
+copy. Caller contract is all-valid (no NaN), so the move is always safe here — no NaN scan. Bit-identical (same
+all-valid values + all_finite witness).
+
+Bench, per-crate only, bench_stransform 1M f64, pandas 2.2.3 best-of-8:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| sign | ~8ms (arc-copy) | 0.37ms | 0.54ms | ~0.07x -> 1.47x WIN | ~22x |
+| abs  | 8.14ms | 0.19ms | 0.17ms | 0.02x -> ~0.90x (parity) | ~43x |
+abs's residual is pandas' SIMD vfabs (0.17ms) vs fp's scalar map — now compute-bound, the arc-copy catastrophe
+(fp was 50x SLOWER) is gone. Conformance GREEN: fp-columnar 436, fp-frame lib 3103, 0 failed. NEW finding (separate
+path, follow-up): Series.round(decimals) is 14.4ms vs pandas 0.56ms = 0.039x — a slow per-element round-compute
+loop (NOT the arc-copy path); needs its own lever.

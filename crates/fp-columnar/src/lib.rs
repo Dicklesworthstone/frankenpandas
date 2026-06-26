@@ -2359,9 +2359,16 @@ impl ScalarValues {
     /// the take_positions/binary/witness zero-copy fast paths (which key on that
     /// variant) are unaffected.
     fn lazy_all_valid_float64_owned(data: Vec<f64>) -> Self {
+        Self::lazy_all_valid_float64_owned_with_finite(data, None)
+    }
+
+    /// Witness-carrying [`Self::lazy_all_valid_float64_owned`]: MOVE the owned Vec
+    /// AND seed the all-finite witness (so abs/round/etc. carry their input
+    /// finiteness for free, exactly as the `Arc::from` path did).
+    fn lazy_all_valid_float64_owned_with_finite(data: Vec<f64>, all_finite: Option<bool>) -> Self {
         Self::LazyAllValidFloat64Vec {
             data: Arc::new(data),
-            all_finite: OnceLock::new(),
+            all_finite: Self::bool_once_lock(all_finite),
             values: OnceLock::new(),
         }
     }
@@ -6823,10 +6830,14 @@ impl Column {
     /// guarantees the buffer has no NaN (NaN ⇒ missing under pandas semantics);
     /// `from_f64_values` is the scanning constructor for unproven input.
     fn from_f64_all_valid_with_finite_opt(data: Vec<f64>, all_finite: Option<bool>) -> Self {
+        // Caller has proven all-valid (no NaN), so MOVE the hot output Vec into
+        // the backing (Arc::new) instead of lazy_all_valid_float64_with_finite's
+        // Arc::from(Vec) cold-realloc-copy (~5.7ms/1M). Flips abs/fabs/round/neg
+        // and the other all-valid f64 producers from the arc-copy floor.
         let len = data.len();
         Self {
             dtype: DType::Float64,
-            values: ScalarValues::lazy_all_valid_float64_with_finite(data, all_finite),
+            values: ScalarValues::lazy_all_valid_float64_owned_with_finite(data, all_finite),
             validity: ValidityMask::all_valid(len),
             data: None,
         }

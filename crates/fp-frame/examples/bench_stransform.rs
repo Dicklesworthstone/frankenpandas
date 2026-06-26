@@ -77,6 +77,9 @@ fn main() {
             "shift" => s.shift(1),
             "clip" => s.clip(Some(-1000.0), Some(1000.0)),
             "rank" => s.rank("average", true, "keep"),
+            "abs" => s.abs(),
+            "round" => s.round(2),
+            "sign" => s.sign(),
             _ => panic!("op"),
         };
         std::hint::black_box(r.unwrap());
