@@ -4973,3 +4973,19 @@ example builds; cumsum best-of-6 varied 9.3-12.5ms run-to-run; load avg high). A
 new_uninit_slice + fill, avoiding the Vec->Arc realloc) saves only the ~1ms copy and still would not cross 1.0x;
 the real fix is the deferred Vec-backed/Arc<Vec<f64>> ScalarValues variant (structural fp-columnar, peer-contended).
 DON'T re-chase on a loaded box. No source change. bench committed for quiet-box re-verification.
+
+### 2026-06-26 cod-a — DataFrame all/any(axis=1) typed Bool output: all 0.65x LOSS -> 1.95x WIN, any 7.93x WIN
+Fresh BOLD-VERIFY on 500k x 10 all-valid Float64 frame, matching `bench_df 500000 10 30` generator, found
+`DataFrame.all(axis=1)` was still losing to pandas solely through Bool output materialization. Live pandas 2.2.3:
+`all(axis=1)` 5.861 ms, `any(axis=1)` 5.587 ms. Current-main FP with the new bench lane:
+`all_axis1=9046396ns`, `any_axis1=5151824ns` (all 0.65x pandas; any 1.08x pandas).
+
+Kept lever: the typed all-Float64 fast paths now collect raw `bool` values and emit
+`Column::from_bool_values` directly instead of constructing `Vec<Scalar::Bool>` and re-inferring through
+`Column::from_values`. This is behavior-identical under the existing gate: every input column is an all-valid,
+no-NaN Float64 slice, so the old scalar truthiness arm is exactly `v != 0.0`, and the output is an all-valid Bool
+Series with the same index/name. Candidate timing:
+`all_axis1=3003191ns`, `any_axis1=704397ns`; ratios are all 1.95x faster than pandas and 3.01x FP-side faster,
+any 7.93x faster than pandas and 7.31x FP-side faster. Focused guards:
+`cargo test -p fp-frame all_axis1 -- --nocapture` and `cargo test -p fp-frame any_axis1 -- --nocapture` green
+(RCH failed open locally, still per-crate).
