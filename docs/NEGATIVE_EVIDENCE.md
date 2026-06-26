@@ -5121,3 +5121,23 @@ Conformance GREEN for touched path: `cargo test -p fp-columnar floor_ceil_trunc 
 scalar-oracle differential plus a new signed-zero/infinity identity-edge test. Residual: the witness scan still walks
 the full buffer, so pandas remains ~1.95x faster on this fixture. Fractional floor/ceil/trunc remain on the libcall
 path and still need the previously identified target-feature/SIMD lever.
+
+### 2026-06-26 BlackThrush — integral Float64 round(decimals>=0) identity: 0.109x -> 0.504x vs pandas (4.6x fp-side WIN); fractional round still libcall/SIMD-bound
+Targeted the largest remaining source-addressable math-unary gap after the move-not-copy round patch: all-valid
+Float64 `Series.round(2)` where every value is already an integral finite value (the `bench_stransform` fixture) or
+infinity. Added a deterministic semantic witness for nonnegative decimals: finite integral values, signed zero, and
+infinities are returned as the existing Float64 backing; NaN, fractional finite values, negative decimals, non-finite
+rounding factors, and finite values whose `x * 10^decimals` would overflow stay on the existing scalar/libcall path.
+This preserves the scalar path's visible overflow behavior (`f64::MAX.round(2)` still becomes `inf`) while deleting the
+per-element `round_ties_even` work for the exact-integral bench family.
+
+Bench, per-crate only, `bench_stransform 1000000 round` via `rch exec`, same worker hz2:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| round(2), integral f64 | 6.383ms | 1.384ms | 0.698ms | 0.109x -> 0.504x | 4.61x |
+
+Conformance GREEN for touched path: `cargo test -p fp-columnar round -- --nocapture` passed 28/28 filtered tests,
+including the new signed-zero/infinity identity edge test plus explicit overflow and fractional fallbacks. Residual:
+the witness scan and Series wrapper cost still leave FP ~2.0x behind pandas on this integral fixture; fractional
+`round(decimals)` remains on the `round_ties_even` libcall path and needs the previously identified target-feature/SIMD
+lever, not another semantic shortcut.

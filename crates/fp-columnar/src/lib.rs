@@ -15917,7 +15917,7 @@ impl Column {
         None
     }
 
-    fn f64_floor_ceil_trunc_identity(x: f64) -> bool {
+    fn f64_integral_or_infinite_identity(x: f64) -> bool {
         const SIGN_MASK: u64 = 0x8000_0000_0000_0000;
         const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
         const FRAC_MASK: u64 = 0x000f_ffff_ffff_ffff;
@@ -15944,7 +15944,43 @@ impl Column {
 
     fn typed_float_integral_identity(&self) -> Option<Self> {
         let data = self.as_f64_slice()?;
-        if data.iter().all(|&x| Self::f64_floor_ceil_trunc_identity(x)) {
+        if data
+            .iter()
+            .all(|&x| Self::f64_integral_or_infinite_identity(x))
+        {
+            return Some(self.clone());
+        }
+        None
+    }
+
+    fn f64_round_nonnegative_decimals_identity(x: f64, factor: f64) -> bool {
+        const SIGN_MASK: u64 = 0x8000_0000_0000_0000;
+        const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+        const FRAC_MASK: u64 = 0x000f_ffff_ffff_ffff;
+        const FRAC_BITS: i32 = 52;
+
+        if !factor.is_finite() {
+            return false;
+        }
+        let bits = x.to_bits();
+        let exp = (bits & EXP_MASK) >> FRAC_BITS;
+        let frac = bits & FRAC_MASK;
+        if exp == 0x7ff {
+            return frac == 0;
+        }
+        let abs_bits = bits & !SIGN_MASK;
+        if abs_bits != 0 && x.abs() > f64::MAX / factor {
+            return false;
+        }
+        Self::f64_integral_or_infinite_identity(x)
+    }
+
+    fn typed_float_round_nonnegative_decimals_identity(&self, factor: f64) -> Option<Self> {
+        let data = self.as_f64_slice()?;
+        if data
+            .iter()
+            .all(|&x| Self::f64_round_nonnegative_decimals_identity(x, factor))
+        {
             return Some(self.clone());
         }
         None
@@ -17075,6 +17111,11 @@ impl Column {
             return Self::new(DType::Int64, out);
         }
         let factor = 10f64.powi(decimals);
+        if decimals >= 0
+            && let Some(out) = self.typed_float_round_nonnegative_decimals_identity(factor)
+        {
+            return Ok(out);
+        }
         // Typed fast path (mirror of `abs`): an all-valid Float64 column rounds
         // over its contiguous buffer and re-ingests typed, skipping the lazy
         // Scalar materialization, the 32 B/cell Vec<Scalar>, and Column::new's
@@ -21986,6 +22027,48 @@ mod tests {
                     Scalar::Float64(-20.0)
                 ]
             );
+        }
+
+        #[test]
+        fn round_nonnegative_decimals_integral_float_identity_preserves_edges_blackthrush() {
+            let expected = vec![
+                f64::NEG_INFINITY,
+                -9.0,
+                -0.0,
+                0.0,
+                7.0,
+                4_503_599_627_370_496.0,
+                f64::INFINITY,
+            ];
+            let input = Column::from_f64_values(expected.clone());
+            let output = input.round(2).expect("round");
+            let got = output.as_f64_slice().expect("all-valid float output");
+            assert_eq!(got.len(), expected.len(), "round length drift");
+            for (pos, (&got, &expected)) in got.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    expected.to_bits(),
+                    "round pos={pos}: got {got:?}, expected {expected:?}"
+                );
+            }
+
+            let huge = Column::from_f64_values(vec![f64::MAX]);
+            let rounded = huge.round(2).expect("round huge");
+            assert_eq!(
+                rounded.as_f64_slice().expect("all-valid huge output")[0],
+                f64::INFINITY
+            );
+
+            let fractional = Column::from_f64_values(vec![1.234]);
+            let rounded = fractional.round(2).expect("round fractional");
+            assert_eq!(
+                rounded.as_f64_slice().expect("all-valid fractional output")[0],
+                1.23
+            );
+
+            let infinite_factor = Column::from_f64_values(vec![f64::INFINITY]);
+            let rounded = infinite_factor.round(400).expect("round infinite factor");
+            assert!(rounded.values()[0].is_missing());
         }
 
         #[test]
