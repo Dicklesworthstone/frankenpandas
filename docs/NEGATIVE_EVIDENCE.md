@@ -5178,3 +5178,22 @@ Conformance GREEN for touched path: `cargo test -p fp-columnar log_nullable_owne
 passed. KEEP PARTIAL because this is a measured same-worker materialization win and almost closes the pandas gap, but
 the residual remains ~1.13x behind pandas: the hot loop is now scalar `ln`/Series wrapper cost, not NaN materialization.
 Closing the rest needs the previously identified target-feature/SVML-style log lever, not another output-constructor rewrite.
+
+### 2026-06-26 BlackThrush — REJECT Datetime64 unique lattice bitset: 0.637x vs pandas; source reverted
+Targeted the remaining Datetime64 `Series.unique()` residual from the dedup ledger with an alien-graveyard-style
+proof-carrying direct-address lattice: detect all-valid/no-NaT temporal grids, compute the timestamp step by gcd, and
+dedup first-seen slots with a bounded bitset before falling back to the existing `FxHashSet<i64>` path. The fixture is
+exactly a 1-minute timestamp lattice, so this tested the intended best case rather than a fallback.
+
+Bench, per-crate only, `bench_series_dt_dedup 200000 unique` via
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec`; pandas 2.2.3 local comparator uses the
+same splitmix timestamp generator:
+| op | fp candidate | pandas | ratio vs pandas | decision |
+|----|--------------|--------|-----------------|----------|
+| Datetime64 Series.unique() | 3.731ms | 2.377ms | 0.637x | ❌ REVERT |
+
+The candidate also regressed against the prior measured FP path recorded in this ledger for the same lane
+(~3.01ms after the sparse temporal hash path). The extra gcd/min/max lattice proof pass costs more than the saved hash
+work at 200k rows / 50k distinct timestamps, and output still boxes one `Scalar::Datetime64` per distinct value. Source
+was restored to the existing hash path. Next viable lever is a typed unique-return surface or a column/array result path
+that avoids distinct `Scalar` output boxing; another membership-plan variant is unlikely to close the pandas gap.
