@@ -4934,3 +4934,16 @@ directly instead of materializing `Vec<Scalar::Int64>` before `Column::from_valu
 passed (RCH failed open locally, still per-crate). Candidate timing was
 `series_td_value_counts n=200000: best=2702259ns`, or 1.54x pandas but 0.70x versus current main. Source was
 reverted as zero-gain/regression; ledger-only reject.
+### 2026-06-26 BlackThrush — DataFrame.median(axis=1): 1.32x -> 5.17x vs pandas @500k×20 (bit-identical)
+A full axis=1 reduction sweep (500k rows × 20 f64 cols) confirmed the surface is dominated — sum 2.4x, mean 2.8x,
+min/max 2.5x, std 8.8x, var 8.6x, skew 8.3x, count 234x WINS — EXCEPT median, the softest at 1.32x and the lone
+axis=1 op still on the slow reduce_rows (per-row Scalar gather) AND doing a full per-row sort. Routed it through the
+typed reduce_rows_func_f64 (gather the column f64 slices once, no Scalar) + QUICKSELECT (select_nth_unstable_by —
+median needs only the middle order statistic(s), O(k) avg vs O(k log k); even count takes the max of the left
+partition as the lower-middle). Bit-identical to the full-sort closure for non-NaN rows (same two middle values);
+a NaN/missing or non-Float64 frame returns None and keeps the generic per-row path.
+
+Bench, per-crate only, CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc, bench_axis1 n=500000 ncols=20
+all-f64, pandas 2.2.3 best-of-6: median 428.65ms -> 109.15ms (3.9x fp-side); pandas 564.54ms, so 1.32x -> 5.17x.
+Correctness: new conformance median_axis1_conformance (quickselect == full-sort oracle for ncols 1/2/3/7/8/20/21,
+duplicate-heavy + negative rows) + median_axis lib (1) green. (The other axis=1 reductions already WIN — no change.)
