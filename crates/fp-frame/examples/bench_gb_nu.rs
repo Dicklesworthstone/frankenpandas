@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, time::Instant};
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
-use fp_index::{Index, IndexLabel};
+use fp_index::Index;
 fn sm(i: usize, s: u64) -> u64 {
     let mut h = (i as u64).wrapping_add(s).wrapping_mul(0x9E3779B97F4A7C15);
     h = (h ^ (h >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
