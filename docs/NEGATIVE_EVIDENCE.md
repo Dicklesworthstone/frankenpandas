@@ -4890,3 +4890,20 @@ Correctness: new conformance series_td_dedup (2: first-occurrence oracle for nun
 drop_duplicates + NaT-bail) + dedup-family lib (71, incl. unchanged Datetime64 conformance after the shared-core
 refactor) green. Remaining Series-over-temporal loss: value_counts (both dtypes, output-materialization floor —
 deferred).
+
+### 2026-06-26 cod-a — Series.value_counts over Datetime64: 0.36x LOSS -> 2.15x WIN @200k; Timedelta64 sibling still loss
+Follow-up verification after `addcab6af` landed the typed temporal value_counts materializer on main. Current
+`origin/main` already routes all-valid Datetime64/Timedelta64 Series.value_counts through an i64-ns `FxHashMap`
+tally and typed temporal index labels, avoiding the old `column.values()` + `ScalarKey` + string-label output
+path. BOLD-VERIFY datetime on the same `rch` worker (`vmi1227854`) flips cleanly: current-main baseline before the
+typed output path was 11.108 ms versus pandas 3.974 ms (0.36x); after `addcab6af` the same bench is 1.846 ms
+versus pandas 3.974 ms (2.15x, 6.0x FP-side). Focused guard:
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a rch exec -- cargo test -p fp-frame series_value_counts_temporal_labels_are_typed_cod_a_vctmp -- --nocapture`
+green; per-crate bench build gate
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a rch exec -- cargo bench -p fp-frame --no-run`
+green.
+
+Measured Timedelta64 sibling is NOT a pandas win and should not be claimed closed: after the same typed path,
+`bench_series_td_dedup 200000 value_counts` measured 10.811 ms versus pandas 3.999 ms (0.37x) on `vmi1264463`.
+Do not spend another wrapper pass here; the remaining Timedelta64 value_counts gap is still output/index
+materialization and needs a deeper TimedeltaIndex/Series output primitive.
