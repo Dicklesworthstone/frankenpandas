@@ -4960,3 +4960,16 @@ Bench, per-crate only, CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpanda
 all-f64, pandas 2.2.3 best-of-6: median 428.65ms -> 109.15ms (3.9x fp-side); pandas 564.54ms, so 1.32x -> 5.17x.
 Correctness: new conformance median_axis1_conformance (quickselect == full-sort oracle for ncols 1/2/3/7/8/20/21,
 duplicate-heavy + negative rows) + median_axis lib (1) green. (The other axis=1 reductions already WIN — no change.)
+
+### 2026-06-26 BlackThrush — Series transforms sweep: cumulative f64 = arc-copy floor (don't re-chase); pct_change/clip/rank/shift WIN
+Probed Series transforms @1M f64 (new bench_stransform). WINS: pct_change 12.6x (1.76ms vs 22.28ms — pandas' is
+slow), clip 1.61x (13.6 vs 21.9ms), rank 4.0x (45.7 vs 182.9ms), shift 1.11x. LOSSES (apparent): cumsum/cummax/
+cummin/cumprod ~0.33-0.52x, diff ~0.40x. Verified the typed prefix-scan path IS firing (as_f64_slice covers the
+from_f64_values LazyAllValidFloat64 backing; cumsum runs `data.iter().scan(acc).collect::<Vec<f64>>()` +
+from_f64_values, NOT the Scalar path). So the residual is the DOCUMENTED f64 arc-copy-on-produce floor
+(from_f64_values -> Arc::from(Vec) reallocates+copies the 8MB output; see "f64 Arc copy-on-produce" memory, prior
+quiet-box reading 0.86x). The 0.33-0.52x here is that floor AMPLIFIED by heavy box contention this session (298s
+example builds; cumsum best-of-6 varied 9.3-12.5ms run-to-run; load avg high). A direct-Arc<[f64]>-build (Arc::
+new_uninit_slice + fill, avoiding the Vec->Arc realloc) saves only the ~1ms copy and still would not cross 1.0x;
+the real fix is the deferred Vec-backed/Arc<Vec<f64>> ScalarValues variant (structural fp-columnar, peer-contended).
+DON'T re-chase on a loaded box. No source change. bench committed for quiet-box re-verification.
