@@ -4617,3 +4617,22 @@ contiguous-Utf8 key + f64 value, pandas 2.2.3 same key distribution best-of-6:
 sgb_moment_utf8_conformance (4) asserts contiguous-Utf8 dense == scalar-backed-Utf8 generic agg_values_scalar for
 sem/skew/kurt bit-for-bit incl. small-group NaN branches; groupby_sem/skew/kurtosis (7) + moments_typed (3) +
 skew_kurt_typed (4) green.
+
+### 2026-06-26 BlackThrush — Series.str.slice routes to contiguous apply_str_utf8: 1.31x->6.64x vs pandas @1M (bit-identical)
+A full str.* sweep (1M contiguous Utf8) found the whole accessor surface already dominates pandas (len 12.7x,
+contains 124x, count 5.9x, splitget 5.7x, upper/lower/title/capitalize/zfill/replace 2-3.4x) — EXCEPT str.slice at
+1.31x, the last string-PRODUCING op still on the slow apply_str path: it built a Vec<Scalar::Utf8> (a 32-byte enum
++ an owned String per row) then re-packed via Column::from_values. Its peers (lower/upper/zfill/title/capitalize/
+strip/replace) already route through apply_str_utf8, which writes each row's bytes into ONE rolling buffer + offsets
+(zero Scalar materialization; for a contiguous input it transforms byte ranges in place). Converted slice's closure
+to (write: &str,&mut Vec<u8> | fallback: &str->Scalar): the write arm appends the forward-ASCII byte span directly
+(no owned String) and reuses python_slice_chars for the general step/non-ASCII arm; the fallback preserves the
+Scalar-backed / missing-value path. Bit-identical: identical sliced bytes at every slot.
+
+Bench, per-crate only, CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc, bench_str_probe 1M
+contiguous-Utf8, pandas 2.2.3 same data best-of-6: str.slice(0,5) fp 79.49ms -> 15.68ms (5.07x fp-side); pandas
+104.04ms, so ratio 1.31x -> 6.64x WIN. Correctness: new differential conformance str_slice_contiguous_conformance
+(2) asserts contiguous-input (zero-copy branch) == scalar-backed-input (write/fallback branch) bit-for-bit across
+forward-ASCII / negative / step / reverse / multi-byte-char cases and that scalar nulls are preserved; lib str_slice
++ str_slice_negative_and_step + slice_replace + series_str_slice_golden_basic (5) green. (replace was already on
+apply_str_utf8; its 2.10x is the inherent per-row s.replace temp-String cost, not a slow-path artifact.)
