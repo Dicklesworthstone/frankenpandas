@@ -2170,6 +2170,29 @@ impl Index {
     /// a dense bitset when the value span is bounded (the membership test then
     /// fits in L2: 1 bit/slot vs the 16-byte pointer-keyed map entry that also
     /// chases into the 32-byte enum vector), else an inline-key `FxHashSet<i64>`.
+    /// Extract the raw ns vector when EVERY label is the requested temporal
+    /// variant (`Datetime64` when `datetime`, else `Timedelta64`); `None` on the
+    /// first mismatch OR an empty input (so a degenerate empty set-op keeps the
+    /// generic fallback's dtype). Lets the temporal index reuse the i64 kernels
+    /// (`membership_filter_i64` / `union_i64`) — Datetime64/Timedelta64 are
+    /// ns-backed but `int64_view()` only matches `IndexLabel::Int64`, so without
+    /// this they fall to the pointer-key `FxHashMap<&IndexLabel>` path.
+    fn all_temporal_ns(labels: &[IndexLabel], datetime: bool) -> Option<Vec<i64>> {
+        if labels.is_empty() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(labels.len());
+        for label in labels {
+            match (datetime, label) {
+                (true, IndexLabel::Datetime64(ns)) | (false, IndexLabel::Timedelta64(ns)) => {
+                    out.push(*ns);
+                }
+                _ => return None,
+            }
+        }
+        Some(out)
+    }
+
     fn membership_filter_i64(a: &[i64], b: &[i64], keep_present: bool) -> Vec<i64> {
         let mut out: Vec<i64> = Vec::new();
         if a.is_empty() {
@@ -3034,6 +3057,30 @@ impl Index {
             result.name = self.shared_name(other);
             return result;
         }
+        // Datetime64 / Timedelta64 i64-keyed intersection (unsorted temporal
+        // indexes miss the sorted-merge path and int64_view's Int64-only gate, so
+        // they fell to the pointer-key FxHashMap — intersection over an UNSORTED
+        // DatetimeIndex was 0.37x pandas). Reuse membership_filter_i64 over the ns
+        // and rebuild the temporal dtype. Bit-identical: same self-order
+        // first-occurrence kept-present labels, inline i64 keys.
+        if let (Some(a_ns), Some(b_ns)) = (
+            Self::all_temporal_ns(self.labels(), true),
+            Self::all_temporal_ns(other.labels(), true),
+        ) {
+            let mut result =
+                Self::from_datetime64(Self::membership_filter_i64(&a_ns, &b_ns, true));
+            result.name = self.shared_name(other);
+            return result;
+        }
+        if let (Some(a_ns), Some(b_ns)) = (
+            Self::all_temporal_ns(self.labels(), false),
+            Self::all_temporal_ns(other.labels(), false),
+        ) {
+            let mut result =
+                Self::from_timedelta64(Self::membership_filter_i64(&a_ns, &b_ns, true));
+            result.name = self.shared_name(other);
+            return result;
+        }
         // Typed all-Utf8 fast path (Utf8 sibling of membership_filter_i64): both
         // sides are pure `IndexLabel::Utf8` (no Null), so hash `&str` directly
         // (skipping the FxHashMap<&IndexLabel> enum load) AND dedup via a "matched"
@@ -3268,6 +3315,26 @@ impl Index {
                 &a_i64, &b_i64, false,
             )));
         }
+        // Datetime64 / Timedelta64 i64-keyed difference (unsorted temporal indexes
+        // miss sorted-merge + the Int64-only int64_view, so they hit the
+        // pointer-key map — difference over an UNSORTED DatetimeIndex was 0.57x
+        // pandas). Reuse membership_filter_i64(keep_present=false). Bit-identical:
+        // self-order, labels not in other, first-occurrence dedup, inline i64 keys.
+        if let (Some(a_ns), Some(b_ns)) = (
+            Self::all_temporal_ns(self.labels(), true),
+            Self::all_temporal_ns(other.labels(), true),
+        ) {
+            return self
+                .propagate_name(Self::from_datetime64(Self::membership_filter_i64(&a_ns, &b_ns, false)));
+        }
+        if let (Some(a_ns), Some(b_ns)) = (
+            Self::all_temporal_ns(self.labels(), false),
+            Self::all_temporal_ns(other.labels(), false),
+        ) {
+            return self.propagate_name(Self::from_timedelta64(Self::membership_filter_i64(
+                &a_ns, &b_ns, false,
+            )));
+        }
         // Typed all-Utf8 fast path: ONE FxHashMap<&str,()> seeded with other's
         // labels doubles as membership AND self-dedup — `insert(s).is_none()` is
         // true only when s is neither in other nor already emitted, so there is no
@@ -3318,6 +3385,32 @@ impl Index {
             let mut labels = Self::membership_filter_i64(&a_i64, &b_i64, false);
             labels.extend(Self::membership_filter_i64(&b_i64, &a_i64, false));
             let mut result = Self::from_i64_values(labels);
+            result.name = self.shared_name(other);
+            return result;
+        }
+        // Datetime64 / Timedelta64 i64-keyed symmetric_difference (unsorted
+        // temporal indexes hit the pointer-key map — symdiff over an UNSORTED
+        // DatetimeIndex was 0.48x pandas). The two halves are disjoint, so two
+        // independent membership_filter_i64(keep_present=false) calls reproduce
+        // the shared-`seen` within-half dedup. Bit-identical: self-not-in-other
+        // then other-not-in-self, inline i64 keys.
+        if let (Some(a_ns), Some(b_ns)) = (
+            Self::all_temporal_ns(self.labels(), true),
+            Self::all_temporal_ns(other.labels(), true),
+        ) {
+            let mut labels = Self::membership_filter_i64(&a_ns, &b_ns, false);
+            labels.extend(Self::membership_filter_i64(&b_ns, &a_ns, false));
+            let mut result = Self::from_datetime64(labels);
+            result.name = self.shared_name(other);
+            return result;
+        }
+        if let (Some(a_ns), Some(b_ns)) = (
+            Self::all_temporal_ns(self.labels(), false),
+            Self::all_temporal_ns(other.labels(), false),
+        ) {
+            let mut labels = Self::membership_filter_i64(&a_ns, &b_ns, false);
+            labels.extend(Self::membership_filter_i64(&b_ns, &a_ns, false));
+            let mut result = Self::from_timedelta64(labels);
             result.name = self.shared_name(other);
             return result;
         }

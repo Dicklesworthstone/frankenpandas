@@ -4760,3 +4760,26 @@ Correctness: new conformance dt_union_conformance (4) — Datetime64 + Timedelta
 oracle (incl. a reverse-sorted case proving output is NOT globally sorted), empty self/other edges keep the other
 side, output carries the matching temporal dtype; fp-index union/setop tests (31) green. (Datetime/Timedelta
 isin/intersection/difference already WIN — no change; this was the lone union gap.)
+
+### 2026-06-26 BlackThrush — UNSORTED Datetime64/Timedelta64 Index intersection/difference/symdiff: 0.37-0.57x LOSS -> 1.0-2.5x WIN @200k (bit-identical)
+Follow-up to the Datetime64 union fix. For SORTED temporal indexes intersection/difference/symdiff already WIN via
+the sorted-merge two-pointer (covers AscendingDatetime64), but for UNSORTED temporal indexes (after concat / take /
+non-monotonic construction) sorted-merge bails and — like union — int64_view's Int64-only gate left them on the
+pointer-key FxHashMap<&IndexLabel> rebuild: intersection 0.37x, difference 0.57x, symdiff 0.48x pandas. Added an
+all_temporal_ns(labels, datetime) extractor + Datetime64/Timedelta64 branches (after the int64 path) that reuse the
+proven membership_filter_i64 (dense-bitset / FxHashSet<i64>) over the ns and rebuild via from_datetime64 /
+from_timedelta64. Bit-identical: same self-order first-occurrence kept/dropped labels (symdiff = two disjoint
+keep_present=false halves), inline i64 keys instead of enum-pointer probes; SORTED indexes still take sorted-merge
+first (no regression, re-verified 0.6ms). Empty inputs bail to the fallback.
+
+Bench, per-crate only, CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc, bench_idx_dt_setops n=200000
+SHUFFLED Datetime64 indexes (splitmix Fisher-Yates), pandas 2.2.3 same data best-of-6:
+| op | fp before | fp after | pandas | ratio before->after | fp-side |
+|----|-----------|----------|--------|---------------------|---------|
+| intersection | 24.72ms | 9.13ms | 9.26ms | 0.37x -> 1.01x | 2.7x |
+| difference   | 25.91ms | 8.05ms | 14.89ms | 0.57x -> 1.85x | 3.2x |
+| symdiff      | 63.66ms | 12.22ms | 30.41ms | 0.48x -> 2.49x | 5.2x |
+
+Correctness: new conformance dt_setops_conformance (2) — Datetime64 + Timedelta64 intersection/difference/symdiff
+over UNSORTED cases (reverse-sorted, shuffled, dups) match first-occurrence oracles, dtype preserved; setop/union
+tests (41+7) green. Completes the temporal Index set-op surface (union done prior; sorted already won).
