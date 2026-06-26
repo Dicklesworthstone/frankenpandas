@@ -5087,3 +5087,18 @@ libcall per element, not a fusion/div issue) — pandas uses SIMD rint (roundpd)
 round-to-nearest-even (magic-number (y+2^52)-2^52 with copysign + |y|<2^52 select, OR explicit roundpd via
 std::simd), whose tie/>=2^52/subnormal/-0.0 bit-identity is NOT fully covered by current goldens — DEFERRED to a
 dedicated pass with an exhaustive differential test vs round_ties_even. (floor/ceil/trunc share the libcall risk.)
+
+### 2026-06-26 BlackThrush — typed_float_unary generic+move: exp 1.32x->2.26x WIN; floor/ceil/trunc/round/sqrt are a SIMD BUILD-TARGET blocker
+typed_float_unary (backs sqrt/exp/log/sign/rint/cbrt) took a `fn(f64)->f64` POINTER (indirect call per element, no
+inline, no vectorization) and used from_f64_values' Arc::from(Vec) copy. Made it generic <F: Fn> (monomorphizes +
+inlines, like its finite_preserving sibling) + from_f64_values_owned (move; NaN outputs route to the identical
+NaN-as-missing path). Bit-identical. Conformance GREEN: fp-columnar 436, fp-frame 145, 0 failed.
+Bench bench_stransform 1M: exp 18.15->10.65ms = 1.32x -> 2.26x WIN (pandas 24.03ms; arc-copy removed + inline).
+
+BLOCKER (the biggest remaining math-unary gaps are NOT source-fixable): floor 0.089x (2.13 vs 0.19ms), ceil 0.11x,
+trunc 0.13x, round(decimals) 0.090x, sqrt ~0.085x, log 0.20x (3.86ms pandas SVML). These need vroundpd (SSE4.1) /
+vsqrtpd-wide / SVML, but fp builds for GENERIC x86-64 (.cargo/config.toml is "intentionally empty — a +fma,+avx2
+rustflags experiment (jawxr) was reverted"), so f64::floor/ceil/trunc/round_ties_even lower to libm libcalls and
+sqrt to scalar sqrtsd. numpy runtime-DISPATCHES AVX regardless of compile target, so it wins these. Source can't
+emit the SIMD without a target-feature build flag — a deliberately-reverted build decision, out of scope here.
+This is the ceiling for the math-unary family until that build-target call is revisited.

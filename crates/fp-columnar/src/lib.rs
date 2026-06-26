@@ -15871,12 +15871,21 @@ impl Column {
     /// casts `x as f64` and `f(x as f64) == x as f64` since the cast is integral;
     /// floor/ceil/trunc of finite/Inf inputs never synthesize a NaN, and
     /// from_f64_values re-marks any NaN exactly as Self::new would.
-    fn typed_float_unary(&self, f: fn(f64) -> f64) -> Option<Self> {
+    // Generic over `F` (not a `fn` pointer) so each call site monomorphizes and
+    // `f` INLINES — letting LLVM lower e.g. `f64::sqrt` to a vectorized `sqrtpd`
+    // (SSE2) instead of a per-element indirect call (sqrt was 12.78ms = indirect
+    // call + arc-copy). Also moves the output Vec (from_f64_values_owned) off the
+    // Arc::from(Vec) cold-realloc-copy. Bit-identical: `f` may produce NaN
+    // (sqrt/log of negatives), and from_f64_values_owned routes any NaN output to
+    // the identical from_f64_values (NaN-as-missing) path.
+    fn typed_float_unary<F: Fn(f64) -> f64>(&self, f: F) -> Option<Self> {
         if let Some(data) = self.as_f64_slice() {
-            return Some(Self::from_f64_values(data.iter().map(|&x| f(x)).collect()));
+            return Some(Self::from_f64_values_owned(
+                data.iter().map(|&x| f(x)).collect(),
+            ));
         }
         if let Some(data) = self.as_i64_slice() {
-            return Some(Self::from_f64_values(
+            return Some(Self::from_f64_values_owned(
                 data.iter().map(|&x| f(x as f64)).collect(),
             ));
         }

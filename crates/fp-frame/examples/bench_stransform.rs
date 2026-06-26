@@ -80,6 +80,12 @@ fn main() {
             "abs" => s.abs(),
             "round" => s.round(2),
             "sign" => s.sign(),
+            "floor" => s.floor(),
+            "ceil" => s.ceil(),
+            "trunc" => s.trunc(),
+            "sqrt" => s.sqrt(),
+            "exp" => s.exp(),
+            "log" => s.log(),
             _ => panic!("op"),
         };
         std::hint::black_box(r.unwrap());
