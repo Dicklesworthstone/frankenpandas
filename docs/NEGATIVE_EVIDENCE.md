@@ -5379,3 +5379,16 @@ moves): SeriesGroupBy shift 0.25x (14.7 vs 3.6ms), diff 0.35x (13.8 vs 4.85ms) �
 materializing an n-elem gid Vec; cumsum avoids it via i64_dense_histogram_range (key-offset). pct_change 0.97x parity.
 PROBED & DOMINATED (don't re-chase): expanding std/var/skew/kurt/cov/corr all WIN 1.05-1.49x; Series.str
 contains/replace/regex/count/split_count WIN 1.56-16.5x; DataFrame/grouped rolling delegate to Series.rolling.
+
+### 2026-06-26 BlackThrush — SeriesGroupBy shift/diff key-offset path: 0.25x/0.35x -> 0.48x/0.70x (1.95x/2.0x fp-side)
+Follow-up to the cumsum/cummax win. grouped shift/diff dense path went through dense_group_ids, which materializes
+an n-element gid_per_row Vec (8MB) and reads it back — the bulk of the cost (cumsum avoids it via key-offset). Added
+dense_groupby_{shift,diff}_f64_by_key: index the per-group ring buffer by the int64 key's dense offset (key-min)
+DIRECTLY (mirrors try_cum_dense), no gid_per_row. Gated on as_i64_slice + i64_dense_histogram_range; Utf8/other keys
+keep the gid path; bit-identical (each distinct key = one group, row order => same per-group history/validity).
+bench_gb_cum 1M g=1000 (load 14): shift 14.70->7.54ms = 0.25x->0.48x (pandas 3.64); diff 13.83->6.94ms =
+0.35x->0.70x (pandas 4.85). Conformance GREEN: fp-frame lib 3103 + new differential gb_shift_diff_bykey_conformance
+(i64 by-key == Utf8 gid path bit-for-bit) + 7 shift/diff tests, 0 failed (vs clean fp-columnar).
+RESIDUAL (still <1.0x): fp's multi-pass structure (NaN scan + i64_dense_histogram_range scan + kernel pass + mask)
+vs pandas' fused Cython factorize+gather — a full flip needs fusing the histogram scan into the kernel. pct_change
+0.97x parity.
