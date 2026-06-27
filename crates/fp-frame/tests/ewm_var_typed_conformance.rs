@@ -73,6 +73,33 @@ fn ewm_var_typed_matches_scalar_path() {
             for i in 0..k {
                 assert_eq!(bits(&st.values()[i]), bits(&ss.values()[i]), "std i={i} span={span}");
             }
+
+            // cov/corr: second series (a perturbation of the first). Typed path
+            // fires only when BOTH are all-valid; the trailing-NaN versions force
+            // the Scalar path, whose observed prefix must match bit-for-bit.
+            let other: Vec<f64> = vals.iter().enumerate().map(|(j, &v)| v * 1.5 + j as f64).collect();
+            let ct = typed_series(&vals)
+                .ewm(Some(span), None)
+                .cov(&typed_series(&other))
+                .unwrap();
+            let cs = scalar_series_with_trailing_nan(&vals)
+                .ewm(Some(span), None)
+                .cov(&scalar_series_with_trailing_nan(&other))
+                .unwrap();
+            for i in 0..k {
+                assert_eq!(bits(&ct.values()[i]), bits(&cs.values()[i]), "cov i={i} span={span}");
+            }
+            let rt = typed_series(&vals)
+                .ewm(Some(span), None)
+                .corr(&typed_series(&other))
+                .unwrap();
+            let rs = scalar_series_with_trailing_nan(&vals)
+                .ewm(Some(span), None)
+                .corr(&scalar_series_with_trailing_nan(&other))
+                .unwrap();
+            for i in 0..k {
+                assert_eq!(bits(&rt.values()[i]), bits(&rs.values()[i]), "corr i={i} span={span}");
+            }
         }
     }
 }

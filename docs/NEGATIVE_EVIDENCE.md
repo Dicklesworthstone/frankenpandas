@@ -5321,3 +5321,15 @@ values, missing-equivalent). Undefined slots (row 0, sum_wt^2<=sum_wt2) are vali
 (99.81 vs 34.72ms), corr 0.70x (102 vs 71ms) — 2-series recurrence, still on values(). (mean 1.09x/sum 1.32x already win.)
 PROBED & DOMINATED this cycle (don't re-chase): df.pivot_table mean/sum/count/max all ~5x WIN (Int64 dense);
 df.sort_values_multi typed radix-lexsort.
+
+### 2026-06-26 BlackThrush — ewm cov/corr typed bivariate recurrence: 0.35x/0.70x -> 1.97x/3.38x WIN (6.4x/5.5x fp-side)
+Completes last entry's follow-up. Ewm::cov/corr each did TWO column().values() (2x 1M Vec<Scalar> + per-element
+is_missing/to_f64) then a zip-by-position bivariate ewmcov recurrence. Extracted ewm_cov_all_observed (debiased,
+sum_wt/sum_wt2) and ewm_corr_all_observed (biased cov_xx/cov_yy/cov_xy, old_wt only — debias cancels) over raw
+&[f64] pairs; cov/corr take the typed branch when BOTH series are all-valid (both as_f64_slice Some), every pair
+observed. Scalar path kept for NaN/missing/misaligned inputs.
+bench_ewm 1M span=20 (load 11): cov 99.81->15.62ms = 0.35x->1.97x (pandas 30.82); corr 102.49->18.60ms =
+0.70x->3.38x (pandas 62.86). Conformance GREEN: fp-frame lib 3103 + binaries, 0 failed; differential
+ewm_var_typed_conformance extended to cov/corr (both-trailing-NaN forces Scalar path; observed prefix bit-equal on
+present values, missing-equivalent). The ENTIRE Series.ewm surface now WINS (mean 1.09x, sum 1.32x, var 1.25x,
+std 1.33x, cov 1.97x, corr 3.38x) — the var/std/cov/corr Scalar-materialization vein is CLOSED.
