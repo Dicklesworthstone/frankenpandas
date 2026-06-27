@@ -5917,3 +5917,25 @@ fp-index 45 datetime tests, existing `..._dt64fmt` golden all green. chrono's fl
 (-0.5s -> `1969-12-31 23:59:59.5`) are reproduced by `div_euclid`/`rem_euclid`. CONFIRMS the lever a fourth time and
 extends it from integer formatting to full calendar formatting; the chrono `DelayedFormat` path was ~85% of
 format_datetime_ns wall time. GENERALIZES to any remaining chrono `.format().to_string()` per-row loop.
+
+### 2026-06-27 TealOsprey — to_json(records) typed streaming writer: 0.69x LOSS -> 5.35x WIN vs pandas (7.7x fp-side)
+A genuine measured LOSS (not in the standard bench harness): `write_json_string(Records)` materialized a full
+`serde_json::Value` tree — a `serde_json::Map` (BTreeMap) PER ROW, a `name.clone()` key PER CELL, a per-cell `Scalar`
+(`c.value(row_idx)`) and `Value` — then serialized it. 1M×2-col = millions of allocs; fp 516ms vs pandas 357ms = 0.69x.
+Added `try_write_json_records_typed`: a streaming writer over all-valid `Int64`/`Float64`/`Bool` columns that writes
+JSON bytes straight into one String — pre-serialized escaped keys (reused every row), `append_i64_decimal` itoa for
+ints, and serde's OWN `CompactFormatter::write_f64` into a reusable scratch for floats (so the exponent spelling,
+e.g. `1e+20`, is byte-identical — raw `ryu::format_finite` gives `1e20` and would diverge). Non-finite f64 -> `null`,
+matching `scalar_to_json`. Falls back to the serde tree (`write_json_records_serde`) on Utf8/null/promotion columns.
+
+Same-box best-of-3, 1M rows × {Int64, Float64} (`fp-io/examples/bench_to_json`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (serde tree) | patched (streaming) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `to_json(orient="records")` 1M | 516.0ms | 66.8ms | 7.72x | 0.69x -> 5.35x (pandas 357.4ms) |
+
+Bit-identical: differential `to_json_records_typed_fast_path_bit_identical_to_serde` compares the typed path against
+the serde reference over an edge-laden frame (i64::MIN/MAX, signed-zero, integer-valued/huge/tiny/±Inf floats, a
+JSON-escaped column name), a -Inf frame, an empty frame, a Utf8-forces-fallback frame, and a 2000-row LCG sweep —
+all byte-for-byte equal; fp-io 48 json tests green. The serde-tree allocation was ~87% of to_json's wall time.
+RESIDUAL: Columns/Index/Split/Values orients still build the serde tree (Records is the pandas default + most common).
