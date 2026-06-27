@@ -5695,3 +5695,24 @@ reaches the all-valid-Float64 path). Conformance GREEN: fp-frame 8 unstack tests
 RESIDUAL (still <1.0x vs pandas): the cost is now dominated by parsing 1M composite "r, c" Utf8 labels (split_once +
 trim + 2x `FxHashMap<String>` probes) — pandas operates on a real 2-level MultiIndex with no string parsing. Closing
 needs a native MultiIndex row-label representation (cross-surface), analogous to the to_period i64-PeriodIndex floor.
+
+### 2026-06-27 AmberLynx — NEGATIVE: df.pivot Utf8 keys already 2.3x WIN; joins/groupby/io/resample sweep all WIN
+After landing df.pivot Int64 (b456cc4b3) and unstack (c8867fe57), checked whether the OPEN sibling — df.pivot with
+Utf8 keys — is a gap. It is NOT. Standalone `bench_pivot_str` (1M rows, Utf8 "r{:07}"/"c{:02}" keys, unique (r,c),
+f64 values; same shape as df_pivot): fp best **104-108ms** vs pandas 2.2.3 `df.pivot` **239.08ms** = **2.3x WIN**
+(pandas' string-keyed pivot is ~5.5x slower than its int pivot, so fp's generic ScalarKey path already beats it).
+The Int64 typed fast path (br-frankenpandas-pvtdk) is NOT needed for Utf8 — do NOT re-chase. (Example removed, not
+committed.)
+
+Same-session quiet-box (load ~14) sweep of the rest of the matrix @1M, fp-side fp-bench min vs matched pandas best-of-4
+(ratio = pandas/fp, >1 = fp faster) — ALL WIN, no gap found:
+| op | fp ms | pandas ms | ratio | | op | fp ms | pandas ms | ratio |
+| --- | ---: | ---: | ---: | --- | --- | ---: | ---: | ---: |
+| groupby_rank_str | 68.6 | 251.8 | 3.7x | | df_groupby_widekey_sum | 115.2 | 220.8 | 1.9x |
+| groupby_nunique_str | 50.3 | 125.3 | 2.5x | | join_inner_shuffled | 60.3 | 136.3 | 2.3x |
+| groupby_multi_str | 37.3 | 74.8 | 2.0x | | csv_read | 59.4 | 1495.3 | 25x |
+
+The measurable surface is dominated. Remaining sub-1.0x ops are all documented cross-surface floors: df_unstack 0.48x
+(composite Utf8-key parse / no native MultiIndex), to_period ~0.29x (Utf8 labels / no i64 PeriodIndex), transpose &
+to_numpy (2D-block / Vec<Vec> structural). Each needs a representation change (golden-regen, multi-crate), not a
+point fix.
