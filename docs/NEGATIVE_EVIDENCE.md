@@ -5716,3 +5716,25 @@ The measurable surface is dominated. Remaining sub-1.0x ops are all documented c
 (composite Utf8-key parse / no native MultiIndex), to_period ~0.29x (Utf8 labels / no i64 PeriodIndex), transpose &
 to_numpy (2D-block / Vec<Vec> structural). Each needs a representation change (golden-regen, multi-crate), not a
 point fix.
+
+### 2026-06-27 AmberLynx — NEGATIVE: two typed-lever extensions are ~0-gain (reverted); where the pivot/unstack lever stops
+After the df.pivot (3.0x) and Series.unstack (1.15x) typed-OUTPUT wins, probed two more extensions on the remaining
+sub-1.0x / near-parity ops. Both same-box back-to-back best-of-6 @1M, fp-bench, REVERTED (~0-gain):
+
+1. **unstack composite-key temporal cache** (last-seen row/col interned-index, short-circuit the FxHashMap<String>
+   probe on a run hit): baseline 56.4ms vs patched 58.2ms — NO gain (marginally slower). The col component changes
+   every row (c=i%10) so its cache is pure overhead, and the row strcmp savings don't beat the FxHashMap probe. A
+   prior agent already filed the same idea (`stash ZERO-GAIN-revert-TypedDedupCol-temporal`) — do NOT re-try.
+2. **to_records typed-input** (`as_f64_slice`/`as_i64_slice` to construct the per-cell Scalar directly, skipping the
+   `col.values()` Vec<Scalar> materialization): baseline 79.7ms vs patched 76.7ms = ~1.04x — bench-amortized to ~0.
+   `time_us` re-runs to_records on the SAME df, so `col.values()` is OnceLock-cached after iter 1 and min-of-N is
+   warm; the input materialization the lever removes is already amortized away. The OUTPUT is `Vec<Vec<Scalar>>`
+   (Scalar by contract) so the dominant per-cell Scalar construction is unavoidable. (Both tests pass / bit-identical
+   if ever wanted; changes stashed, not landed.)
+
+GENERALIZATION (the boundary of the typed lever): the pivot/unstack 3x came from eliminating output Scalar
+CONSTRUCTION via `from_f64_values_owned` (typed Vec<f64> output). It does NOT transfer to (a) Scalar-output-by-
+contract ops (to_records/to_dict — output is the cost), (b) parse-bound ops (unstack composite-key — no native
+MultiIndex), or (c) bench-amortized input materialization (OnceLock-cached `.values()`). Confirms again: the
+measurable surface is dominated; the only real residuals are the representation floors (MultiIndex, i64 PeriodIndex,
+2D-block) — each a multi-crate golden-regen project, not a point fix.
