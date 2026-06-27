@@ -5472,3 +5472,25 @@ minute-spaced data — these produce ~1M / ~60M bins (near-identity / mostly-emp
 labels (fast civil format! for 'min'; chrono dt.format for 's' via the build_groups fallback). pandas returns an i64
 DatetimeIndex (no string formatting). Closing them needs the resample output index to be Datetime64 labels instead
 of Utf8 strings — a golden-regen + label-dtype change across the whole resample surface, deferred.
+
+### 2026-06-27 Codex cod-a — fractional Column.round magic-constant half-even: 0.58x -> 0.64x vs pandas (1.11x fp-side)
+Dug the documented `round_ties_even` libcall residual after confirming no committed bench-worktree win was waiting off
+main. Implemented the alien-graveyard "target-block/math lowering" lever without unsafe: for typed all-valid Float64
+`Column::round(decimals)`, finite nonzero scale factors now use the classic nearest-even magic-constant lowering
+`(abs(y)+2^52)-2^52` plus sign restoration, then divide by the same scale. Non-finite/zero factors stay on the existing
+`f64::round_ties_even` path; nullable/NaN paths stay scalar, preserving missing-value semantics.
+
+Bench evidence, per-crate target dir `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`, `rch exec`
+fell open locally because workers had no admissible slots. Cargo rejects the literal `cargo bench --release` spelling
+on this toolchain, so the valid per-crate bench command was `cargo bench -p fp-columnar` (green). Timing used the
+existing `bench_round` example, 2M fractional f64 values rounded to 2 decimals, repeated 10x after warmup:
+
+| workload | origin/main best/median | patched best/median | pandas 2.2.3 best/median | ratio vs pandas | fp-side |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Column.round(2), fractional f64 | 8.756ms / 9.465ms | 7.920ms / 8.926ms | 5.064ms / 5.355ms | 0.58x -> 0.64x best, 0.57x -> 0.60x median | 1.11x best, 1.06x median |
+
+Conformance GREEN: `cargo test -p fp-columnar --release` passed 441/441 (5 ignored); `cargo test -p fp-conformance
+--release` passed with exit 0. Bit-contract proof: new randomized edge test compares the fast scaled path to
+`(x * factor).round_ties_even() / factor` by exact bits across infinities, signed zero, 2^52 boundaries, large finite
+values, and 20k generated normals for decimals -6, -2, 0, 2, 6, 12. Remaining gap is memory/write + scalar path
+overhead; true SIMD roundpd/SVML lowering is still the deeper lever.
