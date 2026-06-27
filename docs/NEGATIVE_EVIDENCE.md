@@ -5392,3 +5392,16 @@ bench_gb_cum 1M g=1000 (load 14): shift 14.70->7.54ms = 0.25x->0.48x (pandas 3.6
 RESIDUAL (still <1.0x): fp's multi-pass structure (NaN scan + i64_dense_histogram_range scan + kernel pass + mask)
 vs pandas' fused Cython factorize+gather — a full flip needs fusing the histogram scan into the kernel. pct_change
 0.97x parity.
+
+### 2026-06-26 BlackThrush — grouped cumprod NaN-output nullable-move: 0.31x -> 0.95x (3.1x fp-side, near-parity)
+Probed the rest of the SeriesGroupBy transform surface (bench_gb_xform): rank 5.58x, cumcount 4.39x, ffill 1.34x,
+bfill 1.27x, cummin ~1.0x — all WIN. ONLY cumprod lost (0.31x, 12.49 vs 3.84ms): adversarial bench values (0..100000)
+overflow to inf, then inf*0 -> NaN, so the output has NaN; try_cum_dense's from_f64_values_owned NaN-gate fell back
+to the Arc::from(Vec) copy. FIX: added a `nan_aware` flag to try_cum_dense (Series + DataFrame GroupBy); cumprod
+passes true, and a NaN-bearing output routes through the nullable MOVE (from_f64_values_with_validity ->
+lazy_nullable_float64 moves the Vec) instead of the Arc-copy. cumsum/cummax/cummin pass false => unchanged owned
+move, NO scan/tax. NaN slots become validity-missing Null (was validity-false Float64(NaN)) — both is_missing,
+to_numpy NaN; conformance-equivalent.
+bench_gb_xform 1M g=1000: cumprod 12.49->4.03ms = 0.31x->0.95x (pandas 3.84); cumsum/cummax/cummin unchanged ~2.3ms.
+Conformance GREEN: 62 cum* tests + fp-frame lib (3 acosh fails are the pre-existing peer math-unary regression, not
+this change). Realistic (non-overflow) cumprod was already fast via the owned move; this fixes the overflow case.
