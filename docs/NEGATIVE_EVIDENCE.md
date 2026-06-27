@@ -5333,3 +5333,18 @@ bench_ewm 1M span=20 (load 11): cov 99.81->15.62ms = 0.35x->1.97x (pandas 30.82)
 ewm_var_typed_conformance extended to cov/corr (both-trailing-NaN forces Scalar path; observed prefix bit-equal on
 present values, missing-equivalent). The ENTIRE Series.ewm surface now WINS (mean 1.09x, sum 1.32x, var 1.25x,
 std 1.33x, cov 1.97x, corr 3.38x) — the var/std/cov/corr Scalar-materialization vein is CLOSED.
+
+### 2026-06-26 BlackThrush — rolling skew/kurt typed feed: kurt 0.49x->1.66x WIN, skew 0.36x->0.88x (3.4x/2.4x fp-side)
+Same Scalar-materialization vein, now in rolling moments. rolling_moment_online's clean fast path (BTreeMap already
+replaced by an O(1) consecutive-equal counter, br-1q4q4) STILL did column().values() (1M Vec<Scalar>) +
+rolling_moment_value Scalar dispatch per window step + a 32B/cell Vec<Scalar> output. Added a typed branch: run the
+sliding power-sum recurrence over the raw as_f64_slice &[f64], reuse state.output() (extract f64; Null/Float64(NaN)
+-> NaN = validity-missing), emit Vec<f64> via from_f64_values. Bit-identical (same add_sums/remove_sums/output +
+same constant-window counter; all-valid => every row observed).
+bench_rolling 1M w=100 (load 6), pandas 2.2.3: kurt 80.15->23.79ms = 0.49x->1.66x WIN (pandas 39.54); skew
+96.02->39.94ms = 0.36x->0.88x near-parity (pandas 34.96). Conformance GREEN: fp-frame lib 3103 + new differential
+rolling_moment_typed_conformance (trailing-NaN forces Scalar path; window prefix bit-equal), 0 failed (verified vs a
+CLEAN fp-columnar; 3 acosh goldens failing in-tree are a PEER's uncommitted fp-columnar WIP, not this change).
+RESIDUAL skew 0.88x: output_skew's per-element s2.powf(1.5) (kurt uses s2*s2, hence kurt faster); s2*sqrt(s2) would
+flip it but is a 1-ULP GOLDEN REGEN (deferred, matches expanding-skew note). ALSO STILL LOSS (Scalar/BTreeMap vein,
+follow-up): rolling cov 0.48x (181 vs 86ms), corr 0.64x (183 vs 116ms) via RollingPairwiseMomentState + 2x values().
