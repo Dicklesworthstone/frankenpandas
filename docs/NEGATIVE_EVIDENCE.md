@@ -5957,3 +5957,27 @@ Bit-identical: the `to_json_records_typed_fast_path_bit_identical_to_serde` diff
 serde Map-per-row reference over every frame (edge floats incl ±Inf, escaped key, empty, Utf8 fallback, 2000-row LCG
 sweep); fp-io 48 json tests green. Records + JSONL (the two pandas `records`/`lines` spellings) now share one typed
 writer. RESIDUAL unchanged: Columns/Index/Split/Values orients still build the serde tree.
+
+### 2026-06-27 TealOsprey — to_json(columns) typed streaming writer: 0.39x LOSS -> 4.66x WIN vs pandas (11.9x fp-side)
+The WORST measured to_json orient (a survey found Columns 0.39x and Index 0.63x both LOSE pandas; Values 1.78x / Split
+2.13x / Records already won). The `Columns` serde arm built `{col: {idx: val}}` by re-running `index_label_json_key`
+(label `to_string` + serde quote) for EVERY cell of EVERY column (n×k) into a nested `serde_json::Map` per column.
+Added `try_write_json_columns_typed`: pre-serialize the n inner index-label keys ONCE into a single contiguous buffer
+(+ offsets), reused across all columns; for the common all-Int64-unique index, keys are hand-rolled `"` + itoa + `":`
+straight from `int64_label_values()` (no `labels()` IndexLabel materialization, no per-key alloc); values via the
+shared `append_typed_json_value`. Bails to the serde tree on non-typed columns or COLLIDING serialized keys (e.g.
+`Int64(1)` vs `Utf8("1")` both spell `"1"` — the serde path errors there, so the fast path must not swallow it).
+
+Two-step measurement (`fp-io/examples/bench_to_json 1000000 columns`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`, best-of-3:
+| step | time | vs pandas 375.2ms |
+| --- | ---: | ---: |
+| baseline (serde Map-of-Maps) | 958.6ms | 0.39x |
+| naive (Vec<String> idxkeys, 1M allocs) | 617.2ms | 0.61x (REVERTED in-flight) |
+| final (contiguous keybuf + itoa + int64 view) | 80.5ms | **4.66x** |
+
+11.9x fp-side end state. The 1M per-key `String` allocs + `labels()` materialization were the residual after the
+nested-Map removal; the contiguous buffer + direct i64 view closed it. Bit-identical: the json differential now also
+asserts Columns vs a from-scratch serde Map-of-Maps reference over every frame (edge floats, escaped key, empty, Utf8
+fallback, 2000-row LCG sweep) + the existing `json_columns_write_duplicate_index_rejects` still rejects via fallback;
+fp-io 48 json tests green. RESIDUAL: the `Index` orient (0.63x) still builds the serde tree — same lever applies next.

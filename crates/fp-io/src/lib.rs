@@ -6139,14 +6139,21 @@ fn write_json_records_serde(
 /// With `as_jsonl = true` the row objects are joined by `\n` with no enclosing
 /// `[ ]` (the JSON Lines spelling `write_jsonl_string` produces); otherwise they
 /// are wrapped as a `[..]` array (the `records` orient).
-fn try_write_json_records_typed(frame: &DataFrame, as_jsonl: bool) -> Option<String> {
+/// A typed all-valid value column view for the streaming JSON writers.
+enum JCol<'a> {
+    I(&'a [i64]),
+    F(&'a [f64]),
+    B(&'a [bool]),
+}
+
+/// Extract every column as an all-valid typed slice plus its pre-serialized,
+/// escaped, colon-terminated JSON key (column order = `preserve_order`
+/// insertion order). Returns `None` — caller falls back to the serde tree — on
+/// any column that is not all-valid `Int64`/`Float64`/`Bool`, would take the
+/// int→float promotion branch, or on a row-multiindex frame.
+fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<String>)> {
     if frame.row_multiindex().is_some() {
         return None;
-    }
-    enum JCol<'a> {
-        I(&'a [i64]),
-        F(&'a [f64]),
-        B(&'a [bool]),
     }
     let headers: Vec<&String> = frame.column_names();
     let n = frame.index().len();
@@ -6154,8 +6161,6 @@ fn try_write_json_records_typed(frame: &DataFrame, as_jsonl: bool) -> Option<Str
     let mut keys: Vec<String> = Vec::with_capacity(headers.len());
     for name in &headers {
         let column = frame.column(name.as_str())?;
-        // The int→float promotion branch is never taken today, but guard so a
-        // future change can't silently diverge from the serde reference.
         if column_promotes_int_json_values_to_float(column.values()) {
             return None;
         }
@@ -6169,25 +6174,49 @@ fn try_write_json_records_typed(frame: &DataFrame, as_jsonl: bool) -> Option<Str
             return None;
         };
         cols.push(jc);
-        // Pre-serialize the key WITH its quotes; the `:` separator is appended
-        // here so each row only does `push_str`.
         let mut key = serde_json::to_string(name.as_str()).ok()?;
         key.push(':');
         keys.push(key);
     }
+    Some((cols, keys))
+}
 
+/// Append cell `(col, r)` as a JSON value, byte-identical to serde:
+/// `i64` via `append_i64_decimal`, finite `f64` via serde's own
+/// `CompactFormatter::write_f64` (exact exponent spelling, e.g. `1e+20`),
+/// non-finite `f64` as `null` (matching `scalar_to_json`), `bool` as
+/// `true`/`false`. `fbytes` is a reusable scratch to avoid a per-cell alloc.
+#[inline]
+fn append_typed_json_value(out: &mut String, col: &JCol<'_>, r: usize, fbytes: &mut Vec<u8>) {
     use serde_json::ser::{CompactFormatter, Formatter};
+    match col {
+        JCol::I(s) => append_i64_decimal(out, s[r]),
+        JCol::F(s) => {
+            let v = s[r];
+            if v.is_finite() {
+                fbytes.clear();
+                // Writing into a Vec<u8> is infallible.
+                let _ = CompactFormatter.write_f64(fbytes, v);
+                out.push_str(std::str::from_utf8(fbytes).unwrap_or("null"));
+            } else {
+                out.push_str("null");
+            }
+        }
+        JCol::B(s) => out.push_str(if s[r] { "true" } else { "false" }),
+    }
+}
+
+fn try_write_json_records_typed(frame: &DataFrame, as_jsonl: bool) -> Option<String> {
+    let (cols, keys) = extract_typed_value_columns(frame)?;
+    let n = frame.index().len();
     let mut out = String::with_capacity(
-        n.saturating_mul(headers.len().max(1))
+        n.saturating_mul(cols.len().max(1))
             .saturating_mul(12)
             .saturating_add(16),
     );
     if !as_jsonl {
         out.push('[');
     }
-    // Reusable byte scratch so finite f64 are formatted via serde's own
-    // `write_f64` (identical exponent spelling, e.g. `1e+20`) without a per-cell
-    // heap alloc.
     let mut fbytes: Vec<u8> = Vec::with_capacity(32);
     for r in 0..n {
         if r > 0 {
@@ -6199,27 +6228,97 @@ fn try_write_json_records_typed(frame: &DataFrame, as_jsonl: bool) -> Option<Str
                 out.push(',');
             }
             out.push_str(&keys[c]);
-            match col {
-                JCol::I(s) => append_i64_decimal(&mut out, s[r]),
-                JCol::F(s) => {
-                    let v = s[r];
-                    if v.is_finite() {
-                        fbytes.clear();
-                        // Writing into a Vec<u8> is infallible.
-                        let _ = CompactFormatter.write_f64(&mut fbytes, v);
-                        out.push_str(std::str::from_utf8(&fbytes).unwrap_or("null"));
-                    } else {
-                        out.push_str("null");
-                    }
-                }
-                JCol::B(s) => out.push_str(if s[r] { "true" } else { "false" }),
-            }
+            append_typed_json_value(&mut out, col, r, &mut fbytes);
         }
         out.push('}');
     }
     if !as_jsonl {
         out.push(']');
     }
+    Some(out)
+}
+
+/// Streaming typed fast path for `to_json(orient="columns")` — `{col: {idx:
+/// val}}`. The serde tree re-stringifies the index-label key for EVERY cell of
+/// EVERY column (n×k) and builds a nested Map per column; this is ~0.39x pandas.
+/// Here the n index-label keys are pre-serialized ONCE and reused across every
+/// column. Returns `None` (serde fallback) unless the index is unique (so no
+/// inner key collides — the serde path errors on a duplicate index key, which
+/// this fast path must not silently swallow) and every column is typed.
+///
+/// Bit-identical to the serde `Columns` arm: outer keys in column order, inner
+/// keys in index-label order (both `preserve_order`), inner keys spelled by
+/// `index_label_json_key` then serde-quoted, values via `append_typed_json_value`.
+fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
+    let (cols, colkeys) = extract_typed_value_columns(frame)?;
+    let n = frame.index().len();
+    // Pre-serialize the n inner index-label keys ONCE into a single contiguous
+    // buffer (+ offsets), reused across every column — vs the serde path's n×k
+    // re-stringification. The keys carry the trailing `:` so each cell is one
+    // `push_str` of a slice (no per-key `String` alloc).
+    let mut keybuf = String::with_capacity(n.saturating_mul(10).saturating_add(8));
+    let mut keyoff: Vec<usize> = Vec::with_capacity(n + 1);
+    keyoff.push(0);
+    // Whether the inner keys are guaranteed distinct without a dedup pass.
+    let mut keys_known_unique = false;
+    if frame.index().is_unique()
+        && let Some(vals) = frame.index().int64_label_values()
+        && vals.len() == n
+    {
+        // All-Int64 unique labels: distinct i64 → distinct decimal keys, and
+        // `serde_json::to_string(v.to_string())` is exactly `"<decimal>"`, so a
+        // hand-rolled `"` + itoa + `":` is byte-identical and needs no dedup.
+        for &v in vals.iter() {
+            keybuf.push('"');
+            append_i64_decimal(&mut keybuf, v);
+            keybuf.push_str("\":");
+            keyoff.push(keybuf.len());
+        }
+        keys_known_unique = true;
+    } else {
+        for label in frame.index().labels() {
+            let k = serde_json::to_string(&index_label_json_key(label)).ok()?;
+            keybuf.push_str(&k);
+            keybuf.push(':');
+            keyoff.push(keybuf.len());
+        }
+    }
+    // The serde path rejects a frame whose labels produce COLLIDING JSON object
+    // keys (e.g. `Int64(1)` and `Utf8("1")` both spell `"1"`, or two datetimes
+    // in the same millisecond). Bail (→ serde path, which returns the
+    // duplicate-key error) if any key repeats.
+    if !keys_known_unique {
+        let mut seen = std::collections::HashSet::with_capacity(n);
+        for r in 0..n {
+            if !seen.insert(&keybuf[keyoff[r]..keyoff[r + 1]]) {
+                return None;
+            }
+        }
+    }
+
+    let mut out = String::with_capacity(
+        n.saturating_mul(cols.len().max(1))
+            .saturating_mul(16)
+            .saturating_add(16),
+    );
+    out.push('{');
+    let mut fbytes: Vec<u8> = Vec::with_capacity(32);
+    for (c, col) in cols.iter().enumerate() {
+        if c > 0 {
+            out.push(',');
+        }
+        out.push_str(&colkeys[c]);
+        out.push('{');
+        for r in 0..n {
+            if r > 0 {
+                out.push(',');
+            }
+            out.push_str(&keybuf[keyoff[r]..keyoff[r + 1]]);
+            append_typed_json_value(&mut out, col, r, &mut fbytes);
+        }
+        out.push('}');
+    }
+    out.push('}');
     Some(out)
 }
 
@@ -6250,6 +6349,10 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             write_json_records_serde(frame, &headers, &column_float_promotions)
         }
         JsonOrient::Columns => {
+            // Typed streaming fast path; falls back to the serde tree below.
+            if let Some(s) = try_write_json_columns_typed(frame) {
+                return Ok(s);
+            }
             let mut outer = serde_json::Map::new();
             for (name, promote_int_to_float) in headers.iter().zip(column_float_promotions.iter()) {
                 let mut col_obj = serde_json::Map::new();
@@ -30566,6 +30669,32 @@ mod merge_simple_numeric_csv_chunks_tests {
         fn assert_jsonl_matches(frame: &DataFrame) {
             assert_eq!(super::write_jsonl_string(frame).expect("jsonl"), jsonl_serde_ref(frame));
         }
+        // Columns orient: compare the typed fast path's end-to-end output to the
+        // serde-tree output captured by temporarily... there is no separate serde
+        // entry point, so compare against a from-scratch serde Map-of-Maps ref.
+        fn columns_serde_ref(frame: &DataFrame) -> String {
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let mut outer = serde_json::Map::new();
+            for name in &headers {
+                let mut col_obj = serde_json::Map::new();
+                if let Some(col) = frame.column(name.as_str()) {
+                    for (label, val) in frame.index().labels().iter().zip(col.values()) {
+                        col_obj.insert(
+                            super::index_label_json_key(label),
+                            super::scalar_to_json_with_column_promotion(val, false),
+                        );
+                    }
+                }
+                outer.insert(name.clone(), serde_json::Value::Object(col_obj));
+            }
+            serde_json::to_string(&serde_json::Value::Object(outer)).unwrap()
+        }
+        fn assert_columns_matches(frame: &DataFrame) {
+            assert_eq!(
+                write_json_string(frame, JsonOrient::Columns).expect("cols"),
+                columns_serde_ref(frame),
+            );
+        }
         fn idx(n: usize) -> Index {
             Index::new_known_unique_int64_unit_range(0, n)
         }
@@ -30592,11 +30721,13 @@ mod merge_simple_numeric_csv_chunks_tests {
         // Fast path must actually fire here (all-valid numeric/bool).
         assert!(super::try_write_json_records_typed(&frame, false).is_some());
         assert!(super::try_write_json_records_typed(&frame, true).is_some());
+        assert!(super::try_write_json_columns_typed(&frame).is_some());
         assert_eq!(
             write_json_string(&frame, JsonOrient::Records).expect("json"),
             serde_ref(&frame),
         );
         assert_jsonl_matches(&frame);
+        assert_columns_matches(&frame);
 
         // -Inf in isolation.
         let mut c2: BTreeMap<String, Column> = BTreeMap::new();
@@ -30607,6 +30738,7 @@ mod merge_simple_numeric_csv_chunks_tests {
             serde_ref(&f2),
         );
         assert_jsonl_matches(&f2);
+        assert_columns_matches(&f2);
 
         // Empty frame (0 rows) and a single-column int frame.
         let mut c3: BTreeMap<String, Column> = BTreeMap::new();
@@ -30617,6 +30749,7 @@ mod merge_simple_numeric_csv_chunks_tests {
             serde_ref(&f3),
         );
         assert_jsonl_matches(&f3);
+        assert_columns_matches(&f3);
 
         // A Utf8 column forces the serde fallback; equality must still hold
         // (trivially, since the fast path declines).
@@ -30634,6 +30767,7 @@ mod merge_simple_numeric_csv_chunks_tests {
             serde_ref(&f4),
         );
         assert_jsonl_matches(&f4);
+        assert_columns_matches(&f4);
 
         // Pseudo-random sweep (LCG, no external rng) over Int64/Float64 values.
         let mut state: u64 = 0x9E3779B97F4A7C15;
@@ -30660,5 +30794,6 @@ mod merge_simple_numeric_csv_chunks_tests {
             serde_ref(&rframe),
         );
         assert_jsonl_matches(&rframe);
+        assert_columns_matches(&rframe);
     }
 }
