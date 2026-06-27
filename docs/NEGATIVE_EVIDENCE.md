@@ -5604,3 +5604,30 @@ Action: aborted the cherry-pick and landed no code. Lesson: after numeric label 
 not the dominant cost and may preserve hotter codegen/layout than the extracted helper. Do not re-chase the old
 267ms->158ms evidence; the live frontier is still the Utf8 period-label representation floor versus pandas' compact
 PeriodIndex, not the Series/DataFrame wrapper path.
+
+### 2026-06-27 AmberLynx — to_period contiguous-Utf8 index (default freqs): partially lifts the String-alloc floor
+The prior cycles squeezed the per-label COMPUTE (numeric civil/weekly labels, 1.6x fp-side) but left the documented
+OUTPUT floor intact: the non-anchored `to_period` branch collected a `Vec<IndexLabel::Utf8(String)>` (1M heap String
+allocs @1M rows) then `Index::new` over a 32B/elem `Vec<IndexLabel>`. Applied the STACK-LEVER pattern: write every
+period label straight into ONE contiguous `String` buffer + `Vec<usize>` offsets, then build the index via the lazy
+`Index::from_utf8_contiguous(bytes, offsets)` (br-frankenpandas-nbspq) — zero per-row String allocations, no 32MB
+`Vec<IndexLabel>`. New `period_label_numeric_into` (write! not format!, bit-identical bytes) + `append_period_label`
+(truncate-on-fallback so a partial numeric write never corrupts the buffer; chrono fallback for out-of-range years /
+Utf8 timestamp labels keeps one temp String). Anchored aliases (W-MON.., Y-JAN.., Q-anchored) keep the per-label path.
+
+Same-box back-to-back best-of-6, 1M Datetime64 row index (`examples/bench_toperiod`), CARGO_TARGET_DIR per-crate:
+| freq | origin/main best | patched best | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| M | 85.36ms | 77.0ms | 1.11x | ~0.27x->0.29x (pandas 22.69ms) |
+| Q | 74.19ms | 66.0ms | 1.12x | — |
+| D | 118.63ms | 110.9ms | 1.07x | — |
+| Y | 52.21ms | 51.1ms | 1.02x | — |
+| W | 213.70ms | 181.3ms | 1.18x | ~0.12x->0.14x (pandas 25.75ms) |
+
+ALL FIVE freqs faster (consistent direction ⇒ real, not load noise); the memory-traffic win (1M fewer heap allocs)
+exceeds the wall-clock delta and compounds at larger frame sizes / under concurrency. Bit-identical: fp-frame lib
+3103 passed / 0 failed / 15 ignored, all 56 test binaries green incl. `to_period_numeric_conformance` (numeric path
+== chrono path over a decade w/ boundaries). RESIDUAL (still <1.0x vs pandas, string-floored): the labels are still
+Utf8 bytes, not an i64 PeriodIndex; the remaining cost is now the per-label civil/weekly COMPUTE + the input-side
+`.labels()` materialization (no public Datetime64 nanos view to iterate raw). Closing fully still needs a Period
+index-label type (golden-regen, cross-surface). Anchored W-/Y-/Q- aliases unchanged.
