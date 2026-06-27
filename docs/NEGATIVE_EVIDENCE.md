@@ -5366,3 +5366,16 @@ dataframe_arccosh_golden_basic FAIL on PRISTINE HEAD 4d724e4a3 (verified with AL
 a recent peer math-unary commit (8f6edc822 fuse nullable log / 3551a3287 fuse nullable sqrt / 67640e386 skip
 integral round / 454f90ec2 skip integral floor) — likely a Float64(NaN)-vs-Null output-repr drift in acosh(x<1).
 Surfaced for the math-unary owner; out of my (rolling) lane.
+
+### 2026-06-26 BlackThrush — SeriesGroupBy cumsum/cummax move-not-copy: 0.44x/0.32x -> 2.38x/1.29x WIN (5.4x/4x fp-side)
+try_cum_dense (backs SeriesGroupBy + DataFrameGroupBy cumsum/cummax) ran a tight one-pass int64-dense accumulator
+but built its output via Column::from_f64_values(out) — the Arc::from(Vec) cold-realloc-copy + has_nan/all_finite
+rescan (~9ms/1M here, the bulk of the op). Switched both output sites to from_f64_values_owned (move; NaN-bearing
+output routes to the identical NaN-as-missing path). Bit-identical.
+bench_gb_cum 1M g=1000 (load 11), pandas 2.2.3: cumsum 11.11->2.06ms = 0.44x->2.38x (pandas 4.89); cummax
+11.44->2.87ms = 0.32x->1.29x (pandas 3.69). Conformance GREEN: fp-frame lib 3103 + 42 cumsum/cummax tests, 0 failed
+(vs clean fp-columnar). FOLLOW-UP (different cause — NOT arc-copy; they use from_f64_values_with_validity which
+moves): SeriesGroupBy shift 0.25x (14.7 vs 3.6ms), diff 0.35x (13.8 vs 4.85ms) — cost is dense_group_ids
+materializing an n-elem gid Vec; cumsum avoids it via i64_dense_histogram_range (key-offset). pct_change 0.97x parity.
+PROBED & DOMINATED (don't re-chase): expanding std/var/skew/kurt/cov/corr all WIN 1.05-1.49x; Series.str
+contains/replace/regex/count/split_count WIN 1.56-16.5x; DataFrame/grouped rolling delegate to Series.rolling.
