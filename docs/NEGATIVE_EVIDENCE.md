@@ -5283,3 +5283,25 @@ The candidate was also slower than the previously landed same-worker `hz2` lane-
 without improving the reduction. Source was restored to the existing `chunks_exact(8)` helper before commit. Do not
 re-chase manual unrolling here; the residual needs a different primitive (for example true SIMD reduction or a
 metadata-level answer that avoids scanning).
+
+### 2026-06-26 BlackThrush — REJECT Series.abs sign-bit-clean identity: 0.79x -> 0.56x vs pandas; source reverted
+No live non-prunable `.scratch`/`.worktrees` bench worktree head was unmerged from `main`, so this was a dig path
+against the remaining positive-only Float64 `Series.abs()` gap in `bench_misc2`. Tested an alien-artifact-style
+semantic witness: if every all-valid Float64 input has a clear sign bit, `abs()` can return the existing immutable
+column unchanged; the proof deliberately excludes `-0.0` because pandas/Rust `abs(-0.0)` observes `+0.0`.
+
+Correctness for the candidate passed before benchmarking:
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo test -p fp-columnar
+abs_typed_nonnegative_identity_preserves_negative_zero_semantics --release -- --nocapture` on `hz2` passed the
+focused guard. Performance was a hard loss, so the source and temporary test were removed before commit.
+
+Bench, per-crate only, `bench_misc2 1000000 20` via
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec`, same worker `hz2` for FP before/after;
+pandas 2.2.3 local comparator uses the same LCG Float64 generator:
+| op | fp current main | fp candidate | pandas | ratio before->candidate | decision |
+|----|-----------------|--------------|--------|-------------------------|----------|
+| abs, all-positive f64 | 190111ns | 271021ns | 150946ns | 0.794x -> 0.557x | REVERT |
+
+The full sign-bit witness scan costs more than simply writing the output Vec through the existing `abs` typed path.
+Do not re-chase pre-scanning all-positive Float64 abs unless the column already carries a persisted non-negative
+witness from construction or upstream expression planning; a separate proof scan is negative value.
