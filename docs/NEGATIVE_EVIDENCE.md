@@ -5445,3 +5445,17 @@ the 20x-slowness; residual is numpy's vectorized civil). Conformance GREEN: fp-f
 isocalendar_typed_conformance (typed Datetime64 path == Utf8 parse path bit-for-bit over a decade of daily dates +
 ISO-week 52/53 boundaries + leap years + NaT). LESSON: DataFrame::from_series' multi-index union is a hidden O(n)
 tax on any multi-column dt/derived output — check other 3-column dt returns (e.g. similar accessors).
+
+### 2026-06-27 BlackThrush — resample('W') dense-scatter + numeric Sunday-ordinal: 0.17x -> 0.51x (3x fp-side)
+Probed Series.resample (bench_resample, 1M minute-spaced Datetime64 index, pandas 2.2.3): 'D' 1.1-1.4x WIN, but 'h'
+0.26x and 'W' 0.17x LOSS. Fixed 'W' (the biggest gap, 43.61 vs 7.45ms) with TWO bit-identical levers in
+resample_build_groups' `unit == "W"` branch: (1) the per-row scatter did groups.get_mut(String) — hashing a String
+EVERY row (1M); replaced with a dense Vec<Vec<usize>> scatter by integer bin index `(bin_end-min)/step`, building
+String keys ONCE per bin (empty bins still filled). (2) the per-row Sunday-ordinal built a chrono NaiveDate +
+.weekday() per row; replaced with pure i64 from ns (1970-01-01 = Thursday => weekday-from-Sunday=(dse+4)%7,
+ord=dse+days_to_sunday+719_163). bench_resample 1M: W mean 43.61->14.5ms = 0.17x->0.51x (pandas 7.45; 2W same; D
+7.3ms no regression). Conformance GREEN: fp-frame lib 3103 + 51 resample tests + new differential
+resample_week_numeric_conformance (numeric == chrono Sunday-ord over 80yr incl. pre-1970 + sub-day offsets).
+REMAINING (logged, not lever-worthy yet): 'h' 0.27x (29 vs 7.9ms) — the fixed-duration path already bins numerically
++ dense-scatters, but materializes a Vec<Vec<usize>> over 16667 bins (thousands of small allocs + scattered gather);
+a CSR (counting-sort, one flat Vec) layout or a single-pass sum/count accumulator for sum/mean would close it.
