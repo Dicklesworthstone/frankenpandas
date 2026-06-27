@@ -6147,6 +6147,28 @@ enum JCol<'a> {
     /// Datetime64 ns: serialized as epoch-MILLISECOND integers (`v / 1_000_000`),
     /// `NaT` (i64::MIN) → `null` — matching `scalar_to_json`.
     DtMs(&'a [i64]),
+    /// All-valid contiguous Utf8: `(bytes, offsets)`, row r =
+    /// `bytes[offsets[r]..offsets[r+1]]`, serialized as a JSON string.
+    U(&'a [u8], &'a [usize]),
+}
+
+/// Append `s` as a JSON string literal, byte-identical to `serde_json` (which
+/// escapes only `"`, `\`, and the control bytes 0x00–0x1F; everything else,
+/// including multi-byte UTF-8, passes through verbatim). The overwhelmingly
+/// common no-escape case is a single `"` + raw + `"`; only a string that
+/// actually contains an escape-worthy byte deopts to `serde_json::to_string`.
+#[inline]
+fn append_json_string(out: &mut String, s: &str) {
+    if s.bytes().all(|b| b >= 0x20 && b != b'"' && b != b'\\') {
+        out.push('"');
+        out.push_str(s);
+        out.push('"');
+    } else {
+        match serde_json::to_string(s) {
+            Ok(escaped) => out.push_str(&escaped),
+            Err(_) => out.push_str("\"\""),
+        }
+    }
 }
 
 /// Extract every column as an all-valid typed slice plus its pre-serialized,
@@ -6184,6 +6206,10 @@ fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<
                 return None;
             }
             (s.len() == n).then_some(JCol::DtMs(s))?
+        } else if let Some((bytes, offsets)) = column.as_utf8_contiguous() {
+            // as_utf8_contiguous already requires validity.all(), so every row
+            // is a present `Scalar::Utf8` → JSON string (never null).
+            (offsets.len() == n + 1).then_some(JCol::U(bytes, offsets))?
         } else {
             return None;
         };
@@ -6225,6 +6251,11 @@ fn append_typed_json_value(out: &mut String, col: &JCol<'_>, r: usize, fbytes: &
             } else {
                 append_i64_decimal(out, v / 1_000_000);
             }
+        }
+        JCol::U(bytes, offsets) => {
+            let field = &bytes[offsets[r]..offsets[r + 1]];
+            // SAFETY-FREE: contiguous Utf8 backing is valid UTF-8.
+            append_json_string(out, std::str::from_utf8(field).unwrap_or(""));
         }
     }
 }
@@ -30888,6 +30919,41 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_jsonl_matches(&f4);
         assert_columns_matches(&f4);
         assert_index_matches(&f4);
+
+        // Contiguous Utf8 column (the read-path backing the typed Utf8 arm
+        // accepts), with strings spanning the no-escape fast path and every
+        // serde escape case: quote, backslash, control bytes, and multi-byte
+        // UTF-8 (which serde passes through verbatim).
+        let strs = [
+            "plain",
+            "a\"b",
+            "c\\d",
+            "e\nf",
+            "g\th",
+            "i\u{0001}j",
+            "café",
+            "🦀x",
+            "",
+            "trailing ",
+        ];
+        let mut sbytes: Vec<u8> = Vec::new();
+        let mut soff: Vec<usize> = vec![0];
+        for s in strs {
+            sbytes.extend_from_slice(s.as_bytes());
+            soff.push(sbytes.len());
+        }
+        let mut c5: BTreeMap<String, Column> = BTreeMap::new();
+        c5.insert("n".to_string(), Column::from_i64_values((0..strs.len() as i64).collect()));
+        c5.insert("s".to_string(), Column::from_utf8_contiguous(sbytes, soff));
+        let f5 = DataFrame::new(idx(strs.len()), c5).expect("frame5");
+        assert!(super::try_write_json_records_typed(&f5, false).is_some());
+        assert_eq!(
+            write_json_string(&f5, JsonOrient::Records).expect("json5"),
+            serde_ref(&f5),
+        );
+        assert_jsonl_matches(&f5);
+        assert_columns_matches(&f5);
+        assert_index_matches(&f5);
 
         // Pseudo-random sweep (LCG, no external rng) over Int64/Float64 values.
         let mut state: u64 = 0x9E3779B97F4A7C15;

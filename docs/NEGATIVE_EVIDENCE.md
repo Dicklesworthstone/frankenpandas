@@ -6022,3 +6022,25 @@ Bit-identical: the json differential's main frame now carries a Datetime64 colum
 four common column dtypes (i64/f64/bool/datetime) across all five orients + jsonl — a stray timestamp column no longer
 silently reverts the frame to the slow path. Confirmed reads are NOT a gap: read_csv 37ms vs pandas 176ms (4.76x),
 read_json 473ms vs pandas 1030ms (2.18x) — both already WIN, no action taken.
+
+### 2026-06-27 TealOsprey — to_json typed writers extended to contiguous Utf8 columns: 0.65x LOSS -> 7.7x WIN vs pandas (11.9x fp-side)
+The last common column dtype not on the typed JSON path: a Utf8 column forced the whole frame onto the serde tree
+(materializing a `Scalar::Utf8` clone + `Value::String` per cell), so a frame with a string column lost pandas. Added
+`JCol::U(bytes, offsets)` over the contiguous Utf8 backing `as_utf8_contiguous` exposes (what read_csv / string ops
+produce; the `validity.all()` it requires guarantees every row is a present string). Each cell is written by
+`append_json_string`: serde escapes ONLY `"`, `\`, and control bytes 0x00–0x1F (multi-byte UTF-8 passes through), so
+the no-escape common case is a single `"`+raw+`"` push and only an escape-bearing string deopts to
+`serde_json::to_string`. Byte-identical to `scalar_to_json(Utf8)`. (A `Vec<Scalar>` Utf8 backing — e.g. from
+`from_values` — still bails to serde; the contiguous backing is the read/op path.)
+
+Same-box best-of-3, 1M rows × {Int64, contiguous Utf8 `item_<k>`} (`fp-io/examples/bench_to_json_str`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (serde fallback) | patched (typed) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `to_json(records)` +str 1M | 558.96ms | 47.0ms | 11.9x | 0.65x -> 7.71x (pandas 362.5ms) |
+
+Bit-identical: the json differential gained a contiguous-Utf8 frame whose strings cover the no-escape fast path AND
+every serde escape case (quote, backslash, `\n`, `\t`, control 0x01, accented + emoji multi-byte) — asserted across
+records/jsonl/columns/index vs serde; fp-io 48 json tests green. The typed JSON writers now cover ALL common column
+dtypes (i64/f64/bool/datetime/utf8) across every orient + jsonl; the serde `Value`-tree is reached only by genuinely
+mixed/null/exotic columns. This closes the to_json write surface: no benched column-dtype × orient combination loses.
