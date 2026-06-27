@@ -6083,3 +6083,25 @@ every test frame (numeric edges, datetime+NaT, contiguous-Utf8 escape cases, emp
 json tests green. ALL FIVE to_json orients (records/columns/index/values/split) + jsonl now use typed streaming
 writers across every common column dtype. Split still builds its `data` arrays via serde (its columns/index header
 arrays are tiny); the dominant `data` section is the same row-major shape as Values and is the remaining follow-up.
+
+### 2026-06-27 TealOsprey — to_json(split) typed streaming writer: 2.13x -> 8.59x WIN vs pandas (4.04x fp-side); to_json surface fully typed
+The last to_json orient on the serde tree (the Values entry's flagged follow-up). `Split` is
+`{"columns":[...],"index":[...],"data":[[...]]}`; the dominant `data` section is the same row-major arrays as Values.
+Added `try_write_json_split_typed`: `columns` via serde over the (few) header strings, `index` hand-rolled (itoa per
+label for the common all-Int64 index, `index_label_to_json`+serde otherwise — bare JSON values, not keys), `data` via
+the shared `append_json_row_arrays` (factored out of the Values writer). Object keys emitted columns/index/data to
+match `preserve_order` insertion order. Bails to serde on any non-typed column.
+
+Same-box best-of-3, 1M rows × {Int64, Float64} (`fp-io/examples/bench_to_json 1000000 split`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (serde tree) | patched (streaming) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `to_json(split)` 1M | 316.5ms | 78.3ms | 4.04x | 2.13x -> 8.59x (pandas 672.8ms) |
+
+Bit-identical: the json differential now also asserts Split vs a from-scratch serde `{columns,index,data}` reference
+over every test frame; fp-io 48 json tests green. SURFACE CLOSED: ALL five to_json orients
+(records/columns/index/values/split) AND jsonl now use typed streaming writers across every common column dtype
+(i64/f64/bool/datetime/utf8). The serde `Value`-tree is reached only by genuinely mixed/null/exotic columns. Final
+vs-pandas scorecard for the to_json write surface (1M, numeric): records 5.35x, columns 4.66x, index 8.53x, values
+11.3x, split 8.59x, jsonl 5.53x — every one a WIN; three started as outright LOSSES (records 0.69x, columns 0.39x,
+index 0.63x) plus the datetime (0.72x) and utf8 (0.65x) column-dtype losses, all now closed.

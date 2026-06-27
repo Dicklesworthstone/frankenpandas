@@ -6424,18 +6424,10 @@ fn try_write_json_index_typed(frame: &DataFrame) -> Option<String> {
     Some(out)
 }
 
-/// Streaming typed fast path for `to_json(orient="values")` — `[[v, v], ...]`,
-/// row-major arrays with no keys (the simplest orient). Bit-identical to the
-/// serde `Values` arm: each row is the column values in column order, formatted
-/// by `append_typed_json_value`. Bails (→ serde) on any non-typed column.
-fn try_write_json_values_typed(frame: &DataFrame) -> Option<String> {
-    let (cols, _keys) = extract_typed_value_columns(frame)?;
-    let n = frame.index().len();
-    let mut out = String::with_capacity(
-        n.saturating_mul(cols.len().max(1))
-            .saturating_mul(12)
-            .saturating_add(16),
-    );
+/// Append the row-major `[[v, v], ...]` array of all cells (column order per
+/// row) to `out` — the shared body of the `values` orient and the `data`
+/// section of the `split` orient.
+fn append_json_row_arrays(out: &mut String, cols: &[JCol<'_>], n: usize) {
     out.push('[');
     let mut fbytes: Vec<u8> = Vec::with_capacity(32);
     for r in 0..n {
@@ -6447,11 +6439,78 @@ fn try_write_json_values_typed(frame: &DataFrame) -> Option<String> {
             if c > 0 {
                 out.push(',');
             }
-            append_typed_json_value(&mut out, col, r, &mut fbytes);
+            append_typed_json_value(out, col, r, &mut fbytes);
         }
         out.push(']');
     }
     out.push(']');
+}
+
+/// Streaming typed fast path for `to_json(orient="values")` — `[[v, v], ...]`,
+/// row-major arrays with no keys (the simplest orient). Bit-identical to the
+/// serde `Values` arm. Bails (→ serde) on any non-typed column.
+fn try_write_json_values_typed(frame: &DataFrame) -> Option<String> {
+    let (cols, _keys) = extract_typed_value_columns(frame)?;
+    let n = frame.index().len();
+    let mut out = String::with_capacity(
+        n.saturating_mul(cols.len().max(1))
+            .saturating_mul(12)
+            .saturating_add(16),
+    );
+    append_json_row_arrays(&mut out, &cols, n);
+    Some(out)
+}
+
+/// Streaming typed fast path for `to_json(orient="split")` —
+/// `{"columns":[...],"index":[...],"data":[[...]]}`. The `data` section is the
+/// same row-major shape as `values` (the bulk); the `columns`/`index` header
+/// arrays are tiny. Bit-identical to the serde `Split` arm: `columns` is the
+/// header strings, `index` is each label via `index_label_to_json` (bare ints
+/// for an Int64 index, hand-rolled here), `data` via `append_json_row_arrays`,
+/// and the object keys are in insertion order (columns, index, data) under
+/// `preserve_order`. Bails (→ serde) on any non-typed column.
+fn try_write_json_split_typed(frame: &DataFrame) -> Option<String> {
+    let (cols, _keys) = extract_typed_value_columns(frame)?;
+    let n = frame.index().len();
+    let headers = frame.column_names();
+    // columns array: serde over the (few) header strings — same escaping as the
+    // serde path's `Vec<Value::String>`.
+    let cols_json = serde_json::to_string(&headers).ok()?;
+    // index array: bare JSON values (NOT object keys), `index_label_to_json` per
+    // label — hand-rolled itoa for the common all-Int64 index, serde otherwise.
+    let mut idx_json = String::with_capacity(n.saturating_mul(8).saturating_add(2));
+    idx_json.push('[');
+    if let Some(vals) = frame.index().int64_label_values()
+        && vals.len() == n
+    {
+        for (i, &v) in vals.iter().enumerate() {
+            if i > 0 {
+                idx_json.push(',');
+            }
+            append_i64_decimal(&mut idx_json, v);
+        }
+    } else {
+        for (i, label) in frame.index().labels().iter().enumerate() {
+            if i > 0 {
+                idx_json.push(',');
+            }
+            idx_json.push_str(&serde_json::to_string(&index_label_to_json(label)).ok()?);
+        }
+    }
+    idx_json.push(']');
+
+    let mut out = String::with_capacity(
+        n.saturating_mul(cols.len().max(1))
+            .saturating_mul(12)
+            .saturating_add(idx_json.len() + cols_json.len() + 48),
+    );
+    out.push_str("{\"columns\":");
+    out.push_str(&cols_json);
+    out.push_str(",\"index\":");
+    out.push_str(&idx_json);
+    out.push_str(",\"data\":");
+    append_json_row_arrays(&mut out, &cols, n);
+    out.push('}');
     Some(out)
 }
 
@@ -6543,6 +6602,10 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             Ok(serde_json::to_string(&serde_json::Value::Object(outer))?)
         }
         JsonOrient::Split => {
+            // Typed streaming fast path; falls back to the serde tree below.
+            if let Some(s) = try_write_json_split_typed(frame) {
+                return Ok(s);
+            }
             let col_array: Vec<serde_json::Value> = headers
                 .iter()
                 .map(|h| serde_json::Value::String(h.clone()))
@@ -30886,6 +30949,45 @@ mod merge_simple_numeric_csv_chunks_tests {
                 values_serde_ref(frame),
             );
         }
+        // Split orient: from-scratch serde {columns, index, data} reference.
+        fn split_serde_ref(frame: &DataFrame) -> String {
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let col_array: Vec<serde_json::Value> = headers
+                .iter()
+                .map(|h| serde_json::Value::String(h.clone()))
+                .collect();
+            let index_array: Vec<serde_json::Value> = frame
+                .index()
+                .labels()
+                .iter()
+                .map(super::index_label_to_json)
+                .collect();
+            let mut data = Vec::with_capacity(frame.index().len());
+            for row_idx in 0..frame.index().len() {
+                let row: Vec<serde_json::Value> = headers
+                    .iter()
+                    .map(|name| {
+                        frame
+                            .column(name.as_str())
+                            .and_then(|c| c.value(row_idx))
+                            .map(|v| super::scalar_to_json_with_column_promotion(v, false))
+                            .unwrap_or(serde_json::Value::Null)
+                    })
+                    .collect();
+                data.push(serde_json::Value::Array(row));
+            }
+            let mut obj = serde_json::Map::new();
+            obj.insert("columns".into(), serde_json::Value::Array(col_array));
+            obj.insert("index".into(), serde_json::Value::Array(index_array));
+            obj.insert("data".into(), serde_json::Value::Array(data));
+            serde_json::to_string(&serde_json::Value::Object(obj)).unwrap()
+        }
+        fn assert_split_matches(frame: &DataFrame) {
+            assert_eq!(
+                write_json_string(frame, JsonOrient::Split).expect("split"),
+                split_serde_ref(frame),
+            );
+        }
         fn idx(n: usize) -> Index {
             Index::new_known_unique_int64_unit_range(0, n)
         }
@@ -30930,6 +31032,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert!(super::try_write_json_columns_typed(&frame).is_some());
         assert!(super::try_write_json_index_typed(&frame).is_some());
         assert!(super::try_write_json_values_typed(&frame).is_some());
+        assert!(super::try_write_json_split_typed(&frame).is_some());
         assert_eq!(
             write_json_string(&frame, JsonOrient::Records).expect("json"),
             serde_ref(&frame),
@@ -30938,6 +31041,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_columns_matches(&frame);
         assert_index_matches(&frame);
         assert_values_matches(&frame);
+        assert_split_matches(&frame);
 
         // -Inf in isolation.
         let mut c2: BTreeMap<String, Column> = BTreeMap::new();
@@ -30951,6 +31055,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_columns_matches(&f2);
         assert_index_matches(&f2);
         assert_values_matches(&f2);
+        assert_split_matches(&f2);
 
         // Empty frame (0 rows) and a single-column int frame.
         let mut c3: BTreeMap<String, Column> = BTreeMap::new();
@@ -30964,6 +31069,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_columns_matches(&f3);
         assert_index_matches(&f3);
         assert_values_matches(&f3);
+        assert_split_matches(&f3);
 
         // A Utf8 column forces the serde fallback; equality must still hold
         // (trivially, since the fast path declines).
@@ -30984,6 +31090,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_columns_matches(&f4);
         assert_index_matches(&f4);
         assert_values_matches(&f4);
+        assert_split_matches(&f4);
 
         // Contiguous Utf8 column (the read-path backing the typed Utf8 arm
         // accepts), with strings spanning the no-escape fast path and every
@@ -31020,6 +31127,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_columns_matches(&f5);
         assert_index_matches(&f5);
         assert_values_matches(&f5);
+        assert_split_matches(&f5);
 
         // Pseudo-random sweep (LCG, no external rng) over Int64/Float64 values.
         let mut state: u64 = 0x9E3779B97F4A7C15;
@@ -31049,5 +31157,6 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_columns_matches(&rframe);
         assert_index_matches(&rframe);
         assert_values_matches(&rframe);
+        assert_split_matches(&rframe);
     }
 }
