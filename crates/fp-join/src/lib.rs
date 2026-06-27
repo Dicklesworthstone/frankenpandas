@@ -1356,6 +1356,63 @@ fn utf8_span<'a>(bytes: &'a [u8], offsets: &[usize], pos: usize) -> &'a [u8] {
     &bytes[offsets[pos]..offsets[pos + 1]]
 }
 
+fn utf8_offsets_are_sorted(bytes: &[u8], offsets: &[usize]) -> bool {
+    offsets
+        .windows(3)
+        .all(|window| bytes[window[0]..window[1]] <= bytes[window[1]..window[2]])
+}
+
+fn sorted_contiguous_utf8_inner_positions(
+    left_bytes: &[u8],
+    left_offsets: &[usize],
+    right_bytes: &[u8],
+    right_offsets: &[usize],
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    if !utf8_offsets_are_sorted(left_bytes, left_offsets)
+        || !utf8_offsets_are_sorted(right_bytes, right_offsets)
+    {
+        return None;
+    }
+
+    let left_n = left_offsets.len() - 1;
+    let right_n = right_offsets.len() - 1;
+    let mut left_positions = Vec::<usize>::with_capacity(left_n.min(right_n));
+    let mut right_positions = Vec::<usize>::with_capacity(left_positions.capacity());
+    let mut left_pos = 0usize;
+    let mut right_pos = 0usize;
+
+    while left_pos < left_n && right_pos < right_n {
+        let left_span = utf8_span(left_bytes, left_offsets, left_pos);
+        let right_span = utf8_span(right_bytes, right_offsets, right_pos);
+        match left_span.cmp(right_span) {
+            Ordering::Less => left_pos += 1,
+            Ordering::Greater => right_pos += 1,
+            Ordering::Equal => {
+                let left_start = left_pos;
+                let right_start = right_pos;
+                while left_pos < left_n
+                    && utf8_span(left_bytes, left_offsets, left_pos) == left_span
+                {
+                    left_pos += 1;
+                }
+                while right_pos < right_n
+                    && utf8_span(right_bytes, right_offsets, right_pos) == right_span
+                {
+                    right_pos += 1;
+                }
+                for matched_left in left_start..left_pos {
+                    for matched_right in right_start..right_pos {
+                        left_positions.push(matched_left);
+                        right_positions.push(matched_right);
+                    }
+                }
+            }
+        }
+    }
+
+    Some((left_positions, right_positions))
+}
+
 fn utf8_span_lower_bound(bytes: &[u8], offsets: &[usize], needle: &[u8]) -> usize {
     let mut lo = 0usize;
     let mut hi = offsets.len() - 1;
@@ -6650,6 +6707,12 @@ fn contiguous_utf8_inner_positions(
         return Some((Vec::new(), Vec::new()));
     }
 
+    if let Some(positions) =
+        sorted_contiguous_utf8_inner_positions(left_bytes, left_offsets, right_bytes, right_offsets)
+    {
+        return Some(positions);
+    }
+
     let mut right_map = FxHashMap::<&[u8], JoinPositionBucket>::with_capacity_and_hasher(
         right_n,
         Default::default(),
@@ -9113,7 +9176,8 @@ mod tests {
         lower_hex_overlap_plan_from_certificates, ordered_unique_utf8_inner_position_plan,
         ordered_unique_utf8_inner_positions, ordered_utf8_lower_hex_overlap_len,
         scalar_utf8_left_positions, scalar_utf8_outer_positions,
-        strictly_increasing_utf8_key_spans, utf8_span_lower_bound,
+        sorted_contiguous_utf8_inner_positions, strictly_increasing_utf8_key_spans,
+        utf8_span_lower_bound,
     };
 
     fn contiguous_utf8_column(values: &[&str]) -> Column {
@@ -13308,6 +13372,43 @@ mod tests {
         assert_eq!(
             merged.columns.get("rv").unwrap().values(),
             &[Scalar::Int64(20), Scalar::Int64(22)]
+        );
+    }
+
+    #[test]
+    fn sorted_contiguous_utf8_inner_positions_preserves_duplicate_order_codb() {
+        let left = contiguous_utf8_column(&["a", "a", "b", "d"]);
+        let right = contiguous_utf8_column(&["a", "a", "c", "d"]);
+        let (left_bytes, left_offsets) = left.as_utf8_contiguous().expect("left contiguous");
+        let (right_bytes, right_offsets) = right.as_utf8_contiguous().expect("right contiguous");
+
+        let (left_positions, right_positions) = sorted_contiguous_utf8_inner_positions(
+            left_bytes,
+            left_offsets,
+            right_bytes,
+            right_offsets,
+        )
+        .expect("sorted spans should use two-pointer merge");
+
+        assert_eq!(left_positions, vec![0, 0, 1, 1, 3]);
+        assert_eq!(right_positions, vec![0, 1, 0, 1, 3]);
+    }
+
+    #[test]
+    fn sorted_contiguous_utf8_inner_positions_rejects_unsorted_input_codb() {
+        let left = contiguous_utf8_column(&["b", "a"]);
+        let right = contiguous_utf8_column(&["a", "b"]);
+        let (left_bytes, left_offsets) = left.as_utf8_contiguous().expect("left contiguous");
+        let (right_bytes, right_offsets) = right.as_utf8_contiguous().expect("right contiguous");
+
+        assert!(
+            sorted_contiguous_utf8_inner_positions(
+                left_bytes,
+                left_offsets,
+                right_bytes,
+                right_offsets,
+            )
+            .is_none()
         );
     }
 

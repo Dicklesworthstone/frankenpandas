@@ -1,10 +1,11 @@
-//! Inner merge on Int64 vs Utf8 key @1M left x K right. bench_merge <n> <k> <keytype>
+//! Inner merge on Int64 vs Utf8 key @1M left x K right.
+//! bench_merge <n> <k> <keytype> [sorted_dup]
 use std::collections::BTreeMap;
 
 use fp_columnar::Column;
 use fp_frame::DataFrame;
 use fp_index::{Index, IndexLabel};
-use fp_join::{merge_dataframes, JoinType};
+use fp_join::{JoinType, merge_dataframes};
 
 fn sm(i: usize, s: u64) -> u64 {
     let mut h = (i as u64).wrapping_add(s).wrapping_mul(0x9E3779B97F4A7C15);
@@ -12,6 +13,15 @@ fn sm(i: usize, s: u64) -> u64 {
     h ^= h >> 31;
     h
 }
+
+fn sorted_dup_key(row: usize, rows: usize, cardinality: usize) -> i64 {
+    if rows == 0 || cardinality == 0 {
+        return 0;
+    }
+    let key = (row as u128 * cardinality as u128) / rows as u128;
+    key.min((cardinality - 1) as u128) as i64
+}
+
 fn frame(keys_i64: Vec<i64>, vals: Vec<f64>, vname: &str, utf8: bool) -> DataFrame {
     let n = keys_i64.len();
     let key_col = if utf8 {
@@ -37,8 +47,17 @@ fn main() {
     let n: usize = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
     let k: usize = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(100_000);
     let utf8 = a.get(3).map(|s| s == "utf8").unwrap_or(false);
+    let sorted_dup = a.get(4).map(|s| s == "sorted_dup").unwrap_or(false);
     let left = frame(
-        (0..n).map(|i| (sm(i, 0) % k as u64) as i64).collect(),
+        (0..n)
+            .map(|i| {
+                if sorted_dup {
+                    sorted_dup_key(i, n, k)
+                } else {
+                    (sm(i, 0) % k as u64) as i64
+                }
+            })
+            .collect(),
         (0..n).map(|i| sm(i, 2) as f64).collect(),
         "lv",
         utf8,
@@ -59,5 +78,7 @@ fn main() {
             best = e;
         }
     }
-    println!("merge_inner_{} n={n} k={k}: best={best}ns", if utf8 { "utf8" } else { "i64" });
+    let key_name = if utf8 { "utf8" } else { "i64" };
+    let mode = if sorted_dup { "_sorted_dup" } else { "" };
+    println!("merge_inner_{key_name}{mode} n={n} k={k}: best={best}ns");
 }

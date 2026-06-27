@@ -5544,6 +5544,7 @@ Conformance GREEN: `cargo test -p fp-columnar --release` passed 441/441 (5 ignor
 `(x * factor).round_ties_even() / factor` by exact bits across infinities, signed zero, 2^52 boundaries, large finite
 values, and 20k generated normals for decimals -6, -2, 0, 2, 6, 12. Remaining gap is memory/write + scalar path
 overhead; true SIMD roundpd/SVML lowering is still the deeper lever.
+
 ### 2026-06-27 BlackThrush — to_period numeric civil label (M/D/Y/Q/H/min/s): ~150->94ms M (1.6x fp-side, 0.15x->0.24x)
 Probed Series.dt -> to_period (converts the Datetime64 ROW INDEX to period labels; fp uses Utf8 string labels):
 ALL freqs lose — M 0.15x (150 vs 22.7ms), D 0.14x, Y 0.19x, W 0.064x (402ms). period_index_label converted each ns
@@ -5568,3 +5569,19 @@ dt.format per row). Now computes week bounds numerically: 1970-01-01 (day 0) = T
 RESIDUAL (unchanged, string-floored): still <1.0x because to_period emits 1M IndexLabel::Utf8 (2 dates/label for W)
 + Index::new — pandas returns an i64 PeriodIndex. The Utf8 period-label representation is the real floor; W/B
 anchored aliases still chrono. Closing needs a Period index-label type (golden-regen, cross-surface).
+
+### 2026-06-27 Codex cod-b - sorted duplicate-run Utf8 inner merge: 2.75x -> 3.15x vs pandas
+Landed the measured bench-worktree lever from `69e75b39` on current main: all-valid contiguous Utf8 inner joins now
+detect sorted duplicate runs and use a two-pointer run merge before the hash-map fallback. This extends the existing
+ordered-unique Utf8 path to the non-unique sorted case while preserving pandas left-major/right-minor duplicate
+pairing. Unsorted or null-bearing keys still fall through to the prior paths.
+
+Bench evidence, same target dir `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`, command routed
+through `rch exec` but fell open locally because no worker slots were admissible. The baseline used current main
+`66104c54f` with the identical `bench_merge sorted_dup` example mode applied only for measurement; patched timing is
+this commit's code. Workload: `bench_merge 1000000 100000 utf8 sorted_dup`, 1M sorted duplicate-run left Utf8 keys
+joined to 100k sorted unique right Utf8 keys; pandas 2.2.3 equivalent `left.merge(right, on="key", how="inner")`.
+
+| workload | current main | patched | pandas 2.2.3 | ratio vs pandas | fp-side |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| sorted duplicate-run Utf8 inner merge | 82.124ms | 71.649ms | 226.015ms | 2.75x -> 3.15x | 1.15x |
