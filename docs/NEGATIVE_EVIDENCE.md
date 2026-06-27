@@ -6105,3 +6105,27 @@ over every test frame; fp-io 48 json tests green. SURFACE CLOSED: ALL five to_js
 vs-pandas scorecard for the to_json write surface (1M, numeric): records 5.35x, columns 4.66x, index 8.53x, values
 11.3x, split 8.59x, jsonl 5.53x — every one a WIN; three started as outright LOSSES (records 0.69x, columns 0.39x,
 index 0.63x) plus the datetime (0.72x) and utf8 (0.65x) column-dtype losses, all now closed.
+
+### 2026-06-27 BlackThrush — Series.unstack numeric flat-label parser: ORIG 58.712ms -> 22.634ms (2.59x fp-side)
+The measured `df_unstack` gap was not in value scatter after the existing typed Float64 branch; it was still paying
+per-label string splitting/trimming and two `FxHashMap<String, usize>` lookups for the benchmark's canonical flattened
+numeric labels (`"row, col"`). Added a guarded parser for exact non-negative decimal `"u64, u64"` Utf8 labels that
+factorizes row/column codes as integers and only converts distinct output row/column labels back to strings. Any
+non-Utf8 label, non-canonical spacing, sign, empty side, overflow, or leading-zero multi-digit token falls back to the
+old string path, preserving public string semantics.
+
+Same target dir `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`; command:
+`rch exec -- cargo run -p fp-bench --release -- --category dataframe_ops --workload df_unstack --size 1M --dtype float64 --json`.
+
+| workload | ORIG current main | patched | fp-side | vs pandas note |
+| --- | ---: | ---: | ---: | --- |
+| `df_unstack` 1M float64 | 58.712ms best (`rch exec` fell open locally) | 22.634ms best (`rch exec` fell open locally after final cleanup; earlier remote `hz2` best was 20.011ms) | 2.59x | prior pandas 2.2.3 row was 24.37ms, so this moves the workload from ~0.42-0.48x to ~1.08x vs that comparator |
+
+Guards: `cargo test -p fp-frame --release unstack` passed (9 focused tests including a leading-zero fallback test);
+`cargo bench -p fp-frame` passed after Cargo rejected the literal invalid `cargo bench --release -p fp-frame` form;
+`cargo test -p fp-conformance --release` passed. `cargo check -p fp-frame --all-targets` passed with existing example
+unused-import warnings. `cargo clippy -p fp-frame --all-targets -- -D warnings` is blocked before this crate by an
+existing `fp-columnar` lint; `cargo clippy -p fp-frame --lib --no-deps -- -D warnings` shows only the known broad
+`fp-frame` lint backlog after removing the one local `unstack` loop warning. `cargo fmt -p fp-frame --check` is blocked
+by pre-existing formatting drift in examples/tests and unrelated old `lib.rs` hunks. Bounded UBS
+`timeout 180s ubs crates/fp-frame/src/lib.rs` timed out without a focused finding, matching the known broad inventory.
