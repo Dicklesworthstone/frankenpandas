@@ -16052,6 +16052,27 @@ impl Column {
         None
     }
 
+    #[inline]
+    fn round_ties_even_fast(value: f64) -> f64 {
+        const TWO_POW_52: f64 = 4_503_599_627_370_496.0;
+        let abs = value.abs();
+        if abs < TWO_POW_52 {
+            let rounded = (abs + TWO_POW_52) - TWO_POW_52;
+            if value.is_sign_negative() {
+                -rounded
+            } else {
+                rounded
+            }
+        } else {
+            value
+        }
+    }
+
+    #[inline]
+    fn round_scaled_ties_even_fast(value: f64, factor: f64) -> f64 {
+        Self::round_ties_even_fast(value * factor) / factor
+    }
+
     /// All-valid numeric column → an owned `f64` view (Float64 copied, Int64 cast
     /// `x as f64`), exactly as `Scalar::to_f64` would. `None` for nullable /
     /// non-numeric columns (so binary ufuncs fall back to the scalar loop).
@@ -17195,6 +17216,13 @@ impl Column {
             // round of all-valid finite/inf never yields NaN, so owned (all-valid)
             // is bit-identical; from_f64_values_owned's NaN scan routes any stray
             // NaN to the identical Arc path.
+            if factor.is_finite() && factor != 0.0 {
+                return Ok(Self::from_f64_values_owned(
+                    data.iter()
+                        .map(|&x| Self::round_scaled_ties_even_fast(x, factor))
+                        .collect(),
+                ));
+            }
             return Ok(Self::from_f64_values_owned(
                 data.iter()
                     .map(|&x| (x * factor).round_ties_even() / factor)
@@ -22135,6 +22163,55 @@ mod tests {
             let infinite_factor = Column::from_f64_values(vec![f64::INFINITY]);
             let rounded = infinite_factor.round(400).expect("round infinite factor");
             assert!(rounded.values()[0].is_missing());
+        }
+
+        #[test]
+        fn round_fast_scaled_matches_round_ties_even_reference_blackthrush() {
+            let mut values = vec![
+                f64::NEG_INFINITY,
+                -4_503_599_627_370_496.0,
+                -4_503_599_627_370_495.5,
+                -12_345.675,
+                -2.5,
+                -1.5,
+                -0.015,
+                -0.005,
+                -0.0,
+                0.0,
+                0.005,
+                0.015,
+                1.5,
+                2.5,
+                12_345.675,
+                4_503_599_627_370_495.5,
+                4_503_599_627_370_496.0,
+                f64::INFINITY,
+                f64::MAX,
+                -f64::MAX,
+            ];
+            let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+            for _ in 0..20_000 {
+                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                let exponent = ((state >> 48) % 1200) + 1;
+                let sign = state & (1_u64 << 63);
+                let mantissa = state & 0x000f_ffff_ffff_ffff;
+                values.push(f64::from_bits(sign | (exponent << 52) | mantissa));
+            }
+
+            for decimals in [-6, -2, 0, 2, 6, 12] {
+                let factor = 10.0_f64.powi(decimals);
+                let col = Column::from_f64_values(values.clone());
+                let got = col.round(decimals).expect("round");
+                let got = got.as_f64_slice().expect("typed round");
+                for (pos, (&x, &rounded)) in values.iter().zip(got).enumerate() {
+                    let expected = (x * factor).round_ties_even() / factor;
+                    assert_eq!(
+                        rounded.to_bits(),
+                        expected.to_bits(),
+                        "decimals={decimals} pos={pos} x={x:?}: got {rounded:?}, expected {expected:?}"
+                    );
+                }
+            }
         }
 
         #[test]
