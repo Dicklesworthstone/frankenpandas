@@ -245,29 +245,88 @@ impl fmt::Display for IndexLabel {
     }
 }
 
+/// Hinnant `civil_from_days`: proleptic-Gregorian (year, month, day) for a day
+/// count since the 1970-01-01 epoch. Floor-correct for negative (pre-epoch)
+/// days. Identical algorithm to `fp-frame`'s `datetime64_civil_from_nanos`.
+#[inline]
+fn civil_from_epoch_days(days_since_epoch: i64) -> (i64, i64, i64) {
+    let days = days_since_epoch + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let doe = days - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    (year, month, day)
+}
+
+/// Append exactly two decimal digits of `n` (0..=99) — `{:02}`.
+#[inline]
+fn push_2d_str(buf: &mut String, n: i64) {
+    buf.push((b'0' + (n / 10 % 10) as u8) as char);
+    buf.push((b'0' + (n % 10) as u8) as char);
+}
+
+/// Append exactly four decimal digits of `n` (0..=9999) — `{:04}`.
+#[inline]
+fn push_4d_str(buf: &mut String, n: i64) {
+    buf.push((b'0' + (n / 1000 % 10) as u8) as char);
+    buf.push((b'0' + (n / 100 % 10) as u8) as char);
+    buf.push((b'0' + (n / 10 % 10) as u8) as char);
+    buf.push((b'0' + (n % 10) as u8) as char);
+}
+
 pub fn format_datetime_ns(nanos: i64) -> String {
     if nanos == i64::MIN {
         return "NaT".to_owned();
     }
-    // `from_timestamp_nanos` decomposes the full i64 nanosecond count with the
-    // correct floor semantics for pre-epoch instants (the old manual
-    // `nanos / 1e9` + `(nanos % 1e9).unsigned_abs()` mis-decomposed negatives:
-    // -0.5s became 1970-01-01 00:00:00.5 instead of 1969-12-31 23:59:59.5).
-    let dt = chrono::DateTime::from_timestamp_nanos(nanos);
-    let mut rendered = dt.format("%Y-%m-%d %H:%M:%S").to_string();
-    // Carry subsecond precision (br-frankenpandas-dt64fmt): the old formatter
-    // dropped any fraction, so a Datetime64 column with sub-second nanos lost
-    // precision in repr/to_csv. Append the fraction with the SAME trailing-zero
-    // trimming `format_naive_datetime` uses, so a Datetime64 value and the Utf8
-    // datetime string for the same instant render identically.
-    let subsec_nanos = dt.timestamp_subsec_nanos();
-    if subsec_nanos != 0 {
-        let mut fractional = format!("{subsec_nanos:09}");
-        while fractional.ends_with('0') {
-            fractional.pop();
+    // Hand-rolled civil + ASCII (br-frankenpandas-dtns), bit-identical to the
+    // prior `chrono::from_timestamp_nanos(nanos).format("%Y-%m-%d %H:%M:%S")` +
+    // trailing-zero-trimmed subsecond fraction, but without the per-call chrono
+    // DateTime construction, the `DelayedFormat` strftime machinery, and the two
+    // `String`/`format!` allocations. `div_euclid`/`rem_euclid` reproduce
+    // chrono's floor semantics for pre-epoch instants (-0.5s renders as
+    // 1969-12-31 23:59:59.5). A datetime64[ns] year is always in [1677, 2262]
+    // (the i64-ns range) so `%Y` is exactly 4 digits, and the time fields are 2.
+    let days = nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+    let (y, m, d) = civil_from_epoch_days(days);
+    let secs_of_day = nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
+    let h = secs_of_day / 3600;
+    let mi = (secs_of_day % 3600) / 60;
+    let sec = secs_of_day % 60;
+    let subsec = nanos.rem_euclid(Timedelta::NANOS_PER_SEC); // 0..=999_999_999
+
+    let mut rendered = String::with_capacity(if subsec != 0 { 29 } else { 19 });
+    push_4d_str(&mut rendered, y);
+    rendered.push('-');
+    push_2d_str(&mut rendered, m);
+    rendered.push('-');
+    push_2d_str(&mut rendered, d);
+    rendered.push(' ');
+    push_2d_str(&mut rendered, h);
+    rendered.push(':');
+    push_2d_str(&mut rendered, mi);
+    rendered.push(':');
+    push_2d_str(&mut rendered, sec);
+    if subsec != 0 {
+        // Nine zero-padded fraction digits with trailing zeros trimmed, matching
+        // the prior `format!("{subsec:09}")` + pop-'0' loop exactly.
+        let mut frac = [0u8; 9];
+        let mut v = subsec;
+        for slot in frac.iter_mut().rev() {
+            *slot = b'0' + (v % 10) as u8;
+            v /= 10;
+        }
+        let mut end = 9usize;
+        while end > 0 && frac[end - 1] == b'0' {
+            end -= 1;
         }
         rendered.push('.');
-        rendered.push_str(&fractional);
+        // SAFETY-FREE: frac[..end] is all ASCII digits.
+        rendered.push_str(std::str::from_utf8(&frac[..end]).unwrap_or(""));
     }
     rendered
 }
@@ -30981,6 +31040,64 @@ mod tests {
         );
         // NaT sentinel is preserved.
         assert_eq!(super::format_datetime_ns(i64::MIN), "NaT");
+    }
+
+    #[test]
+    fn format_datetime_ns_bit_identical_to_chrono_over_full_range_dtns() {
+        // Differential guard for the hand-rolled civil+ASCII rewrite
+        // (br-frankenpandas-dtns): must match chrono byte-for-byte across the
+        // entire i64-ns datetime64 range, both whole-second and sub-second.
+        fn chrono_ref(nanos: i64) -> String {
+            if nanos == i64::MIN {
+                return "NaT".to_owned();
+            }
+            let dt = chrono::DateTime::from_timestamp_nanos(nanos);
+            let mut rendered = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+            let subsec_nanos = dt.timestamp_subsec_nanos();
+            if subsec_nanos != 0 {
+                let mut fractional = format!("{subsec_nanos:09}");
+                while fractional.ends_with('0') {
+                    fractional.pop();
+                }
+                rendered.push('.');
+                rendered.push_str(&fractional);
+            }
+            rendered
+        }
+
+        // Edge cases: the representable datetime64[ns] bounds, the epoch, and
+        // pre-epoch fractions where floor semantics bite.
+        let edges = [
+            i64::MIN,
+            i64::MIN + 1,                       // 1677-09-21 ...
+            i64::MAX,                           // 2262-04-11 ...
+            0,
+            -1,
+            1,
+            -500_000_000,
+            -999_999_999,
+            -1_000_000_000,
+            500_000_000,
+            123_456_789,
+            -86_400_000_000_000,                // exactly one day pre-epoch
+        ];
+        for ns in edges {
+            assert_eq!(super::format_datetime_ns(ns), chrono_ref(ns), "ns={ns}");
+        }
+
+        // Dense sweep across the full range with a large odd step (covers every
+        // month/day/leap combination + sub-second fractions via the prime step).
+        let step: i64 = 4_801_357_913_i64; // ~4.8s, coprime-ish, exercises subsec
+        let mut ns = i64::MIN + 1;
+        let mut count = 0u64;
+        while count < 3_000_000 {
+            assert_eq!(super::format_datetime_ns(ns), chrono_ref(ns), "ns={ns}");
+            match ns.checked_add(step) {
+                Some(next) => ns = next,
+                None => break,
+            }
+            count += 1;
+        }
     }
 
     #[test]

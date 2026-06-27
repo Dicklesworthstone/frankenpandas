@@ -5893,3 +5893,27 @@ runs 41.678ms and 39.353ms. Using the established same-workload pandas 2.2.3 com
 (24.29ms), ratio improves from 0.49x to 0.62x vs pandas; fp-side speedup 1.25x. Residual remains vectorized
 date-to-civil arithmetic plus three-column materialization; the cheaper validity construction was negative evidence,
 not a keeper.
+
+### 2026-06-27 TealOsprey — format_datetime_ns hand-rolled civil+ASCII (drop chrono): 8.7x fp-side, to_csv datetime 5.1x (13.1x vs pandas)
+The fourth and broadest application of the to_period/strftime/astype ASCII-writer lever. `fp_index::format_datetime_ns`
+— the shared chokepoint for to_csv datetime columns, repr, to_html, and astype(str)-of-datetime — built a
+`chrono::DateTime::from_timestamp_nanos(ns)` then `dt.format("%Y-%m-%d %H:%M:%S").to_string()` plus a
+`format!("{subsec:09}")` PER VALUE: chrono DateTime construction + `DelayedFormat` strftime machinery + two String
+allocs every row. Replaced with `civil_from_epoch_days` (Hinnant `civil_from_days`, the exact algorithm fp-frame's
+strftime fast path already uses) + `div_euclid`/`rem_euclid` time decomposition + hand-rolled `push_4d_str`/
+`push_2d_str` + a manual 9-digit trailing-zero-trimmed fraction. No chrono, no `DelayedFormat`, one String alloc.
+
+Same-box best-of, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| bench | baseline (chrono) | patched (hand-rolled) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `format_datetime_ns` 1M (no subsec) | 318.4ms | 36.7ms | 8.67x | — |
+| `format_datetime_ns` 1M (subsec) | 405.2ms | 67.3ms | 6.02x | — |
+| `to_csv` 1M datetime column | 507.8ms | 99.3ms | 5.11x | 2.57x -> 13.1x (pandas 1303ms) |
+
+Bit-identical: a permanent differential `format_datetime_ns_bit_identical_to_chrono_over_full_range_dtns` compares
+the new impl against an inline chrono reference over 3M values stepping the full i64-ns datetime64 range + the
+representable bounds / epoch / pre-epoch sub-second edges = byte-for-byte equal; fp-io 146 csv + 45 datetime tests,
+fp-index 45 datetime tests, existing `..._dt64fmt` golden all green. chrono's floor semantics for pre-epoch instants
+(-0.5s -> `1969-12-31 23:59:59.5`) are reproduced by `div_euclid`/`rem_euclid`. CONFIRMS the lever a fourth time and
+extends it from integer formatting to full calendar formatting; the chrono `DelayedFormat` path was ~85% of
+format_datetime_ns wall time. GENERALIZES to any remaining chrono `.format().to_string()` per-row loop.
