@@ -65,6 +65,24 @@ fn rolling_skew_kurt_typed_matches_scalar_path() {
                     assert_eq!(bits(&rt.values()[i]), bits(&rs.values()[i]), "kurt={kurt} w={w} i={i}");
                 }
             }
+
+            // cov/corr: second axis (perturbation). Typed path needs BOTH all-
+            // valid; trailing-NaN forces the Scalar path, prefix must match.
+            let other: Vec<f64> = vals.iter().enumerate().map(|(j, &v)| v * 0.75 - j as f64).collect();
+            for corr in [false, true] {
+                let t = typed_series(&vals);
+                let to = typed_series(&other);
+                let sc = scalar_series_trailing_nan(&vals);
+                let so = scalar_series_trailing_nan(&other);
+                let (rt, rs) = if corr {
+                    (t.rolling(w, None).corr(&to).unwrap(), sc.rolling(w, None).corr(&so).unwrap())
+                } else {
+                    (t.rolling(w, None).cov(&to).unwrap(), sc.rolling(w, None).cov(&so).unwrap())
+                };
+                for i in 0..k {
+                    assert_eq!(bits(&rt.values()[i]), bits(&rs.values()[i]), "corr={corr} w={w} i={i}");
+                }
+            }
         }
     }
 }

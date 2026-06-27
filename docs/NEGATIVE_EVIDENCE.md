@@ -5348,3 +5348,21 @@ CLEAN fp-columnar; 3 acosh goldens failing in-tree are a PEER's uncommitted fp-c
 RESIDUAL skew 0.88x: output_skew's per-element s2.powf(1.5) (kurt uses s2*s2, hence kurt faster); s2*sqrt(s2) would
 flip it but is a 1-ULP GOLDEN REGEN (deferred, matches expanding-skew note). ALSO STILL LOSS (Scalar/BTreeMap vein,
 follow-up): rolling cov 0.48x (181 vs 86ms), corr 0.64x (183 vs 116ms) via RollingPairwiseMomentState + 2x values().
+
+### 2026-06-26 BlackThrush — rolling cov/corr typed feed: corr 0.64x->1.25x WIN, cov 0.48x->0.89x (1.96x/1.87x fp-side)
+Closes the rolling-moment Scalar vein. rolling_pairwise_moment's clean path materialized THREE buffers — two 1M
+Vec<Scalar> (a_vals + aligned b_vals) AND a 1M Vec<Option<(f64,f64)>> pairs buffer — plus a Vec<Scalar> output.
+Added a typed branch: when self + aligned_other are both all-valid no-NaN (both as_f64_slice Some), run the sliding
+pairwise power-sum recurrence over the two raw &[f64], reuse RollingPairwiseMomentState add_sums/remove_sums/output
++ the per-axis O(1) consecutive-equal counters, emit Vec<f64> via from_f64_values. Bit-identical (every pair
+observed; undefined rows -> NaN = validity-missing).
+bench_rolling 1M w=100 (load 6), pandas 2.2.3: corr 182.88->93.34ms = 0.64x->1.25x WIN (pandas 116.44); cov
+181.17->96.80ms = 0.48x->0.89x near-parity (pandas 86.11). Conformance GREEN for THIS change: rolling cov/corr 10
+tests + differential rolling_moment_typed_conformance extended to cov/corr (trailing-NaN forces Scalar path, prefix
+bit-equal), 0 failed.
+
+>>> MAIN IS RED (pre-existing, NOT this change): series_acosh_golden_basic, series_arccosh_golden_basic,
+dataframe_arccosh_golden_basic FAIL on PRISTINE HEAD 4d724e4a3 (verified with ALL my changes stashed). Regressed by
+a recent peer math-unary commit (8f6edc822 fuse nullable log / 3551a3287 fuse nullable sqrt / 67640e386 skip
+integral round / 454f90ec2 skip integral floor) — likely a Float64(NaN)-vs-Null output-repr drift in acosh(x<1).
+Surfaced for the math-unary owner; out of my (rolling) lane.
