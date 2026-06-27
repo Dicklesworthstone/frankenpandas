@@ -5631,3 +5631,21 @@ exceeds the wall-clock delta and compounds at larger frame sizes / under concurr
 Utf8 bytes, not an i64 PeriodIndex; the remaining cost is now the per-label civil/weekly COMPUTE + the input-side
 `.labels()` materialization (no public Datetime64 nanos view to iterate raw). Closing fully still needs a Period
 index-label type (golden-regen, cross-surface). Anchored W-/Y-/Q- aliases unchanged.
+
+### 2026-06-27 Codex cod-b — Series.to_period shared contiguous-index path: 0.210x -> 0.295x vs pandas (1.40x fp-side)
+After the stale direct-Series bypass was rejected above, dug the live `to_period` string-floor gap against current
+main (`c60b782ee`). The old bypass regressed because it used a per-label helper and lost the newer contiguous-Utf8
+index builder. This lever factors the current `DataFrame::to_period` index conversion into
+`period_index_from_datetime_like_index` and routes `Series::to_period` directly through that exact helper, so Series
+skips the `to_frame -> DataFrame::to_period -> squeeze` wrapper while preserving the contiguous bytes+offsets Period
+label output, Series name, values, categorical metadata, sparse metadata, and index name.
+
+Same-worktree proof with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b rch exec -- cargo run
+--release -p fp-frame --example bench_toperiod -- 1000000 M`: current main local best **108.054ms**; patched local
+best samples **78.747ms / 76.999ms**; pandas 2.2.3 comparator from the current ledger **22.69ms**. Ratio vs pandas
+improves **0.210x -> 0.295x** using the patched best; FP-side speedup is **1.40x**. A remote `hz2` patched sample
+also returned **67.284ms**, but the local before/after pair is the comparison proof.
+
+Semantics are shared, not duplicated: `DataFrame::to_period` calls the same helper, so anchored `W-*`, `Y-*`, and
+`Q-*` aliases plus unsupported-frequency errors follow one code path. The focused Series guard now asserts the Series
+name, index name, and values survive the direct route.
