@@ -6249,25 +6249,28 @@ fn try_write_json_records_typed(frame: &DataFrame, as_jsonl: bool) -> Option<Str
 /// Bit-identical to the serde `Columns` arm: outer keys in column order, inner
 /// keys in index-label order (both `preserve_order`), inner keys spelled by
 /// `index_label_json_key` then serde-quoted, values via `append_typed_json_value`.
-fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
-    let (cols, colkeys) = extract_typed_value_columns(frame)?;
+/// Pre-serialize the n index-label JSON object keys ONCE into a single
+/// contiguous buffer (+ offsets), each carrying its quotes and trailing `:`.
+/// For an all-Int64 unique index the keys are hand-rolled `"` + itoa + `":`
+/// straight off `int64_label_values()` — no `labels()` IndexLabel
+/// materialization and no per-key `String` alloc. Returns `None` (caller falls
+/// back to the serde tree) if any serialized key collides (the serde path
+/// errors on a duplicate index-label key, which the fast path must not swallow).
+/// Shared by the `columns` and `index` orients (the index keys are the
+/// repeated-per-column / repeated-per-row keys respectively).
+fn build_json_index_key_buffer(frame: &DataFrame) -> Option<(String, Vec<usize>)> {
     let n = frame.index().len();
-    // Pre-serialize the n inner index-label keys ONCE into a single contiguous
-    // buffer (+ offsets), reused across every column — vs the serde path's n×k
-    // re-stringification. The keys carry the trailing `:` so each cell is one
-    // `push_str` of a slice (no per-key `String` alloc).
     let mut keybuf = String::with_capacity(n.saturating_mul(10).saturating_add(8));
     let mut keyoff: Vec<usize> = Vec::with_capacity(n + 1);
     keyoff.push(0);
-    // Whether the inner keys are guaranteed distinct without a dedup pass.
     let mut keys_known_unique = false;
     if frame.index().is_unique()
         && let Some(vals) = frame.index().int64_label_values()
         && vals.len() == n
     {
-        // All-Int64 unique labels: distinct i64 → distinct decimal keys, and
-        // `serde_json::to_string(v.to_string())` is exactly `"<decimal>"`, so a
-        // hand-rolled `"` + itoa + `":` is byte-identical and needs no dedup.
+        // Distinct i64 → distinct decimal keys, and
+        // `serde_json::to_string(v.to_string())` is exactly `"<decimal>"`, so the
+        // hand-rolled spelling is byte-identical and needs no dedup.
         for &v in vals.iter() {
             keybuf.push('"');
             append_i64_decimal(&mut keybuf, v);
@@ -6283,10 +6286,6 @@ fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
             keyoff.push(keybuf.len());
         }
     }
-    // The serde path rejects a frame whose labels produce COLLIDING JSON object
-    // keys (e.g. `Int64(1)` and `Utf8("1")` both spell `"1"`, or two datetimes
-    // in the same millisecond). Bail (→ serde path, which returns the
-    // duplicate-key error) if any key repeats.
     if !keys_known_unique {
         let mut seen = std::collections::HashSet::with_capacity(n);
         for r in 0..n {
@@ -6295,6 +6294,15 @@ fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
             }
         }
     }
+    Some((keybuf, keyoff))
+}
+
+fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
+    let (cols, colkeys) = extract_typed_value_columns(frame)?;
+    let n = frame.index().len();
+    // The n inner index-label keys, pre-serialized once, reused across every
+    // column — vs the serde path's n×k re-stringification.
+    let (keybuf, keyoff) = build_json_index_key_buffer(frame)?;
 
     let mut out = String::with_capacity(
         n.saturating_mul(cols.len().max(1))
@@ -6314,6 +6322,46 @@ fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
                 out.push(',');
             }
             out.push_str(&keybuf[keyoff[r]..keyoff[r + 1]]);
+            append_typed_json_value(&mut out, col, r, &mut fbytes);
+        }
+        out.push('}');
+    }
+    out.push('}');
+    Some(out)
+}
+
+/// Streaming typed fast path for `to_json(orient="index")` — `{idx: {col:
+/// val}}`, the transpose of `columns`. The serde tree builds a `serde_json::Map`
+/// per ROW plus an index-label outer key per row (~0.63x pandas). Here the n
+/// outer index-label keys are pre-serialized once (contiguous buffer) and the k
+/// inner column keys are reused every row. Bit-identical to the serde `Index`
+/// arm: outer keys in row order, inner keys in column order (both
+/// `preserve_order`), same key spellings and value formatting; bails (→ serde
+/// path, which errors) on a duplicate index-label key or any non-typed column.
+fn try_write_json_index_typed(frame: &DataFrame) -> Option<String> {
+    let (cols, colkeys) = extract_typed_value_columns(frame)?;
+    let n = frame.index().len();
+    // The n outer index-label keys, pre-serialized once.
+    let (keybuf, keyoff) = build_json_index_key_buffer(frame)?;
+
+    let mut out = String::with_capacity(
+        n.saturating_mul(cols.len().max(1))
+            .saturating_mul(16)
+            .saturating_add(16),
+    );
+    out.push('{');
+    let mut fbytes: Vec<u8> = Vec::with_capacity(32);
+    for r in 0..n {
+        if r > 0 {
+            out.push(',');
+        }
+        out.push_str(&keybuf[keyoff[r]..keyoff[r + 1]]);
+        out.push('{');
+        for (c, col) in cols.iter().enumerate() {
+            if c > 0 {
+                out.push(',');
+            }
+            out.push_str(&colkeys[c]);
             append_typed_json_value(&mut out, col, r, &mut fbytes);
         }
         out.push('}');
@@ -6377,6 +6425,10 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             Ok(serde_json::to_string(&serde_json::Value::Object(outer))?)
         }
         JsonOrient::Index => {
+            // Typed streaming fast path; falls back to the serde tree below.
+            if let Some(s) = try_write_json_index_typed(frame) {
+                return Ok(s);
+            }
             let mut outer = serde_json::Map::new();
             for row_idx in 0..row_count {
                 let mut row_obj = serde_json::Map::new();
@@ -30695,6 +30747,31 @@ mod merge_simple_numeric_csv_chunks_tests {
                 columns_serde_ref(frame),
             );
         }
+        // Index orient: from-scratch serde Map-of-row-Maps reference.
+        fn index_serde_ref(frame: &DataFrame) -> String {
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let mut outer = serde_json::Map::new();
+            for row_idx in 0..frame.index().len() {
+                let mut row_obj = serde_json::Map::new();
+                for name in &headers {
+                    let val = frame
+                        .column(name.as_str())
+                        .and_then(|c| c.value(row_idx))
+                        .map(|v| super::scalar_to_json_with_column_promotion(v, false))
+                        .unwrap_or(serde_json::Value::Null);
+                    row_obj.insert(name.clone(), val);
+                }
+                let key = super::index_label_json_key(&frame.index().labels()[row_idx]);
+                outer.insert(key, serde_json::Value::Object(row_obj));
+            }
+            serde_json::to_string(&serde_json::Value::Object(outer)).unwrap()
+        }
+        fn assert_index_matches(frame: &DataFrame) {
+            assert_eq!(
+                write_json_string(frame, JsonOrient::Index).expect("index"),
+                index_serde_ref(frame),
+            );
+        }
         fn idx(n: usize) -> Index {
             Index::new_known_unique_int64_unit_range(0, n)
         }
@@ -30722,12 +30799,14 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert!(super::try_write_json_records_typed(&frame, false).is_some());
         assert!(super::try_write_json_records_typed(&frame, true).is_some());
         assert!(super::try_write_json_columns_typed(&frame).is_some());
+        assert!(super::try_write_json_index_typed(&frame).is_some());
         assert_eq!(
             write_json_string(&frame, JsonOrient::Records).expect("json"),
             serde_ref(&frame),
         );
         assert_jsonl_matches(&frame);
         assert_columns_matches(&frame);
+        assert_index_matches(&frame);
 
         // -Inf in isolation.
         let mut c2: BTreeMap<String, Column> = BTreeMap::new();
@@ -30739,6 +30818,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         );
         assert_jsonl_matches(&f2);
         assert_columns_matches(&f2);
+        assert_index_matches(&f2);
 
         // Empty frame (0 rows) and a single-column int frame.
         let mut c3: BTreeMap<String, Column> = BTreeMap::new();
@@ -30750,6 +30830,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         );
         assert_jsonl_matches(&f3);
         assert_columns_matches(&f3);
+        assert_index_matches(&f3);
 
         // A Utf8 column forces the serde fallback; equality must still hold
         // (trivially, since the fast path declines).
@@ -30768,6 +30849,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         );
         assert_jsonl_matches(&f4);
         assert_columns_matches(&f4);
+        assert_index_matches(&f4);
 
         // Pseudo-random sweep (LCG, no external rng) over Int64/Float64 values.
         let mut state: u64 = 0x9E3779B97F4A7C15;
@@ -30795,5 +30877,6 @@ mod merge_simple_numeric_csv_chunks_tests {
         );
         assert_jsonl_matches(&rframe);
         assert_columns_matches(&rframe);
+        assert_index_matches(&rframe);
     }
 }

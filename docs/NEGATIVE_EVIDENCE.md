@@ -5981,3 +5981,22 @@ nested-Map removal; the contiguous buffer + direct i64 view closed it. Bit-ident
 asserts Columns vs a from-scratch serde Map-of-Maps reference over every frame (edge floats, escaped key, empty, Utf8
 fallback, 2000-row LCG sweep) + the existing `json_columns_write_duplicate_index_rejects` still rejects via fallback;
 fp-io 48 json tests green. RESIDUAL: the `Index` orient (0.63x) still builds the serde tree — same lever applies next.
+
+### 2026-06-27 TealOsprey — to_json(index) typed streaming writer: 0.63x LOSS -> 8.53x WIN vs pandas (13.5x fp-side)
+The last losing to_json orient (the columns entry's flagged residual). `Index` is the transpose of `columns` —
+`{idx: {col: val}}` — and the serde arm built a `serde_json::Map` per ROW plus an index-label outer key per row.
+Added `try_write_json_index_typed` reusing the shared `build_json_index_key_buffer` (the n outer index-label keys
+pre-serialized once into a contiguous buffer, hand-rolled `"`+itoa+`":` off `int64_label_values()` for the common
+all-Int64-unique index) + the k inner column keys reused every row + `append_typed_json_value`. Bails to serde on a
+duplicate index key or non-typed column.
+
+Same-box best-of-3, 1M rows × {Int64, Float64} (`fp-io/examples/bench_to_json 1000000 index`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (serde tree) | patched (streaming) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `to_json(index)` 1M | 1197.6ms | 88.5ms | 13.53x | 0.63x -> 8.53x (pandas 755.4ms) |
+
+Bit-identical: the json differential now also asserts Index vs a from-scratch serde Map-of-row-Maps reference over
+every frame; fp-io 48 json tests green. ALL FIVE to_json orients (records/columns/index/values/split) + jsonl now WIN
+vs pandas — the to_json surface is fully un-lost (records 5.35x, columns 4.66x, index 8.53x, values 1.78x, split
+2.13x, jsonl 5.53x). The serde `Value`-tree was the universal culprit; the typed streaming writers retire it.
