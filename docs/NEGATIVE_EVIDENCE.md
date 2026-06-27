@@ -6044,3 +6044,23 @@ every serde escape case (quote, backslash, `\n`, `\t`, control 0x01, accented + 
 records/jsonl/columns/index vs serde; fp-io 48 json tests green. The typed JSON writers now cover ALL common column
 dtypes (i64/f64/bool/datetime/utf8) across every orient + jsonl; the serde `Value`-tree is reached only by genuinely
 mixed/null/exotic columns. This closes the to_json write surface: no benched column-dtype × orient combination loses.
+
+### 2026-06-27 BlackThrush — dt.isocalendar ordinal ISO week: 0.50x -> 0.54x vs pandas (1.09x fp-side)
+Follow-up on the largest remaining non-structural measured gap after the typed `dt.isocalendar` path. The prior path
+still derived civil year/month/day, day-of-year, leap status, and 53-week clamps per row. This pass switches the typed
+Datetime64 path to the ISO ordinal identity: ISO year is the civil year of the week Thursday, and ISO week is the
+distance from the Monday of ISO week 1. That removes month/day/day-of-year work while preserving the existing NaT
+validity mask behavior and 53-week year semantics.
+
+Same current-origin worktree (`0881afa1c`), same target dir
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`, `rch exec` fell open locally because workers were
+saturated, command `cargo run --release -p fp-frame --example bench_dtacc -- 1000000 isocalendar`; pandas 2.2.3
+comparator uses the identical 1M hourly timestamp fixture:
+| workload | ORIG best | patched best | pandas best | ratio vs pandas | fp-side |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `dt.isocalendar` 1M | 49.089ms | 45.092ms | 24.314ms | 0.50x -> 0.54x | 1.09x |
+
+Bit-equivalence guard: before landing, the ordinal formula was checked against the existing civil formula over a
+400k-day contiguous range plus 5M randomized epoch days. Focused fp-frame isocalendar tests and the full
+fp-conformance crate were run in release mode. Residual remains output/DataFrame construction plus pandas' vectorized
+datetime core; another same-formula scalar tweak is unlikely to close the remaining gap.
