@@ -5305,3 +5305,19 @@ pandas 2.2.3 local comparator uses the same LCG Float64 generator:
 The full sign-bit witness scan costs more than simply writing the output Vec through the existing `abs` typed path.
 Do not re-chase pre-scanning all-positive Float64 abs unless the column already carries a persisted non-negative
 witness from construction or upstream expression planning; a separate proof scan is negative value.
+
+### 2026-06-26 BlackThrush — ewm var/std typed recurrence: 0.26x/0.13x -> 1.25x/1.33x WIN (4.7x/9.9x fp-side, algorithmic)
+Series.ewm(span).var()/.std() were big LOSSES (var 82.78ms=0.26x, std 184.78ms=0.13x pandas) — NOT SIMD/bandwidth
+(survives load 36) but pure Scalar overhead: var() did self.series.column().values() (1M Vec<Scalar> + per-element
+is_missing/to_f64 dispatch) instead of as_f64_slice; std() then RE-materialized var()'s Scalars to sqrt + from_values.
+Extracted ewm_var_all_observed(&[f64], 1-alpha) — the identical debiased ewmcov recurrence, but every element is
+`observed` (as_f64_slice is all-valid no-NaN), over the raw slice. var: typed branch -> from_f64_values. std: same
+recurrence + sqrt in one pass (no var()-Series roundtrip). Scalar path kept for NaN/missing inputs.
+Bench bench_ewm 1M span=20, pandas 2.2.3: var 82.78->17.48ms = 0.26x->1.25x; std 184.78->18.67ms = 0.13x->1.33x
+(pandas var 21.91, std 24.90). Conformance GREEN: fp-frame lib 3103 + 50 binaries, 0 failed; NEW differential
+ewm_var_typed_conformance (trailing-NaN forces Scalar path; observed prefix must match typed bit-for-bit on present
+values, missing-equivalent). Undefined slots (row 0, sum_wt^2<=sum_wt2) are validity-missing Float64(NaN)
+(is_missing=true, renders pandas NaN), value-identical. FOLLOW-UP same Scalar-overhead pattern: ewm cov 0.35x
+(99.81 vs 34.72ms), corr 0.70x (102 vs 71ms) — 2-series recurrence, still on values(). (mean 1.09x/sum 1.32x already win.)
+PROBED & DOMINATED this cycle (don't re-chase): df.pivot_table mean/sum/count/max all ~5x WIN (Int64 dense);
+df.sort_values_multi typed radix-lexsort.
