@@ -5556,3 +5556,15 @@ load-CONFOUNDED (without=load61, with=load114) and falsely read ~0-gain; a same-
 RESIDUAL FLOOR (still <1.0x, NOT chrono): 1M IndexLabel::Utf8 String allocs + Index::new over them — pandas returns
 an i64 PeriodIndex (no strings). Closing needs a Period/i64 index label type (golden-regen, big). 'W'/'B' still
 chrono (anchored bounds). PROBED & WON (don't re-chase): df.melt 100Kx10/x20 = 1.8x/1.6x WIN (typed tiling).
+
+### 2026-06-27 BlackThrush — to_period('W') numeric weekly label: ~376->235ms (1.6x fp-side, 0.064x->0.11x)
+Extends last cycle's to_period numeric civil to the Weekly freq (the biggest to_period gap, W was 0.064x = 15x
+slower). period_label_numeric returned None for Weekly -> chrono (NaiveDateTime + weekly_period_bounds + 2x
+dt.format per row). Now computes week bounds numerically: 1970-01-01 (day 0) = Thursday => num_days_from_monday =
+(day+3) mod 7; Monday = day - that, Sunday = +6; civil_from_day (refactored shared Hinnant helper) + format! the
+"start/end" label. bench_toperiod 1M (same-load toggle): W ~376->235ms = ~1.6x fp-side (pandas 25.75 => 0.064x->
+0.11x). Bit-identical: fp-frame lib 3103 + 38 to_period tests + new differential to_period_numeric_conformance
+(Datetime64 numeric path == Utf8-string chrono path for M/D/Y/Q/W over a decade incl. boundaries).
+RESIDUAL (unchanged, string-floored): still <1.0x because to_period emits 1M IndexLabel::Utf8 (2 dates/label for W)
++ Index::new — pandas returns an i64 PeriodIndex. The Utf8 period-label representation is the real floor; W/B
+anchored aliases still chrono. Closing needs a Period index-label type (golden-regen, cross-surface).
