@@ -6195,3 +6195,24 @@ reverting every column to the generic writer. Bit-identical: new differential `t
 _without_fallback_dtcsv` (typed output == hand-verified expected incl. NaT→na_rep and the column-uniform full-timestamp
 form) + fp-io 148 csv tests green. The typed CSV writer now covers i64/f64/bool/utf8/datetime, matching the typed JSON
 writers' dtype coverage.
+
+### 2026-06-28 BlackThrush - resample('min') typed Datetime64 bin labels: 0.148x -> 0.647x vs pandas (4.38x fp-side vs ORIG)
+The prior sub-daily resample fast path still formatted every output bin into a Utf8 timestamp label. On the 1M
+minute-spaced fixture, `resample('min')` emits 1M bins, so label formatting dominated the otherwise single-pass typed
+mean/sum reducer. Applied the pandas-aligned label lever: the typed sub-daily reducer now emits
+`IndexLabel::Datetime64(bin_start_ns)` directly from the already-computed bin start, avoiding the per-bin civil
+conversion and `String` allocation while matching pandas' DatetimeIndex model more closely than the old Utf8 labels.
+
+Same target dir `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-a`; `rch exec` fell open locally due
+worker saturation. ORIG is current-main worktree state `3c20b754d` before the lever, command
+`rch exec -- cargo run -p fp-frame --example bench_resample --release -- 1000000 min mean`; pandas 2.2.3 comparator
+uses the identical 1M minute-spaced timestamp fixture:
+| workload | ORIG best | patched best | pandas best | ratio vs pandas | fp-side |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `resample('min').mean()` 1M | 312.357ms | 71.331ms | 46.156ms | 0.148x -> 0.647x | 4.38x |
+
+Validation: focused `series_resample_subdaily_typed_fast_path_emits_datetime64_labels` release test green; full
+`fp-conformance` release crate green; valid per-crate `cargo bench -p fp-frame` green. The literal requested
+`cargo bench --release -p fp-frame` form was also run and rejected by Cargo because `bench` has no `--release`
+argument, so the valid per-crate bench command above is the landed gate. Residual is output-index allocation and
+1M-bin result construction; this is a KEEP PARTIAL, not a full pandas win.
