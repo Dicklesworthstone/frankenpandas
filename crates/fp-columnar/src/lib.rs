@@ -10255,7 +10255,7 @@ impl Column {
                 if let (Some(l), Some(r)) = (self.as_f64_slice(), right.as_f64_slice()) {
                     let apply = binary_f64_apply(op);
                     let result: Vec<f64> = l.iter().zip(r).map(|(&a, &b)| apply(a, b)).collect();
-                    return Some(Ok(Self::from_f64_values(result)));
+                    return Some(Ok(Self::from_f64_values_owned(result)));
                 }
                 let left_data = ColumnData::from_scalars(&self.values, DType::Float64);
                 let right_data = ColumnData::from_scalars(&right.values, DType::Float64);
@@ -10277,7 +10277,7 @@ impl Column {
                 // Operation-produced NaN is still marked missing by
                 // from_f64_values, exactly like the Scalar::Float64(NaN) path.
                 if result_validity.all() {
-                    return Some(Ok(Self::from_f64_values(result_data)));
+                    return Some(Ok(Self::from_f64_values_owned(result_data)));
                 }
 
                 // Build output scalars respecting NaN propagation: if either
@@ -10314,7 +10314,7 @@ impl Column {
                 if let (Some(l), Some(r)) = (self.as_i64_slice(), right.as_i64_slice()) {
                     let (result_data, _validity) =
                         vectorized_binary_i64(l, r, &self.validity, &right.validity, op)?;
-                    return Some(Ok(Self::from_i64_values(result_data)));
+                    return Some(Ok(Self::from_i64_values_owned(result_data)));
                 }
                 let left_data = ColumnData::from_scalars(&self.values, DType::Int64);
                 let right_data = ColumnData::from_scalars(&right.values, DType::Int64);
@@ -10328,7 +10328,7 @@ impl Column {
                 // All inputs valid: keep the typed i64 result buffer as the
                 // column source of truth and skip Scalar materialization.
                 if result_validity.all() {
-                    return Some(Ok(Self::from_i64_values(result_data)));
+                    return Some(Ok(Self::from_i64_values_owned(result_data)));
                 }
 
                 let values: Vec<Scalar> = result_data
@@ -20629,9 +20629,15 @@ mod tests {
 
         assert!(result.validity().all());
         assert_eq!(result.as_f64_slice(), Some([11.0, 22.0, 33.0].as_slice()));
+        // Output stays a lazy all-valid typed Float64 backing (not Scalar-
+        // materialized). The owned move-not-realloc path uses the `Vec` variant;
+        // accept either it or the `Arc<[f64]>` variant.
         assert!(matches!(
             &result.values,
             ScalarValues::LazyAllValidFloat64 { values, .. } if values.get().is_none()
+        ) || matches!(
+            &result.values,
+            ScalarValues::LazyAllValidFloat64Vec { values, .. } if values.get().is_none()
         ));
     }
 

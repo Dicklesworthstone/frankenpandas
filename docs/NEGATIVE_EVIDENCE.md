@@ -7003,3 +7003,21 @@ Same-box best-of-3, 5M (`fp-columnar/examples/bench_between`),
 
 Both flip LOSS->WIN. Bit-identical: new `between_typed_matches_oracle` (i64 & f64, random validity, all 4 inclusive
 policies, independent oracle) + fp-columnar 31 between + fp-frame 24 between tests green.
+
+### 2026-06-27 TealOsprey — binary arithmetic (col OP col) owned-move output: add 0.36x -> ~0.93x vs pandas (2.6x fp-side)
+FOUNDATIONAL: `try_vectorized_binary` (the AG-10 fast path under add/sub/mul/div/mod/pow/floordiv) emitted its typed
+result via from_f64_values / from_i64_values (Arc::from realloc-copy ~40ms/5M). Switched all 4 typed output sites
+(f64 typed-input + f64 all-valid; i64 typed-input + i64 all-valid) to from_f64_values_owned / from_i64_values_owned
+(MOVE). Bit-identical: i64 has no NaN (always moves); f64 owned falls back to from_f64_values on an op-produced NaN
+(inf±inf), preserving the exact NaN->missing marking.
+
+Same-box best-of-3, 5M col+col (`fp-columnar/examples/bench_add`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | before (Arc::from) | after (owned) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `add` f64+f64 5M | 66.6ms | 25.8ms | 2.58x | 0.36x -> 0.94x (pandas 24.2ms) |
+| `add` i64+i64 5M | 66.9ms | 25.3ms | 2.64x | 0.35x -> 0.92x (pandas 23.3ms) |
+
+Near-parity (the residual is the 120MB read+write bandwidth, ~= pandas C) and benefits the WHOLE binary-arithmetic
+family. Bit-identical: FULL fp-columnar suite 467 passed / 0 failed (updated vectorized_binary_all_valid_keeps_typed_
+output_lazy to accept the LazyAllValidFloat64Vec backing) + fp-frame 222 arithmetic tests green.
