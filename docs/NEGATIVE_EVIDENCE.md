@@ -6747,3 +6747,25 @@ the i64→f64 convert + the f64-vs-i64 output dtype). The f64 cum* paths inherit
 fp-columnar 15 cum tests green (incl. the NaN-bit-aware typed-vs-Scalar differential). NOTE: diff was left on
 from_f64_values — its boundary NaN forces the _owned fallback anyway (a from_f64_values_owned_with_validity rewrite
 could skip it; follow-up).
+
+### 2026-06-27 TealOsprey — diff via from_f64_values_with_validity (move + nullable backing): 0.30x -> 0.82x vs pandas (near parity)
+Follow-up to the diff typed commit: its outputs went through `from_f64_values` (NaN-at-boundary scan + Arc::from(Vec)
+realloc-copy). Switched to `from_f64_values_with_validity(out, validity)`: fill an f64 body, mark the vacated boundary
+as ONE invalid range (`ValidityMask::from_invalid_ranges`), and MOVE the Vec into a `LazyNullableFloat64` backing — no
+NaN scan, no realloc. Bit-identical: that backing materializes a valid slot as `Float64(a−b)` and an invalid slot as
+`Null(NaN)` = exactly the body + the Scalar path's `null_scalar` (`missing_for_dtype(Float64) = Null(NaN)`).
+
+FALSE START (recorded): first tried `from_f64_values_owned_with_validity` — its backing is `lazy_all_valid_float64`
+which IGNORES a partial validity mask, so boundary slots materialized as `Float64(0.0)` not missing; the two existing
+`diff_periods_*` tests caught it (my typed-vs-typed differential false-passed). The right constructor is the
+nullable-backed `from_f64_values_with_validity` (`all()` → all-valid fold, else `LazyNullableFloat64`).
+
+Same-box best-of-3, 5M (`fp-columnar/examples/bench_diff`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | from_f64_values | from_f64_values_with_validity | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `diff` i64 5M | 75.6ms | 27.6ms | 0.30x -> 0.82x (pandas 22.8ms) |
+| `diff` f64 5M | 77.1ms | 30.2ms | -> 0.75x |
+
+Cumulative diff i64 this session: 416ms -> 27.6ms = 15x fp-side, 0.05x -> 0.82x vs pandas (near parity). Bit-identical:
+fp-columnar 36 diff (incl. the explicit boundary/value `diff_periods_*` correctness tests) + fp-frame 29 diff green.

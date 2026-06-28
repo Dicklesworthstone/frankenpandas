@@ -15684,15 +15684,23 @@ impl Column {
             return Self::new(out_dtype, vec![null; len]);
         }
         let abs = periods.unsigned_abs() as usize;
-        // Typed Float64-output fast paths (i64 / f64 inputs) — fill an f64 buffer
-        // directly: boundary slots NaN (→ missing via from_f64_values, exactly the
-        // Scalar Null below), body = a − b. Bit-identical to the Scalar loop's
-        // `Float64(to_f64(a) − to_f64(b))`, no per-element Scalar materialization.
+        // Typed Float64-output fast paths (i64 / f64 inputs): fill an f64 body
+        // buffer, mark the vacated boundary as a single invalid range, and MOVE it
+        // into a LazyNullableFloat64 backing via from_f64_values_with_validity (no
+        // NaN scan, no Arc::from realloc). Bit-identical to the Scalar loop: that
+        // backing materializes a valid slot as Float64(a−b) and an invalid slot as
+        // Null(NaN) — exactly the body and the boundary `null_scalar` below. (The
+        // OWNED-with-validity ctor cannot be used: its backing is all-valid and
+        // ignores a partial mask — see NEGATIVE_EVIDENCE.)
         if abs < len {
+            // Leading (periods>0) or trailing (periods<0) `abs` slots are vacated.
+            let boundary: (usize, usize) = if periods > 0 { (0, abs) } else { (len - abs, abs) };
+            let validity =
+                ValidityMask::from_invalid_ranges(Arc::from(vec![boundary].into_boxed_slice()), len);
             // Int64: (x as f64) − (y as f64) is always finite (|i64 as f64| ≤ 9.2e18,
-            // difference ≤ 1.8e19) so no arithmetic NaN/inf — only boundary NaN.
+            // difference ≤ 1.8e19) so the body carries no NaN.
             if let Some(data) = self.as_i64_slice() {
-                let mut out = vec![f64::NAN; len];
+                let mut out = vec![0.0_f64; len];
                 if periods > 0 {
                     for i in abs..len {
                         out[i] = data[i] as f64 - data[i - abs] as f64;
@@ -15702,16 +15710,16 @@ impl Column {
                         out[i] = data[i] as f64 - data[i + abs] as f64;
                     }
                 }
-                return Ok(Self::from_f64_values(out));
+                return Ok(Self::from_f64_values_with_validity(out, validity));
             }
-            // Float64: only safe when inf-free — finite−finite is never NaN (it is
-            // finite or an overflow ±inf, both of which from_f64_values keeps,
-            // matching Self::new); an inf INPUT could give inf−inf = NaN, where
-            // from_f64_values (NaN→missing) would diverge from the Scalar
-            // Float64(NaN). `as_f64_slice` is already NaN-free, so all-finite ⇔ no inf.
+            // Float64: only safe when inf-free — finite−finite is never NaN (only
+            // finite or an overflow ±inf, both valid). An inf INPUT could yield
+            // inf−inf = NaN at a VALID slot, which LazyNullableFloat64 keeps as
+            // Float64(NaN) rather than the Scalar path's Null — so inf-bearing
+            // columns fall to the Scalar path. `as_f64_slice` is already NaN-free.
             if let Some(data) = self.as_f64_slice() {
                 if data.iter().all(|x| x.is_finite()) {
-                    let mut out = vec![f64::NAN; len];
+                    let mut out = vec![0.0_f64; len];
                     if periods > 0 {
                         for i in abs..len {
                             out[i] = data[i] - data[i - abs];
@@ -15721,7 +15729,7 @@ impl Column {
                             out[i] = data[i] - data[i + abs];
                         }
                     }
-                    return Ok(Self::from_f64_values(out));
+                    return Ok(Self::from_f64_values_with_validity(out, validity));
                 }
             }
         }
