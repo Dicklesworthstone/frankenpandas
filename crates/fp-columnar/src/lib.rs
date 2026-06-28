@@ -18018,15 +18018,25 @@ impl Column {
         if fill.is_missing()
             && let Some(data) = self.as_f64_slice()
         {
-            let mut out = vec![f64::NAN; len];
-            if abs < len {
-                if periods > 0 {
-                    out[abs..].copy_from_slice(&data[..len - abs]);
-                } else {
-                    out[..len - abs].copy_from_slice(&data[abs..]);
-                }
-            }
-            return Ok(Self::from_f64_values(out));
+            // Copy the surviving run into an f64 body and mark the vacated slots as
+            // one invalid range, then MOVE into a LazyNullableFloat64 backing
+            // (from_f64_values_with_validity) — no NaN scan, no Arc::from realloc.
+            // Bit-identical to the prior from_f64_values(NaN-vacated) path: an
+            // invalid slot materializes Null(NaN) = the missing fill; the copied
+            // body (as_f64_slice is NaN-free) materializes Float64(src).
+            let mut out = vec![0.0_f64; len];
+            let vacated: (usize, usize) = if abs >= len {
+                (0, len)
+            } else if periods > 0 {
+                out[abs..].copy_from_slice(&data[..len - abs]);
+                (0, abs)
+            } else {
+                out[..len - abs].copy_from_slice(&data[abs..]);
+                (len - abs, abs)
+            };
+            let validity =
+                ValidityMask::from_invalid_ranges(Arc::from(vec![vacated].into_boxed_slice()), len);
+            return Ok(Self::from_f64_values_with_validity(out, validity));
         }
         let mut out: Vec<Scalar> = Vec::with_capacity(len);
         if abs >= len {
@@ -23067,6 +23077,50 @@ mod tests {
         fn abs_utf8_errors() {
             let col = Column::from_values(vec![Scalar::Utf8("x".into())]).expect("col");
             assert!(col.abs().is_err());
+        }
+
+        #[test]
+        fn shift_typed_f64_missing_fill_matches_scalar_path() {
+            // The typed f64 (missing-fill) shift via from_f64_values_with_validity
+            // == the generic Scalar shift: vacated slots Null(NaN), body Float64(src),
+            // across +/- periods incl. abs >= len (all vacated).
+            let mut state: u64 = 0x7A1C_3E5F_90B2_D4C6;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..200 {
+                let n = (next() % 50) as usize + 1;
+                let fvals: Vec<f64> = (0..n).map(|_| (next() % 1000) as f64 * 0.5 - 250.0).collect();
+                let typed = Column::from_f64_values(fvals.clone());
+                for p in [1i64, 2, -1, -3, n as i64, n as i64 + 5, -(n as i64) - 2] {
+                    let t = typed.shift(p, Scalar::Null(NullKind::NaN)).unwrap();
+                    let abs = p.unsigned_abs() as usize;
+                    // Independent oracle (NOT the Scalar shift, which a Float64
+                    // from_values twin would also route through the typed path).
+                    let expected: Vec<Scalar> = (0..n)
+                        .map(|i| {
+                            let vacated = if abs >= n {
+                                true
+                            } else if p > 0 {
+                                i < abs
+                            } else {
+                                i >= n - abs
+                            };
+                            if vacated {
+                                Scalar::Null(NullKind::NaN)
+                            } else if p > 0 {
+                                Scalar::Float64(fvals[i - abs])
+                            } else {
+                                Scalar::Float64(fvals[i + abs])
+                            }
+                        })
+                        .collect();
+                    assert_eq!(t.values(), expected, "period {p}");
+                }
+            }
         }
 
         #[test]

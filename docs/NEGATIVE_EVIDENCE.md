@@ -6769,3 +6769,21 @@ Same-box best-of-3, 5M (`fp-columnar/examples/bench_diff`),
 
 Cumulative diff i64 this session: 416ms -> 27.6ms = 15x fp-side, 0.05x -> 0.82x vs pandas (near parity). Bit-identical:
 fp-columnar 36 diff (incl. the explicit boundary/value `diff_periods_*` correctness tests) + fp-frame 29 diff green.
+
+### 2026-06-27 TealOsprey — shift (f64, missing fill) via from_f64_values_with_validity: 0.67x LOSS -> 2.1x WIN vs pandas
+Applies the diff move-not-realloc lever to shift. The f64 missing-fill fast path filled vacated slots with NaN then
+called `from_f64_values` (NaN scan + Arc::from realloc) — 64.9ms, 0.67x vs pandas. Switched to copy the surviving run
+into an f64 body, mark the vacated slots as ONE invalid range, and MOVE into a `LazyNullableFloat64` backing
+(`from_f64_values_with_validity`). Bit-identical: vacated → Null(NaN) (= the missing fill), copied body → Float64(src)
+(as_f64_slice is NaN-free); handles abs≥len (all vacated).
+
+Same-box best-of-3, 5M (`fp-columnar/examples/bench_shift`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | from_f64_values | with_validity | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `shift(1)` f64 5M | 64.9ms | 20.8ms | 3.12x | 0.67x -> 2.10x (pandas 43.6ms) |
+
+Bit-identical: new `shift_typed_f64_missing_fill_matches_scalar_path` (independent hand-oracle, ± periods incl.
+abs≥len) + fp-columnar 26 shift + fp-frame 31 shift tests green. OPEN: i64 shift is still on the Scalar path (344ms,
+0.19x vs pandas 64.4ms) — a typed path needs the fp-frame fill NullKind pinned (Int64 missing is Null(Null) vs the
+f64 Null(NaN)); deferred to avoid a NullKind mismatch.
