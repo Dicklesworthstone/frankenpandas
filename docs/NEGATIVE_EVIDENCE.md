@@ -6987,3 +6987,19 @@ Same-box best-of-3, 5M (`fp-columnar/examples/bench_i64ops`, `bench_sort_i64`),
 astype flips LOSS->WIN. sort i64 gains 1.26x fp-side (the value-sort realloc removed) but stays <np.sort's tuned
 introsort core (gather-bound, documented). Bit-identical: fp-columnar 12 astype/sort tests green (full suite already
 466 green with the variant).
+
+### 2026-06-27 TealOsprey — between typed f64+i64 (predicate -> Vec<bool>): 0.10x LOSS -> 1.2-1.3x WIN vs pandas (12.6x fp-side)
+`Column::between_inclusive` looped self.values (materializing the lazy column) + to_f64 + Vec<Scalar::Bool> + Self::new
+— ~170ms, 0.10x vs pandas (10x slower). Added typed f64/i64 paths: compute the bound predicate over the raw buffer +
+validity into a Vec<bool> (missing/NaN → false, matching the Scalar branch), then from_bool_values (all-valid Bool —
+between never yields a null). Bit-identical (same predicate, x / x as f64).
+
+Same-box best-of-3, 5M (`fp-columnar/examples/bench_between`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (Scalar) | patched (typed) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `between` f64 5M | 173.4ms | 13.7ms | 12.7x | 0.10x -> 1.28x (pandas 17.5ms) |
+| `between` i64 5M | 168.7ms | 14.5ms | 11.6x | 0.10x -> 1.23x (pandas 17.9ms) |
+
+Both flip LOSS->WIN. Bit-identical: new `between_typed_matches_oracle` (i64 & f64, random validity, all 4 inclusive
+policies, independent oracle) + fp-columnar 31 between + fp-frame 24 between tests green.

@@ -16405,6 +16405,35 @@ impl Column {
             }
         };
 
+        // Typed fast paths: compute the predicate over the raw buffer + validity
+        // into a Vec<bool> (missing / NaN → false, matching the Scalar branch),
+        // then from_bool_values (all-valid Bool — between never yields a null).
+        // Bit-identical: same predicate, same to_f64 (x / x as f64).
+        let pred = |x: f64| -> bool {
+            let lower_ok = if include_left { x >= lower } else { x > lower };
+            let upper_ok = if include_right { x <= upper } else { x < upper };
+            lower_ok && upper_ok
+        };
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let out: Vec<bool> = data
+                .iter()
+                .enumerate()
+                .map(|(i, &x)| validity.get(i) && !x.is_nan() && pred(x))
+                .collect();
+            return Ok(Self::from_bool_values(out));
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let out: Vec<bool> = data
+                .iter()
+                .enumerate()
+                .map(|(i, &x)| validity.get(i) && pred(x as f64))
+                .collect();
+            return Ok(Self::from_bool_values(out));
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -25349,6 +25378,58 @@ mod tests {
                     Scalar::Bool(true),
                 ]
             );
+        }
+
+        #[test]
+        fn between_typed_matches_oracle() {
+            // Typed i64/f64 between == an independent oracle (missing/NaN → false),
+            // all four inclusive policies. Built via from_*_values_with_validity to
+            // drive the typed paths.
+            let mut state: u64 = 0x71E0_3B9D_2C84_A5F6;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..150 {
+                let n = (next() % 200) as usize + 1;
+                let ivals: Vec<i64> = (0..n).map(|_| (next() % 20) as i64).collect();
+                let fvals: Vec<f64> = ivals.iter().map(|&v| v as f64).collect();
+                let mut vmask = ValidityMask::all_valid(n);
+                let mut present = vec![true; n];
+                for (i, p) in present.iter_mut().enumerate() {
+                    if next() % 4 == 0 {
+                        vmask.set(i, false);
+                        *p = false;
+                    }
+                }
+                let icol = Column::from_i64_values_with_validity(ivals.clone(), vmask.clone());
+                let fcol = Column::from_f64_values_with_validity(fvals.clone(), vmask.clone());
+                let (lo, hi) = (5.0_f64, 15.0_f64);
+                for pol in ["both", "left", "right", "neither"] {
+                    let (il, ir) = match pol {
+                        "both" => (true, true),
+                        "left" => (true, false),
+                        "right" => (false, true),
+                        _ => (false, false),
+                    };
+                    let exp: Vec<Scalar> = (0..n)
+                        .map(|i| {
+                            let ok = if present[i] {
+                                let x = fvals[i];
+                                (if il { x >= lo } else { x > lo })
+                                    && (if ir { x <= hi } else { x < hi })
+                            } else {
+                                false
+                            };
+                            Scalar::Bool(ok)
+                        })
+                        .collect();
+                    assert_eq!(icol.between_inclusive(lo, hi, pol).unwrap().values(), exp);
+                    assert_eq!(fcol.between_inclusive(lo, hi, pol).unwrap().values(), exp);
+                }
+            }
         }
 
         #[test]
