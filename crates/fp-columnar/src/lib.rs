@@ -14035,6 +14035,59 @@ impl Column {
     /// columns return a type error. Result dtype is always Float64.
     pub fn interpolate_linear(&self) -> Result<Self, ColumnError> {
         let len = self.values.len();
+        // Typed Float64 fast path: source the present values from the contiguous
+        // buffer + validity (no per-element Scalar/ to_f64 materialization), run the
+        // identical interior-gap + trailing-ffill fill into an f64 buffer, and MOVE
+        // it out with a validity mask (leading nulls stay missing). Bit-identical to
+        // the Scalar path below: a filled/present slot → Float64(value), a remaining
+        // (leading) null → Null(NaN); the fill arithmetic is the same.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let mut out = vec![0.0_f64; len];
+            let mut valid = vec![false; len];
+            for i in 0..len {
+                if validity.get(i) && !data[i].is_nan() {
+                    out[i] = data[i];
+                    valid[i] = true;
+                }
+            }
+            let first = valid.iter().position(|&b| b);
+            let last = valid.iter().rposition(|&b| b);
+            if let (Some(start), Some(end)) = (first, last) {
+                let mut i = start;
+                while i < end {
+                    if valid[i] {
+                        i += 1;
+                        continue;
+                    }
+                    let gap_start = i;
+                    while i < end && !valid[i] {
+                        i += 1;
+                    }
+                    let before = out[gap_start - 1];
+                    let after = out[i];
+                    let span = (i - gap_start + 1) as f64;
+                    for (k, j) in (gap_start..i).enumerate() {
+                        let step = (k + 1) as f64;
+                        out[j] = before + (after - before) * (step / span);
+                        valid[j] = true;
+                    }
+                }
+                let last_valid = out[end];
+                for j in (end + 1)..len {
+                    out[j] = last_valid;
+                    valid[j] = true;
+                }
+            }
+            let mut vmask = ValidityMask::all_valid(len);
+            for (j, &ok) in valid.iter().enumerate() {
+                if !ok {
+                    vmask.set(j, false);
+                }
+            }
+            return Ok(Self::from_f64_values_with_validity(out, vmask));
+        }
         // Convert to f64 once; missing → None.
         let mut floats: Vec<Option<f64>> = Vec::with_capacity(len);
         for v in &self.values {
@@ -25692,6 +25745,32 @@ mod tests {
             assert!(deep > shallow);
             // deep_extra = "hi".len() + "world".len() = 2 + 5 = 7
             assert_eq!(deep - shallow, 7);
+        }
+
+        #[test]
+        fn interpolate_typed_f64_backing_matches_expected() {
+            // Drives the typed path explicitly (from_f64_values_with_validity →
+            // LazyNullableFloat64, which as_f64_slice_with_validity recognizes).
+            // Leading null stays null; interior gap linearly filled; trailing
+            // forward-fills the last valid value.
+            let mut vmask = ValidityMask::all_valid(7);
+            for j in [0usize, 2, 3, 6] {
+                vmask.set(j, false);
+            }
+            // values: [_, 10, _, _, 40, 50, _]  (underscores invalid)
+            let data = vec![0.0, 10.0, 0.0, 0.0, 40.0, 50.0, 0.0];
+            let col = Column::from_f64_values_with_validity(data, vmask);
+            let r = col.interpolate_linear().expect("interp");
+            let v = r.values();
+            assert!(v[0].is_missing(), "leading null stays null: {:?}", v[0]);
+            assert_eq!(v[1], Scalar::Float64(10.0));
+            // gap between 10 (idx1) and 40 (idx4): span=3 → 20, 30
+            assert_eq!(v[2], Scalar::Float64(20.0));
+            assert_eq!(v[3], Scalar::Float64(30.0));
+            assert_eq!(v[4], Scalar::Float64(40.0));
+            assert_eq!(v[5], Scalar::Float64(50.0));
+            // trailing forward-fill of last valid (50)
+            assert_eq!(v[6], Scalar::Float64(50.0));
         }
 
         #[test]

@@ -6829,3 +6829,20 @@ f64 flips LOSS->WIN. i64 is a 3.6x fp-side improvement but stays 0.56x — the r
 realloc (there is no owned Int64 constructor; the f64 owned path uses an Arc<Vec<f64>> backing — adding the i64 sibling
 is a structural ScalarValues change, deferred). Bit-identical: new `fillna_typed_nullable_matches_oracle` (i64 & f64,
 random validity, independent oracle) + fp-columnar 4 fillna + fp-frame 19 fillna tests green.
+
+### 2026-06-27 TealOsprey — interpolate (linear) typed f64 path: 0.69x LOSS -> 8.9x WIN vs pandas (12.8x fp-side)
+`Column::interpolate_linear` materialized the lazy column TWICE: input via `for v in &self.values { v.to_f64() }` into
+Vec<Option<f64>>, output into Vec<Scalar> → Self::new — ~429ms, 0.69x vs pandas. Added a typed Float64 path: read
+`as_f64_slice_with_validity`, mark present into an f64 buffer + a bool valid[], run the IDENTICAL interior-gap-fill +
+trailing-forward-fill, then MOVE the buffer out with a validity mask (leading nulls stay missing) via
+from_f64_values_with_validity. Bit-identical (filled/present → Float64(value), leading null → Null(NaN); same fill
+arithmetic).
+
+Same-box best-of-3, 5M nullable f64 (1/4 NA) (`fp-columnar/examples/bench_interp`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (Scalar x2) | patched (typed) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `interpolate()` f64 5M | 429.2ms | 33.5ms | 12.8x | 0.69x -> 8.87x (pandas 296.9ms) |
+
+Bit-identical: new `interpolate_typed_f64_backing_matches_expected` (drives the LazyNullableFloat64 entry; leading-null
++ interior-gap + trailing-ffill) + fp-columnar 6 interpolate + fp-frame 19 interpolate tests green.
