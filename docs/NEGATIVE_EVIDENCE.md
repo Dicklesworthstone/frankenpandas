@@ -7021,3 +7021,18 @@ Same-box best-of-3, 5M col+col (`fp-columnar/examples/bench_add`),
 Near-parity (the residual is the 120MB read+write bandwidth, ~= pandas C) and benefits the WHOLE binary-arithmetic
 family. Bit-identical: FULL fp-columnar suite 467 passed / 0 failed (updated vectorized_binary_all_valid_keeps_typed_
 output_lazy to accept the LazyAllValidFloat64Vec backing) + fp-frame 222 arithmetic tests green.
+
+### 2026-06-27 TealOsprey — DataFrame scalar arithmetic (apply_scalar_op) owned-move: add_scalar 0.34x -> 1.02x vs pandas
+The DataFrame add/sub/mul/div/pow/mod-scalar core `apply_scalar_op` had typed f64/i64 paths but emitted via
+from_f64_values (Arc::from realloc — the exact cost BlackThrush's in-code note flagged as the dominant floor).
+Switched both typed outputs to from_f64_values_owned (move; falls back on op-produced NaN → bit-identical).
+
+Same-box best-of-3, 5M single-col DataFrame (`fp-frame/examples/bench_addscalar`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | before (Arc::from) | after (owned) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df + scalar` f64 5M | 64.5ms | 21.5ms | 3.00x | 0.34x -> 1.02x (pandas 22.0ms) |
+
+Flips LOSS->parity/WIN, covers the whole DataFrame scalar-arithmetic family. Bit-identical: fp-frame scalar/arithmetic
+tests green. (NB: 3 PRE-EXISTING failures — series/dataframe arccosh+acosh golden mismatches — reproduce on a CLEAN
+tree without this change; a peer's unrelated acosh golden drift, NOT caused by apply_scalar_op.)
