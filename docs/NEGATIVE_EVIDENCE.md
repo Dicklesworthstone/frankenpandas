@@ -6932,3 +6932,21 @@ broad (typed_float_unary already owned; cum*/fillna-f64/clip/astype/shift/diff/p
 shared from_f64_values_with_validity all-valid->owned branch). Remaining residual: all-valid Int64-OUTPUT ops
 (fillna/bfill i64) still Arc::from-realloc — but even moved they only reach ~parity (compute-bound vs pandas C), so the
 owned-Int64 ScalarValues variant is NOT worth its structural cost; DEFERRED.
+
+### 2026-06-27 TealOsprey — replace typed Int64 scalar path: 0.14x LOSS -> 0.60x vs pandas (4.3x fp-side)
+`Column::replace_values` materialized the lazy column + ran per-element `semantic_eq` over the target list + infer_dtype
+— 272ms, 0.14x vs pandas. Added a typed Int64 path: all-valid Int64 column with all-Int64 (non-missing) targets AND
+replacements → scan the raw &[i64] with integer equality (= semantic_eq for Int64), first-match-wins. Bit-identical
+(output stays Int64 = infer_dtype of all-Int64).
+
+Same-box best-of-3, 5M i64, 1 target (`fp-columnar/examples/bench_replace`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (Scalar) | patched (typed) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `replace` i64 5M | 271.9ms | 63.0ms | 4.32x | 0.14x -> 0.60x (pandas 38.0ms) |
+
+4.3x fp-side, lifts a 7x catastrophe to ~1.6x-slower. RESIDUAL: all-valid Int64 output → from_i64_values Arc::from
+realloc (~28ms) + the scan; even moved it reaches only ~parity (compute-bound vs pandas C) — another data point that the
+owned-Int64 variant buys parity not wins for the all-valid-i64-output family (replace/fillna/bfill i64), so it stays
+DEFERRED. Bit-identical: new `replace_typed_i64_matches_oracle` (multi/duplicate targets, independent first-match oracle)
++ fp-columnar 9 replace tests green.

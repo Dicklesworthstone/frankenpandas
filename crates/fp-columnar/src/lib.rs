@@ -14819,6 +14819,43 @@ impl Column {
                 right: replacement.len(),
             });
         }
+        // Typed Int64 fast path: all-valid Int64 column with all-Int64 (non-missing)
+        // targets AND replacements → the output stays Int64 (infer_dtype of all-Int64),
+        // so scan the raw &[i64] with integer equality (= semantic_eq for Int64),
+        // first-match-wins (same target order), no per-element Scalar/semantic_eq
+        // dispatch or infer_dtype. Bit-identical.
+        if self.dtype == DType::Int64
+            && to_replace.iter().all(|s| matches!(s, Scalar::Int64(_)))
+            && replacement.iter().all(|s| matches!(s, Scalar::Int64(_)))
+            && let Some(data) = self.as_i64_slice()
+        {
+            let targets: Vec<i64> = to_replace
+                .iter()
+                .map(|s| match s {
+                    Scalar::Int64(v) => *v,
+                    _ => unreachable!(),
+                })
+                .collect();
+            let reps: Vec<i64> = replacement
+                .iter()
+                .map(|s| match s {
+                    Scalar::Int64(v) => *v,
+                    _ => unreachable!(),
+                })
+                .collect();
+            let out: Vec<i64> = data
+                .iter()
+                .map(|&x| {
+                    for (t, r) in targets.iter().zip(reps.iter()) {
+                        if x == *t {
+                            return *r;
+                        }
+                    }
+                    x
+                })
+                .collect();
+            return Ok(Self::from_i64_values(out));
+        }
         let out: Vec<Scalar> = self
             .values
             .iter()
@@ -28476,6 +28513,43 @@ mod tests {
             let other = Column::from_values(vec![Scalar::Int64(0)]).expect("other");
             let err = col.where_cond_series(&cond, &other).unwrap_err();
             assert!(matches!(err, crate::ColumnError::InvalidMaskType { .. }));
+        }
+
+        #[test]
+        fn replace_typed_i64_matches_oracle() {
+            // Typed i64 replace == an independent first-match-wins oracle, with
+            // multiple (incl. overlapping/duplicate) targets. Built via
+            // from_i64_values to drive the typed path.
+            let mut state: u64 = 0x51A2_C7E3_4F08_9DB1;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..200 {
+                let n = (next() % 300) as usize + 1;
+                let data: Vec<i64> = (0..n).map(|_| (next() % 10) as i64).collect();
+                let col = Column::from_i64_values(data.clone());
+                let k = (next() % 4) as usize + 1;
+                let targets: Vec<i64> = (0..k).map(|_| (next() % 12) as i64).collect();
+                let reps: Vec<i64> = (0..k).map(|_| (next() % 100) as i64 - 50).collect();
+                let to_rep: Vec<Scalar> = targets.iter().map(|&v| Scalar::Int64(v)).collect();
+                let repl: Vec<Scalar> = reps.iter().map(|&v| Scalar::Int64(v)).collect();
+                let got = col.replace(&to_rep, &repl).unwrap();
+                let exp: Vec<Scalar> = data
+                    .iter()
+                    .map(|&x| {
+                        for (t, r) in targets.iter().zip(reps.iter()) {
+                            if x == *t {
+                                return Scalar::Int64(*r);
+                            }
+                        }
+                        Scalar::Int64(x)
+                    })
+                    .collect();
+                assert_eq!(got.values(), exp);
+            }
         }
 
         #[test]
