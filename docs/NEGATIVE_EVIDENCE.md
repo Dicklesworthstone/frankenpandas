@@ -6216,3 +6216,23 @@ Validation: focused `series_resample_subdaily_typed_fast_path_emits_datetime64_l
 `cargo bench --release -p fp-frame` form was also run and rejected by Cargo because `bench` has no `--release`
 argument, so the valid per-crate bench command above is the landed gate. Residual is output-index allocation and
 1M-bin result construction; this is a KEEP PARTIAL, not a full pandas win.
+
+### 2026-06-27 TealOsprey — read_jsonl: move-not-clone parsed Maps + drop redundant key clones (1.13-1.34x fp-side)
+`read_jsonl_str` was the weakest-winning read op (1.43x vs pandas). Two bit-identical wastes removed: (1) each line's
+parsed `serde_json::Map` was `obj.clone()`d into `all_rows` — now the object is MOVED out of the per-line `Value`
+(`Value::Object(map) => all_rows.push(map)`), skipping a deep copy (every key String + value) per row; (2) the
+column-name union pass did `set.insert(key.clone())` for EVERY key of EVERY row — now `contains` guards the clone, so
+a uniform JSONL stream (every line sharing keys, the `to_json(lines=True)` shape) clones each key once total instead
+of once per row (saves O(n·k) String clones).
+
+Box was peer-contended this cycle so the ratio is a conservative range, not a point. Same-target
+`fp-io/examples/bench_read jsonl`, 1M rows × {Int64, Float64}, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| window | baseline (ORIG) | patched | fp-side |
+| --- | ---: | ---: | ---: |
+| quiet | 545ms | 483ms | 1.13x |
+| busier back-to-back | 701ms | 525ms | 1.34x |
+
+Conservative ≥1.13x; vs pandas 782ms moves 1.43x -> ~1.6x. The change removes provable O(n·k) clone work (not a
+phantom), so it can only help or be neutral. Bit-identical: fp-io 9 jsonl tests green (read/write round-trip, union
+keys, hostile-row cap). NOTE: perf reads taken on a contended box — the absolute ms are noisy; the win is the removed
+allocations, confirmed logically + by every same-load pair showing patched < ORIG.

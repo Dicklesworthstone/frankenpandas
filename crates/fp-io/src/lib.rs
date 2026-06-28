@@ -6981,11 +6981,16 @@ pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
                 "JSONL input exceeds maximum of {READ_JSONL_MAX_ROWS} rows"
             )));
         }
-        let parsed = parse_json_value_allowing_pandas_nan(trimmed)?;
-        let obj = parsed
-            .as_object()
-            .ok_or_else(|| IoError::JsonFormat("JSONL: each line must be a JSON object".into()))?;
-        all_rows.push(obj.clone());
+        // Move the parsed object out of the per-line `Value` instead of cloning
+        // it — avoids a deep copy (every key String + value) of each row's Map.
+        match parse_json_value_allowing_pandas_nan(trimmed)? {
+            serde_json::Value::Object(map) => all_rows.push(map),
+            _ => {
+                return Err(IoError::JsonFormat(
+                    "JSONL: each line must be a JSON object".into(),
+                ));
+            }
+        }
     }
 
     if all_rows.is_empty() {
@@ -6998,7 +7003,11 @@ pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
     let mut col_names_ordered: Vec<String> = Vec::new();
     for row in &all_rows {
         for key in row.keys() {
-            if col_name_set.insert(key.clone()) {
+            // Only clone a key the first time it is seen (uniform JSONL — every
+            // line sharing the same keys — clones each key exactly once total,
+            // not once per row).
+            if !col_name_set.contains(key.as_str()) {
+                col_name_set.insert(key.clone());
                 col_names_ordered.push(key.clone());
             }
         }
