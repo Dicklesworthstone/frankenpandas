@@ -6456,3 +6456,23 @@ Sibling `sum` sanity on the same patched tree: `resample('s').sum()` 1M best 13.
 `series_resample_sparse_subdaily_typed_path_skips_empty_bins` release test green; conformance and valid per-crate
 bench gates are recorded in the landing commit. The literal requested `cargo bench --release -p fp-frame` form remains
 invalid Cargo syntax, so the valid per-crate bench command is `cargo bench -p fp-frame`.
+
+### 2026-06-28 BlackThrush - resample('min') lazy Datetime64 affine output index: 1.14x vs ORIG
+Follow-up on the same measured residual after the direct Datetime64 label keep. Current main still built a 1M-element
+`Vec<IndexLabel::Datetime64>` for dense sub-daily output bins. Added a lazy `Datetime64` affine index backing sibling to
+the existing lazy `Int64` affine backing and routed dense, no-empty-bin sub-daily resample output through it. Sparse-bin
+sub-daily output keeps the explicit label path, so empty-bin skip semantics are unchanged.
+
+Same target dir `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`; `rch exec` fell open locally for
+the paired timing because workers were saturated, so the KEEP ratio uses clean `origin/main` and patched worktrees on the
+same machine/target setup. ORIG is `b3a4545e5` (`perf(fp-frame): emit datetime labels for subdaily resample`). Command:
+`rch exec -- cargo run -p fp-frame --example bench_resample --release -- 1000000 min mean`.
+
+| workload | ORIG best | patched best | ratio vs ORIG | pandas note |
+| --- | ---: | ---: | ---: | --- |
+| `resample('min').mean()` 1M | 44.439898ms | 39.002742ms | 1.14x | prior same-fixture pandas best 46.156ms; patched is 1.18x vs pandas |
+
+Validation: focused `series_resample_subdaily_typed_fast_path_emits_datetime64_labels` release test green; full
+`fp-conformance` release crate green; valid per-crate `cargo bench -p fp-frame` green on remote `hz2`. The literal
+requested `cargo bench --release -p fp-frame` form was also run per-crate on remote `vmi1264463` and rejected by Cargo
+because `bench` has no `--release` argument.

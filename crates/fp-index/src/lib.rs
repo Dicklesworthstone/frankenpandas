@@ -736,6 +736,20 @@ impl Int64AffineLabels {
         labels
     }
 
+    fn materialize_datetime64(self) -> Vec<IndexLabel> {
+        let mut labels = Vec::with_capacity(self.len);
+        let mut value = self.start;
+        for offset in 0..self.len {
+            labels.push(IndexLabel::Datetime64(value));
+            if offset + 1 < self.len {
+                value = value
+                    .checked_add(self.step)
+                    .expect("validated Datetime64 affine range end");
+            }
+        }
+        labels
+    }
+
     fn materialize_i64(self) -> Vec<i64> {
         let mut labels = Vec::with_capacity(self.len);
         let mut value = self.start;
@@ -923,6 +937,7 @@ struct IndexLabels {
     int64_affine: Option<Int64AffineLabels>,
     int64_two_affine: Option<Box<Int64TwoAffineLabels>>,
     int64_strided: Option<Int64StridedLabels>,
+    datetime64_affine: Option<Int64AffineLabels>,
     /// Lazy typed Int64 backing (br-frankenpandas-dxqpm). `Some(values)` once
     /// computed means every label is `IndexLabel::Int64` and `values` is the
     /// raw `i64` view; `None` once computed means the labels are not all
@@ -950,6 +965,7 @@ impl IndexLabels {
             int64_affine: None,
             int64_two_affine: None,
             int64_strided: None,
+            datetime64_affine: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         }
@@ -963,6 +979,7 @@ impl IndexLabels {
             int64_affine: None,
             int64_two_affine: None,
             int64_strided: None,
+            datetime64_affine: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -979,6 +996,7 @@ impl IndexLabels {
             int64_affine: Some(Int64AffineLabels::new(start, step, len)?),
             int64_two_affine: None,
             int64_strided: None,
+            datetime64_affine: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -992,6 +1010,7 @@ impl IndexLabels {
             int64_affine: None,
             int64_two_affine: Some(Box::new(Int64TwoAffineLabels::new(first, second)?)),
             int64_strided: None,
+            datetime64_affine: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -1010,6 +1029,7 @@ impl IndexLabels {
             int64_affine: None,
             int64_two_affine: None,
             int64_strided: Some(Int64StridedLabels::new(values, start, step, len)?),
+            datetime64_affine: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -1025,9 +1045,24 @@ impl IndexLabels {
             int64_affine: None,
             int64_two_affine: None,
             int64_strided: None,
+            datetime64_affine: None,
             int64_typed,
             utf8_contiguous: None,
         }
+    }
+
+    fn new_datetime64_affine(start: i64, step: i64, len: usize) -> Option<Self> {
+        Some(Self {
+            materialized: OnceLock::new(),
+            materialized_slice: None,
+            int64_unit_range: None,
+            int64_affine: None,
+            int64_two_affine: None,
+            int64_strided: None,
+            datetime64_affine: Some(Int64AffineLabels::new(start, step, len)?),
+            int64_typed: OnceLock::new(),
+            utf8_contiguous: None,
+        })
     }
 
     fn new_utf8_contiguous(bytes: Arc<[u8]>, offsets: Arc<[usize]>) -> Self {
@@ -1040,6 +1075,7 @@ impl IndexLabels {
             int64_affine: None,
             int64_two_affine: None,
             int64_strided: None,
+            datetime64_affine: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: Some((bytes, offsets)),
         }
@@ -1075,6 +1111,9 @@ impl IndexLabels {
                             .collect(),
                     );
                 }
+                if let Some(range) = self.datetime64_affine {
+                    return Arc::new(range.materialize_datetime64());
+                }
                 if let Some(strided) = self.int64_strided.clone() {
                     return Arc::new(strided.materialize());
                 }
@@ -1103,6 +1142,9 @@ impl IndexLabels {
         }
         if let Some(strided) = self.int64_strided.clone() {
             return strided.materialize();
+        }
+        if let Some(range) = self.datetime64_affine {
+            return range.materialize_datetime64();
         }
         if let Some((bytes, offsets)) = &self.utf8_contiguous {
             return offsets
@@ -1138,6 +1180,9 @@ impl IndexLabels {
         }
         if let Some(strided) = &self.int64_strided {
             return strided.len;
+        }
+        if let Some(range) = self.datetime64_affine {
+            return range.len;
         }
         if let Some((_, offsets)) = &self.utf8_contiguous {
             return offsets.len() - 1;
@@ -1217,6 +1262,16 @@ impl IndexLabels {
             return labels;
         }
 
+        if let Some(range) = self.datetime64_affine {
+            let offset = i64::try_from(start).expect("start within index length");
+            if let Some(delta) = range.step.checked_mul(offset)
+                && let Some(next_start) = range.start.checked_add(delta)
+                && let Some(labels) = Self::new_datetime64_affine(next_start, range.step, len)
+            {
+                return labels;
+            }
+        }
+
         if let Some(slice) = &self.materialized_slice
             && let Some(next_start) = slice.start.checked_add(start)
             && let Some(view) =
@@ -1229,6 +1284,7 @@ impl IndexLabels {
                 int64_affine: None,
                 int64_two_affine: None,
                 int64_strided: None,
+                datetime64_affine: None,
                 int64_typed: OnceLock::new(),
                 utf8_contiguous: None,
             };
@@ -1244,6 +1300,7 @@ impl IndexLabels {
                 int64_affine: None,
                 int64_two_affine: None,
                 int64_strided: None,
+                datetime64_affine: None,
                 int64_typed: OnceLock::new(),
                 utf8_contiguous: None,
             };
@@ -1268,6 +1325,10 @@ impl IndexLabels {
                 len: range.len,
             })
             .or(self.int64_affine)
+    }
+
+    fn datetime64_affine_range(&self) -> Option<Int64AffineLabels> {
+        self.datetime64_affine
     }
 
     /// The raw `i64` view of an all-Int64 label vector, computing and caching
@@ -1413,6 +1474,7 @@ impl Clone for IndexLabels {
             || self.int64_affine.is_some()
             || self.int64_two_affine.is_some()
             || self.int64_strided.is_some()
+            || self.datetime64_affine.is_some()
             || self.materialized_slice.is_some()
             || self.utf8_contiguous.is_some()
             || matches!(int64_typed.get(), Some(Some(_)));
@@ -1426,6 +1488,7 @@ impl Clone for IndexLabels {
             int64_affine: self.int64_affine,
             int64_two_affine: self.int64_two_affine.clone(),
             int64_strided: self.int64_strided.clone(),
+            datetime64_affine: self.datetime64_affine,
             int64_typed,
             utf8_contiguous: self.utf8_contiguous.clone(),
         }
@@ -1816,6 +1879,25 @@ impl Index {
     }
 
     #[must_use]
+    #[doc(hidden)]
+    pub fn from_datetime64_affine_range(start: i64, step: i64, len: usize) -> Option<Self> {
+        let labels = IndexLabels::new_datetime64_affine(start, step, len)?;
+        let index = Self {
+            labels,
+            name: None,
+            label_identity: next_index_label_identity(),
+            duplicate_cache: OnceLock::new(),
+            sort_order_cache: OnceLock::new(),
+            semantic_fingerprint_cache: OnceLock::new(),
+        };
+        let _ = index.duplicate_cache.set(false);
+        if len <= 1 || step > 0 {
+            let _ = index.sort_order_cache.set(SortOrder::AscendingDatetime64);
+        }
+        Some(index)
+    }
+
+    #[must_use]
     pub fn from_datetime64(nanos: Vec<i64>) -> Self {
         Self::new(nanos.into_iter().map(IndexLabel::Datetime64).collect())
     }
@@ -1985,6 +2067,12 @@ impl Index {
                 } else {
                     SortOrder::Unsorted
                 }
+            } else if let Some(range) = self.labels.datetime64_affine_range() {
+                if range.len <= 1 || range.step > 0 {
+                    SortOrder::AscendingDatetime64
+                } else {
+                    SortOrder::Unsorted
+                }
             } else {
                 detect_sort_order(self.labels())
             }
@@ -2004,6 +2092,11 @@ impl Index {
     #[must_use]
     pub fn position(&self, needle: &IndexLabel) -> Option<usize> {
         if let (Some(range), IndexLabel::Int64(target)) = (self.labels.int64_affine_range(), needle)
+        {
+            return range.position(*target);
+        }
+        if let (Some(range), IndexLabel::Datetime64(target)) =
+            (self.labels.datetime64_affine_range(), needle)
         {
             return range.position(*target);
         }
