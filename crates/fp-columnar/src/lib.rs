@@ -10286,7 +10286,14 @@ impl Column {
                 // any operation-produced NaN missing, identically).
                 if let (Some(l), Some(r)) = (self.as_f64_slice(), right.as_f64_slice()) {
                     let apply = binary_f64_apply(op);
-                    let result: Vec<f64> = l.iter().zip(r).map(|(&a, &b)| apply(a, b)).collect();
+                    // Pow is libm-powf COMPUTE-bound (~30ns/elem) → parallelize;
+                    // add/sub/mul/div/mod are bandwidth-bound → keep serial (threads
+                    // would only contend). Bit-identical (same apply, order preserved).
+                    let result: Vec<f64> = if matches!(op, ArithmeticOp::Pow) {
+                        par_map_vec_f64(l.len(), |i| apply(l[i], r[i]))
+                    } else {
+                        l.iter().zip(r).map(|(&a, &b)| apply(a, b)).collect()
+                    };
                     return Some(Ok(Self::from_f64_values_owned(result)));
                 }
                 let left_data = ColumnData::from_scalars(&self.values, DType::Float64);
@@ -10906,7 +10913,7 @@ impl Column {
                 right: right.len(),
             });
         }
-        if let Some(out) = self.typed_float_binary(right, |b, e| b.powf(e)) {
+        if let Some(out) = self.typed_float_binary_par(right, |b, e| b.powf(e)) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -10946,7 +10953,7 @@ impl Column {
                 right: other.len(),
             });
         }
-        if let Some(out) = self.typed_float_binary(other, |y, x| y.atan2(x)) {
+        if let Some(out) = self.typed_float_binary_par(other, |y, x| y.atan2(x)) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -10970,7 +10977,7 @@ impl Column {
                 right: other.len(),
             });
         }
-        if let Some(out) = self.typed_float_binary(other, |a, b| a.hypot(b)) {
+        if let Some(out) = self.typed_float_binary_par(other, |a, b| a.hypot(b)) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -17557,6 +17564,31 @@ impl Column {
         Some(Self::from_f64_values(
             a.iter().zip(b.iter()).map(|(&x, &y)| f(x, y)).collect(),
         ))
+    }
+
+    /// Parallel sibling of [`typed_float_binary`] for COMPUTE-bound libm binaries
+    /// (pow/atan2/hypot — each `f(x,y)` is ~20-40ns). Reads both f64 buffers
+    /// directly (no `all_valid_as_f64` copy) when both are typed f64, evaluates in
+    /// parallel (par_map_vec_f64), and MOVEs the result out. Bit-identical to
+    /// `typed_float_binary` (same `f`, same order; from_f64_values_owned falls back
+    /// to from_f64_values on an op-produced NaN, keeping Float64(NaN) identically).
+    fn typed_float_binary_par(&self, other: &Self, f: fn(f64, f64) -> f64) -> Option<Self> {
+        if let (Some(a), Some(b)) = (self.as_f64_slice(), other.as_f64_slice()) {
+            if a.len() != b.len() {
+                return None;
+            }
+            return Some(Self::from_f64_values_owned(par_map_vec_f64(a.len(), |i| {
+                f(a[i], b[i])
+            })));
+        }
+        let a = self.all_valid_as_f64()?;
+        let b = other.all_valid_as_f64()?;
+        if a.len() != b.len() {
+            return None;
+        }
+        Some(Self::from_f64_values_owned(par_map_vec_f64(a.len(), |i| {
+            f(a[i], b[i])
+        })))
     }
 
     pub fn floor(&self) -> Result<Self, ColumnError> {

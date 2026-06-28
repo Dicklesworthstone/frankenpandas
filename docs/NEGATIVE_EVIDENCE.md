@@ -7144,3 +7144,23 @@ Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_trig`),
 Both flip to WIN. With this, the entire unary-math transcendental surface (exp/log/log2/log10/ln/sqrt/sin/cos/tan/asin/
 acos/atan/sinh/cosh/tanh/asinh/acosh/atanh/exp_m1/ln_1p/cbrt) is parallelized and wins 2-4.5x; cheap maps
 (reciprocal/to_degrees/to_radians/round) remain serial (bandwidth-bound). FULL fp-columnar suite 467 passed / 0 failed.
+
+### 2026-06-27 TealOsprey — PARALLEL libm binaries (pow/atan2/hypot): -> 4.4-10.3x WIN vs pandas
+Extends compute-bound parallelism to the libm BINARY ops. pow (ArithmeticOp::Pow) flows through
+try_vectorized_binary's f64 arm — special-cased Pow there to par_map_vec_f64 (add/sub/mul/div/mod stay serial,
+bandwidth-bound). atan2/hypot (separate Column methods) went through typed_float_binary (which also did an
+all_valid_as_f64 COPY + from_f64_values realloc); added typed_float_binary_par (reads both f64 slices directly — no
+copy — parallel compute, owned move) and routed them. Bit-identical (same f, order preserved, NaN→Float64(NaN) via
+owned fallback).
+
+Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_pow`, `bench_atan2`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | serial | parallel | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `pow` (col**col) 5M | 70.3ms | 15.9ms | 4.42x | 1.00x -> 4.43x (pandas 70.5ms) |
+| `atan2` 5M | 173.4ms | 23.0ms | 7.54x | 1.18x -> 8.87x (pandas 204.0ms) |
+| `hypot` 5M | 132.6ms | 14.9ms | 8.90x | 1.16x -> 10.34x (pandas 154.2ms) |
+
+All strong WINS. (pandas arctan2/hypot are themselves slow ~150-200ms; fp already edged them serially, now dominates.)
+Cheap binaries (add/sub/mul/div/mod/max/min/copysign) stay serial — bandwidth-bound. FULL fp-columnar suite 467
+passed / 0 failed.
