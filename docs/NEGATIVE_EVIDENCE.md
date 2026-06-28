@@ -6916,3 +6916,19 @@ Same-box best-of-3, 5M (`fp-columnar/examples/bench_clip`),
 | `clip` i64 5M | 60.8ms | 22.3ms | 2.73x | 1.18x -> 3.23x (pandas 72.0ms) |
 
 Bit-identical: fp-columnar 27 clip tests green.
+
+### 2026-06-27 TealOsprey — astype Int64->Float64 owned-move output: 0.36x LOSS -> 1.04x WIN vs pandas
+astype's typed Int64->Float64 path emitted via from_f64_values (Arc::from realloc). `x as f64` is always finite →
+all-valid output → switched to from_f64_values_owned (MOVE). Bit-identical.
+
+Same-box best-of-3, 5M (`fp-columnar/examples/bench_astype`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | from_f64_values | owned | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `astype` i64->f64 5M | 63.7ms | 22.0ms | 2.90x | 0.36x -> 1.04x (pandas 22.9ms) |
+
+Flips LOSS->parity/WIN. Bit-identical: fp-columnar 7 astype tests green. NOTE: the f64-output owned-move sweep is now
+broad (typed_float_unary already owned; cum*/fillna-f64/clip/astype/shift/diff/pct_change/interpolate via owned or the
+shared from_f64_values_with_validity all-valid->owned branch). Remaining residual: all-valid Int64-OUTPUT ops
+(fillna/bfill i64) still Arc::from-realloc — but even moved they only reach ~parity (compute-bound vs pandas C), so the
+owned-Int64 ScalarValues variant is NOT worth its structural cost; DEFERRED.

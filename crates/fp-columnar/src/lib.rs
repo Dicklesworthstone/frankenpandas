@@ -15548,7 +15548,8 @@ impl Column {
             && let Some(data) = self.as_i64_slice()
         {
             let out: Vec<f64> = data.iter().map(|&x| x as f64).collect();
-            return Ok(Self::from_f64_values(out));
+            // `x as f64` is always finite → all-valid output → MOVE (no realloc).
+            return Ok(Self::from_f64_values_owned(out));
         }
         if target == DType::Int64
             && let Some(data) = self.as_f64_slice()
