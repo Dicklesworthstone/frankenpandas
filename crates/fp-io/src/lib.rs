@@ -1937,6 +1937,9 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
         // All-valid contiguous Utf8: (bytes, offsets) with row r =
         // bytes[offsets[r]..offsets[r+1]].
         U(&'a [u8], &'a [usize]),
+        // All-valid (no validity-mask null) Datetime64 ns + the column-uniform
+        // to_csv format; NaT sentinels render as na_rep inline.
+        Dt(&'a [i64], DatetimeCsvFormat),
     }
     let mut cols: Vec<FastCol<'_>> = Vec::with_capacity(headers.len());
     for name in &headers {
@@ -1964,6 +1967,16 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                 return None;
             }
             cols.push(FastCol::U(bytes, offsets));
+        } else if column.dtype() == DType::Datetime64 {
+            // A validity-mask null (data slot ≠ NaT) would diverge from the
+            // general path's `Scalar::Null` → na_rep; require no mask-nulls. NaT
+            // sentinels (kept AS DATA by an all-valid backing) are rendered as
+            // na_rep inline, matching scalar_to_csv_cell.
+            let s = column.as_datetime64_slice()?;
+            if s.len() != n || column.has_nulls() {
+                return None;
+            }
+            cols.push(FastCol::Dt(s, datetime_csv_format(column)));
         } else {
             return None;
         }
@@ -2047,6 +2060,22 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                     // SAFETY-FREE: contiguous Utf8 backing is valid UTF-8.
                     let field = std::str::from_utf8(field).unwrap_or("");
                     append_csv_minimal_field(&mut out, field, delim, single_field);
+                }
+                // Datetime64: NaT → na_rep (isomorphic with the F NaN arm's sole
+                // empty-na quoting); else the column-uniform format string, routed
+                // through QUOTE_MINIMAL exactly like scalar_to_csv_cell's output.
+                FastCol::Dt(s, fmt) => {
+                    let v = s[r];
+                    if v == Timestamp::NAT {
+                        if single_field && options.na_rep.is_empty() {
+                            out.push_str("\"\"");
+                        } else {
+                            out.push_str(&options.na_rep);
+                        }
+                    } else {
+                        let rendered = format_datetime_csv(v, *fmt);
+                        append_csv_minimal_field(&mut out, &rendered, delim, single_field);
+                    }
                 }
             }
         }
@@ -16032,6 +16061,42 @@ mod tests {
         assert_eq!(
             super::try_write_csv_typed(&frame, &CsvWriteOptions::default()).as_deref(),
             Some(expected)
+        );
+        assert_eq!(write_csv_string(&frame).expect("write"), expected);
+    }
+
+    #[test]
+    fn to_csv_typed_handles_datetime_column_without_fallback_dtcsv() {
+        // A Datetime64 column must stay on the typed fast path (previously any
+        // datetime forced the whole frame to the generic writer). NaT renders as
+        // na_rep; the column-uniform full-timestamp form is used because one
+        // value is non-midnight.
+        let v0 = 946_684_800_000_000_000i64; // 2000-01-01 00:00:00
+        let v1 = v0 + 3_661_000_000_000; // 2000-01-01 01:01:01
+        let mut columns = BTreeMap::new();
+        columns.insert("a".to_string(), Column::from_i64_values(vec![10, 20, 30]));
+        columns.insert("b".to_string(), Column::from_f64_values(vec![1.5, 2.0, 3.5]));
+        columns.insert(
+            "t".to_string(),
+            Column::from_datetime64_values(vec![v0, v1, Timestamp::NAT]),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ]),
+            columns,
+            vec!["a".to_string(), "b".to_string(), "t".to_string()],
+        )
+        .unwrap();
+        let expected =
+            "a,b,t\n10,1.5,2000-01-01 00:00:00\n20,2.0,2000-01-01 01:01:01\n30,3.5,\n";
+        // Typed fast path fires (no datetime fallback) and is byte-identical to
+        // the public writer (which routes through it).
+        assert_eq!(
+            super::try_write_csv_typed(&frame, &CsvWriteOptions::default()).as_deref(),
+            Some(expected),
         );
         assert_eq!(write_csv_string(&frame).expect("write"), expected);
     }

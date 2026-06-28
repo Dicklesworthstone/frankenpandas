@@ -6149,3 +6149,44 @@ Validation: focused `fp-frame dt_isocalendar` release tests green; full `fp-conf
 per-crate `cargo bench -p fp-frame` green. The literal requested `cargo bench --release -p fp-frame` form was also
 run and rejected by Cargo because `bench` has no `--release` argument, so the valid per-crate bench command above is
 the landed gate.
+
+### 2026-06-28 BlackThrush - SeriesGroupBy shift/diff byte seen-state: 1.25x/1.12x fp-side vs ORIG
+After the bench-worktree scan, every measured unlanded worktree candidate was either already patch-equivalent on
+`origin/main` or explicitly dominated in this ledger. The current source-addressable residual I dug was the
+`periods == 1` dense Int64-key `SeriesGroupBy.shift/diff` path: the prior fast path still used `Vec<bool>` for the
+per-group seen state, so the hottest branch went through packed-bit proxy loads/stores. Replaced that local seen state
+with byte flags (`Vec<u8>`), preserving the same per-group first-row invalidity contract while avoiding bit-proxy
+traffic in the row loop.
+
+Same target dir `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`; `rch exec` fell open locally
+because workers were saturated/no admissible slots. ORIG is detached clean `origin/main` at `3c20b754d`; patched is this
+commit's worktree. Command:
+`rch exec -- cargo run --release -p fp-frame --example bench_gb_cum -- 1000000 1000 {shift,diff} 8`.
+
+| workload | ORIG best | patched best | ratio vs ORIG | pandas note |
+| --- | ---: | ---: | ---: | --- |
+| `SeriesGroupBy.shift(1)` | 5.389818ms | 4.312075ms | 1.25x | prior same-workload pandas comparator 28.490ms, so both already win |
+| `SeriesGroupBy.diff(1)` | 4.041242ms | 3.618641ms | 1.12x | prior same-workload pandas comparator 29.100ms, so both already win |
+
+The lever is intentionally narrow: `periods > 1`, non-dense keys, null/NaN values, and non-float fall back to the
+existing paths. Validation: pending in this commit cycle.
+
+### 2026-06-27 TealOsprey — to_csv typed FastCol path extended to Datetime64: 1.95x fp-side (6.9x -> 13.5x vs pandas)
+Mirror of the to_json datetime fix on the CSV side. `try_write_csv_typed`'s `FastCol` only knew F/I/B/U, so ANY
+Datetime64 column made the whole frame `return None` and revert to the generic `csv`-crate writer — dragging the
+int/float columns off their typed fast paths too. Added `FastCol::Dt(&[i64], DatetimeCsvFormat)`: gated `!has_nulls()`
+(NaT-as-data kept by the all-valid backing renders as na_rep inline, matching `scalar_to_csv_cell`), formatted by the
+already-fast `format_datetime_csv` (hand-rolled civil, no chrono) and routed through `append_csv_minimal_field`
+(QUOTE_MINIMAL), with the same sole-empty-na `""` quoting as the F NaN arm.
+
+Same-box best-of-3, 1M rows × {Int64, Float64, Datetime64} (`fp-io/examples/bench_to_csv_mixed`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (generic writer) | patched (typed FastCol) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `to_csv` mixed+dt 1M | 323.3ms | 166.1ms | 1.95x | 6.9x -> 13.5x (pandas 2236ms) |
+
+Already beat pandas (its to_csv is slow); the lever keeps a mixed datetime frame on the typed path instead of
+reverting every column to the generic writer. Bit-identical: new differential `to_csv_typed_handles_datetime_column
+_without_fallback_dtcsv` (typed output == hand-verified expected incl. NaT→na_rep and the column-uniform full-timestamp
+form) + fp-io 148 csv tests green. The typed CSV writer now covers i64/f64/bool/utf8/datetime, matching the typed JSON
+writers' dtype coverage.
