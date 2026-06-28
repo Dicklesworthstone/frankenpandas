@@ -5233,6 +5233,61 @@ fn i64_direct_address_range(data: &[i64]) -> Option<(i64, usize)> {
     }
 }
 
+/// Count distinct values in an all-valid `i64` slice that is too wide for the
+/// dense direct-address path, via a purpose-built open-addressing hash set
+/// (linear probing, inline `i64` keys, ~0.5 load factor) over the raw slice —
+/// no `Scalar` materialization and no `FxHashSet` SwissTable/control-byte
+/// overhead (the "wide-i64 high-card khash floor" lever). `i64::MIN` is the
+/// empty sentinel and is tracked separately so a real `i64::MIN` value still
+/// counts. Fibonacci hashing (multiply by the golden-ratio odd constant) spreads
+/// sequential/strided keys across the table.
+fn count_distinct_i64_wide(data: &[i64]) -> i64 {
+    const EMPTY: i64 = i64::MIN;
+    if data.is_empty() {
+        return 0;
+    }
+    // Load factor ~0.5: capacity = next power of two ≥ 2·n. Distinct ≤ n, so the
+    // table never exceeds ~0.5 occupancy and linear-probe runs stay short.
+    let cap = data
+        .len()
+        .saturating_mul(2)
+        .checked_next_power_of_two()
+        .unwrap_or(0);
+    // Fall back to the caller's generic path if the table would be implausibly
+    // large (cap == 0 only on overflow of usize::MAX/2).
+    if cap == 0 {
+        let mut set: FxHashSet<i64> = FxHashSet::default();
+        for &v in data {
+            set.insert(v);
+        }
+        return set.len() as i64;
+    }
+    let mask = cap - 1;
+    let mut keys = vec![EMPTY; cap];
+    let mut count = 0i64;
+    let mut has_sentinel = false;
+    for &v in data {
+        if v == EMPTY {
+            has_sentinel = true;
+            continue;
+        }
+        let mut idx = ((v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        loop {
+            let k = keys[idx];
+            if k == EMPTY {
+                keys[idx] = v;
+                count += 1;
+                break;
+            }
+            if k == v {
+                break;
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+    count + i64::from(has_sentinel)
+}
+
 /// Hash-free duplicate flags for a bounded-range `i64` slice via a dense
 /// direct-address table (no per-element hashing or `Scalar` enum). Identical
 /// semantics to [`duplicated_flags_typed`]. `min`/`range` come from
@@ -12116,19 +12171,23 @@ impl Column {
         // hash-free, no Scalar enum. All-valid ⇒ no missing, so dropna does not
         // add a bucket; bit-identical to nannunique's distinct count. Same gate
         // as unique/isin/duplicated.
-        if let Some(data) = self.as_i64_slice()
-            && let Some((min, range)) = i64_direct_address_range(data)
-        {
-            let mut seen = vec![false; range];
-            let mut distinct = 0i64;
-            for &v in data {
-                let slot = (v as i128 - min as i128) as usize;
-                if !seen[slot] {
-                    seen[slot] = true;
-                    distinct += 1;
+        if let Some(data) = self.as_i64_slice() {
+            if let Some((min, range)) = i64_direct_address_range(data) {
+                let mut seen = vec![false; range];
+                let mut distinct = 0i64;
+                for &v in data {
+                    let slot = (v as i128 - min as i128) as usize;
+                    if !seen[slot] {
+                        seen[slot] = true;
+                        distinct += 1;
+                    }
                 }
+                return Scalar::Int64(distinct);
             }
-            return Scalar::Int64(distinct);
+            // Wide / sparse all-valid Int64: out of dense-bitset range, but the
+            // raw &[i64] still avoids Scalar materialization — count distinct via
+            // the purpose-built open-addressing set (beats the FxHashSet floor).
+            return Scalar::Int64(count_distinct_i64_wide(data));
         }
 
         let mut distinct = match nannunique(&self.values) {
@@ -24488,6 +24547,37 @@ mod tests {
             ])
             .expect("col");
             assert_eq!(col.nunique(), Scalar::Int64(2));
+        }
+
+        #[test]
+        fn nunique_wide_i64_open_addressing_matches_reference() {
+            // The wide/sparse all-valid Int64 path uses count_distinct_i64_wide
+            // (open-addressing set). Must equal a HashSet reference across random
+            // wide data AND the i64::MIN empty-sentinel edge.
+            use std::collections::HashSet;
+            // Deterministic LCG, sparse full-range values + forced duplicates +
+            // both i64::MIN and i64::MAX present.
+            let mut state: u64 = 0xDEAD_BEEF_1234_5678;
+            let mut data: Vec<i64> = Vec::with_capacity(20_000);
+            for _ in 0..10_000 {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let v = (state >> 1) as i64;
+                data.push(v);
+                data.push(v); // duplicate every value
+            }
+            data.push(i64::MIN);
+            data.push(i64::MIN); // sentinel value, duplicated
+            data.push(i64::MAX);
+            let expected = data.iter().copied().collect::<HashSet<i64>>().len() as i64;
+            let col = Column::from_i64_values(data);
+            assert!(
+                col.as_i64_slice().is_some(),
+                "from_i64_values must expose a typed slice so the wide path runs"
+            );
+            assert_eq!(col.nunique(), Scalar::Int64(expected));
+            assert_eq!(col.nunique_with_dropna(false), Scalar::Int64(expected));
         }
 
         #[test]

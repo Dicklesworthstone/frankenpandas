@@ -6236,3 +6236,25 @@ Conservative ≥1.13x; vs pandas 782ms moves 1.43x -> ~1.6x. The change removes 
 phantom), so it can only help or be neutral. Bit-identical: fp-io 9 jsonl tests green (read/write round-trip, union
 keys, hostile-row cap). NOTE: perf reads taken on a contended box — the absolute ms are noisy; the win is the removed
 allocations, confirmed logically + by every same-load pair showing patched < ORIG.
+
+### 2026-06-27 TealOsprey — nunique wide/sparse Int64 open-addressing set: 0.97x LOSS -> 6.0x WIN vs pandas (6.2x fp-side); KHASH FLOOR BROKEN
+The long-standing "wide-i64 high-card khash floor" (memory: factorize 0.32x, value_counts/nunique — FxHashMap vs khash;
+"custom open-addr i64 table UNTRIED"). `nunique` had a dense direct-address bitset for bounded ranges but fell to
+`nannunique` (Scalar materialization + FxHashSet) for SPARSE wide i64 — at PARITY/slight-loss vs pandas' khash. Added
+`count_distinct_i64_wide`: a purpose-built open-addressing set (linear probing, inline i64 keys, ~0.5 load, Fibonacci
+hash, i64::MIN empty-sentinel tracked separately) scanned straight over the raw `&[i64]` — no Scalar boxing, no
+SwissTable control-byte/tombstone overhead. Wired into `nunique_with_dropna`'s typed path (dense bitset kept for
+bounded ranges; new set for wide).
+
+Same-box best-of-3, 5M Int64, ~5M distinct sparse full-range values (`fp-columnar/examples/bench_hashops 5000000
+nunique wide`), `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (FxHashSet+Scalar) | patched (open-addr) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `nunique` wide-i64 5M | 765.6ms | 123.4ms | 6.21x | 0.97x -> 6.00x (pandas 740.8ms) |
+| `nunique` dense-i64 5M (unchanged) | 10.0ms | 10.0ms | 1.0x | wins (pandas 140ms) |
+
+Bit-identical: new `nunique_wide_i64_open_addressing_matches_reference` (open-addr count == std HashSet count over 20k
+LCG sparse values + forced dups + i64::MIN sentinel + i64::MAX) + fp-columnar 5 nunique tests green. The lever
+GENERALIZES to the other khash-floor ops over wide i64 — `duplicated` (already 1.47x, would widen), `factorize`
+(0.32x, the big one), `value_counts`, `unique` — all of which can reuse this open-addressing table. nunique landed
+first as the clean single-output case; factorize/value_counts are the high-value follow-ups.
