@@ -5358,6 +5358,70 @@ fn mode_i64_wide(data: &[i64]) -> Vec<i64> {
     winners
 }
 
+/// `mode` for an all-valid (NaN-free) `f64` slice: most-frequent value(s),
+/// ascending. Open-addressing keyed by NORMALIZED float bits (−0.0 == +0.0) with
+/// parallel `u32` counts and the first-seen ORIGINAL value (so a `-0.0`-mode
+/// keeps `-0.0`), then argmax + ascending winners. Empty sentinel `i64::MIN`
+/// (= −0.0 bits) never collides with a normalized key. Bit-identical to the
+/// generic `FxHashMap<FloatBits, (count, &Scalar)>` path.
+fn mode_f64_wide(data: &[f64]) -> Vec<f64> {
+    const EMPTY: i64 = i64::MIN;
+    let cap = data
+        .len()
+        .saturating_add(data.len() / 2)
+        .checked_next_power_of_two()
+        .unwrap_or(0);
+    if cap == 0 || data.len() > u32::MAX as usize {
+        let mut counts: FxHashMap<u64, (u64, f64)> = FxHashMap::default();
+        for &f in data {
+            let kb = (if f == 0.0 { 0.0 } else { f }).to_bits();
+            counts.entry(kb).and_modify(|e| e.0 += 1).or_insert((1, f));
+        }
+        let max_c = counts.values().map(|(c, _)| *c).max().unwrap_or(0);
+        let mut winners: Vec<f64> = counts
+            .values()
+            .filter_map(|&(c, f)| (c == max_c).then_some(f))
+            .collect();
+        winners.sort_by(|a, b| a.total_cmp(b));
+        return winners;
+    }
+    let mask = cap - 1;
+    let mut keys = vec![EMPTY; cap];
+    let mut cnt = vec![0u32; cap];
+    let mut first = vec![0.0f64; cap];
+    for &f in data {
+        let kb = (if f == 0.0 { 0.0 } else { f }).to_bits() as i64;
+        let mut p = ((kb as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        loop {
+            if keys[p] == EMPTY {
+                keys[p] = kb;
+                cnt[p] = 1;
+                first[p] = f;
+                break;
+            }
+            if keys[p] == kb {
+                cnt[p] += 1;
+                break;
+            }
+            p = (p + 1) & mask;
+        }
+    }
+    let mut max_c = 0u32;
+    for p in 0..cap {
+        if keys[p] != EMPTY {
+            max_c = max_c.max(cnt[p]);
+        }
+    }
+    let mut winners: Vec<f64> = Vec::new();
+    for p in 0..cap {
+        if keys[p] != EMPTY && cnt[p] == max_c {
+            winners.push(first[p]);
+        }
+    }
+    winners.sort_by(|a, b| a.total_cmp(b));
+    winners
+}
+
 /// `duplicated(keep="first")` flags for an all-valid `i64` slice too wide for
 /// the dense direct-address path, via the same open-addressing set as
 /// [`count_distinct_i64_wide`]: flag is `false` on a value's first occurrence
@@ -13733,6 +13797,15 @@ impl Column {
             if !data.is_empty() {
                 return Ok(Self::from_i64_values(mode_i64_wide(data)));
             }
+        }
+
+        // All-valid (NaN-free) Float64: tally+argmax via open-addressing over
+        // normalized float bits (first-seen original kept for output, -0.0
+        // preserved). Avoids the FxHashMap<FloatBits> + Scalar floor.
+        if let Some(data) = self.as_f64_slice()
+            && !data.is_empty()
+        {
+            return Ok(Self::from_f64_values(mode_f64_wide(data)));
         }
 
         #[derive(Hash, PartialEq, Eq)]
@@ -24683,6 +24756,70 @@ mod tests {
             let col = Column::from_values(vec![Scalar::Float64(1.0)]).expect("col");
             assert!(col.quantile(1.5).is_missing());
             assert!(col.quantile(-0.1).is_missing());
+        }
+
+        #[test]
+        fn mode_f64_open_addressing_matches_reference() {
+            use std::collections::HashMap;
+            // Signed-zero: -0.0 first → mode keeps -0.0 representation.
+            let col = Column::from_f64_values(vec![-0.0, 1.0, 0.0, 1.0, 0.0]);
+            let m = col.mode().expect("mode");
+            let got: Vec<f64> = m
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Float64(x) => *x,
+                    o => panic!("{o:?}"),
+                })
+                .collect();
+            // 0-class count 3 (>1's count 2) → single winner, the first-seen -0.0.
+            assert_eq!(got.len(), 1);
+            assert!(got[0] == 0.0 && got[0].is_sign_negative());
+
+            let mut state: u64 = 0x7777_3333_CCCC_1111;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..150 {
+                let n = (next() % 400) as usize + 1;
+                let data: Vec<f64> = (0..n)
+                    .map(|_| match next() % 6 {
+                        0 => -0.0,
+                        1 => 0.0,
+                        2 => 2.0,
+                        3 => -3.5,
+                        4 => f64::INFINITY,
+                        _ => (next() % 30) as f64,
+                    })
+                    .collect();
+                let mut counts: HashMap<u64, (u64, f64)> = HashMap::new();
+                for &f in &data {
+                    let kb = (if f == 0.0 { 0.0 } else { f }).to_bits();
+                    counts.entry(kb).and_modify(|e| e.0 += 1).or_insert((1, f));
+                }
+                let max_c = counts.values().map(|(c, _)| *c).max().unwrap();
+                let mut expected: Vec<f64> = counts
+                    .values()
+                    .filter_map(|&(c, f)| (c == max_c).then_some(f))
+                    .collect();
+                expected.sort_by(|a, b| a.total_cmp(b));
+                let col = Column::from_f64_values(data);
+                let got: Vec<f64> = col
+                    .mode()
+                    .expect("mode")
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Float64(x) => *x,
+                        o => panic!("{o:?}"),
+                    })
+                    .collect();
+                assert_eq!(got.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                           expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>());
+            }
         }
 
         #[test]

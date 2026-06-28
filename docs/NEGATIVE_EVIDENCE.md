@@ -6495,3 +6495,21 @@ Bit-identical: new `unique_f64_open_addressing_matches_reference_and_signed_zero
 differential vs first-seen normalized-bits HashSet over 120 LCG trials with ±0.0/Inf/repeats) + fp-columnar 24 unique
 + fp-frame 73 unique tests green. The open-addressing table now spans Int64/Datetime64/Float64. RESIDUAL: mode Float64
 (measured ~2327ms, a big loss) — same normalized-bits key + first-seen-value-with-count; next follow-up.
+
+### 2026-06-27 TealOsprey — mode Float64 open-addressing tally (normalized-bits key): 0.49x LOSS -> 2.28x WIN vs pandas (4.6x fp-side)
+The float sibling of the mode-i64 win (and the unique-f64 residual). `mode` Float64 fell to FxHashMap<FloatBits,
+(count,&Scalar)> + 5M Scalar materialization — 0.49x vs pandas. Added `mode_f64_wide`: open-addressing keyed by
+NORMALIZED float bits (−0.0 == +0.0) with parallel u32 counts AND the first-seen original value (so a `-0.0`-mode
+keeps `-0.0`), then argmax + ascending (`total_cmp`) winners. Empty sentinel `i64::MIN` (= −0.0 bits) never collides
+with a normalized key. Gated on `as_f64_slice` (NaN-free; NaN columns fall through to the generic skip-NaN path).
+
+Same-box best-of-3, 5M ~5M-distinct f64 (`fp-columnar/examples/bench_hashops 5000000 mode f64`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (FxHashMap+Scalar) | patched (open-addr) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `mode` Float64 5M | 2327.2ms | 502.3ms | 4.63x | 0.49x -> 2.28x (pandas 1146.9ms) |
+
+Bit-identical: new `mode_f64_open_addressing_matches_reference` (-0.0-first mode preserved + differential vs
+FxHashMap first-seen/max-count ref, total_cmp order, ±0.0/Inf/repeats, 150 LCG trials) + fp-columnar 6 mode +
+fp-frame 41 mode tests green. The open-addressing table now spans Int64/Datetime64/Float64 across nunique/unique/
+factorize/duplicated/mode — the wide high-cardinality hash frontier is closed for all three core dtypes.
