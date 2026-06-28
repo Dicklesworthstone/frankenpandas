@@ -6810,3 +6810,22 @@ Same-box best-of-3, 5M (`fp-columnar/examples/bench_pctchange`),
 
 Bit-identical: new `pct_change_typed_matches_independent_oracle` (hand oracle incl. zeros → zero-prev Null, negatives,
 ±periods) + fp-columnar pct_change suite + fp-frame 25 pct_change tests green.
+
+### 2026-06-27 TealOsprey — fillna nullable f64 (owned move) + typed nullable i64: f64 0.54x->1.20x WIN, i64 0.15x->0.56x
+fillna's f64 typed path emitted via from_f64_values (Arc::from realloc); switched to from_f64_values_owned — its output
+is all-valid + NaN-free (present non-NaN values or the finite fill) so the Vec MOVES. Nullable Int64 fillna had NO
+typed path (as_i64_slice is all-valid-only → a column with nulls fell to the Scalar loop materializing the lazy
+column); added `as_i64_slice_with_validity` + a typed path that fills each missing slot (validity bit alone, no NaN
+sentinel) with the i64 fill into an all-valid i64 buffer. Bit-identical (present → data[i], missing → fv).
+
+Same-box best-of-3, 5M nullable (1/4 NA) (`fp-columnar/examples/bench_fillna`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline | patched | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `fillna` f64 5M | 65.5ms | 29.2ms | 2.24x | 0.54x -> 1.20x (pandas 35.1ms) |
+| `fillna` i64 5M | 243.8ms | 67.7ms | 3.60x | 0.15x -> 0.56x (pandas 37.6ms) |
+
+f64 flips LOSS->WIN. i64 is a 3.6x fp-side improvement but stays 0.56x — the residual is from_i64_values' Arc::from
+realloc (there is no owned Int64 constructor; the f64 owned path uses an Arc<Vec<f64>> backing — adding the i64 sibling
+is a structural ScalarValues change, deferred). Bit-identical: new `fillna_typed_nullable_matches_oracle` (i64 & f64,
+random validity, independent oracle) + fp-columnar 4 fillna + fp-frame 19 fillna tests green.

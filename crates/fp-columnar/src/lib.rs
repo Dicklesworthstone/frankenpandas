@@ -7921,6 +7921,27 @@ impl Column {
         Some((data, &self.validity))
     }
 
+    /// Int64 analogue of [`Self::as_f64_slice_with_validity`]: the contiguous i64
+    /// buffer plus its validity (works for an all-valid OR a `LazyNullableInt64`
+    /// backing). Missingness is the validity bit alone (no NaN sentinel).
+    pub fn as_i64_slice_with_validity(&self) -> Option<(&[i64], &ValidityMask)> {
+        if self.dtype != DType::Int64 {
+            return None;
+        }
+        let data: &[i64] = match &self.values {
+            ScalarValues::LazyAllValidInt64 { data, .. } => data.as_ref(),
+            ScalarValues::LazyNullableInt64 { data, .. } => data.as_slice(),
+            _ => match &self.data {
+                Some(ColumnData::Int64(data)) => data.as_ref(),
+                _ => return None,
+            },
+        };
+        if data.len() != self.validity.len() {
+            return None;
+        }
+        Some((data, &self.validity))
+    }
+
     #[must_use]
     #[doc(hidden)]
     pub fn shared_f64_data_with_validity(&self) -> Option<(Arc<[f64]>, &ValidityMask)> {
@@ -11936,7 +11957,26 @@ impl Column {
                     out.push(*fv);
                 }
             }
-            return Ok(Self::from_f64_values(out));
+            // Output is all-valid and NaN-free (present non-NaN values or the
+            // finite fill) → MOVE into the backing (no Arc::from realloc).
+            return Ok(Self::from_f64_values_owned(out));
+        }
+
+        // Typed nullable Int64 fast path: fill each missing slot (validity bit
+        // alone — no NaN sentinel for Int64) with the i64 fill into an all-valid
+        // i64 buffer, skipping the per-element Scalar clone + Self::new revalidation.
+        // Bit-identical to the loop below: present → data[i], missing → fv, output
+        // all-valid Int64. Gated on a real Int64 fill (a missing fill keeps nulls,
+        // so it falls through to the generic path).
+        if self.dtype == DType::Int64
+            && let Scalar::Int64(fv) = &cast_fill
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let mut out = Vec::with_capacity(data.len());
+            for (i, &d) in data.iter().enumerate() {
+                out.push(if validity.get(i) { d } else { *fv });
+            }
+            return Ok(Self::from_i64_values(out));
         }
 
         // Typed Int64 fast path (br-frankenpandas-3llep): as_i64_slice returns
@@ -22027,6 +22067,54 @@ mod tests {
                     });
                 }
                 assert_filter(case, "timedelta", timedeltas, mask_values(&mut seed, len));
+            }
+        }
+
+        #[test]
+        fn fillna_typed_nullable_matches_oracle() {
+            // Typed nullable i64/f64 fillna == an independent oracle (present → value,
+            // missing → fill) over random validity. Exercises the as_*_with_validity
+            // typed paths (built via from_*_values_with_validity, which a from_values
+            // twin would not reproduce).
+            let mut state: u64 = 0x2C7E_91A0_B3D5_46F8;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for _ in 0..200 {
+                let n = (next() % 200) as usize + 1;
+                let ivals: Vec<i64> = (0..n).map(|_| (next() % 1000) as i64 - 500).collect();
+                let fvals: Vec<f64> = ivals.iter().map(|&v| v as f64 + 0.25).collect();
+                let mut vmask = ValidityMask::all_valid(n);
+                let mut valid = vec![true; n];
+                for (i, vf) in valid.iter_mut().enumerate() {
+                    if next() % 3 == 0 {
+                        vmask.set(i, false);
+                        *vf = false;
+                    }
+                }
+                let icol = Column::from_i64_values_with_validity(ivals.clone(), vmask.clone());
+                let fcol = Column::from_f64_values_with_validity(fvals.clone(), vmask.clone());
+                let ifill = 7_i64;
+                let ffill = 7.0_f64;
+                let igot = icol.fillna(&Scalar::Int64(ifill)).unwrap();
+                let fgot = fcol.fillna(&Scalar::Float64(ffill)).unwrap();
+                for i in 0..n {
+                    let iexp = if valid[i] {
+                        Scalar::Int64(ivals[i])
+                    } else {
+                        Scalar::Int64(ifill)
+                    };
+                    let fexp = if valid[i] {
+                        Scalar::Float64(fvals[i])
+                    } else {
+                        Scalar::Float64(ffill)
+                    };
+                    assert_eq!(igot.values()[i], iexp, "i64 idx {i}");
+                    assert_eq!(fgot.values()[i], fexp, "f64 idx {i}");
+                }
             }
         }
 
