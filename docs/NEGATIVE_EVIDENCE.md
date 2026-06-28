@@ -6298,3 +6298,23 @@ stayed green, but the change was REVERTED per the ~0-gain rule. LESSON: the open
 the hash probe is the bottleneck (nunique: scalar count, no sort/large-output; factorize: codes output but hash-heavy).
 value_counts high-card is dominated by sort + dual-column output — a different lever (typed Int64 value output +
 radix/count-based top-k instead of full sort) would be needed, not a faster hash.
+
+### 2026-06-27 TealOsprey — factorize typed Int64 codes output (Vec<i64>, not Vec<Scalar>): 1.34x further fp-side (1.24x -> 1.66x vs pandas)
+The residual flagged after the factorize open-addressing win: `codes` was a `Vec<Scalar::Int64>` (n × 32 B box) for
+EVERY path (dense, wide, hash). Since factorize codes are always plain Int64 (-1 for NA), built `codes` as a typed
+`Vec<i64>` throughout — `factorize_i64_wide` now returns `Vec<i64>`, all three branches push raw i64, the sort remap
+operates on i64, and the codes column is emitted via `Self::from_i64_values(codes)` instead of
+`Self::new(DType::Int64, Vec<Scalar>)`. Drops the 5M × 32 B output boxing + revalidation.
+
+Same-box back-to-back best-of-3, 5M sparse i64 (`fp-columnar/examples/bench_hashops 5000000 factorize wide`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | Scalar codes (prev commit) | typed i64 codes | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `factorize` wide-i64 5M | 611.6ms | 456.5ms | 1.34x | 1.24x -> 1.66x (pandas 756.6ms) |
+| `factorize` dense-i64 5M | — | 135.2ms | — | ~5.6x (pandas ~757ms) |
+
+Applies to ALL factorize paths (dense benefits too). Cumulative wide-i64 factorize: 1327ms (pre-open-addr) -> 456ms
+= 2.9x fp-side, 0.57x LOSS -> 1.66x WIN. Bit-identical: codes values unchanged (plain i64, -1 NA), only the column
+backing is now lazy-int64 instead of Scalar — fp-columnar 60 factorize/unique/value_counts tests + fp-frame 12
+factorize tests green. RESIDUAL: `uniques` for high-card i64 is still `Vec<Scalar::Int64>` (could be from_i64_values
+when self.dtype==Int64), a smaller follow-up (uniques ≤ distinct, often < n).

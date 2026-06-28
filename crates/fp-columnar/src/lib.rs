@@ -5296,9 +5296,9 @@ fn count_distinct_i64_wide(data: &[i64]) -> i64 {
 /// Returns `(codes, uniques)` in first-seen order, byte-identical to the
 /// `FxHashMap` path's assignment. `i64::MIN` is the empty sentinel and is
 /// tracked separately so a real `i64::MIN` value factorizes correctly.
-fn factorize_i64_wide(data: &[i64]) -> (Vec<Scalar>, Vec<Scalar>) {
+fn factorize_i64_wide(data: &[i64]) -> (Vec<i64>, Vec<Scalar>) {
     const EMPTY: i64 = i64::MIN;
-    let mut codes: Vec<Scalar> = Vec::with_capacity(data.len());
+    let mut codes: Vec<i64> = Vec::with_capacity(data.len());
     let mut uniques: Vec<Scalar> = Vec::new();
     // ~0.67 load: capacity = next power of two ≥ 1.5·n.
     let cap = data
@@ -5311,12 +5311,12 @@ fn factorize_i64_wide(data: &[i64]) -> (Vec<Scalar>, Vec<Scalar>) {
         let mut map: FxHashMap<i64, i64> = FxHashMap::default();
         for &v in data {
             match map.get(&v) {
-                Some(&c) => codes.push(Scalar::Int64(c)),
+                Some(&c) => codes.push(c),
                 None => {
                     let c = uniques.len() as i64;
                     map.insert(v, c);
                     uniques.push(Scalar::Int64(v));
-                    codes.push(Scalar::Int64(c));
+                    codes.push(c);
                 }
             }
         }
@@ -5332,9 +5332,9 @@ fn factorize_i64_wide(data: &[i64]) -> (Vec<Scalar>, Vec<Scalar>) {
                 let c = uniques.len() as i64;
                 min_code = c;
                 uniques.push(Scalar::Int64(EMPTY));
-                codes.push(Scalar::Int64(c));
+                codes.push(c);
             } else {
-                codes.push(Scalar::Int64(min_code));
+                codes.push(min_code);
             }
             continue;
         }
@@ -5346,11 +5346,11 @@ fn factorize_i64_wide(data: &[i64]) -> (Vec<Scalar>, Vec<Scalar>) {
                 keys[idx] = v;
                 code_at[idx] = c as u32;
                 uniques.push(Scalar::Int64(v));
-                codes.push(Scalar::Int64(c));
+                codes.push(c);
                 break;
             }
             if k == v {
-                codes.push(Scalar::Int64(i64::from(code_at[idx])));
+                codes.push(i64::from(code_at[idx]));
                 break;
             }
             idx = (idx + 1) & mask;
@@ -15342,7 +15342,10 @@ impl Column {
             }
         }
 
-        let (mut codes, mut uniques): (Vec<Scalar>, Vec<Scalar>) = if let Some(data) =
+        // `codes` is a typed `Vec<i64>` (factorize codes are always plain Int64,
+        // -1 for NA) — built directly and emitted via `from_i64_values`, skipping
+        // the n × 32 B `Scalar::Int64` output boxing the old path paid.
+        let (mut codes, mut uniques): (Vec<i64>, Vec<Scalar>) = if let Some(data) =
             self.as_i64_slice()
         {
             if let Some((min, range)) = i64_direct_address_range(data) {
@@ -15353,7 +15356,7 @@ impl Column {
                 // HashMap path's first-seen code assignment.
                 let mut code_table = vec![-1i64; range];
                 let mut uniques: Vec<Scalar> = Vec::new();
-                let mut codes: Vec<Scalar> = Vec::with_capacity(data.len());
+                let mut codes: Vec<i64> = Vec::with_capacity(data.len());
                 for &v in data {
                     let slot = (v as i128 - min as i128) as usize;
                     let existing = code_table[slot];
@@ -15361,9 +15364,9 @@ impl Column {
                         let code = uniques.len() as i64;
                         code_table[slot] = code;
                         uniques.push(Scalar::Int64(v));
-                        codes.push(Scalar::Int64(code));
+                        codes.push(code);
                     } else {
-                        codes.push(Scalar::Int64(existing));
+                        codes.push(existing);
                     }
                 }
                 (codes, uniques)
@@ -15378,35 +15381,35 @@ impl Column {
             let mut uniques: Vec<Scalar> = Vec::new();
             let mut idx_map: FxHashMap<LocalKey<'_>, i64> = FxHashMap::default();
             let mut missing_position: Option<i64> = None;
-            let mut codes: Vec<Scalar> = Vec::with_capacity(self.values.len());
+            let mut codes: Vec<i64> = Vec::with_capacity(self.values.len());
 
             for value in &self.values {
                 if value.is_missing() {
                     if use_na_sentinel {
-                        codes.push(Scalar::Int64(-1));
+                        codes.push(-1);
                     } else if let Some(p) = missing_position {
-                        codes.push(Scalar::Int64(p));
+                        codes.push(p);
                     } else {
                         let code = uniques.len() as i64;
                         missing_position = Some(code);
                         uniques.push(value.clone());
-                        codes.push(Scalar::Int64(code));
+                        codes.push(code);
                     }
                     continue;
                 }
                 let Some(key) = key_of(value) else {
                     // Defensive: non-missing value that maps to no key
                     // (shouldn't happen for valid Scalar variants).
-                    codes.push(Scalar::Int64(-1));
+                    codes.push(-1);
                     continue;
                 };
                 match idx_map.get(&key) {
-                    Some(&p) => codes.push(Scalar::Int64(p)),
+                    Some(&p) => codes.push(p),
                     None => {
                         let code = uniques.len() as i64;
                         idx_map.insert(key, code);
                         uniques.push(value.clone());
-                        codes.push(Scalar::Int64(code));
+                        codes.push(code);
                     }
                 }
             }
@@ -15431,17 +15434,15 @@ impl Column {
                 .collect();
 
             for code in &mut codes {
-                if let Scalar::Int64(value) = code
-                    && *value >= 0
-                {
-                    *value = remap[*value as usize] as i64;
+                if *code >= 0 {
+                    *code = remap[*code as usize] as i64;
                 }
             }
 
             uniques = sorted_uniques;
         }
 
-        let codes_col = Self::new(DType::Int64, codes)?;
+        let codes_col = Self::from_i64_values(codes);
         let uniques_col = Self::new(self.dtype, uniques)?;
         Ok((codes_col, uniques_col))
     }
