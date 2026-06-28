@@ -16801,7 +16801,7 @@ impl Column {
 
     /// Square root of numeric values. Matches numpy's sqrt ufunc.
     pub fn sqrt(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary_nullable_owned(f64::sqrt) {
+        if let Some(out) = self.typed_float_unary_nullable_owned_par(f64::sqrt) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -16851,7 +16851,7 @@ impl Column {
 
     /// Natural logarithm of numeric values. Matches numpy's log ufunc.
     pub fn log(&self) -> Result<Self, ColumnError> {
-        if let Some(out) = self.typed_float_unary_nullable_owned(f64::ln) {
+        if let Some(out) = self.typed_float_unary_nullable_owned_par(f64::ln) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -17364,6 +17364,46 @@ impl Column {
             }
         }
 
+        let validity = if all_valid {
+            ValidityMask::all_valid(len)
+        } else {
+            ValidityMask::from_words(validity_words, len)
+        };
+        Some(Self::from_f64_values_owned_with_validity(
+            out,
+            validity,
+            Some(all_finite),
+        ))
+    }
+
+    /// Parallel sibling of [`typed_float_unary_nullable_owned`] for compute-bound
+    /// maps that may yield NaN (sqrt/ln of negatives → NaN → missing). The
+    /// expensive `f(x)` runs in parallel (par_map_vec_f64); the validity/finiteness
+    /// scan stays a single cheap serial pass over the result. Bit-identical to the
+    /// serial helper (same `f`, same NaN→invalid rule, same order/witness).
+    fn typed_float_unary_nullable_owned_par<F: Fn(f64) -> f64 + Sync>(
+        &self,
+        f: F,
+    ) -> Option<Self> {
+        let len = self.len();
+        let out = if let Some(data) = self.as_f64_slice() {
+            par_map_vec_f64(len, |i| f(data[i]))
+        } else if let Some(data) = self.as_i64_slice() {
+            par_map_vec_f64(len, |i| f(data[i] as f64))
+        } else {
+            return None;
+        };
+        let mut validity_words = vec![0_u64; len.div_ceil(64)];
+        let mut all_valid = true;
+        let mut all_finite = true;
+        for (idx, &y) in out.iter().enumerate() {
+            all_finite &= y.is_finite();
+            if y.is_nan() {
+                all_valid = false;
+            } else {
+                validity_words[idx / 64] |= 1_u64 << (idx % 64);
+            }
+        }
         let validity = if all_valid {
             ValidityMask::all_valid(len)
         } else {

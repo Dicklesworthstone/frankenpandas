@@ -7127,3 +7127,20 @@ Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_trig`),
 (typed_float_unary_nullable_owned, ln of negatives → NaN→missing) which isn't parallelized yet — a parallel nullable
 variant (per-chunk validity) is the follow-up; they're at ~0.95x parity so lower priority. FULL fp-columnar suite 467
 passed / 0 failed.
+
+### 2026-06-27 TealOsprey — PARALLEL nullable transcendentals (sqrt/ln): 0.89-0.95x -> 2.0-3.2x WIN vs pandas
+Completes the transcendental-parallelism follow-up: the 2 nullable-unary callers (sqrt, ln — may yield NaN→missing for
+negative inputs). Added `typed_float_unary_nullable_owned_par` that runs the expensive f(x) in parallel via the existing
+`par_map_vec_f64`, then does ONE cheap serial validity/finiteness scan over the result (the f(x) is the cost, the
+validity bookkeeping is bandwidth). Bit-identical to the serial nullable helper (same f, same NaN→invalid rule, witness).
+
+Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_trig`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | serial | parallel | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `sqrt` 5M | 28.2ms | 12.3ms | 0.89x -> 2.05x (pandas 25.2ms) |
+| `ln` 5M | 43.0ms | 12.8ms | 0.95x -> 3.19x (pandas 40.8ms) |
+
+Both flip to WIN. With this, the entire unary-math transcendental surface (exp/log/log2/log10/ln/sqrt/sin/cos/tan/asin/
+acos/atan/sinh/cosh/tanh/asinh/acosh/atanh/exp_m1/ln_1p/cbrt) is parallelized and wins 2-4.5x; cheap maps
+(reciprocal/to_degrees/to_radians/round) remain serial (bandwidth-bound). FULL fp-columnar suite 467 passed / 0 failed.
