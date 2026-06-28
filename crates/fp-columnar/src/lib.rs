@@ -13486,6 +13486,82 @@ impl Column {
             return Self::new(DType::Float64, vec![Scalar::Null(NullKind::NaN); len]);
         }
         let abs = periods.unsigned_abs() as usize;
+        // Typed Float64-output fast paths (i64 / f64). Compute (cur−prev)/prev into
+        // an f64 buffer: NaN at the boundary AND where prev == 0.0 (the Scalar
+        // path's `p == 0.0` → Null guard; −0.0 == 0.0 so it's covered), let
+        // from_f64_values mark those missing. Bit-identical to the Scalar loop's
+        // `Float64((c−p)/p)` for all-valid columns (no NaN/missing input): a valid
+        // body value is finite or an overflow ±inf (never NaN, since prev ≠ 0),
+        // so only the boundary/zero-prev NaNs become missing. No Scalar materialization.
+        if abs < len {
+            // Build the body + an explicit validity mask: a slot is missing at the
+            // boundary OR where prev == 0.0 (the Scalar path's `p == 0.0` → Null
+            // guard; −0.0 == 0.0 so it's covered). from_f64_values_with_validity
+            // moves the body into a LazyNullableFloat64 backing → an invalid slot
+            // materializes Null(NaN) (= the Scalar Null), a valid slot Float64((c−p)/p)
+            // which is finite or an overflow ±inf but never NaN since prev ≠ 0.
+            // (from_f64_values would instead KEEP a NaN as Float64(NaN), not Null.)
+            if let Some(data) = self.as_f64_slice() {
+                let mut out = vec![0.0_f64; len];
+                let mut validity = ValidityMask::all_valid(len);
+                if periods > 0 {
+                    for i in 0..abs {
+                        validity.set(i, false);
+                    }
+                    for i in abs..len {
+                        let p = data[i - abs];
+                        if p != 0.0 {
+                            out[i] = (data[i] - p) / p;
+                        } else {
+                            validity.set(i, false);
+                        }
+                    }
+                } else {
+                    for i in (len - abs)..len {
+                        validity.set(i, false);
+                    }
+                    for i in 0..len - abs {
+                        let p = data[i + abs];
+                        if p != 0.0 {
+                            out[i] = (data[i] - p) / p;
+                        } else {
+                            validity.set(i, false);
+                        }
+                    }
+                }
+                return Ok(Self::from_f64_values_with_validity(out, validity));
+            }
+            if let Some(data) = self.as_i64_slice() {
+                let mut out = vec![0.0_f64; len];
+                let mut validity = ValidityMask::all_valid(len);
+                if periods > 0 {
+                    for i in 0..abs {
+                        validity.set(i, false);
+                    }
+                    for i in abs..len {
+                        let p = data[i - abs] as f64;
+                        if p != 0.0 {
+                            out[i] = (data[i] as f64 - p) / p;
+                        } else {
+                            validity.set(i, false);
+                        }
+                    }
+                } else {
+                    for i in (len - abs)..len {
+                        validity.set(i, false);
+                    }
+                    for i in 0..len - abs {
+                        let p = data[i + abs] as f64;
+                        if p != 0.0 {
+                            out[i] = (data[i] as f64 - p) / p;
+                        } else {
+                            validity.set(i, false);
+                        }
+                    }
+                }
+                return Ok(Self::from_f64_values_with_validity(out, validity));
+            }
+        }
         let mut out: Vec<Scalar> = Vec::with_capacity(len);
         for i in 0..len {
             let prev_idx = if periods > 0 {
@@ -26158,6 +26234,66 @@ mod tests {
             ])
             .expect("col");
             assert!(col.is_unique());
+        }
+
+        #[test]
+        fn pct_change_typed_matches_independent_oracle() {
+            // Typed i64/f64 pct_change == a hand oracle: boundary & zero-prev → Null,
+            // else Float64((c−p)/p). ± periods incl. negative. (A Scalar-backed twin
+            // would also route through the typed path, so use an independent oracle.)
+            let mut state: u64 = 0x13F9_AC02_55E1_77B3;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let vals_eq = |a: &[Scalar], b: &[Scalar]| -> bool {
+                a.len() == b.len()
+                    && a.iter().zip(b).all(|(x, y)| match (x, y) {
+                        (Scalar::Float64(p), Scalar::Float64(q)) => p.to_bits() == q.to_bits(),
+                        _ => x == y,
+                    })
+            };
+            for _ in 0..200 {
+                let n = (next() % 80) as usize + 1;
+                // include zeros (→ zero-prev Null) and negatives
+                let fvals: Vec<f64> =
+                    (0..n).map(|_| (next() % 9) as f64 - 4.0).collect();
+                let ivals: Vec<i64> = fvals.iter().map(|&v| v as i64).collect();
+                let fcol = Column::from_f64_values(fvals.clone());
+                let icol = Column::from_i64_values(ivals.clone());
+                for p in [1i64, 2, -1, -2] {
+                    let abs = p.unsigned_abs() as usize;
+                    let oracle = |get: &dyn Fn(usize) -> f64| -> Vec<Scalar> {
+                        (0..n)
+                            .map(|i| {
+                                let pi = if p > 0 {
+                                    i.checked_sub(abs)
+                                } else if i + abs < n {
+                                    Some(i + abs)
+                                } else {
+                                    None
+                                };
+                                match pi {
+                                    Some(j) if get(j) != 0.0 => {
+                                        Scalar::Float64((get(i) - get(j)) / get(j))
+                                    }
+                                    _ => Scalar::Null(NullKind::NaN),
+                                }
+                            })
+                            .collect()
+                    };
+                    assert!(vals_eq(
+                        fcol.pct_change(p).unwrap().values(),
+                        &oracle(&|i| fvals[i])
+                    ));
+                    assert!(vals_eq(
+                        icol.pct_change(p).unwrap().values(),
+                        &oracle(&|i| ivals[i] as f64)
+                    ));
+                }
+            }
         }
 
         #[test]

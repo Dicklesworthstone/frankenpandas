@@ -6787,3 +6787,26 @@ Bit-identical: new `shift_typed_f64_missing_fill_matches_scalar_path` (independe
 abs≥len) + fp-columnar 26 shift + fp-frame 31 shift tests green. OPEN: i64 shift is still on the Scalar path (344ms,
 0.19x vs pandas 64.4ms) — a typed path needs the fp-frame fill NullKind pinned (Int64 missing is Null(Null) vs the
 f64 Null(NaN)); deferred to avoid a NullKind mismatch.
+
+### 2026-06-27 TealOsprey — pct_change typed i64/f64 (compute + explicit validity mask): 0.29x LOSS -> 5.7x WIN vs pandas (~20x fp-side)
+`Column::pct_change` was fully Scalar (looped self.values[i], materializing the lazy column) — ~440ms, 0.29x vs
+pandas. Added typed i64/f64 paths: compute (cur−prev)/prev into an f64 body and build an explicit ValidityMask
+(invalid at the boundary AND where prev == 0.0 — the Scalar path's `p == 0.0` → Null guard; −0.0 == 0.0 covered), then
+MOVE the body into a LazyNullableFloat64 backing via from_f64_values_with_validity. Bit-identical: invalid → Null(NaN)
+(= Scalar Null), valid → Float64((c−p)/p) (finite or overflow ±inf, never NaN since prev ≠ 0).
+
+KEY CORRECTION (recorded): from_f64_values does NOT mark a NaN missing — it KEEPS Float64(NaN) (a valid NaN slot),
+which differs from the Scalar path's Null(NaN). The independent-oracle differential caught this (got=Float64(NaN),
+exp=Null(NaN)); the fix is the validity-mask backing, which materializes invalid slots as Null(NaN). (Earlier diff/shift
+already use from_f64_values_with_validity, so they were correct; this nails down WHY from_f64_values alone is wrong for
+missing-bearing typed output.)
+
+Same-box best-of-3, 5M (`fp-columnar/examples/bench_pctchange`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (Scalar) | patched (typed + validity) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `pct_change(1)` f64 5M | 436.9ms | 22.3ms | 19.6x | 0.29x -> 5.71x (pandas 127.4ms) |
+| `pct_change(1)` i64 5M | 451.0ms | 22.2ms | 20.3x | ~5.7x |
+
+Bit-identical: new `pct_change_typed_matches_independent_oracle` (hand oracle incl. zeros → zero-prev Null, negatives,
+±periods) + fp-columnar pct_change suite + fp-frame 25 pct_change tests green.
