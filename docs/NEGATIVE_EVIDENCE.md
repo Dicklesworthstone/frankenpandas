@@ -6594,3 +6594,24 @@ Bit-identical: `nlargest_nsmallest_i64_bounded_scan_matches_sort_take` now also 
 `sort_values±+take` BIT PATTERNS over ±0.0/±Inf data, all k ∈ {1,3,10,len−1} (catches any −0.0 drift) — green; +
 fp-columnar 11 + fp-frame 31 nlargest/nsmallest tests green. LESSON: don't guess a typed comparator — read the exact
 transform the reference path uses (`f64_radix_key`'s zero-canonicalization was the deciding detail).
+
+### 2026-06-27 TealOsprey — Datetime64 sort/nlargest/mode CORRECTNESS FIX + bounded scan: 0.13x LOSS -> 3.1x WIN vs pandas (23x fp-side)
+DISCOVERED a latent correctness bug: `compare_scalars_na_last` had no `Datetime64`/`Period` arm, and `Scalar::to_f64`
+ERRORS for those dtypes — so the fallback `(to_f64, to_f64)` arm returned `Equal` for EVERY pair. Result: the generic
+`sort_values`/`nlargest`/`nsmallest`/`mode` path on a Datetime64 (or Period) Column was a no-op that returned
+POSITIONAL order, not value order (verified: `nlargest(2)` on `[30,10,20,40,5]` returned `[30,10]`, not `[40,30]`).
+FIX: added exact `Datetime64 => a.cmp(b)` and `Period => ordinal.cmp` arms (mirroring the existing Timedelta64 arm).
+This corrects datetime/period sort/nlargest/nsmallest/mode crate-wide to match pandas. Then wired the typed bounded
+top-k scan (`nkeep_typed_i64` over the ns) into `nlargest`/`nsmallest` for no-NaT Datetime64.
+
+Same-box best-of-3, 5M Datetime64, k=10 (`fp-columnar/examples/bench_nlargest`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (broken+Scalar sort) | patched (exact + bounded scan) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `nlargest(10)` datetime 5M | 1067ms (also WRONG values) | 46.3ms | 23x | 0.13x -> 3.11x (pandas 144ms) |
+
+Validation: FULL fp-columnar suite 454 passed / 0 failed (the comparator change broke NOTHING — no test encoded the
+broken positional order), fp-frame sort/nlargest/nsmallest/mode 101 passed, nlargest differential extended to assert
+Datetime64 nlargest/nsmallest == `sort_values±+take` (now exact) over date-spaced data. NOTE: this is a correctness
+improvement (output CHANGES to value-order = pandas-correct), not bit-identical to the prior broken behavior — but no
+test relied on the bug. Period columns gain correct ordering too (perf path Datetime-only for now).

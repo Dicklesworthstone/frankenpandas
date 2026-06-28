@@ -5221,6 +5221,13 @@ fn compare_scalars_na_last(left: &Scalar, right: &Scalar, ascending: bool) -> st
                 (Scalar::Bool(a), Scalar::Bool(b)) => a.cmp(b),
                 (Scalar::Utf8(a), Scalar::Utf8(b)) => a.cmp(b),
                 (Scalar::Timedelta64(a), Scalar::Timedelta64(b)) => a.cmp(b),
+                // Datetime64/Period order by their i64 ns / ordinal (exact),
+                // mirroring the Timedelta64 arm. Without these, `to_f64` errors
+                // for these dtypes (below) so every value compared Equal — making
+                // sort_values/nlargest/nsmallest/mode on a Datetime64 (or Period)
+                // column a no-op that returned positional, not value, order.
+                (Scalar::Datetime64(a), Scalar::Datetime64(b)) => a.cmp(b),
+                (Scalar::Period(a), Scalar::Period(b)) => a.ordinal.cmp(&b.ordinal),
                 (a, b) => match (a.to_f64(), b.to_f64()) {
                     (Ok(af), Ok(bf)) => af.partial_cmp(&bf).unwrap_or(Ordering::Equal),
                     _ => Ordering::Equal,
@@ -15204,6 +15211,16 @@ impl Column {
                 if n < data.len() {
                     return Ok(Self::from_f64_values(nkeep_typed_f64(data, n, false)));
                 }
+            } else if !self.has_nulls()
+                && let Some(data) = self.as_datetime64_slice()
+                && !data.contains(&i64::MIN)
+            {
+                // Datetime64 is i64-ns; with the exact Datetime64 comparator,
+                // sort_values+take == i64 cmp + position. No-NaT (NaT=i64::MIN is
+                // missing → would sort to the end / be excluded) routes here.
+                if n < data.len() {
+                    return Ok(Self::from_datetime64_values(nkeep_typed_i64(data, n, false)));
+                }
             }
         }
         let sorted = self.sort_values(false)?;
@@ -15224,6 +15241,13 @@ impl Column {
             } else if let Some(data) = self.as_f64_slice() {
                 if n < data.len() {
                     return Ok(Self::from_f64_values(nkeep_typed_f64(data, n, true)));
+                }
+            } else if !self.has_nulls()
+                && let Some(data) = self.as_datetime64_slice()
+                && !data.contains(&i64::MIN)
+            {
+                if n < data.len() {
+                    return Ok(Self::from_datetime64_values(nkeep_typed_i64(data, n, true)));
                 }
             }
         }
@@ -26942,6 +26966,33 @@ mod tests {
                         bits(&fcol.nsmallest(k).unwrap(), take),
                         bits(&fcol.sort_values(true).unwrap(), take),
                         "f64 nsmallest k={k}"
+                    );
+                }
+
+                // Datetime64 (no NaT): exact i64-ns order. vs sort_values+take
+                // (now exact via the Datetime64 comparator arm).
+                let dts: Vec<i64> = (0..len).map(|_| (next() % 1000) as i64 * 86_400_000_000_000).collect();
+                let dcol = Column::from_datetime64_values(dts);
+                let dbits = |c: &Column, take: usize| -> Vec<i64> {
+                    c.values()[..take]
+                        .iter()
+                        .map(|v| match v {
+                            Scalar::Datetime64(x) => *x,
+                            o => panic!("{o:?}"),
+                        })
+                        .collect()
+                };
+                for &k in &[1usize, 3, 10, len.saturating_sub(1).max(1)] {
+                    let take = k.min(dcol.len());
+                    assert_eq!(
+                        dbits(&dcol.nlargest(k).unwrap(), take),
+                        dbits(&dcol.sort_values(false).unwrap(), take),
+                        "dt nlargest k={k}"
+                    );
+                    assert_eq!(
+                        dbits(&dcol.nsmallest(k).unwrap(), take),
+                        dbits(&dcol.sort_values(true).unwrap(), take),
+                        "dt nsmallest k={k}"
                     );
                 }
             }
