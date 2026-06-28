@@ -15190,15 +15190,19 @@ impl Column {
     /// therefore excluded from the top-n when `n` fits within the
     /// non-missing count. `n > len()` clamps to the full column.
     pub fn nlargest(&self, n: usize) -> Result<Self, ColumnError> {
-        // Typed bounded top-k scan for small n over an all-valid Int64 column:
-        // O(n) single pass vs a full radix sort of the whole column. Bit-identical
-        // to `sort_values(false)` (stable: ties first-seen) + take — i64 cmp then
-        // position-ascending. (Float64 is left on the sort path: its radix orders
-        // -0.0/+0.0 by bits, which `partial_cmp` would treat as a position tie.)
+        // Typed bounded top-k scan for small n: O(n) single pass vs a full radix
+        // sort of the whole column. Bit-identical to `sort_values(false)` (stable:
+        // ties first-seen) + take. Int64: i64 cmp + position. Float64: the f64
+        // radix key CANONICALIZES ±0.0 to +0.0 and is stable, so its order ==
+        // `partial_cmp` (−0.0 == +0.0) + position — exactly `nkeep_typed_f64`.
         if n >= 1 && n <= NKEEP_BOUNDED_SCAN_MAX_K {
             if let Some(data) = self.as_i64_slice() {
                 if n < data.len() {
                     return Ok(Self::from_i64_values(nkeep_typed_i64(data, n, false)));
+                }
+            } else if let Some(data) = self.as_f64_slice() {
+                if n < data.len() {
+                    return Ok(Self::from_f64_values(nkeep_typed_f64(data, n, false)));
                 }
             }
         }
@@ -15216,6 +15220,10 @@ impl Column {
             if let Some(data) = self.as_i64_slice() {
                 if n < data.len() {
                     return Ok(Self::from_i64_values(nkeep_typed_i64(data, n, true)));
+                }
+            } else if let Some(data) = self.as_f64_slice() {
+                if n < data.len() {
+                    return Ok(Self::from_f64_values(nkeep_typed_f64(data, n, true)));
                 }
             }
         }
@@ -26899,6 +26907,42 @@ mod tests {
                         col.sort_values(true).unwrap().values()[..take].to_vec();
                     assert_eq!(large.values(), ref_large.as_slice(), "nlargest k={k}");
                     assert_eq!(small.values(), ref_small.as_slice(), "nsmallest k={k}");
+                }
+
+                // Float64: same shape vs sort_values+take, incl. ±0.0/±Inf — the
+                // partial_cmp bounded scan must match the (±0.0-canonicalizing,
+                // stable) radix. Compare bit patterns to catch any -0.0 drift.
+                let fdata: Vec<f64> = (0..len)
+                    .map(|_| match next() % 8 {
+                        0 => -0.0,
+                        1 => 0.0,
+                        2 => f64::INFINITY,
+                        3 => f64::NEG_INFINITY,
+                        _ => (next() % 20) as f64 - 10.0,
+                    })
+                    .collect();
+                let fcol = Column::from_f64_values(fdata);
+                let bits = |c: &Column, take: usize| -> Vec<u64> {
+                    c.values()[..take]
+                        .iter()
+                        .map(|v| match v {
+                            Scalar::Float64(x) => x.to_bits(),
+                            o => panic!("{o:?}"),
+                        })
+                        .collect()
+                };
+                for &k in &[1usize, 3, 10, len.saturating_sub(1).max(1)] {
+                    let take = k.min(fcol.len());
+                    assert_eq!(
+                        bits(&fcol.nlargest(k).unwrap(), take),
+                        bits(&fcol.sort_values(false).unwrap(), take),
+                        "f64 nlargest k={k}"
+                    );
+                    assert_eq!(
+                        bits(&fcol.nsmallest(k).unwrap(), take),
+                        bits(&fcol.sort_values(true).unwrap(), take),
+                        "f64 nsmallest k={k}"
+                    );
                 }
             }
         }

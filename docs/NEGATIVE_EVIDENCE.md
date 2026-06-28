@@ -6575,3 +6575,22 @@ shippable). NOTE: f64 `nlargest_keep(.,"first")` (the `_keep` variant via `nkeep
 fast + bit-identical (different reference: `compare_scalars_na_last`, not radix) and stays landed. The remaining f64
 `nlargest()` lever needs a bounded scan keyed by the EXACT float→sortable-bits transform `typed_radix_perm` uses, not
 total_cmp — deferred. i64 nlargest/nsmallest (2.14x WIN) is unaffected and remains landed.
+
+### 2026-06-27 TealOsprey — nlargest/nsmallest Float64 bounded scan LANDED (partial_cmp, not total_cmp): 0.30x LOSS -> 31x WIN vs pandas (105x fp-side)
+SUPERSEDES the revert note above. Root cause of the total_cmp differential failure: `sort_values`' f64 radix key
+(`f64_radix_key`) CANONICALIZES ±0.0 → +0.0 (`if value == 0.0 { 0.0 }`) and the radix is stable — so its order is
+`partial_cmp` (−0.0 == +0.0) + position-ascending, NOT total_cmp (which distinguishes −0.0 < +0.0). Wired
+`nlargest()`/`nsmallest()` Float64 to the EXISTING `nkeep_typed_f64` (partial_cmp) bounded scan — bit-identical to
+the radix.
+
+Same-box best-of-3, 5M Float64 (∈[0,1)), k=10 (`fp-columnar/examples/bench_nlargest`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (full radix sort) | patched (bounded scan) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `nlargest(10)` f64 5M | 634.3ms | 6.0ms | 105x | 0.30x -> 31x (pandas 189.4ms) |
+| `nlargest(10)` i64 5M | 497.1ms | 48.0ms | 10.4x | 2.14x (pandas 102.2ms) |
+
+Bit-identical: `nlargest_nsmallest_i64_bounded_scan_matches_sort_take` now also asserts Float64 nlargest/nsmallest vs
+`sort_values±+take` BIT PATTERNS over ±0.0/±Inf data, all k ∈ {1,3,10,len−1} (catches any −0.0 drift) — green; +
+fp-columnar 11 + fp-frame 31 nlargest/nsmallest tests green. LESSON: don't guess a typed comparator — read the exact
+transform the reference path uses (`f64_radix_key`'s zero-canonicalization was the deciding detail).
