@@ -6706,3 +6706,23 @@ fp's current always-Float64 contract, separate from this perf fix). cumprod REVE
 f64 to ±inf→NaN where `from_f64_values` (NaN→missing) diverges from `nancumprod`'s `Scalar::Float64(NaN)` — kept on
 the exact nan* path for bit-identity. Bit-identical: new `cum_typed_i64_matches_scalar_path` (NaN-bit-aware vs the
 Scalar/nan* path over negatives/wide values, all four ops) + fp-columnar 15 cum tests green.
+
+### 2026-06-27 TealOsprey — diff typed Int64/Float64 path: 5.5x fp-side (0.05x -> 0.30x vs pandas)
+`Column::diff` was FULLY Scalar (no typed path) — for both i64 AND f64 it looped `self.values[i]`/`[i-abs]`,
+materializing the lazy column → ~420ms, 0.05x vs pandas (18x slower). Added typed Float64-output paths: fill an f64
+buffer (boundary slots NaN → missing via from_f64_values = the Scalar Null; body = a−b). i64 always safe ((x as f64)−(y
+as f64) is finite). f64 gated all-finite (`as_f64_slice` is NaN-free, so all-finite ⇔ inf-free; finite−finite is never
+NaN, only finite/overflow-inf which from_f64_values keeps; an inf input → inf−inf=NaN would diverge → falls back to
+the Scalar path).
+
+Same-box best-of-3, 5M (`fp-columnar/examples/bench_diff`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | baseline (Scalar) | patched (typed) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `diff` i64 5M | 416.5ms | 75.6ms | 5.51x | 0.05x -> 0.30x (pandas 22.8ms) |
+| `diff` f64 5M | 428.3ms | 77.1ms | 5.55x | ~0.30x |
+
+5.5x fp-side, lifts an 18x catastrophe to ~3.3x-slower. RESIDUAL: like cum*, the Float64 output (i64→f64 convert +
+f64 buffer + from_f64_values NaN scan) trails pandas' tighter in-place vectorized subtraction. Bit-identical: new
+`diff_typed_matches_scalar_path` (NaN-bit-aware vs Scalar generic, periods {1,2,-1,3}, f64 incl. ±inf to exercise the
+fallback) + fp-columnar 36 diff + fp-frame 29 diff tests green.

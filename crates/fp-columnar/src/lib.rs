@@ -15684,6 +15684,47 @@ impl Column {
             return Self::new(out_dtype, vec![null; len]);
         }
         let abs = periods.unsigned_abs() as usize;
+        // Typed Float64-output fast paths (i64 / f64 inputs) — fill an f64 buffer
+        // directly: boundary slots NaN (→ missing via from_f64_values, exactly the
+        // Scalar Null below), body = a − b. Bit-identical to the Scalar loop's
+        // `Float64(to_f64(a) − to_f64(b))`, no per-element Scalar materialization.
+        if abs < len {
+            // Int64: (x as f64) − (y as f64) is always finite (|i64 as f64| ≤ 9.2e18,
+            // difference ≤ 1.8e19) so no arithmetic NaN/inf — only boundary NaN.
+            if let Some(data) = self.as_i64_slice() {
+                let mut out = vec![f64::NAN; len];
+                if periods > 0 {
+                    for i in abs..len {
+                        out[i] = data[i] as f64 - data[i - abs] as f64;
+                    }
+                } else {
+                    for i in 0..len - abs {
+                        out[i] = data[i] as f64 - data[i + abs] as f64;
+                    }
+                }
+                return Ok(Self::from_f64_values(out));
+            }
+            // Float64: only safe when inf-free — finite−finite is never NaN (it is
+            // finite or an overflow ±inf, both of which from_f64_values keeps,
+            // matching Self::new); an inf INPUT could give inf−inf = NaN, where
+            // from_f64_values (NaN→missing) would diverge from the Scalar
+            // Float64(NaN). `as_f64_slice` is already NaN-free, so all-finite ⇔ no inf.
+            if let Some(data) = self.as_f64_slice() {
+                if data.iter().all(|x| x.is_finite()) {
+                    let mut out = vec![f64::NAN; len];
+                    if periods > 0 {
+                        for i in abs..len {
+                            out[i] = data[i] - data[i - abs];
+                        }
+                    } else {
+                        for i in 0..len - abs {
+                            out[i] = data[i] - data[i + abs];
+                        }
+                    }
+                    return Ok(Self::from_f64_values(out));
+                }
+            }
+        }
         let mut out: Vec<Scalar> = Vec::with_capacity(len);
         let null_scalar = if out_dtype == DType::Timedelta64 {
             Scalar::Null(NullKind::NaT)
@@ -24528,6 +24569,56 @@ mod tests {
                 "sort_single 5M i64 x{iters}: radix={radix:?} scalar={scalar:?} ratio={:.2}x (chk {checksum}/{checksum2})",
                 scalar.as_secs_f64() / radix.as_secs_f64()
             );
+        }
+
+        #[test]
+        fn diff_typed_matches_scalar_path() {
+            // Typed i64/f64 diff == the Scalar generic path over random data,
+            // multiple periods (incl. negative), incl. f64 inf (which must fall
+            // back to the Scalar path, not the typed inf-gated one).
+            let mut state: u64 = 0x44BB_22DD_66FF_8800;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let vals_eq = |a: &[Scalar], b: &[Scalar]| -> bool {
+                a.len() == b.len()
+                    && a.iter().zip(b).all(|(x, y)| match (x, y) {
+                        (Scalar::Float64(p), Scalar::Float64(q)) => p.to_bits() == q.to_bits(),
+                        _ => x == y,
+                    })
+            };
+            for _ in 0..200 {
+                let n = (next() % 300) as usize + 1;
+                let ivals: Vec<i64> = (0..n).map(|_| (next() % 1000) as i64 - 500).collect();
+                let ityped = Column::from_i64_values(ivals.clone());
+                let iscalar =
+                    Column::from_values(ivals.iter().map(|&v| Scalar::Int64(v)).collect())
+                        .expect("i col");
+                let fvals: Vec<f64> = (0..n)
+                    .map(|_| match next() % 9 {
+                        0 => f64::INFINITY,
+                        1 => f64::NEG_INFINITY,
+                        _ => (next() % 2000) as f64 * 0.25 - 250.0,
+                    })
+                    .collect();
+                let ftyped = Column::from_f64_values(fvals.clone());
+                let fscalar =
+                    Column::from_values(fvals.iter().map(|&v| Scalar::Float64(v)).collect())
+                        .expect("f col");
+                for &p in &[1i64, 2, -1, 3] {
+                    assert!(vals_eq(
+                        ityped.diff(p).unwrap().values(),
+                        iscalar.diff(p).unwrap().values()
+                    ));
+                    assert!(vals_eq(
+                        ftyped.diff(p).unwrap().values(),
+                        fscalar.diff(p).unwrap().values()
+                    ));
+                }
+            }
         }
 
         #[test]
