@@ -17655,9 +17655,26 @@ impl Column {
     /// b.to_f64())`; from_f64_values re-marks any NaN result missing as Self::new
     /// would. Returns `None` to fall back when either side is nullable/non-numeric.
     fn typed_float_binary(&self, other: &Self, f: fn(f64, f64) -> f64) -> Option<Self> {
+        // Fast path: both inputs are typed f64 → read the buffers DIRECTLY (no
+        // all_valid_as_f64 to_vec copy of each operand) and MOVE the result out
+        // (from_f64_values_owned, no Arc::from realloc). For cheap ops like
+        // maximum/minimum/copysign those two copies + the realloc dominated the op.
+        // Bit-identical to the copy path: same f(x,y) in the same order.
+        if let (Some(a), Some(b)) = (self.as_f64_slice(), other.as_f64_slice()) {
+            if a.len() != b.len() {
+                return None;
+            }
+            return Some(Self::from_f64_values_owned(
+                a.iter().zip(b.iter()).map(|(&x, &y)| f(x, y)).collect(),
+            ));
+        }
+        // Int64 (or mixed) inputs are rare for these ops — keep the converting path.
         let a = self.all_valid_as_f64()?;
         let b = other.all_valid_as_f64()?;
-        Some(Self::from_f64_values(
+        if a.len() != b.len() {
+            return None;
+        }
+        Some(Self::from_f64_values_owned(
             a.iter().zip(b.iter()).map(|(&x, &y)| f(x, y)).collect(),
         ))
     }

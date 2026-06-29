@@ -7278,3 +7278,18 @@ Same-box best-of-3, 5M f64 single-col DataFrame (`fp-frame/examples/bench_powsca
 This resolves BlackThrush's 2026-06-20 note ("threading apply_scalar_op was ~0-gain") — that was for CHEAP ops
 (add/neg, bandwidth-bound); pow/mod are COMPUTE-bound so within-column parallelism pays. add/sub/mul/div keep the
 serial wrapper. fp-frame 14 scalar-arith + 8 pow/mod tests green.
+
+### 2026-06-27 TealOsprey — typed_float_binary slice-direct + owned: maximum/minimum/copysign 0.62x LOSS -> 2.79x WIN
+`typed_float_binary` (element-wise maximum/minimum/copysign/fmax) called `all_valid_as_f64()` on BOTH operands — each a
+full to_vec COPY (2×40MB at 5M) — then `from_f64_values` (Arc::from realloc). For these CHEAP ops (1 cmp / copysign)
+the two copies + realloc dominated, making them LOSSES. Rewrote to read both f64 buffers DIRECTLY (no copy) when typed
+and MOVE the result (from_f64_values_owned); i64/mixed inputs keep the converting path. Bit-identical (same f, order).
+
+Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_emax`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | before (2 copies + realloc) | after (slice-direct + move) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `maximum` (np.maximum) 5M | 113.8ms | 25.4ms | 4.48x | 0.62x -> 2.79x (pandas 70.9ms) |
+
+Flips LOSS->WIN; also fixes minimum/copysign/fmax (same helper). These are bandwidth-bound (cheap per-elem), so kept
+SERIAL — the win is eliminating the redundant copies, NOT parallelism. FULL fp-columnar suite 467 passed / 0 failed.
