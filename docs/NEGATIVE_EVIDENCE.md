@@ -7601,3 +7601,20 @@ Same-box best-of-6, 2M rows × (f64 + Bool) value cols by Scalar-backed Utf8 key
 
 All flip LOSS->WIN (low card too: 0.62-0.68x -> 2.9-3.5x). sem by Utf8 key (0.64-0.72x) is the last single-key gap —
 separate path, next. FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — DataFrameGroupBy sem/skew/kurt by single Utf8 key dense moment path: 0.64x LOSS -> 2.9x WIN
+The dense f64 moment engine `agg_typed_pairs_dense_f64_moments` (sem/skew/kurt) had a single-Int64-key branch and
+multi-key branches but NO single-Utf8-key branch, so a single Utf8 key (contiguous or Scalar-backed) fell to the SipHash
+build_groups + per-group Vec<Scalar> path. Added the Utf8 sibling of the Int64 branch via single_utf8_key_dense_grouping
++ moments_by_pair (the same engine the i64 path uses). Bit-identical: same sorted group order, same per-group moment.
+
+Same-box best-of-6, 2M rows, f64 value col by Scalar-backed Utf8 key (`bench_dfgbu3`; fp computes the f64 col, matching
+prior behavior — the fp-side ratio is the clean grouping measure), pandas 2.2.3 per-call:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df.groupby(Utf8).sem()` 2M card=1000 | 64.1ms  | 33.3ms  | 1.92x | 1.54x -> 2.96x (pandas 98.9ms) |
+| `df.groupby(Utf8).sem()` 2M card=100k | 544.9ms | 118.9ms | 4.58x | 0.64x -> 2.91x (pandas 346.4ms) |
+
+Flips the high-card LOSS->WIN; skew/kurt share the engine. This closes the single-Utf8-key DataFrameGroupBy surface
+(sum/mean/std/var/min/max/count/first/last/all/any/nunique/idxmax/idxmin/sem/skew/kurt all dense). FULL fp-frame suite
+3109 passed / 0 failed.
