@@ -7347,3 +7347,23 @@ The residual ~2.5x bandwidth gap is in the Vec<bool> output path (vec![false;n] 
 from_bool_values), not the comparison — a packed-bitmask Bool representation (1 bit/elem instead of 1 byte) would be
 the real lever, but that's a structural Bool-column change (every Bool consumer), DEFERRED. portable_simd Mask→bytes is
 NOT the answer for this op.
+
+### 2026-06-29 BlackThrush — Series f64 select/clip owned-move output: where/mask 0.68-0.70x LOSS -> 1.66-1.69x WIN
+The Series-level typed fast paths `where_cond_series` / `mask_series` / `clip_with_series` (and `update`) each had an
+i64 branch emitting `from_i64_values_owned` (MOVE) but the *f64* sibling still emitted `from_f64_values` (Arc::from(Vec)
+cold-realloc-copy of the freshly-built output Vec — ~40MB extra traffic at 5M). When the i64 paths were converted to
+owned-move (TealOsprey 2026-06-27), the f64 siblings at these 4 Series-level call sites were MISSED — visible as the
+f64 op running ~3x slower than its i64 twin in `bench_survey2`. Switched all four to `from_f64_values_owned` (MOVE).
+Bit-identical: every output is provably NaN-free (both operands gated through `as_f64_slice` = all-valid no-NaN;
+max/min and bit-select of NaN-free f64 cannot introduce NaN), and `from_f64_values_owned` re-scans for NaN and falls
+back to the copy constructor if any were present — so the result column is semantically identical.
+
+Same-box best-of-6, 5M (`fp-frame/examples/bench_survey2`), `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | before (copy) | after (move) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `where_cond_series` f64 5M | 69.0ms | 27.9ms | 2.48x | 0.68x -> 1.69x (pandas 47.1ms) |
+| `mask_series` f64 5M       | 65.2ms | 27.6ms | 2.36x | 0.70x -> 1.66x (pandas 46.0ms) |
+| `clip_with_series` f64 5M  | 80.7ms | 40.0ms | 2.02x | 2.32x -> 4.67x (pandas 186.9ms) |
+
+where/mask flip LOSS->WIN; clip (already winning vs pandas' slow elementwise clip) improves WIN->bigger WIN. `update`
+f64 (same pattern, not separately benched) fixed for consistency. FULL fp-frame suite 3109 passed / 0 failed.
