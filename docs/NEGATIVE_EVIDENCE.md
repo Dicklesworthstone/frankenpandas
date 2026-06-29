@@ -7729,3 +7729,16 @@ Same-box best-of-6, 2M rows by Scalar-backed Utf8 key (`bench_dfgbu3`), pandas 2
 | `df.groupby(Utf8).nth(0)` 2M card=100k | 305.4ms | 108.1ms | 2.82x | 0.92x -> 3.12x (pandas 337.6ms) |
 
 Completes the head/tail/nth row-selection trio for Utf8 keys. FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — reshape + multi-key row-selection surface CONFIRMED DOMINANT (no gap)
+Swept several common ops vs pandas 2.2.3 (same-box best-of-6); all WIN, no lever needed — recorded so agents skip them:
+- `df.melt(id, value_vars)` numeric: 200k×10 43.8ms vs 79.0 (1.80x), 1M×10 351.5ms vs 454.9 (1.29x) WIN (`bench_melt`).
+- `df.groupby([utf8,utf8]).head(5)` 2M/10k-groups: 87.3ms vs 165.7 (1.90x WIN); `.nth(0)` 79.4ms vs 163.0 (2.05x WIN)
+  — multi-key head/nth fall to build_groups (dense_group_positions/nth gate by.len()==1), but pandas' multi-key path is
+  slower, so fp WINS anyway; extending to multi_mixed_dense would only grow an existing win, NOT close a loss.
+- DataFrame numeric (prior entry): rank 27.6x / corr 16.4x / nlargest 28x / nunique 12.3x WINS.
+- groupby transform by Utf8 key: already dense (transform_dense_gids has a &str branch).
+The ONLY remaining vs-pandas LOSSES are the documented STRUCTURAL ones: multi-key Utf8 merge 0.62x (dense_packed
+factorize-to-codes), 1M-group multi-key groupby output assembly 0.25x (categorical MultiIndex / Vec<MixedKey> String
+materialization), single-Utf8-subset DataFrame dedup 0.60x (string-hashtable khash floor), and the f64-comparison
+Vec<bool> bandwidth 0.40x (packed-bitmask Bool). All need multi-hour structural work, not a fast-path reroute.

@@ -33,4 +33,6 @@ fn main() {
     timeit("mean", || { std::hint::black_box(df.groupby(&["k1","k2"]).unwrap().mean().unwrap().shape()); });
     timeit("count", || { std::hint::black_box(df.groupby(&["k1","k2"]).unwrap().count().unwrap().shape()); });
     timeit("max", || { std::hint::black_box(df.groupby(&["k1","k2"]).unwrap().max().unwrap().shape()); });
+    timeit("head", || { std::hint::black_box(df.groupby(&["k1","k2"]).unwrap().head(5).unwrap().shape()); });
+    timeit("nth", || { std::hint::black_box(df.groupby(&["k1","k2"]).unwrap().nth(0).unwrap().shape()); });
 }
