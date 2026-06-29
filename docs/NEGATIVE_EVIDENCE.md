@@ -7422,3 +7422,20 @@ Same-box best-of-6, 2M Utf8 8-card (`fp-frame/examples/bench_reshape`):
 
 No caching in the new path ⇒ the 12.1ms is a true per-call cost (not a witness-cache phantom). Flips a real LOSS->WIN.
 FULL fp-frame suite 3109 passed / 0 failed. (get_dummies Utf8 0.62x is the next gap in this vein — separate.)
+
+### 2026-06-29 BlackThrush — Utf8 duplicated() typed Scalar-backed path: 0.24x LOSS -> 1.18-2.12x WIN
+Sister to the Utf8 factorize fix: `duplicated()` on an all-valid Utf8 Series with a Scalar-materialized column
+(from_values ingestion, not LazyContiguousUtf8 ⇒ the byte-span dup-flags path can't fire) fell to the generic
+ScalarKey path, which wraps each value in a ScalarKey AND boxes the entire 2M-element output as `Scalar::Bool` then
+rebuilds the column via `with_values_preserving_index` (from_values). Added a typed all-valid-Utf8 path: key on the
+borrowed `&str` via `FxHashMap<&str,()>`, write a typed `Vec<bool>` mask, emit through `bool_mask_preserving_name`.
+Bit-identical: first occurrence unflagged, rest flagged on the same string keys; all-valid ⇒ no Null bucket.
+
+Same-box best-of-6, 2M Utf8 (`fp-frame/examples/bench_u8survey`):
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `duplicated()` Utf8 2M card=8     | 84.4ms  | 17.2ms | 4.91x | 0.24x -> 1.18x (pandas 20.3ms) |
+| `duplicated()` Utf8 2M card=100k  | 190.7ms | 42.6ms | 4.48x | 0.47x -> 2.12x (pandas 90.1ms) |
+
+Both flip LOSS->WIN. (Same broad Scalar-backed-Utf8 sweep also found groupby-by-key count at high card 0.60x — next.)
+FULL fp-frame suite 3109 passed / 0 failed.
