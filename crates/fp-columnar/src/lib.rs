@@ -10286,14 +10286,16 @@ impl Column {
                 // any operation-produced NaN missing, identically).
                 if let (Some(l), Some(r)) = (self.as_f64_slice(), right.as_f64_slice()) {
                     let apply = binary_f64_apply(op);
-                    // Pow is libm-powf COMPUTE-bound (~30ns/elem) → parallelize;
-                    // add/sub/mul/div/mod are bandwidth-bound → keep serial (threads
+                    // Pow (libm powf ~30ns/elem) and Mod (python_mod_f64: NaN/inf
+                    // branches + fmod, ~8ns/elem) are COMPUTE-bound → parallelize;
+                    // add/sub/mul/div are bandwidth-bound → keep serial (threads
                     // would only contend). Bit-identical (same apply, order preserved).
-                    let result: Vec<f64> = if matches!(op, ArithmeticOp::Pow) {
-                        par_map_vec_f64(l.len(), |i| apply(l[i], r[i]))
-                    } else {
-                        l.iter().zip(r).map(|(&a, &b)| apply(a, b)).collect()
-                    };
+                    let result: Vec<f64> =
+                        if matches!(op, ArithmeticOp::Pow | ArithmeticOp::Mod) {
+                            par_map_vec_f64(l.len(), |i| apply(l[i], r[i]))
+                        } else {
+                            l.iter().zip(r).map(|(&a, &b)| apply(a, b)).collect()
+                        };
                     return Some(Ok(Self::from_f64_values_owned(result)));
                 }
                 let left_data = ColumnData::from_scalars(&self.values, DType::Float64);

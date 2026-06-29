@@ -7217,3 +7217,18 @@ NOT compute-bound and threads don't help (cf. dt civil-conversion / libm transce
 compute and scale 3-10x). REGIME BOUNDARY: compute-bound parallelism pays only when per-element work >> the per-element
 memory/overhead; short-string ops fall on the wrong side. (Very long strings could differ, but str.* already WINS
 8-12x vs pandas' object-dtype loop, so this is not a gap.) Don't re-attempt str-op parallelism for short strings.
+
+### 2026-06-27 TealOsprey — PARALLEL f64 mod (a%b): 1.57x -> 6.14x WIN vs pandas
+Added ArithmeticOp::Mod to the try_vectorized_binary f64 parallel special-case (alongside Pow). `python_mod_f64`
+(NaN/inf branches + fmod, ~8ns/elem) is COMPUTE-bound — parallelizing it scaled 3.9x (my "bandwidth floor ~25ms"
+estimate was WRONG: the compute dominated and the output write didn't bottleneck). add/sub/mul/div stay serial
+(bandwidth-bound, ~parity-win already). Bit-identical (same python_mod_f64, order preserved).
+
+Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_mod`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | serial | parallel | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `mod` (a%b) f64 5M | 40.8ms | 10.45ms | 3.90x | 1.57x -> 6.14x (pandas 64.2ms) |
+
+(div checked too: 25.8ms = 1.08x WIN already, bandwidth-bound — left serial, NOT parallelized.) FULL fp-columnar
+suite 467 passed / 0 failed.
