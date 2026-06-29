@@ -7510,3 +7510,19 @@ Same-box best-of-6, 2M f64 value by Scalar-backed Utf8 key, pandas rebuilding gr
 
 Flips the high-card LOSS->WIN (and also speeds first/last for Int64 keys, which had no dense path). nunique() by this
 key kind remains on build_groups (per-group distinct set — next). FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — SeriesGroupBy.nunique() dense per-group distinct-count: 0.62x LOSS -> 1.15x WIN
+nunique()'s dense paths gate on i64-key+i64-value (`try_nunique_dense`) or Utf8-value (`try_nunique_str_dense`), so an
+f64 value and/or a Scalar-backed Utf8 key fell to the generic `agg_values_scalar` build_groups path. Added a dense
+per-group distinct-count over any dense gid layout (dense_group_ids + dense_group_labels): per-gid FxHashSet of
+canonical f64 bits (or raw i64), counted in one pass (mirror of the dense `unique()` f64 path). Bit-identical: distinct
+count is order-independent; all-valid typed value ⇒ nothing to skip; `v==0.0 -> 0` bits == ScalarKey::FloatBits.
+
+Same-box best-of-6, 2M f64 value by Scalar-backed Utf8 key, pandas rebuilding groupby per call (`bench_gbukey`):
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `nunique` by Utf8 key 2M card=1000 | 180.8ms | 162.8ms | 1.11x | 1.35x -> 1.50x (pandas 244.4ms) |
+| `nunique` by Utf8 key 2M card=100k | 538.7ms | 287.7ms | 1.87x | 0.62x -> 1.15x (pandas 331.7ms) |
+
+Flips the high-card LOSS->WIN. Completes the groupby-by-Scalar-backed-Utf8-key family (sum/mean/max/min/var/std/count/
+first/last/nunique all now dense). FULL fp-frame suite 3109 passed / 0 failed.
