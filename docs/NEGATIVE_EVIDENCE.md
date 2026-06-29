@@ -7761,3 +7761,26 @@ encoding-independent) are safe; outer/right (key-sorted order: codes are first-s
 keep the Utf8 path. Implementable with an inner/left gate + the existing dense path, but needs careful order-conformance
 verification (a merge order bug is data-corruption-adjacent) — a focused session, not a 60m patch. Prototype retained in
 bench_merge2u. Conformance GREEN (bench + docs only).
+
+### 2026-06-29 BlackThrush — nullable Float64 abs/round/compare_scalar typed paths: 0.004-0.065x -> 0.26-0.45x (4.5-108x fp-side)
+Real data has NaN. The all-valid `as_f64_slice` fast paths bail on ANY NaN, so a nullable (10%-null) Float64 column fell
+to the per-element Scalar dispatch: 5M abs 384ms / round 403ms / gt_scalar 416ms — 18x/15x/237x slower than pandas.
+Added nullable typed paths over `as_f64_slice_with_validity`: compare_scalar emits a typed nullable Bool via
+`from_bool_values_with_validity` (invalid⇒Null, bit-identical to the Scalar path's `Null(Null)`); abs/round compute the
+present slots over the raw &[f64], write NaN at invalid slots, and re-ingest via the canonical `from_f64_values` (which
+re-derives validity from NaN — bit-identical to the loop's missing handling; abs/round never turn a present value into
+the only-at-missing NaN). NOTE: my first abs/round attempt used `from_f64_values_owned_with_validity` and FAILED tests —
+its all-valid-claiming backing ignores the validity field at missing slots; the from_f64_values re-ingest is the correct
+(if copying) path.
+
+Same-box best-of-6, 5M Float64 10%-null (`fp-frame/examples/bench_nullable`), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `gt_scalar` (s>0.5) | 415.6ms | 3.9ms  | 107x  | 0.004x -> 0.45x (pandas 1.75ms) |
+| `abs`               | 383.7ms | 81.0ms | 4.74x | 0.056x -> 0.26x (pandas 21.4ms) |
+| `round(2)`          | 402.7ms | 90.0ms | 4.47x | 0.065x -> 0.30x (pandas 26.2ms) |
+
+Catastrophic LOSS -> moderate (gt_scalar fixes the whole compare family lt/eq/ne/ge/le). Residual vs pandas is the
+validity rebuild (from_f64_values' NaN scan + Arc::from copy) — pandas does NaN ops in-place with no validity model.
+A non-copying nullable-f64 constructor (fixing from_f64_values_owned_with_validity's backing) is the next lever.
+fp-columnar 467/0, fp-frame 3109/0.

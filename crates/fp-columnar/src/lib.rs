@@ -11950,6 +11950,33 @@ impl Column {
             return Ok(Self::from_bool_values(bools));
         }
 
+        // Nullable Float64 fast path: the all-valid `as_f64_slice` above bails on
+        // ANY NaN/missing, so a nullable Float64 column fell to the generic
+        // per-element Scalar dispatch + 32-byte Scalar/cell (compare on a 10%-null
+        // 5M column was ~415ms / 237x slower than pandas). Compare over the raw
+        // &[f64] and carry the source validity onto a typed nullable Bool result.
+        // Bit-identical to the Scalar path: present slot ⇒ `Bool(v <op> s)` (same
+        // `scalar_compare` "convert both to f64" branch for Float64 vs numeric),
+        // missing slot ⇒ `from_bool_values_with_validity`'s invalid bit, which is
+        // `Null(NullKind::Null)` (= the Scalar path's missing arm); the bool value
+        // at a masked slot is never observed.
+        if let Some((data, validity)) = self.as_f64_slice_with_validity()
+            && let Ok(s) = scalar.to_f64()
+        {
+            let bools: Vec<bool> = data
+                .iter()
+                .map(|&v| match op {
+                    ComparisonOp::Gt => v > s,
+                    ComparisonOp::Lt => v < s,
+                    ComparisonOp::Eq => v == s,
+                    ComparisonOp::Ne => v != s,
+                    ComparisonOp::Ge => v >= s,
+                    ComparisonOp::Le => v <= s,
+                })
+                .collect();
+            return Ok(Self::from_bool_values_with_validity(bools, validity.clone()));
+        }
+
         let values = self
             .values
             .iter()
@@ -16829,6 +16856,24 @@ impl Column {
             let out: Vec<f64> = data.iter().map(|&x| x.abs()).collect();
             return Ok(Self::from_f64_all_valid_with_finite_opt(out, witness));
         }
+        // Nullable Float64 fast path: the all-valid `as_f64_slice` above bails on
+        // ANY NaN/missing, so a nullable Float64 column fell to the per-element
+        // Scalar loop (~384ms / 18x slower than pandas on a 10%-null 5M column).
+        // Abs the present slots over the raw &[f64], write NaN at invalid slots,
+        // and re-ingest via the canonical `from_f64_values` (which re-derives the
+        // validity from NaN). Bit-identical to the loop for a Float64 column:
+        // present ⇒ `Float64(x.abs())`; missing ⇒ NaN ⇒ `from_f64_values` marks it
+        // missing exactly as `Self::new(Float64, [Null(NaN)])` does, and abs never
+        // turns a present (non-NaN, valid) value into NaN, so the NaN set == the
+        // original missing set.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let out: Vec<f64> = (0..data.len())
+                .map(|i| if validity.get(i) { data[i].abs() } else { f64::NAN })
+                .collect();
+            return Ok(Self::from_f64_values(out));
+        }
 
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
@@ -18871,6 +18916,27 @@ impl Column {
                     .map(|&x| (x * factor).round_ties_even() / factor)
                     .collect(),
             ));
+        }
+        // Nullable Float64 fast path (mirror of abs): round present slots over the
+        // raw &[f64] with the IDENTICAL formula as the loop, write NaN at invalid
+        // slots, re-ingest via `from_f64_values`. Bit-identical for a Float64
+        // column: present ⇒ same `(x*factor).round_ties_even()/factor`; missing ⇒
+        // NaN ⇒ marked missing; round of a present value never yields the only-at-
+        // -missing NaN (finite/inf round stays finite/inf), so the NaN set ==
+        // original missing set. (~403ms / 15x slower than pandas on a 10%-null 5M.)
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let out: Vec<f64> = (0..data.len())
+                .map(|i| {
+                    if validity.get(i) {
+                        (data[i] * factor).round_ties_even() / factor
+                    } else {
+                        f64::NAN
+                    }
+                })
+                .collect();
+            return Ok(Self::from_f64_values(out));
         }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
