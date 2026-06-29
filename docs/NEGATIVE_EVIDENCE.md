@@ -7810,3 +7810,11 @@ Same-box best-of-6, 5M Float64 10%-null (`fp-frame/examples/bench_nullable`), pa
 
 Both FLIP LOSS->WIN (log shares the helper → same fix). One helper change covers the whole transcendental family on
 nullable input. fp-columnar 467/0, fp-frame 3109/0. Still open in vein: diff 0.049x, cummax/cummin 0.168x (cumulative).
+
+### 2026-06-29 BlackThrush — nullable Float64 diff typed path: 0.049x -> 0.53x (10.8x fp-side)
+diff() on a nullable Float64 column fell to the per-element Scalar loop (5M 10%-null: 459ms, 20x slower than pandas).
+Added a nullable typed path mirroring the all-valid one: subtract over the raw &[f64], clear the validity bit where the
+slot is out of range OR either operand is missing, emit via the validity-respecting `from_f64_values_with_validity`
+(0.0-datum + cleared-bit ⇒ Null(NaN), the same convention the all-valid path + generic path use). Bit-identical
+(present pair ⇒ Float64(data[i]-data[j]); boundary/missing-operand ⇒ Null(NaN)). 459->42.6ms, 0.049x -> 0.53x
+(pandas 22.7ms). fp-frame 3109/0. Still open: cummax/cummin 0.168x (cumulative running-extremum, different pattern).
