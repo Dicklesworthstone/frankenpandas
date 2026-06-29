@@ -44,6 +44,10 @@ fn main() {
     timeit("nlargest_i64", || { std::hint::black_box(siq.nlargest(100).unwrap().len()); });
     timeit("idxmax_i64", || { std::hint::black_box(siq.idxmax().unwrap()); });
     timeit("ffill_i64_clean", || { std::hint::black_box(siq.ffill(None).unwrap().len()); });
+    timeit("rank_i64", || { std::hint::black_box(siq.rank("average", true, "keep").unwrap().len()); });
+    timeit("nsmallest_i64", || { std::hint::black_box(siq.nsmallest(100).unwrap().len()); });
+    timeit("argsort_i64", || { std::hint::black_box(siq.argsort(true).unwrap().len()); });
+    timeit("interpolate_i64_clean", || { std::hint::black_box(siq.interpolate().unwrap().len()); });
     let oth_i = Series::new("o", Index::from_range(0, n as i64, 1), Column::from_i64_values((0..n as i64).map(|i| i % 777).collect())).unwrap();
     timeit("update_i64", || { std::hint::black_box(si.update(&oth_i).unwrap().len()); });
     timeit("combine_first_i64", || { std::hint::black_box(si.combine_first(&oth_i).unwrap().len()); });
