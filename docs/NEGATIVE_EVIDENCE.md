@@ -7818,3 +7818,19 @@ slot is out of range OR either operand is missing, emit via the validity-respect
 (0.0-datum + cleared-bit ⇒ Null(NaN), the same convention the all-valid path + generic path use). Bit-identical
 (present pair ⇒ Float64(data[i]-data[j]); boundary/missing-operand ⇒ Null(NaN)). 459->42.6ms, 0.049x -> 0.53x
 (pandas 22.7ms). fp-frame 3109/0. Still open: cummax/cummin 0.168x (cumulative running-extremum, different pattern).
+
+### 2026-06-29 BlackThrush — nullable Float64 cummax/cummin typed paths: 0.168x LOSS -> 2.0-2.1x WIN
+cummax()/cummin() on a nullable Float64 column fell to the per-element Scalar loop (5M 10%-null: 426/433ms, 6x slower
+than pandas). Added nullable typed paths: running extremum over the raw &[f64] — a present slot folds into `acc`
+(seeded -inf/+inf) and emits it; a missing slot clears its validity bit and SKIPS the fold (skipna). Emit via the
+validity-respecting `from_f64_values_with_validity`. Bit-identical to the generic loop (present ⇒ Float64(acc); missing
+⇒ Null(NaN)).
+
+Same-box best-of-6, 5M Float64 10%-null (`bench_nullable`), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `cummax` | 426.1ms | 35.1ms | 12.2x | 0.168x -> 2.04x (pandas 71.7ms) |
+| `cummin` | 433.4ms | 35.4ms | 12.2x | 0.174x -> 2.13x (pandas 75.3ms) |
+
+Both FLIP LOSS->WIN. Closes the nullable-f64 elementwise vein opened this session (compare/abs/round/neg/sqrt/exp/log/
+diff/cummax/cummin all now typed-fast). fp-frame 3109/0.
