@@ -12096,6 +12096,15 @@ impl Column {
             && fv.is_finite()
             && let Some((data, validity)) = self.as_f64_slice_with_validity()
         {
+            // Nothing-to-fill short-circuit: every slot present (validity set) AND
+            // no NaN datum (a valid-bit NaN counts as missing per Scalar::is_missing)
+            // ⇒ output == input, so share the backing in O(1) instead of rebuilding
+            // a fresh n*8 buffer. Bit-identical (clone preserves values + dtype +
+            // validity), and returns self's own representation rather than minting a
+            // new variant. The NaN scan is a cheap sequential read vs the alloc+copy.
+            if validity.all() && !data.iter().any(|d| d.is_nan()) {
+                return Ok(self.clone());
+            }
             let mut out = Vec::with_capacity(data.len());
             for (i, &d) in data.iter().enumerate() {
                 if validity.get(i) && !d.is_nan() {
