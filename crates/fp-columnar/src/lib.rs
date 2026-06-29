@@ -14913,13 +14913,14 @@ impl Column {
                 let out: Vec<f64> = (0..s.len())
                     .map(|i| if cb[i] { s[i] } else { o[i] })
                     .collect();
-                return Ok(Self::from_f64_values(out));
+                // all-valid select of two NaN-free buffers → MOVE (no realloc).
+                return Ok(Self::from_f64_values_owned(out));
             }
             if let (Some(s), Some(o)) = (self.as_i64_slice(), other.as_i64_slice()) {
                 let out: Vec<i64> = (0..s.len())
                     .map(|i| if cb[i] { s[i] } else { o[i] })
                     .collect();
-                return Ok(Self::from_i64_values(out));
+                return Ok(Self::from_i64_values_owned(out));
             }
         }
         let out: Vec<Scalar> = self
@@ -14957,13 +14958,13 @@ impl Column {
                 let out: Vec<f64> = (0..s.len())
                     .map(|i| if cb[i] { o[i] } else { s[i] })
                     .collect();
-                return Ok(Self::from_f64_values(out));
+                return Ok(Self::from_f64_values_owned(out));
             }
             if let (Some(s), Some(o)) = (self.as_i64_slice(), other.as_i64_slice()) {
                 let out: Vec<i64> = (0..s.len())
                     .map(|i| if cb[i] { o[i] } else { s[i] })
                     .collect();
-                return Ok(Self::from_i64_values(out));
+                return Ok(Self::from_i64_values_owned(out));
             }
         }
         let out: Vec<Scalar> = self
@@ -15151,14 +15152,14 @@ impl Column {
                 && let Ok(o) = other.to_f64()
             {
                 let out: Vec<f64> = (0..s.len()).map(|i| if cb[i] { s[i] } else { o }).collect();
-                return Ok(Self::from_f64_values(out));
+                return Ok(Self::from_f64_values_owned(out));
             }
             if let Some(s) = self.as_i64_slice()
                 && let Scalar::Int64(o) = other
             {
                 let o = *o;
                 let out: Vec<i64> = (0..s.len()).map(|i| if cb[i] { s[i] } else { o }).collect();
-                return Ok(Self::from_i64_values(out));
+                return Ok(Self::from_i64_values_owned(out));
             }
         }
         let out: Vec<Scalar> = self

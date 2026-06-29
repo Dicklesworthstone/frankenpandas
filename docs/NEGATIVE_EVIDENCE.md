@@ -7293,3 +7293,19 @@ Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_emax`),
 
 Flips LOSS->WIN; also fixes minimum/copysign/fmax (same helper). These are bandwidth-bound (cheap per-elem), so kept
 SERIAL — the win is eliminating the redundant copies, NOT parallelism. FULL fp-columnar suite 467 passed / 0 failed.
+
+### 2026-06-27 TealOsprey — where/mask select owned-move: 0.83x LOSS -> 2.13x WIN vs pandas
+where_cond_series / mask_series / where_cond(scalar) typed select paths emitted via from_f64_values / from_i64_values
+(Arc::from realloc). The output is an all-valid select of two all-valid (NaN-free) buffers, so switched to
+from_*_values_owned (MOVE). Bit-identical (cond[i] ? s[i] : o[i], no NaN introduced).
+
+Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_cmpwhere where`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | before (realloc) | after (move) | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `where(cond,a,b)` 5M | 67.2ms | 26.2ms | 2.57x | 0.83x -> 2.13x (pandas 55.8ms) |
+
+Flips LOSS->WIN; also covers mask_series + where_cond(scalar). NOTE (separate, harder): element-wise comparison `a<b`
+is 8.3ms vs pandas' 3.3ms (0.40x) — already typed/hoisted/owned, the residual is LLVM autovectorization of
+f64-compare→Vec<bool> vs numpy's hand-tuned SIMD mask (a safe-Rust SIMD ceiling; std::simd/intrinsics would be the
+lever, deferred). FULL fp-columnar suite 467 passed / 0 failed.
