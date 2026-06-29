@@ -7232,3 +7232,17 @@ Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_mod`),
 
 (div checked too: 25.8ms = 1.08x WIN already, bandwidth-bound — left serial, NOT parallelized.) FULL fp-columnar
 suite 467 passed / 0 failed.
+
+### 2026-06-27 TealOsprey — PARALLEL f64 floordiv (a//b): 2.34x -> 4.85x WIN vs pandas
+Added ArithmeticOp::FloorDiv to the try_vectorized_binary f64 parallel special-case (with Pow/Mod). python_floordiv
+(branches + floor + fdiv, ~7ns/elem) is compute-bound. Bit-identical.
+
+Same-box best-of-3, 5M f64 (`fp-columnar/examples/bench_fdiv`),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cc`:
+| op | serial | parallel | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `floordiv` (a//b) f64 5M | 35.0ms | 16.9ms | 2.07x | 2.34x -> 4.85x (pandas 82.0ms) |
+
+(Lower scaling than mod's 3.9x — floordiv is lighter compute so more bandwidth-relative, but still a clear win.) The
+f64 binary parallel special-case now covers Pow/Mod/FloorDiv (compute-bound); add/sub/mul/div stay serial (bandwidth).
+FULL fp-columnar suite 467 passed / 0 failed.
