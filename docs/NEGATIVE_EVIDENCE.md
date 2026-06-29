@@ -7581,3 +7581,23 @@ Same-box best-of-6, 2M rows × 2 f64 value cols by Scalar-backed Utf8 key (`benc
 
 Flips LOSS->WIN (idxmin shares the path). Also confirmed this turn: DataFrameGroupBy nunique (2.3x WIN), pivot_table by
 Utf8 (4.5-5.4x WIN), Series.map(dict) Utf8 (1.3-1.7x WIN) all already dominate — no gap. FULL fp-frame suite 3109/0.
+
+### 2026-06-29 BlackThrush — DataFrameGroupBy first/last/all/any by Scalar-backed Utf8 key: 0.31x LOSS -> 2.6-3.5x WIN
+The remaining i64-key-only single-key dense bypasses — `try_bool_reduce_dense` (all/any) and `try_first_last_dense`
+(first/last; its inline Utf8 branch handled only the CONTIGUOUS backing) — sent a Scalar-backed Utf8 key
+(`from_values`, common with a mixed/Bool value column that also disqualifies the aggregate_named_func materialization
+gate) to the SipHash build_groups + scattered Scalar-gather path. Added a shared `single_utf8_key_dense_grouping`
+helper (Utf8 analog of int64_dense_grouping: first-seen gids over the borrowed &str via pivot_utf8_key_strs, str::cmp
+sort when self.sort, by-named output index) and routed all/any + first/last (+ the count contiguous block, dedup)
+through it. Bit-identical: same sorted group order + value-type-agnostic chosen-row/fold as the generic path.
+
+Same-box best-of-6, 2M rows × (f64 + Bool) value cols by Scalar-backed Utf8 key (`bench_dfgbu3`), pandas 2.2.3 per-call:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df.groupby(Utf8).last()` 2M card=100k | 721.2ms | 84.9ms  | 8.49x | 0.31x -> 2.64x (pandas 224.2ms) |
+| `df.groupby(Utf8).any()`  2M card=100k | 678.0ms | 92.6ms  | 7.32x | 0.42x -> 3.09x (pandas 286.4ms) |
+| `df.groupby(Utf8).all()`  2M card=100k | 615.9ms | 95.6ms  | 6.44x | 0.43x -> 2.78x (pandas 265.7ms) |
+| `df.groupby(Utf8).first()` 2M card=100k| 677.9ms | 117.7ms | 5.76x | 0.60x -> 3.44x (pandas 405.2ms) |
+
+All flip LOSS->WIN (low card too: 0.62-0.68x -> 2.9-3.5x). sem by Utf8 key (0.64-0.72x) is the last single-key gap —
+separate path, next. FULL fp-frame suite 3109 passed / 0 failed.
