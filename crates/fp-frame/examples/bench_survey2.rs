@@ -34,7 +34,11 @@ fn main() {
     let m = s.gt_scalar(&Scalar::Float64(0.5)).unwrap();
     timeit("where(prebuilt)", || { std::hint::black_box(s.where_cond(&m, Some(&Scalar::Float64(0.0))).unwrap().len()); });
     timeit("mask(prebuilt)", || { std::hint::black_box(s.mask(&m, Some(&Scalar::Float64(0.0))).unwrap().len()); });
+    let other_f = Series::new("o", Index::from_range(0, n as i64, 1), Column::from_f64_values((0..n).map(|i| i as f64).collect())).unwrap();
+    timeit("where_series_f64", || { std::hint::black_box(s.where_cond_series(&m, &other_f).unwrap().len()); });
+    let other_i = Series::new("o", Index::from_range(0, n as i64, 1), Column::from_i64_values((0..n as i64).collect())).unwrap();
     let mi = si.gt_scalar(&Scalar::Int64(500)).unwrap();
+    timeit("where_series_i64", || { std::hint::black_box(si.where_cond_series(&mi, &other_i).unwrap().len()); });
     timeit("where_i64(prebuilt)", || { std::hint::black_box(si.where_cond(&mi, Some(&Scalar::Int64(0))).unwrap().len()); });
     timeit("mask_i64(prebuilt)", || { std::hint::black_box(si.mask(&mi, Some(&Scalar::Int64(0))).unwrap().len()); });
     timeit("value_counts_i64", || { std::hint::black_box(si.value_counts().unwrap().len()); });
