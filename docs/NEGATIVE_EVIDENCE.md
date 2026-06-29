@@ -7439,3 +7439,21 @@ Same-box best-of-6, 2M Utf8 (`fp-frame/examples/bench_u8survey`):
 
 Both flip LOSS->WIN. (Same broad Scalar-backed-Utf8 sweep also found groupby-by-key count at high card 0.60x — next.)
 FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — SeriesGroupBy.count() dense path generalized to any all-valid value dtype: 0.60x LOSS -> 12.5x WIN
+The dense direct-address count fast path (bounded-Int64 key ⇒ gid_of[k-min], tally sizes, no SipHash build_groups)
+gated its VALUE column on `as_f64_slice() || as_i64_slice()` — i.e. only fired for numeric values. A Utf8 (or Bool/
+Datetime) value column, even all-valid, fell to the generic SipHash build_groups path (pointer-key, 2 cache misses/row).
+But count() never reads the value data — for an all-valid column every row counts, so count == group size regardless of
+dtype. Generalized the gate to `!self.series.column.has_any_missing()` (both the Int64-key and the contiguous-Utf8-key
+dense blocks). Bit-identical: numeric all-valid still hits dense (unchanged), numeric-with-NaN still falls through
+(has_any_missing true, excluded rows), and non-numeric all-valid now hits dense with the same first-seen key order /
+size output the build_groups path produced.
+
+Same-box best-of-6, 2M Utf8 value column grouped by bounded-i64 key (`fp-frame/examples/bench_u8survey`):
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| Utf8 `groupby(i64).count()` 2M card=8    | 50.1ms  | 4.58ms | 10.9x | 1.27x -> 13.9x (pandas 63.5ms) |
+| Utf8 `groupby(i64).count()` 2M card=100k | 183.1ms | 8.77ms | 20.9x | 0.60x -> 12.5x (pandas 110.1ms) |
+
+Flips the high-card LOSS->WIN (and the low-card marginal win into domination). FULL fp-frame suite 3109 passed / 0 failed.
