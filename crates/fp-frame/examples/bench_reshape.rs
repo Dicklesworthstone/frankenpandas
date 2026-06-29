@@ -1,55 +1,25 @@
-use std::{collections::BTreeMap, time::Instant};
-
+use fp_frame::Series;
 use fp_columnar::Column;
-use fp_frame::DataFrame;
-use fp_index::{Index, IndexLabel};
-fn sm(i: usize, s: u64) -> f64 {
-    let mut h = (i as u64).wrapping_add(s).wrapping_mul(0x9E3779B97F4A7C15);
-    h = (h ^ (h >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    h ^= h >> 31;
-    (h >> 11) as f64
+use fp_index::Index;
+use fp_types::Scalar;
+fn timeit<F: FnMut()>(label: &str, mut f: F) {
+    let mut best = u128::MAX;
+    for _ in 0..6 {
+        let t = std::time::Instant::now();
+        f();
+        best = best.min(t.elapsed().as_nanos());
+    }
+    println!("{label}: {:.2}ms", best as f64 / 1e6);
 }
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
-    let n: usize = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(500_000);
-    let k: usize = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(6);
-    let op = a.get(3).map(String::as_str).unwrap_or("melt");
-    let it: usize = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(6);
-    let index = Index::new((0..n as i64).map(IndexLabel::Int64).collect());
-    let mut cols = BTreeMap::new();
-    let mut order = vec!["id".to_string()];
-    cols.insert(
-        "id".to_string(),
-        Column::from_i64_values((0..n).map(|i| i as i64).collect()),
-    );
-    for c in 0..k {
-        let nm = format!("c{c}");
-        cols.insert(
-            nm.clone(),
-            Column::from_f64_values((0..n).map(|i| sm(i, c as u64)).collect()),
-        );
-        order.push(nm);
-    }
-    let df = DataFrame::new_with_column_order(index, cols, order).unwrap();
-    let vv: Vec<&str> = (0..k)
-        .map(|c| Box::leak(format!("c{c}").into_boxed_str()) as &str)
-        .collect();
-    let mut best = u128::MAX;
-    for _ in 0..it {
-        let t = Instant::now();
-        match op {
-            "melt" => {
-                std::hint::black_box(df.melt(&["id"], &vv, None, None).unwrap());
-            }
-            "stack" => {
-                std::hint::black_box(df.stack().unwrap());
-            }
-            _ => panic!(),
-        };
-        let e = t.elapsed().as_nanos();
-        if e < best {
-            best = e;
-        }
-    }
-    println!("{op} n={n} k={k}: best={best}ns");
+    let n: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+    let cats = ["red", "green", "blue", "yellow", "orange", "purple", "black", "white"];
+    let uvals: Vec<Scalar> = (0..n).map(|i| Scalar::Utf8(cats[i % cats.len()].to_string())).collect();
+    let su = Series::new("u", Index::from_range(0, n as i64, 1), Column::from_values(uvals).unwrap()).unwrap();
+    let iv: Vec<i64> = (0..n as i64).map(|i| i % 1000).collect();
+    let si = Series::new("i", Index::from_range(0, n as i64, 1), Column::from_i64_values(iv)).unwrap();
+    timeit("factorize_utf8", || { let r = su.factorize().unwrap(); std::hint::black_box(r.0.len()); });
+    timeit("factorize_i64", || { let r = si.factorize().unwrap(); std::hint::black_box(r.0.len()); });
+    timeit("get_dummies_utf8", || { std::hint::black_box(su.str().get_dummies(",").unwrap().shape()); });
+    timeit("value_counts_utf8", || { std::hint::black_box(su.value_counts().unwrap().len()); });
 }
