@@ -7636,3 +7636,18 @@ Same-box best-of-6, 2M rows, TWO Scalar-backed Utf8 keys + f64 value (`bench_dfg
 Low-group flips to a strong WIN; ~1M-group improves 3x fp-side but stays a LOSS — the residual is the 1M-group output
 assembly (key_of_gid's per-group Vec<MixedKey> String materialization + MultiIndex build), a separate output-bound
 issue from the grouping. FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — DataFrame.sort_values by Scalar-backed Utf8 column: 0.59x LOSS -> 3.55x WIN
+`sort_values_na`'s Utf8 fast path (call `argsort_with`, a stable MSD byte radix) gated on
+`sort_column.as_utf8_contiguous().is_some()` — so a Scalar-backed (from_values) Utf8 sort key fell to the generic
+O(n log n) `compare_scalars_with_na_position` sort over materialized Scalars (~2.3s at 2M rows). But `argsort_with`
+ALREADY radix-sorts BOTH backings (raw &[u8] spans for contiguous, `utf8_msd_argsort` over &str for the Scalar-backed
+case). Relaxed the gate to any all-valid Utf8 column (na_position='last'). Bit-identical: the exact same argsort_with
+call + reorder, just now reached for the non-contiguous backing.
+
+Same-box best-of-6, 2M rows, sort by a Scalar-backed Utf8 column (`bench_dfu`), pandas 2.2.3 per-call:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df.sort_values(Utf8)` 2M card=10000 | 2319.6ms | 387.2ms | 5.99x | 0.59x -> 3.55x (pandas 1376.1ms) |
+
+Flips a big LOSS->WIN. FULL fp-frame suite 3109 passed / 0 failed.
