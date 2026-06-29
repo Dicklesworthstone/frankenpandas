@@ -7665,3 +7665,22 @@ None beat the loss vs pandas. The residual is the string-dedup hashtable itself 
 cold map) — pandas' khash is faster; closing it needs an open-addressing string table / radix dedup, not a fast-path
 reroute. REVERTED per ~0-gain. (Distinct from the sort_values/groupby Utf8 wins, which rerouted to an EXISTING fast
 kernel; here the generic path already is the hash dedup.) FULL fp-frame suite green at HEAD (unchanged).
+
+### 2026-06-29 BlackThrush — set_index by Scalar-backed Utf8 column: 0.13x -> 0.46x (3.6x fp-side; partial — pandas zero-copy residual)
+`set_index`'s contiguous-Utf8 fast path (lazy Utf8 index over the immutable Arc backing, no per-row String) gated on
+`utf8_contiguous_arcs()`, so a Scalar-backed (from_values) Utf8 column fell to the generic path that allocates one
+`IndexLabel::Utf8(String)` PER ROW (2M small allocs). Added a branch that materializes the strings into ONE contiguous
+buffer (single big alloc + sequential copy) then builds the same `from_utf8_contiguous` lazy index. Bit-identical (the
+lazy index materializes the identical per-row strings).
+
+Same-box best-of-6, 2M rows, set_index by a Scalar-backed Utf8 column (`bench_dfu`), pandas 2.2.3 per-call:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df.set_index(Utf8)` 2M card=10000 | 86.9ms | 23.9ms | 3.64x | 0.13x -> 0.46x (pandas 11.0ms) |
+
+3.6x fp-side improvement (one big alloc replacing 2M small ones), but stays a LOSS — pandas' set_index is near-free (the
+index shares the column's object array; no copy). fp's lazy Utf8 index needs a CONTIGUOUS byte buffer, so a Scalar-backed
+column must be copied once; matching pandas needs an index representation that borrows the column's Scalar Strings
+(structural). Also confirmed dominant this turn (no gap): groupby by Datetime64 key (sum 4.4x / count 2.5-3.7x WIN);
+agg(list)/agg(dict) by Utf8 key (dispatch through the already-fixed gb.count/first/last/min/max/named_func). FULL
+fp-frame suite 3109 passed / 0 failed.
