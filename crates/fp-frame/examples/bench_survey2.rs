@@ -48,6 +48,8 @@ fn main() {
     timeit("nsmallest_i64", || { std::hint::black_box(siq.nsmallest(100).unwrap().len()); });
     timeit("argsort_i64", || { std::hint::black_box(siq.argsort(true).unwrap().len()); });
     timeit("interpolate_i64_clean", || { std::hint::black_box(siq.interpolate().unwrap().len()); });
+    timeit("diff_i64", || { std::hint::black_box(siq.diff(1).unwrap().len()); });
+    timeit("cummax_i64", || { std::hint::black_box(siq.cummax().unwrap().len()); });
     timeit("mode_i64", || { std::hint::black_box(si.mode().unwrap().len()); });
     timeit("cut_i64", || { std::hint::black_box(fp_frame::cut(&siq, 10).unwrap().len()); });
     let oth_i = Series::new("o", Index::from_range(0, n as i64, 1), Column::from_i64_values((0..n as i64).map(|i| i % 777).collect())).unwrap();
