@@ -7618,6 +7618,26 @@ impl Column {
         }
     }
 
+    /// Build a nullable Float64 column from a raw `data` buffer plus an EXPLICIT
+    /// validity mask, WITHOUT re-deriving validity from NaN. The `LazyNullableFloat64`
+    /// backing renders each slot as: validity-set ⇒ present `Float64(data)`;
+    /// cleared-bit-with-NaN-datum ⇒ present `Float64(NaN)`; cleared-bit-with-
+    /// non-NaN-datum ⇒ `Null(NullKind::NaN)`. This is the only constructor that
+    /// reproduces the per-element Scalar path's three-way representation for typed
+    /// nullable arithmetic outputs (a GENERATED NaN must stay a present
+    /// `Float64(NaN)`, an absent operand must be `Null`). Callers set the validity
+    /// bit iff the slot is present AND its datum is non-NaN.
+    #[must_use]
+    pub fn from_f64_values_nullable(data: Vec<f64>, validity: ValidityMask) -> Self {
+        debug_assert_eq!(data.len(), validity.len());
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_nullable_float64(data, validity.clone()),
+            validity,
+            data: None,
+        }
+    }
+
     fn from_f64_values_with_finite_witness(
         data: Vec<f64>,
         has_nan: bool,

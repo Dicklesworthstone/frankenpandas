@@ -7882,3 +7882,20 @@ Same-box best-of-6, 5M Float64 10%-null (`bench_nullable`), pandas 2.2.3:
 
 Covers add/sub/mul/div/mod/pow/floordiv col+col on nullable f64 (the most common op family). fp-columnar 467/0,
 fp-frame 3109/0. (Scalar-arith path, apply_scalar_op_inner, can use the same backing next — same representation.)
+
+### 2026-06-29 BlackThrush — nullable Float64 scalar arithmetic (df OP scalar): 0.050x -> 0.60x (12.1x fp-side)
+Reused the LazyNullableFloat64 lever from the col+col fix. Extracted a pub constructor
+`Column::from_f64_values_nullable(data, validity)` (LazyNullableFloat64-backed, no NaN re-derivation), and added a
+nullable Float64 fast path to `apply_scalar_op_inner` (DataFrame df+scalar / -scalar / *scalar / etc.): apply over the
+raw &[f64], set the validity bit only where present AND result non-NaN, emit via the new constructor. Bit-identical to
+the Scalar map (present ⇒ Float64(op); missing ⇒ Null(NaN); generated NaN ⇒ present Float64(NaN), validity cleared) —
+fp-frame 3109/0 incl. DataFrame-arith-with-NaN tests.
+
+Same-box best-of-6, 5M Float64 10%-null, df + 1.0 (`bench_dfscalar`), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df.add_scalar(1.0)` nullable | 430.7ms | 35.6ms | 12.1x | 0.050x -> 0.60x (pandas 21.4ms) |
+
+Completes the nullable-f64 arithmetic surface (col+col AND col+scalar). The reusable
+`from_f64_values_nullable` constructor is now available for any other typed nullable-f64 op output. fp-columnar 467/0,
+fp-frame 3109/0.
