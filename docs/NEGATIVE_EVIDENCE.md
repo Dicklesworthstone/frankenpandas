@@ -7847,3 +7847,20 @@ Float64(NaN), not Null(NaN)); `from_f64_values_with_validity` with an explicit m
 Null-NaN split. CLEAN FIX needs a constructor mirroring Self::new's NaN handling, OR a two-mask path distinguishing
 input-missing (→Null) from generated-NaN (→present Float64(NaN)) — a focused constructor change, not a 60m reroute.
 (Also confirmed dominant this turn: nullable clip 2.1x WIN, fillna ~parity.) Conformance GREEN (bench+docs only).
+
+### 2026-06-29 BlackThrush — nullable f64 arithmetic (col+col AND col+scalar): EXACT blocker pinned = one missing constructor
+Sharpening the prior binary-arith rejection after tracing the scalar path too (apply_scalar_op_inner, 64089): BOTH
+nullable f64+f64 (419ms, 0.057x) and f64+scalar fall to a per-element Scalar Vec because no typed f64 constructor
+reproduces the general path's exact per-slot Scalar representation. The general paths need, simultaneously:
+  (a) missing-operand / missing-input slot ⇒ `Scalar::Null(NullKind::NaN)`  (a MISSING slot, Null representation)
+  (b) generated NaN at a present slot (inf-inf, a/0, NaN**0) ⇒ for col+col via `Self::new` ⇒ PRESENT `Float64(NaN)`;
+      for scalar via `from_values` ⇒ MISSING — i.e. the two general paths themselves DIFFER, and a typed replacement
+      must match each respectively.
+Available constructors: `from_f64_values` re-derives validity from NaN AND renders missing as `Float64(NaN)` (fails (a):
+gives Float64(NaN) not Null); `from_f64_values_with_validity` renders cleared bits as `Null(NaN)` (✓ for (a)) but
+re-marks SET-bit NaN as missing (fails col+col's present-Float64(NaN) in (b)); `from_f64_values_owned_with_validity`
+ignores the validity field entirely (fails (a)). THE FIX (next session): add a constructor `from_f64_data_explicit_validity(
+data, validity)` that emits `Null(NaN)` for cleared bits and a PRESENT `Float64(datum)` (NaN included) for set bits — NO
+NaN re-derivation — then col+col uses validity=lvalid&rvalid, and scalar uses from_f64_values (its general path already
+marks generated-NaN missing). Verified blocked, not landed (parity test
+`aligned_binary_f64_same_positions_matches_general_path_for_all_ops_with_nan_inf` enforces it). Conformance GREEN (docs only).
