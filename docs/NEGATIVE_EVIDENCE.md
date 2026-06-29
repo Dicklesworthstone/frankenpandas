@@ -7526,3 +7526,24 @@ Same-box best-of-6, 2M f64 value by Scalar-backed Utf8 key, pandas rebuilding gr
 
 Flips the high-card LOSS->WIN. Completes the groupby-by-Scalar-backed-Utf8-key family (sum/mean/max/min/var/std/count/
 first/last/nunique all now dense). FULL fp-frame suite 3109 passed / 0 failed.
+
+### 2026-06-29 BlackThrush — DataFrameGroupBy by Scalar-backed Utf8 key: materialize-to-contiguous: 0.24x LOSS -> parity/WIN
+`df.groupby("strcol").agg()` — the most common groupby idiom — fell to the SipHash build_groups path when the key was a
+Scalar-materialized Utf8 column (from_values), because every dense bypass in `aggregate_named_func` / `try_count_dense`
+gates the single Utf8 key on `as_utf8_contiguous()`. Added a fallback in `aggregate_named_func`: when the lone key is an
+all-valid NON-contiguous Utf8 column and every value column is dense f64/i64, materialize the key to an owned contiguous
+(bytes, offsets) buffer ONCE via the new `utf8_key_owned_contiguous` helper (O(key bytes), far cheaper than
+build_groups' Vec<ScalarKey> + SipHash map + wrapper sort) and reuse the identical `aggregate_str_dense` contiguous path.
+Covers sum/mean/std/var/min/max/first/last/prod/median/count (count falls through to aggregate_named_func). Bit-identical:
+same byte spans ⇒ same first-seen gids, lexicographic key order, per-group row-order folds.
+
+Same-box best-of-6, 2M rows × 2 f64 value cols by Scalar-backed Utf8 key, pandas 2.2.3 per-call (`bench_dfgbu`):
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df.groupby(Utf8).sum()`  2M card=1000 | 285.7ms | 68.5ms  | 4.17x | 0.24x -> 1.01x (pandas 69.1ms) |
+| `df.groupby(Utf8).mean()` 2M card=1000 | 164.6ms | 78.5ms  | 2.10x | 0.44x -> 0.93x (pandas 73.0ms) |
+| `df.groupby(Utf8).sum()`  2M card=100k | 558.4ms | 313.8ms | 1.78x | 0.41x -> 0.74x (pandas 231.3ms) |
+
+Flips the low-card case to parity/WIN; high-card improves 1.8x fp-side but stays a partial loss — the residual is the
+cache-cold 100k-entry FxHashMap<&[u8]> over 2M spans (the high-card string-hashtable floor, distinct from this fix).
+FULL fp-frame suite 3109 passed / 0 failed.
