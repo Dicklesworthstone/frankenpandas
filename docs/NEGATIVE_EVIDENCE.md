@@ -7950,3 +7950,15 @@ Same-box best-of-6, 1M x 20 Float64 10%-null (`bench_axis1n`), pandas 2.2.3:
 | `std(axis=1)`  | 646.2ms | 116.0ms | 5.57x | 0.74x -> 4.11x (pandas 477.1ms) |
 
 All FLIP LOSS->WIN. fp-frame 3109/0.
+
+### 2026-06-29 BlackThrush — groupby by a NULLABLE key: 0.20-0.37x LOSS (SURFACED; lever = sentinel-gid dropna dense grouping)
+SeriesGroupBy by a nullable i64 key (10% missing): sum 64.8ms (0.37x), count 103.5ms (0.20x) vs pandas 23.9/20.8ms at
+2M, card=1000 (`bench_gbnull`). The dense grouping (dense_group_ids / int64_dense_grouping) gates the KEY on `as_i64_slice`
+(= all-valid), so a nullable key falls to SipHash build_groups + per-group Scalar gather (~3-5x slower). pandas drops
+missing keys by default (dropna=True). LEVER: a nullable-key dense path that reads `as_i64_slice_with_validity` (and the
+Utf8 sibling), assigns a SENTINEL gid (usize::MAX) to missing-key rows so they're EXCLUDED from the output, dense-groups
+the present keys. NOT landed: dense_group_ids' current contract is "every row gets a gid in 0..ngroups"; a sentinel
+breaks EVERY consumer (dense_group_fold, dense_group_var_std, the count/first/last/idxmax/head paths) — each `acc[g]`
+would index OOB on a MAX gid. Needs either a swept sentinel-skip across all consumers OR a per-consumer nullable-key
+path, PLUS verifying fp's build_groups dropna matches pandas exactly first. A focused grouping session, not a 60m reroute.
+(Also confirmed dominant this turn: DataFrame axis=0 median 2.3x WIN, std 32x WIN, sum/mean/var fast — no gap.)
