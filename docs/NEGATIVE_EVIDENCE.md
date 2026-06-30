@@ -7962,3 +7962,16 @@ breaks EVERY consumer (dense_group_fold, dense_group_var_std, the count/first/la
 would index OOB on a MAX gid. Needs either a swept sentinel-skip across all consumers OR a per-consumer nullable-key
 path, PLUS verifying fp's build_groups dropna matches pandas exactly first. A focused grouping session, not a 60m reroute.
 (Also confirmed dominant this turn: DataFrame axis=0 median 2.3x WIN, std 32x WIN, sum/mean/var fast — no gap.)
+
+### 2026-06-29 BlackThrush — nullable Utf8 str ops + nullable surface status: CONFIRMED DOMINANT (no gap)
+Swept str ops on a nullable Utf8 Series (10% missing, 2M) vs pandas 2.2.3 object-str (`bench_strnull`) — all WIN or parity
+(pandas object str.* is Python-level and slow, so fp's nullable str path wins even though it's slower than all-valid
+contiguous): upper 198ms vs 208 (1.05x), len 161 vs 219 (1.35x), contains 180 vs 277 (1.53x), startswith 146 vs 179
+(1.22x). No lever.
+NULLABLE-F64 VEIN STATUS (this session): comprehensively closed. Fixed/typed-fast: compare family (108x), abs/round/neg
+(4.7-7.2x), sqrt/exp/log (flipped to WIN), diff (10.8x), cummax/cummin (flipped to WIN), between (14x), clip_with_series
+(flipped to WIN), where/mask/where_series (up to 44x; where/mask flipped to WIN), col+col AND col+scalar arithmetic (via
+the new LazyNullableFloat64-backed `from_f64_values_nullable` constructor), DataFrame axis=1 sum/mean/max/std (flipped to
+WIN, one reduce_rows change). Confirmed already-dominant (no gap): nullable sum/mean/std/var (Series + DF axis=0),
+median axis=0 (2.3x), isin (1.49x), ffill (1.16x), interpolate (7.6x), all str ops. ONLY remaining nullable gap:
+groupby-by-nullable-KEY (0.20-0.37x, surfaced above — needs the sentinel-gid dropna sweep).
