@@ -7975,3 +7975,37 @@ the new LazyNullableFloat64-backed `from_f64_values_nullable` constructor), Data
 WIN, one reduce_rows change). Confirmed already-dominant (no gap): nullable sum/mean/std/var (Series + DF axis=0),
 median axis=0 (2.3x), isin (1.49x), ffill (1.16x), interpolate (7.6x), all str ops. ONLY remaining nullable gap:
 groupby-by-nullable-KEY (0.20-0.37x, surfaced above — needs the sentinel-gid dropna sweep).
+
+### 2026-06-29 BlackThrush — SeriesGroupBy by a NULLABLE Int64 key: 0.20-0.37x LOSS -> 0.82x/0.88x/1.49x (+ correctness: drops the null group to match pandas)
+The previously-surfaced groupby-by-nullable-KEY gap (the "ONLY remaining nullable gap" above) is CLOSED — and it
+turned out to ALSO be a latent correctness divergence. `SeriesGroupBy::build_groups` had no dropna handling: a missing
+key (Null / NaN-float / NaT) was kept as a spurious `Utf8("NaN")` group, whereas pandas drops missing-key rows
+(`dropna=True` default; SeriesGroupBy exposes no dropna=False). DataFrameGroupBy already dropped them
+(`self.dropna && key_cols...is_missing() => continue`); SeriesGroupBy was the lone offender. Verified empirically:
+fp `[NaN-group, 1, 0]` vs pandas `[0.0, 1.0]` (pandas 2.2.3). The conformance proptest `prop_groupby_sum_dropna_*`
+only checks `IndexLabel::Null` (the spurious group is `Utf8("NaN")`, so it slipped through) AND tests the conformance
+crate's own reference oracle, not fp-frame's SeriesGroupBy — so the divergence was untested.
+
+FIX (one place, whole surface): (1) generic `build_groups` loop now `continue`s on `val.is_missing()` (dropna) — fixes
+sum/mean/count/std/var/agg_scalar/first/last/etc. at once. (2) a hash-free dense direct-address path for a NULLABLE
+bounded-Int64 key (`as_i64_slice_with_validity` + new `i64_dense_histogram_range_valid` over the VALID span) that skips
+missing-key rows and direct-addresses present keys — bit-identical to the dropna-corrected generic path (present keys
+first-seen order, ascending row indices per group). (3) a sister dense count path (all-valid value + nullable bounded
+key) so count's `.values()[idx].is_missing()` per-group materialization is bypassed. Updated the one test that pinned
+the OLD buggy behavior (`null_nan_metamorphic_series_groupby_missing_key_isolation_tn6qb6`) to the pandas-correct
+labels — its real metamorphic invariant (present groups isolated from dropped missing-key rows) still holds and is
+strengthened. fp-frame lib 3109/0.
+
+Same-box best-of-6, 2M Int64 10%-null key, card=1000, Float64 value (`bench_gbnull`), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `sum`   | 64.8ms  | 28.3ms | 2.29x | 0.37x -> 0.82x (pandas 24.2ms) |
+| `mean`  | ~69ms   | 27.1ms | 2.5x  | ~0.36x -> 0.88x (pandas 25.1ms) |
+| `count` | 103.5ms | 13.7ms | 7.55x | 0.20x -> 1.49x WIN (pandas 20.5ms) |
+
+count FLIPS to a WIN; sum/mean from deep-loss to near-parity. All three now drop the null-key group exactly as pandas
+(correctness fix, not just perf). NOTE: the earlier-feared "sentinel-gid sweep across every dense consumer" was NOT
+needed — fixing `build_groups` + adding a nullable-key dense path (which simply skips missing-key rows, no sentinel in
+the shared gid layout) covers the reduction surface without touching `dense_group_ids`/`dense_group_fold`'s all-valid
+contract. Pre-existing unrelated conformance flake `prop_series_where_and_mask_series_are_condition_duals` (where/mask,
+NOT groupby) confirmed failing on clean baseline with this change stashed — not introduced here.
