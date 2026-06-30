@@ -7906,3 +7906,11 @@ The output is an ALL-VALID Bool (the Scalar path emits Bool(false) for a missing
 typed nullable path over `as_f64_slice_with_validity`: present ⇒ the same hoisted-per-mode f64 predicate; missing ⇒
 false. Emit via from_bool_values. Bit-identical to the Scalar loop. 287->20.4ms, 0.018x -> 0.25x (pandas 5.1ms).
 fp-frame 3109/0. (Also confirmed this turn: nullable ffill 1.16x WIN, interpolate 7.6x WIN, bfill ~parity — no gap.)
+
+### 2026-06-29 BlackThrush — nullable Float64 clip_with_series(): 0.33x LOSS -> 1.60x WIN
+clip(lower=Series, upper=Series) on a nullable Float64 value column fell to the generic per-element Scalar clip (the
+typed block's `none_missing` gate excludes a nullable value): 5M 10%-null clip_series 463ms / 3x slower than pandas.
+Added a nullable-value + all-valid-f64-bounds + same-index path: clip present slots over the raw &[f64] (NaN at missing),
+re-ingest via from_f64_values. Bit-identical (present ⇒ Float64(r.max(lo).min(hi)); missing ⇒ Float64(NaN) == val.clone()
+of a missing f64; max/min of a present finite value never yields NaN). 463->95.9ms, 0.33x -> 1.60x WIN (pandas 154ms).
+fp-frame 3109/0. (Also confirmed this turn: nullable isin 1.49x WIN — no gap.)

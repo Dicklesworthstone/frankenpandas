@@ -41,4 +41,9 @@ fn main() {
     timeit("bfill", || { std::hint::black_box(s.bfill(None).unwrap().len()); });
     timeit("interpolate", || { std::hint::black_box(s.interpolate().unwrap().len()); });
     timeit("between", || { std::hint::black_box(s.between(&Scalar::Float64(0.1), &Scalar::Float64(0.9), "both").unwrap().len()); });
+    let needles: Vec<Scalar> = (0..1000).map(|i| Scalar::Float64(i as f64 * 0.001)).collect();
+    timeit("isin", || { std::hint::black_box(s.isin(&needles).unwrap().len()); });
+    let lo = Series::new("lo", Index::from_range(0, n as i64, 1), Column::from_f64_values((0..n).map(|i| (i%100) as f64 *0.001).collect())).unwrap();
+    let hi = Series::new("hi", Index::from_range(0, n as i64, 1), Column::from_f64_values((0..n).map(|i| 0.5+(i%100) as f64 *0.001).collect())).unwrap();
+    timeit("clip_series", || { std::hint::black_box(s.clip_with_series(Some(&lo), Some(&hi)).unwrap().len()); });
 }
