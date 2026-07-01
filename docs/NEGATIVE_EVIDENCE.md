@@ -8009,3 +8009,35 @@ needed — fixing `build_groups` + adding a nullable-key dense path (which simpl
 the shared gid layout) covers the reduction surface without touching `dense_group_ids`/`dense_group_fold`'s all-valid
 contract. Pre-existing unrelated conformance flake `prop_series_where_and_mask_series_are_condition_duals` (where/mask,
 NOT groupby) confirmed failing on clean baseline with this change stashed — not introduced here.
+
+### 2026-06-30 BlackThrush — cut (equal-width binning) typed-input fast path: 0.33x/0.40x -> 0.40x/0.51x (1.21x/1.26x fp-side); residual loss is STRUCTURAL (Utf8 output vs pandas Categorical)
+Whole-surface re-survey (bench_survey2, 5M, best-of-6, pandas 2.2.3) confirmed the surface is dominated — rank_i64
+1.57x, argsort_i64 1.19x, nlargest 2.0x, nsmallest 1.41x, median 3.4x, clip_series 5.4x, value_counts/nunique/unique
+all win — EXCEPT `cut`, the one clear loss: cut_i64 0.33x (496ms vs pandas 164ms), cut_f64 0.40x (375ms vs 151ms).
+factorize wide-i64 (the old "KHASH floor") re-measured 2.24x WIN — that gap is long closed.
+
+CAUSE (two parts): (a) INPUT — cut_i64 fell to the generic `series.values()` arm, boxing all n values into Scalars
+(the `as_f64_slice` typed path only fired for Float64); even cut_f64 built a redundant `Vec<Option<f64>>` (80MB @5M)
++ a separate `valid: Vec<f64>` copy (40MB) purely to compute min/max. (b) OUTPUT — pandas `pd.cut` returns a
+Categorical (n 1-byte codes + ~10 category strings); fp's cut is conformance-LOCKED to a Utf8 Series of interval
+strings (strict packet FP-P2D-081 pins `utf8` values), so it MUST materialize n full label strings (~110MB of
+bytes+offsets @5M) — a strictly larger output than pandas produces. The per-row variable-length label memcpy dominates.
+
+FIX (input only — the safe ceiling): a typed all-valid fast path handling BOTH `as_f64_slice` AND `as_i64_slice`,
+reading the raw slice directly — one-pass min/max (folding each element as f64, exactly matching the generic `to_f64()`
+fold), then emitting the pre-formatted interval labels into one contiguous byte buffer. No `Vec<Option<f64>>`, no `valid`
+copy, no per-value Scalar materialization for the Int64 case. Bit-identical (verified vs pandas 2.2.3 for i64 and f64:
+same edges, same 0.1%-widened first-left, same `((f-min)/width).ceil()-1` clamp, same labels). The bin-index division
+is bit-locked (reciprocal-multiply would differ by ULPs and flip a boundary bin — the strict gate forbids it), and the
+Utf8 output is dtype-locked, so this input-side win is the max achievable without changing cut's return dtype.
+
+bench_survey2 5M, best-of-6 (3 stable runs), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `cut_i64` | 496ms | 408ms | 1.21x | 0.33x -> 0.40x (pandas 164ms) |
+| `cut_f64` | 375ms | 297ms | 1.26x | 0.40x -> 0.51x (pandas 151ms) |
+
+Residual loss is STRUCTURAL, same class as to_numpy/transpose (l4vzc): pandas returns a compact Categorical; fp's
+conformance contract is a materialized Utf8 interval-string column. Closing it fully would require cut to return
+`DType::Categorical` (codes+categories) — a return-dtype change that breaks the strict FP-P2D-081 Utf8 parity gate, so
+NOT pursued. fp-frame lib green, cut/qcut conformance green.
