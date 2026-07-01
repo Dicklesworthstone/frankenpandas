@@ -8126,3 +8126,23 @@ FLIPS LOSS->WIN. fp-columnar 467/0. (Utf8->Int64 astype has the same generic-pat
 cast_scalar(Utf8,Int64) tries i64 then f64-with-fract==0, so a typed path would gate on that. Not landed this session.)
 Also confirmed dominant this survey (no gap): to_csv 6.0x, read_json 1.4x/read_jsonl 1.7x, to_datetime 4.5x, to_numeric
 5.9x, merge_inner 3.3x, pivot_table mean/sum/std/median/min/max/count all 1.6-4.5x, df rank/corr/nlargest/nunique 11-25x.
+
+### 2026-07-01 BlackThrush — astype(Int64) on a Utf8 column: 0.65x LOSS -> 4.1x WIN (typed parse path; sister of the Utf8->Float64 lever)
+The documented follow-up to the Utf8->Float64 astype fix: `Series.astype(Int64)` on a string column was also a LOSS
+(1M int-strings: fp 63.6ms vs pandas 41.3ms = 0.65x) — same cause (Column::astype had no Utf8->numeric typed path, so it
+fell to the generic per-cell cast_scalar Scalar tail). FIX: a typed Utf8->Int64 path reproducing cast_scalar(Utf8(s),
+Int64) EXACTLY — try `s.parse::<i64>()`; else `s.parse::<f64>()` accepted only when finite, integer-valued (fract==0),
+and in i64 range (fp's long-standing "1.0"->1 via-float-intermediate behavior); else raise — parsed straight from the
+contiguous buffer into a typed Vec<i64>, then from_i64_values_owned (MOVE). Bail to the generic path on any failed cell
+(reproduces the identical InvalidCast). Bit-identical to the prior generic path (FP-P2D-024's 13 fixtures incl.
+utf8_to_int stay green).
+
+bench 1M int-strings, best-of-6 (stable ×3), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `astype(Int64)` on Utf8 | 63.6ms | 10.0ms | 6.36x | 0.65x -> 4.13x WIN (pandas 41.3ms) |
+
+FLIPS LOSS->WIN. fp-columnar 467/0. NOTE: fp accepts "1.0"->1 where pandas astype('int64') RAISES — this is a
+PRE-EXISTING cast_scalar parity difference (the generic path does the same), NOT introduced here; the typed path is
+bit-identical to prior fp behavior. Utf8->Float64 (shipped e9382ba79) + Utf8->Int64 now both typed — the Utf8->numeric
+astype surface is covered.

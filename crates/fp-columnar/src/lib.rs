@@ -15907,6 +15907,44 @@ impl Column {
                 return Ok(Self::from_f64_values_owned(out));
             }
         }
+        // Utf8 -> Int64: sister of the Utf8->Float64 path (astype(int64) on a
+        // string column was 0.65x pandas via the generic Scalar tail). cast_scalar(
+        // Utf8(s), Int64) is exactly: try `s.parse::<i64>()`; else `s.parse::<f64>()`
+        // accepted only when finite, integer-valued, and in i64 range (pandas takes
+        // "1.0" as int via a float intermediate); else raise. Reproduced verbatim
+        // here over the contiguous buffer into a typed Vec<i64>. `as_utf8_contiguous`
+        // is all-valid ⇒ every cell present; any field that fails BOTH parses BAILS
+        // to the generic Scalar path, which raises the identical InvalidCast. All
+        // present ⇒ from_i64_values_owned MOVEs. Bit-identical. (br-frankenpandas utf8-i64-astype)
+        if target == DType::Int64
+            && let Some((bytes, offsets)) = self.as_utf8_contiguous()
+        {
+            let n = offsets.len() - 1;
+            let mut out: Vec<i64> = Vec::with_capacity(n);
+            let mut ok = true;
+            for i in 0..n {
+                let Ok(s) = std::str::from_utf8(&bytes[offsets[i]..offsets[i + 1]]) else {
+                    ok = false;
+                    break;
+                };
+                if let Ok(v) = s.parse::<i64>() {
+                    out.push(v);
+                } else if let Ok(f) = s.parse::<f64>()
+                    && f.is_finite()
+                    && f.fract() == 0.0
+                    && f >= i64::MIN as f64
+                    && f < 9_223_372_036_854_775_808.0
+                {
+                    out.push(f as i64);
+                } else {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                return Ok(Self::from_i64_values_owned(out));
+            }
+        }
         // Int64 -> Utf8: hand-rolled decimal itoa straight into a contiguous
         // byte buffer (br-frankenpandas-itoa). cast_scalar(Int64(v), Utf8) is
         // exactly `v.to_string()` (pandas spells ints plainly — unlike floats
