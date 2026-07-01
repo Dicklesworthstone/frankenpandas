@@ -8146,3 +8146,26 @@ FLIPS LOSS->WIN. fp-columnar 467/0. NOTE: fp accepts "1.0"->1 where pandas astyp
 PRE-EXISTING cast_scalar parity difference (the generic path does the same), NOT introduced here; the typed path is
 bit-identical to prior fp behavior. Utf8->Float64 (shipped e9382ba79) + Utf8->Int64 now both typed — the Utf8->numeric
 astype surface is covered.
+
+### 2026-07-01 BlackThrush — searchsorted(many needles) on a sorted Int64 column: 0.49x LOSS -> 1.21x WIN (typed primitive binary search)
+Re-survey found `Series.searchsorted(values, side)` a LOSS (2M i64 needles into a 2M sorted i64 array: fp 926ms vs
+pandas 450ms = 0.49x — 463ns/search, far above a binary search's ~50ns floor). CAUSE: `searchsorted_values` binary-
+searches via `vals.partition_point(|v| compare_scalar_values(v, value))` over a materialized `Vec<Scalar>` — ~42M
+Scalar-enum comparisons (21 steps × 2M needles), each paying enum-dispatch instead of a raw i64 compare.
+
+FIX: a typed fast path — when the column is all-valid Int64 (`as_i64_slice`) AND ascending-sorted AND every needle is
+Int64, binary-search the raw `&[i64]` with primitive `partition_point(x < k)` [left] / `(x <= k)` [right]. Mixed / float
+/ missing needles keep the general Scalar path (cross-type compare + missing handled exactly). Bit-identical: for an
+all-valid sorted i64 array `compare_scalar_values(Int64,Int64)` is i64 cmp, so the insertion site matches. Verified vs
+pandas 2.2.3 (sorted-with-duplicates array [1,3,3,3,5,7,7,9], needles incl. boundary/out-of-range/exact-match — left AND
+right both EXACT).
+
+bench 2M i64 needles into 2M sorted i64, best-of-6 (×3), pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `searchsorted(many)` i64 | 926ms | 372ms | 2.49x | 0.49x -> 1.21x WIN (pandas 450ms) |
+
+FLIPS LOSS->WIN. fp-frame lib 3109/0; conformance 1596 packets green. (Float64 sorted column + Float64 needles has the
+same Scalar-dispatch shape — a natural sibling, not landed this session.) Also confirmed dominant this survey (no gap):
+map(dict) 2.2x, df.replace(dict) 14.6x, str.extract 3.1x, astype(datetime) parity; astype(Utf8->Bool) is a correctness
+parity item (fp raises, pandas gives all-True), not perf.
