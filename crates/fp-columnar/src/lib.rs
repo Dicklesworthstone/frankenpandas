@@ -19062,18 +19062,29 @@ impl Column {
         // -missing NaN (finite/inf round stays finite/inf), so the NaN set ==
         // original missing set. (~403ms / 15x slower than pandas on a 10%-null 5M.)
         if self.dtype == DType::Float64
-            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+            && let Some((data, _)) = self.as_f64_slice_with_validity()
         {
-            let out: Vec<f64> = (0..data.len())
-                .map(|i| {
-                    if validity.get(i) {
-                        (data[i] * factor).round_ties_even() / factor
-                    } else {
-                        f64::NAN
-                    }
-                })
-                .collect();
-            return Ok(Self::from_f64_values(out));
+            // round PRESERVES missingness exactly (a present value never rounds to
+            // NaN — finite/inf stay finite/inf — and a missing slot stays missing),
+            // so the OUTPUT validity == the INPUT validity. Two consequences vs the
+            // old `validity.get(i)`-per-element + `from_f64_values` form:
+            //   (1) drop the per-element validity branch — round EVERY slot over the
+            //       raw &[f64] (a masked slot's datum rounds to some finite value
+            //       that `from_f64_values_with_validity` then masks away, so the
+            //       logical result is identical to writing NaN there), giving the
+            //       branch-free, vectorizable map instead of a mispredicting scan.
+            //   (2) reuse the input validity mask directly instead of re-scanning
+            //       the whole output Vec for NaN inside `from_f64_values`.
+            // Bit-identical: valid slots use the SAME `(x*factor).round_ties_even()
+            // /factor`; missing slots view as `missing_for_dtype(Float64)` either
+            // way (~15x-slower nullable round was this get()+rescan tax).
+            // Elementwise + independent → fan out (par_map_vec_f64 self-gates on
+            // n and core count). Bit-identical: each slot's `(x*factor)
+            // .round_ties_even()/factor` is order-independent.
+            let out = par_map_vec_f64(data.len(), |i| {
+                (data[i] * factor).round_ties_even() / factor
+            });
+            return Ok(Self::from_f64_values_with_validity(out, self.validity.clone()));
         }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
