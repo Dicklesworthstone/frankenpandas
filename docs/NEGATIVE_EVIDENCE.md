@@ -8601,3 +8601,13 @@ bench 2M rows, card=1000 dense i64 key, nullable Int64 (20%-null), best-of-6, pa
 | `sgb.max`  nullable-i64 | 107ms | 22.3ms | 0.29x -> 1.41x WIN (pandas 31.5ms) |
 
 FLIPS LOSS->WIN across the reduction surface. FOLLOW-UPS (this probe): sparse/wide-i64-key + Utf8-key nullable value still generic (same branch, not yet added); `sgb.count` nullable 0.44x (separate count path); Series.diff nullable-i64 typed path attempted but REJECTED — 117ms->11ms fp-side yet still 0.1x (pandas non-grouped diff is a 1.15ms bandwidth-optimal SIMD subtract, unwinnable).
+
+### 2026-07-02 BlackThrush — Series.cumsum on NULLABLE Int64: typed skipna prefix-sum (0.14x -> 1.97x WIN)
+Follow-up from the nullable-i64 probe: Series.cumsum on a nullable Int64 column was 0.14x pandas (122ms) — the all-valid `as_i64_slice` cumsum path bails on ANY missing and the nullable-Float64 path is Float64-only, so it fell to the generic per-row `.values()` Scalar loop. The generic loop emits, for a nullable Int64 column, `acc += val.to_f64()` -> `Float64(acc)` on a present row and `Null(NaN)` on a missing row (skipna, acc not advanced) — a FLOAT64 output (pandas cumsum on int-with-NaN is float64 too). Added a typed path running that same skipna prefix sum off the raw `(&[i64], &ValidityMask)`, casting each present datum to f64 (mirror of the existing nullable-Float64 cumsum path). Bit-identical — missing slot -> `missing_for_dtype(Float64)` == `Null(NaN)` (the generic `Null(NaN)`), present slot `Float64(acc)` where `acc += data[i] as f64` (the generic `val.to_f64()`), seeded 0.0. Verified vs pandas 2.2.3 (5000-row, leading + interior missing, dtype Float64, 0 diffs). fp-frame 3109/0, fp-conformance 418/1 (pre-existing where/mask only).
+
+bench 2M rows, nullable Int64 (20%-null), best-of-6, pandas 2.2.3:
+| op | before | after | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `Series.cumsum` nullable-i64 | 122ms | 8.5ms | 0.14x -> 1.97x WIN (pandas 16.8ms) |
+
+FLIPS LOSS->WIN. Prefix-sum's sequential dependency means pandas isn't bandwidth-trivial (unlike the REJECTED non-grouped diff), so the typed pass wins. cumprod/cummax/cummin nullable-i64 are the sibling follow-ups (same all-valid-gate gap).
