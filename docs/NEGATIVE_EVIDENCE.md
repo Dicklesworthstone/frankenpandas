@@ -8578,3 +8578,14 @@ bench 2M rows, card=1000 dense i64 key, nullable Int64 (20%-null) sourced throug
 | `gb.shift(1)` Int64 nullable | 328ms | 14.6ms | 0.06x -> 1.44x WIN (pandas 21ms) |
 
 Broad structural fix: re-enables the typed Int64 path on ALL cloned nullable Int64 columns (shift measured here; dedup/value_counts/joins/groupby all gate on `as_i64_slice`/`as_i64_slice_with_validity`). REJECTED first attempt: a blanket carry of Int64/Float64/Bool caches broke 3 fp-columnar unit tests (they assert `data: None` after clone for all-valid + Float64 shapes) and risked the Float64 canonicalization — the narrow Int64-Eager scope is the safe subset.
+
+### 2026-07-02 BlackThrush — SeriesGroupBy.diff(periods) on Int64: dense i64->f64 ring kernel (0.31x -> 4.4x WIN)
+Sister to the Int64 shift win: grouped `diff` on an Int64 column produces a FLOAT64 output (`cur.to_f64() - prev.to_f64()`, exactly what the generic branch and pandas both do — pandas returns float64 for int diff). The dense f64 diff kernels gate on `as_f64_slice*` (Float64 only), so an Int64 column fell to the generic per-group Scalar gather (~9x slower than pandas). Added `dense_groupby_diff_i64_to_f64{,_by_key}` — the diff ring kernels reading i64 and casting to f64 (ring stores the cast value so the subtract is a plain f64 op). UNLIKE shift, NO NullKind subtlety: a Float64 output's missing IS `Null(NaN)` = `missing_for_dtype(Float64)`, exactly the generic path's `Null(NaN)`. Gated to `as_i64_slice_with_validity` (DType::Int64; excludes the Bool-XOR and Timedelta-diff special cases, which aren't Int64). Bit-identical — verified vs a public-API reimplementation of the exact generic path (5000-row differential, all-valid + nullable, periods 1/2/3/7, dtype Float64, 0 diffs). fp-frame 3109/0, fp-conformance 418/1 (pre-existing where/mask failure only).
+
+bench 2M rows, card=1000 dense i64 key, best-of-6, pandas 2.2.3:
+| op | before | after | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `gb.diff(1)` Int64 all-valid | 199ms | 14.2ms | 0.31x -> 4.4x WIN (pandas 62ms) |
+| `gb.diff(1)` Int64 nullable  | (generic) | 18.3ms | 3.1x WIN (pandas 57ms) |
+
+FLIPS LOSS->WIN. The nullable case rides on the Column::clone backing-preservation fix (41a17e11d) — without it the DataFrame-sourced nullable Int64 column would have stayed generic. Completes the grouped Int64 transform vein (shift + diff done; ffill/bfill done earlier).
