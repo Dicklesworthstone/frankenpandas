@@ -8386,3 +8386,23 @@ bench 2M×3 Float64 20%-null cols, best-of-6, pandas 2.2.3:
 Resolves the surfaced blocker for cum*/diff. STILL OPEN: df.shift (carries source NullKind via vals[src].clone — needs
 the Float64-missing==NaN convention decision or NullKind care) and grouped DataFrameGroupBy shift/cum* (use
 transform_dense_gids -> gid_per_row, a separate path). fp-frame lib 3109/0; conformance 1596 packets green.
+
+### 2026-07-01 BlackThrush — DataFrame.shift (non-groupby) on nullable Float64 cols: 0.119x LOSS -> 2.14x WIN (direct-column-access)
+Completes the non-groupby DataFrame transform sweep (after cum*/diff, d514cac48). df.shift on nullable Float64 cols was
+a LOSS (2M×3: fp 245ms vs pandas 25.6ms = 0.119x) — same `column_as_series` clone de-typing. FIX: Float64 columns shift
+straight off the STORED column's `(&[f64], &ValidityMask)` (validity-carrying memmove; vacated = missing/Null(NaN)); the
+NullKind concern is moot because a typed Float64 column's missing slots ARE Null(NaN) (the convention Series::shift
+relies on, conformance-green), and the generic path's de-typed clone carries those same Null(NaN) — so carrying
+`data[src]`+`validity[src]` reproduces `vals[src].clone()` bit-for-bit. Non-Float64 columns keep the exact
+apply_per_column gate (numeric → Series shift, non-numeric → clone passthrough). Verified vs pandas 2.2.3
+(shift(2)/shift(-2) nullable EXACT); conformance 1596 packets green (the NullKind convention held).
+
+bench 2M×3 Float64 20%-null cols, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df.shift` | 245ms | 12.0ms | 20x | 0.119x -> 2.14x WIN (pandas 25.6ms) |
+
+FLIPS LOSS->WIN. The full NON-groupby DataFrame nullable-f64 transform surface (shift/diff/cumsum/cumprod/cummin/cummax)
+is now dense. The surfaced Column::clone de-typing blocker is fully worked around at the DataFrame transform layer without
+touching clone. fp-frame lib 3109/0. Remaining nullable-transform gap: grouped DataFrameGroupBy (already 0.8-1.35x from
+7aa978dec; residual is the transform_dense_gids gid_per_row build).
