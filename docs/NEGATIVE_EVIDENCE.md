@@ -8253,3 +8253,26 @@ bench 2M Float64 20%-null value, i64 key, best-of-6, pandas 2.2.3:
 
 Both FLIP LOSS->WIN. With grouped shift (07ab7a033), the nullable-f64 SeriesGroupBy transform surface (shift/ffill/bfill)
 is now dense. fp-frame lib 3109/0; conformance 1596 packets green.
+
+### 2026-07-01 BlackThrush — SeriesGroupBy.diff/cumsum/cumprod/cummin/cummax on nullable Float64: 0.06x LOSS -> 1.9-2.1x WIN (nullable dense kernels)
+Completing the nullable-f64 SeriesGroupBy transform sweep (after shift/ffill/bfill): diff + the four cum* were ALL
+catastrophic losses on a nullable value column (2M 20%-null f64, card=100: diff 307ms/0.058x, cumsum 314ms/0.071x,
+cummax 305ms/0.067x — ~15-17x slower than pandas) — their dense paths (`try_cum_dense`, `dense_groupby_diff_f64`) gate
+on `as_f64_slice` (no missing), so nullable fell to the generic per-group Scalar gather.
+
+FIX: (1) `try_cum_dense_nullable(init, step)` — skipna cumulative over &[f64]+validity (present slot folds acc=step(acc,v)
+and outputs it; missing slot outputs missing, acc untouched; a present slot whose acc goes NaN via cumprod inf*0 clears
+its bit), wired into cumsum/cumprod/cummin/cummax after the all-valid path. (2) `dense_groupby_diff_nullable_f64{,_by_key}`
+— positional NaN-propagating diff (out = v - v_{periods-back}, valid iff both endpoints present). Bit-identical to the
+generic paths (verified vs pandas 2.2.3: diff/cumsum/cumprod/cummin/cummax on nullable groups ALL EXACT, incl. the
+skipna running-accumulator-across-gaps semantics).
+
+bench 2M Float64 20%-null value, i64 key, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `gb.cumsum` card=100 | 314.0ms | 10.8ms | 29x | 0.071x -> 2.05x WIN (pandas 22.2ms) |
+| `gb.cummax` card=100 | 305.3ms | 11.0ms | 28x | 0.067x -> 1.87x WIN (pandas 20.5ms) |
+| `gb.diff` card=100   | 307.2ms | 18.1ms | 17x | 0.058x -> 0.98x parity (card=1000 1.21x WIN) |
+
+diff removes a 17x-slower defect (parity/win); cum* FLIP to WIN. The full nullable-f64 SeriesGroupBy transform surface
+(shift, ffill, bfill, diff, cumsum, cumprod, cummin, cummax) is now dense. fp-frame lib 3109/0; conformance 1596 green.
