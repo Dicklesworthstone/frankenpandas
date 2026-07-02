@@ -3670,6 +3670,18 @@ impl ScalarValues {
         None
     }
 
+    /// Borrow the Float64 chunk views WITHOUT materializing the concatenated
+    /// buffer (unlike `chunks_float64_data`, which allocates+fills a cold
+    /// `Vec<f64>` — ~5.7ms/1M of page faults). Lets order-preserving reductions
+    /// (sum/mean) fold each chunk slice in place, so a `concat(...).sum()` never
+    /// pays the 40MB materialization pandas' eager concat is forced to.
+    fn float64_chunks_ref(&self) -> Option<&[Float64Chunk]> {
+        if let Self::LazyAllValidFloat64Chunks { chunks, .. } = self {
+            return Some(chunks);
+        }
+        None
+    }
+
     fn materialize_int64_chunks(chunks: &[Int64Chunk], len: usize) -> Vec<i64> {
         let mut out = Vec::with_capacity(len);
         for chunk in chunks {
@@ -12763,6 +12775,51 @@ impl Column {
 
     /// Sum of non-missing values.
     ///
+    /// Sum an all-valid Float64 `concat(...)` output (`LazyAllValidFloat64Chunks`)
+    /// by folding each chunk slice in place with ONE 0.0-seeded accumulator in
+    /// 0..n order — BIT-IDENTICAL to `as_f64_slice().iter().sum()` over the
+    /// materialized buffer (same values, same order, same sequential left-fold)
+    /// — but WITHOUT allocating+filling the cold concatenated `Vec<f64>` (the
+    /// [[f64-arc-copy-on-produce]] ~5.7 ms/1M page-fault cost). `None` for any
+    /// non-chunked / nullable / non-Float64 column (caller keeps its normal path).
+    #[must_use]
+    pub fn all_valid_f64_chunk_sum(&self) -> Option<f64> {
+        if self.dtype != DType::Float64 || !self.validity.all() {
+            return None;
+        }
+        let chunks = self.values.float64_chunks_ref()?;
+        let mut s = 0.0_f64;
+        for chunk in chunks {
+            for &x in chunk.as_slice() {
+                s += x;
+            }
+        }
+        Some(s)
+    }
+
+    /// Mean of an all-valid Float64 chunks column (see `all_valid_f64_chunk_sum`):
+    /// `Σ / len` with the in-place chunk fold; `None` for empty or non-chunked.
+    #[must_use]
+    pub fn all_valid_f64_chunk_mean(&self) -> Option<f64> {
+        if self.dtype != DType::Float64 || !self.validity.all() {
+            return None;
+        }
+        let chunks = self.values.float64_chunks_ref()?;
+        let mut s = 0.0_f64;
+        let mut count = 0usize;
+        for chunk in chunks {
+            let slice = chunk.as_slice();
+            for &x in slice {
+                s += x;
+            }
+            count += slice.len();
+        }
+        if count == 0 {
+            return None;
+        }
+        Some(s / count as f64)
+    }
+
     /// Matches `pd.Series.sum()` in skipna=True mode via fp-types::nansum.
     /// Empty column returns 0.0 (matching pandas).
     #[must_use]
@@ -12772,6 +12829,13 @@ impl Column {
         // Bit-identical to nansum's Float64 arm: a sequential left-fold seeded
         // at 0.0 over the same values in the same order (no Timedelta/missing
         // branch applies to an all-valid Float64 column).
+        // Chunk fast path: a `concat(...)` output is a lazy
+        // `LazyAllValidFloat64Chunks`; fold each chunk slice in place (see
+        // `all_valid_f64_chunk_sum`) instead of materializing the cold 40MB
+        // concat buffer, so `concat(...).sum()` beats pandas' copy-then-sum.
+        if let Some(s) = self.all_valid_f64_chunk_sum() {
+            return Scalar::Float64(s);
+        }
         if let Some(data) = self.as_f64_slice() {
             let mut s = 0.0_f64;
             for &x in data {
@@ -12790,6 +12854,11 @@ impl Column {
     pub fn mean(&self) -> Scalar {
         // Typed reduction (see `sum`): for an all-valid Float64 column nanmean
         // is `Σ / count` with count == len; an empty column stays Null(NaN).
+        // Chunk fast path (see `all_valid_f64_chunk_mean`): fold the concat
+        // chunks in place instead of materializing the cold buffer.
+        if let Some(m) = self.all_valid_f64_chunk_mean() {
+            return Scalar::Float64(m);
+        }
         if let Some(data) = self.as_f64_slice() {
             if data.is_empty() {
                 return Scalar::Null(NullKind::NaN);
