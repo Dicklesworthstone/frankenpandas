@@ -17898,6 +17898,12 @@ impl Column {
 
     #[inline]
     fn round_ties_even_fast(value: f64) -> f64 {
+        // Magic-number ties-to-even: `(|x|+2^52)-2^52` uses only SSE2
+        // add/sub/abs/compare, so it stays cheap on the BASELINE x86-64 target
+        // (SSE2, no SSE4.1). NOTE (negative result 2026-07-02): swapping this for
+        // the `f64::round_ties_even()` intrinsic REGRESSED round(2) 3.4→11.9ms —
+        // without `+sse4.1` the intrinsic lowers to a libm `roundeven` CALL per
+        // element (no `roundpd`), un-vectorizable. Keep the magic trick.
         const TWO_POW_52: f64 = 4_503_599_627_370_496.0;
         let abs = value.abs();
         if abs < TWO_POW_52 {
