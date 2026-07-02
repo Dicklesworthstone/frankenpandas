@@ -8459,3 +8459,22 @@ bench 2M Float64 20%-null, best-of-6, pandas 2.2.3:
 
 FLIPS LOSS->WIN. fp-frame lib 3109/0; conformance 1596 packets green. (Also surfaced this probe: drop_duplicates nullable
 0.63x and idxmax nullable 0.74x — smaller losses, follow-ups; value_counts 1.9x / nunique 3.2x WIN.)
+
+### 2026-07-01 BlackThrush — Series.drop_duplicates on Float64 (all-valid + nullable): typed dedup path, ~1.4-2x fp-side -> near parity
+Follow-up from the sort_values probe: Float64 had NO typed drop_duplicates path (Int64/Datetime64/Timedelta64/Utf8 do),
+so both all-valid AND nullable f64 fell to the generic `.values()` Scalar + `scalar_key_allow_missing` path (nullable was
+0.63x pandas). FIX: a typed Float64 dedup keying present values by their normalized f64 bits (-0.0 == 0.0, matching
+scalar_key_allow_missing) in an FxHashMap<u64>, collapsing all missing/NaN into one group via a `seen_missing` flag
+(pandas dedups all NaN together, keeping one; a typed Float64 column's missing are Null(NaN) — the distinct-NullKind case
+is object/Null-dtype, which doesn't hit this DType::Float64-gated path). First/Last/None all handled; typed
+`take_positions` gather. Bit-identical, verified vs pandas 2.2.3 (idx AND vals EXACT incl. NaN-dedup + -0.0/0.0 merge).
+
+bench 2M Float64, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `drop_duplicates` nullable | 177ms | 128ms | 1.39x | 0.63x -> 0.88x (pandas 112ms) |
+| `drop_duplicates` all-valid | (generic) | 85.9ms | ~2x | 0.94x (pandas 80.7ms) |
+
+Removes the Scalar-materialization tax; lands at NEAR PARITY (0.88-0.94x — residual is FxHashMap<u64> vs pandas' khash
+constant factor, a structural hash-table difference). Real fp-side gain (not near-zero), bit-identical, covers the whole
+f64 dedup surface. fp-frame lib 3109/0; conformance 1596 packets green. (idxmax nullable 0.74x still open — small.)
