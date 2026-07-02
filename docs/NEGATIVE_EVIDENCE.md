@@ -8533,3 +8533,28 @@ bench 2M Float64 20%-null, best-of-6, pandas 2.2.3:
 
 FLIPS LOSS->WIN. fp-frame lib 3109/0; conformance 1596 packets green. (Also surfaced this probe: df.corr on 5 null cols
 0.45x — pairwise-null correlation, a bigger separate follow-up; median 1.15x / mode 1.53x WIN.)
+
+### 2026-07-02 BlackThrush — SeriesGroupBy.ffill/bfill on Int64 & Utf8: gather-index dense path (Utf8 0.25x -> 1.23x WIN)
+Probe found grouped `ffill`/`bfill` a LOSS for every dtype except Float64: the dense `try_dense_fill` only covers f64,
+so an Int64/Utf8/Bool value column fell to the generic `transform_groups` path — SipHash/dense group build + a per-group
+`Vec<Scalar>` clone + a scatter clone + `from_values` rescan, ALL of it String churn for Utf8 (grouped Utf8 ffill was ~4x
+slower than pandas). KEY INSIGHT: grouped fill is a pure GATHER — every output row copies exactly one source row's value.
+Added `try_dense_fill_gather` (dtype-generic): ONE O(n) pass over a dense gid layout computes, per output slot, the source
+row it copies — `row` itself when present (or when no in-limit fill is available, keeping its own missing value), else the
+group's last-seen present row (ffill) / next present row (bfill); `Column::take_positions` then does the typed gather
+(contiguous Int64/Utf8 buffers, no per-group Scalar materialization). Gated to dtypes whose missingness is fully
+determined by the validity mask (Bool/BoolNullable/Int64/Int64Nullable/Utf8) so `validity.get(i)` == `!is_missing()`;
+Float64 (NaN-as-missing, own path) and Datetime64/Timedelta64 (NaT sentinels) excluded. Bit-identical (present slot copies
+own value, filled slot copies the same source row the generic path clones, unfilled-missing copies own missing value;
+`limit` caps consecutive fills identically). Verified vs pandas 2.2.3: ffill+bfill, Int64/Utf8/Bool, limit=None/1/2/3,
+leading/trailing nulls and all-null groups — ALL EXACT (4000-row differential, 0 diffs across 9 cases). bfill shares the
+identical machinery (reverse iteration).
+
+bench 2M rows, card=1000 dense i64 key, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `gb.ffill` Utf8  | 1031ms | 212ms | 4.9x | 0.25x -> 1.23x WIN (pandas 260ms) |
+| `gb.ffill` Int64 |  331ms | 168ms | 2.0x | 0.57x -> 1.12x WIN (pandas 187ms) |
+
+FLIPS LOSS->WIN. fp-frame lib 3109/0. (Also surfaced: `gb.fillna` Utf8 0.77x — but SeriesGroupBy.fillna is DEPRECATED in
+pandas 2.2, so left alone; `gb.fillna` Int64 already 1.33x WIN.)
