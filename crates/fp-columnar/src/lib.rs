@@ -8880,9 +8880,14 @@ impl Column {
             // materializes Scalar::Int64(data[i]) exactly as the primitive path
             // would, with the same all-valid mask. (br-frankenpandas-uza04)
             if let Some(data) = self.take_cached_all_valid_int64_positions(positions) {
+                // MOVE the gathered Vec<i64> into the owned backing instead of
+                // Arc::<[i64]>::from(Vec) (16 MB copy — same [[f64-arc-copy-on-produce]]
+                // tax the sibling Float64 gather just shed, 8.8× col-side). Bit-identical:
+                // LazyAllValidInt64Vec is all-valid Int64, as_i64_slice/values() match
+                // LazyAllValidInt64. Contiguous/strided i64 views keep Arc<[i64]>.
                 return Self {
                     dtype: self.dtype,
-                    values: ScalarValues::lazy_all_valid_int64(data),
+                    values: ScalarValues::lazy_all_valid_int64_owned(data),
                     validity: ValidityMask::all_valid(n),
                     data: None,
                 };
