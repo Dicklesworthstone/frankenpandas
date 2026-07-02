@@ -8478,3 +8478,20 @@ bench 2M Float64, best-of-6, pandas 2.2.3:
 Removes the Scalar-materialization tax; lands at NEAR PARITY (0.88-0.94x — residual is FxHashMap<u64> vs pandas' khash
 constant factor, a structural hash-table difference). Real fp-side gain (not near-zero), bit-identical, covers the whole
 f64 dedup surface. fp-frame lib 3109/0; conformance 1596 packets green. (idxmax nullable 0.74x still open — small.)
+
+### 2026-07-01 BlackThrush — Series.quantile on nullable Float64: 0.40x LOSS (2.5x slower) -> 1.65x WIN (nullable quickselect)
+Probe found quantile(q) on a nullable Float64 column a LOSS (2M 20%-null: fp 55ms vs pandas 22ms = 0.40x) — striking
+because median (== quantile 0.5) was a 1.15x WIN. Cause: quantile's all-valid typed quickselect (`typed_quantile_f64`)
+gates on `as_f64_slice`/`as_i64_slice`, so a nullable column fell to the generic filter + O(n log n) FULL SORT +
+percentile_with_interpolation. FIX: a nullable Float64 path — gather present (`validity.get(i) && !data[i].is_nan()` ==
+the generic `!is_missing()`) values off `(&[f64], &ValidityMask)` and run the same O(n) `typed_quantile_f64` quickselect.
+Bit-identical (typed_quantile_f64 mirrors sort+percentile; verified vs pandas 2.2.3: q=0/0.25/0.5/0.75/1.0 on a nullable
+series ALL EXACT = 1/2/3/4/5).
+
+bench 2M Float64 20%-null, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `Series.quantile` nullable | 55.0ms | 13.2ms | 4.2x | 0.40x -> 1.65x WIN (pandas 21.8ms) |
+
+FLIPS LOSS->WIN. fp-frame lib 3109/0; conformance 1596 packets green. (Also surfaced this probe: df.corr on 5 null cols
+0.45x — pairwise-null correlation, a bigger separate follow-up; median 1.15x / mode 1.53x WIN.)
