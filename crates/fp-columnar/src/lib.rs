@@ -6904,14 +6904,47 @@ impl Column {
     }
 
     fn from_inferred_float64_values(values: Vec<Scalar>) -> Result<Self, ColumnError> {
-        let coerced = values
-            .into_iter()
-            .map(|value| match value {
-                Scalar::Null(kind) => Ok(Scalar::Null(kind)),
-                other => cast_scalar_owned(other, DType::Float64),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        // Coerce to f64 while tracking whether the column is "canonical NaN-missing"
+        // (every missing slot is EXACTLY Null(NaN) — no Null(NaT)/Null(Null), and no
+        // present Float64(NaN) which is `is_missing` yet a distinct Scalar variant).
+        // This is the pandas-faithful Float64 case (float missing is always NaN).
+        // When it holds, a raw f64 buffer (with a 0.0 SENTINEL at missing slots) +
+        // validity fully reproduces every Scalar via the LazyNullableFloat64 backing
+        // — which every typed fast path (take_positions/sort/dedup/...) recognizes,
+        // unlike the Eager ColumnData::Float64+from_vec representation whose per-slot
+        // NullKind forces a per-row Scalar::clone gather (take was 13x slower).
+        // The 0.0 sentinel is REQUIRED: LazyNullableFloat64.values() emits
+        // Float64(datum) when `validity || datum.is_nan()`, so a NaN sentinel at a
+        // missing slot would wrongly materialize Float64(NaN) instead of Null(NaN).
+        let mut fdata: Vec<f64> = Vec::with_capacity(values.len());
+        let mut canonical_nan_missing = true;
+        let mut coerced: Vec<Scalar> = Vec::with_capacity(values.len());
+        for value in values {
+            let c = match value {
+                Scalar::Null(kind) => Scalar::Null(kind),
+                other => cast_scalar_owned(other, DType::Float64)?,
+            };
+            match &c {
+                Scalar::Float64(x) => {
+                    fdata.push(*x);
+                    if x.is_nan() {
+                        canonical_nan_missing = false; // present Float64(NaN): keep Eager
+                    }
+                }
+                Scalar::Null(NullKind::NaN) => fdata.push(0.0), // 0.0 sentinel, NOT NaN
+                _ => {
+                    fdata.push(0.0);
+                    canonical_nan_missing = false; // Null(NaT)/Null(Null): keep Eager
+                }
+            }
+            coerced.push(c);
+        }
         let validity = ValidityMask::from_values(&coerced);
+        if canonical_nan_missing {
+            // Bit-identical: present ⇒ Float64(fdata[i]) == coerced Float64; missing
+            // ⇒ validity-clear + 0.0 datum ⇒ Null(NaN) == coerced Null(NaN).
+            return Ok(Self::from_f64_values_with_validity(fdata, validity));
+        }
         let data = Self::cached_data_for_values(DType::Float64, &coerced);
         let values = match (&data, validity.all()) {
             (Some(ColumnData::Float64(data)), true) => {
