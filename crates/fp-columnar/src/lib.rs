@@ -5068,13 +5068,38 @@ pub struct Column {
 
 impl Clone for Column {
     fn clone(&self) -> Self {
+        let values = self
+            .clone_dense_values_from_cache()
+            .unwrap_or_else(|| self.values.clone());
+        // Preserve the Arc-backed typed `data` cache through the clone for a
+        // NULLABLE Int64 column. `clone_dense_values_from_cache` already rescues
+        // the ALL-VALID case (it converts Eager values to a lazy typed backing,
+        // so `as_i64_slice` stays available WITHOUT the cache — hence those clones
+        // keep `data: None`), but it bails for any column with nulls: a nullable
+        // Int64 column's `values` stay Eager and its `data` cache was dropped, so
+        // `as_i64_slice_with_validity` returned None on the clone. Since
+        // Series/DataFrame ops clone columns constantly, that silently degraded
+        // every dense fast path gated on it (groupby shift/dedup/value_counts/
+        // joins) to the generic Scalar path. Carrying the `Arc<[i64]>` (an O(1)
+        // refcount bump) restores typed access. Scoped to Int64 + still-Eager
+        // values: the all-valid and Float64 clone shapes are untouched (their
+        // tests assert `data: None`), and Float64's mixed NaN/Null missing —
+        // where a typed view would canonicalize `Null(Null)`->`Null(NaN)` — is
+        // deliberately excluded. `values`/`validity`/`dtype` are unchanged and the
+        // cache is a consistent view of `values` (`PartialEq` ignores `data`).
+        let data = match &self.data {
+            Some(d @ ColumnData::Int64(_))
+                if self.dtype == DType::Int64 && matches!(values, ScalarValues::Eager(_)) =>
+            {
+                Some(d.clone())
+            }
+            _ => None,
+        };
         Self {
             dtype: self.dtype,
-            values: self
-                .clone_dense_values_from_cache()
-                .unwrap_or_else(|| self.values.clone()),
+            values,
             validity: self.validity.clone(),
-            data: None,
+            data,
         }
     }
 }
