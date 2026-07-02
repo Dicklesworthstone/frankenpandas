@@ -8276,3 +8276,25 @@ bench 2M Float64 20%-null value, i64 key, best-of-6, pandas 2.2.3:
 
 diff removes a 17x-slower defect (parity/win); cum* FLIP to WIN. The full nullable-f64 SeriesGroupBy transform surface
 (shift, ffill, bfill, diff, cumsum, cumprod, cummin, cummax) is now dense. fp-frame lib 3109/0; conformance 1596 green.
+
+### 2026-07-01 BlackThrush — DataFrameGroupBy shift/diff/cumsum/cumprod/cummin/cummax on nullable Float64 cols: 0.04-0.11x LOSS -> 0.8-1.35x (10-15x fp-side)
+Parallel to the SeriesGroupBy nullable sweep: DataFrameGroupBy transforms were catastrophic losses when ANY value column
+was nullable (2M×2 f64 20%-null, card=100: dfgb.shift 566ms/0.083x, cumsum 566ms/0.051x, diff 606ms/0.11x — 9-26x slower
+than pandas). CAUSE: `try_shift_dense`/`try_diff_dense`/`try_cum_dense` did `col.as_f64_slice()?` per column, so a single
+nullable column bailed the WHOLE frame to the generic per-column Scalar `transform_groups`.
+
+FIX: each helper now handles a nullable Float64 column per-column via `as_f64_slice_with_validity` + the gid-based
+nullable kernels (`dense_groupby_shift_nullable_f64`, `dense_groupby_diff_nullable_f64`, new
+`dense_groupby_cum_nullable_f64`); all-valid columns keep the MOVE fast path, non-Float64 columns still bail to generic.
+Bit-identical (verified vs pandas 2.2.3: shift/cumsum/diff/cumprod on a nullable-col frame ALL EXACT).
+
+bench 2M×2 Float64 20%-null cols, i64 key, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `dfgb.diff` card=100   | 606ms | 50.0ms | 12x   | 0.11x -> 1.35x WIN (pandas 67.6ms) |
+| `dfgb.cumsum` card=100 | 566ms | 37.2ms | 15x   | 0.051x -> 0.77x (pandas 28.8ms) |
+| `dfgb.shift` card=100  | 566ms | 54.2ms | 10.4x | 0.083x -> 0.87x (pandas 47.3ms) |
+
+diff FLIPS to WIN; shift/cumsum go from catastrophic loss to near-parity (removes a 10-26x-slower defect; residual is the
+DataFrame multi-column + gid_per_row build vs pandas' fused Cython — a smaller follow-up, e.g. a by-key path avoiding
+gid_per_row). fp-frame lib 3109/0; conformance 1596 packets green.
