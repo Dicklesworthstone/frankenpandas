@@ -8589,3 +8589,15 @@ bench 2M rows, card=1000 dense i64 key, best-of-6, pandas 2.2.3:
 | `gb.diff(1)` Int64 nullable  | (generic) | 18.3ms | 3.1x WIN (pandas 57ms) |
 
 FLIPS LOSS->WIN. The nullable case rides on the Column::clone backing-preservation fix (41a17e11d) — without it the DataFrame-sourced nullable Int64 column would have stayed generic. Completes the grouped Int64 transform vein (shift + diff done; ffill/bfill done earlier).
+
+### 2026-07-02 BlackThrush — SeriesGroupBy sum/mean/max/min on NULLABLE numeric value: dense skipna bucket (0.32x -> 1.5x WIN)
+Probe found grouped reductions on a nullable Int64 value column ~0.3x pandas: `agg_numeric` (shared by sum/mean/max/min/etc.) has dense direct-address bucket paths, but they gate on `as_f64_slice`/`as_i64_slice` (ALL-VALID), so a nullable value column fell to the generic `build_groups` Scalar path (per-row .values() + ScalarKey + SipHash). Added a NULLABLE branch to the bounded-Int64-key dense path: bucket only PRESENT values per group (skipna — `validity.get(i)`, plus a valid-but-NaN Float64 slot skipped, exactly the generic `filter_map` that skips `is_missing()`), and emit `Null(NaN)` for an all-missing group (the generic `nums.is_empty()` arm) else `Float64(func(nums))`. Bit-identical to the generic path (same first-seen gid order + i64 labels, same present nums per group in row order, same aggregate). Verified vs pandas 2.2.3 (sum via min_count=1 to match fp's empty-group NaN; mean/max/min natural): sum/mean/max/min ALL EXACT incl. an all-missing group. One branch fixes every `agg_numeric` reducer. fp-frame 3109/0, fp-conformance 418/1 (pre-existing where/mask only).
+
+bench 2M rows, card=1000 dense i64 key, nullable Int64 (20%-null), best-of-6, pandas 2.2.3:
+| op | before | after | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `sgb.sum`  nullable-i64 | 102ms | 21.0ms | 0.32x -> 1.56x WIN (pandas 32.8ms) |
+| `sgb.mean` nullable-i64 | 108ms | 23.5ms | 0.32x -> 1.45x WIN (pandas 34.0ms) |
+| `sgb.max`  nullable-i64 | 107ms | 22.3ms | 0.29x -> 1.41x WIN (pandas 31.5ms) |
+
+FLIPS LOSS->WIN across the reduction surface. FOLLOW-UPS (this probe): sparse/wide-i64-key + Utf8-key nullable value still generic (same branch, not yet added); `sgb.count` nullable 0.44x (separate count path); Series.diff nullable-i64 typed path attempted but REJECTED — 117ms->11ms fp-side yet still 0.1x (pandas non-grouped diff is a 1.15ms bandwidth-optimal SIMD subtract, unwinnable).
