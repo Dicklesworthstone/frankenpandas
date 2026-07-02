@@ -8363,3 +8363,26 @@ de-typing `column_as_series` clone. Safe for cum*/diff (their generic path alrea
 `Null(NullKind::NaN)`, so a typed output matches bit-for-bit); shift is the exception (it CARRIES the source NullKind via
 `vals[src].clone()`, so a typed shift would need to preserve NullKind — or accept the Float64-missing==NaN convention).
 Alternatively: a NullKind-preserving nullable typed backing. Series-level ops are unaffected (already fast).
+
+### 2026-07-01 BlackThrush — DataFrame cumsum/cumprod/cummin/cummax/diff on nullable Float64 cols: 0.16x/0.45x LOSS -> 2.3x/9x WIN (direct-column-access, the safe fix for the surfaced clone blocker)
+Landed the SAFE fix for the blocker surfaced above (Column::clone de-types nullable Float64 via the NullKind-preserving
+invariant): instead of touching clone, the DataFrame cum*/diff now fold straight off the STORED column's typed
+`(&[f64], &ValidityMask)` (via `as_f64_slice_with_validity`) — no `column_as_series` clone, no de-typing. `apply_cum_f64`
+runs the skipna cumulative for Float64 columns (present folds `acc=step(acc,v)`, missing outputs missing, cumprod inf*0
+NaN clears its bit); `df.diff` runs the positional NaN-propagating diff (valid iff both endpoints present). Non-Float64
+columns delegate to the Series op / pass through EXACTLY as `apply_per_column`'s gate did (numeric → op, non-numeric →
+clone passthrough — preserves the string-column-passthrough test + Timedelta/Bool dtype rules). SAFE because cum*/diff
+NORMALIZE every missing to `Null(NaN)` in both the typed and generic paths (unlike shift, which carries source NullKind —
+deliberately left on the existing path). Bit-identical, verified vs pandas 2.2.3 (cumsum/cumprod/cummin/cummax + diff
+±periods on nullable cols ALL EXACT).
+
+bench 2M×3 Float64 20%-null cols, best-of-6, pandas 2.2.3:
+| op | before | after | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `df.cumsum` | 235ms | 11.8ms | 20x | 0.449x -> 9.0x WIN (pandas 106ms) |
+| `df.diff`   | 253ms | 15.8ms | 16x | 0.155x -> 2.26x WIN (pandas 35.7ms) |
+| `df.cummax/cummin/cumprod` | ~235ms | ~12ms | ~20x | flipped to WIN |
+
+Resolves the surfaced blocker for cum*/diff. STILL OPEN: df.shift (carries source NullKind via vals[src].clone — needs
+the Float64-missing==NaN convention decision or NullKind care) and grouped DataFrameGroupBy shift/cum* (use
+transform_dense_gids -> gid_per_row, a separate path). fp-frame lib 3109/0; conformance 1596 packets green.
