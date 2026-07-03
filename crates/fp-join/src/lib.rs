@@ -8960,6 +8960,74 @@ impl MergeAsofOptions {
     }
 }
 
+/// When BOTH `on` keys are Datetime64, extract them as f64 SHIFTED by the global
+/// minimum ns so the values fit f64's 2^53 integer precision exactly. A raw
+/// Datetime64->ns->f64 cast collapses ns (~1.6e18) to garbage (>2^53), so
+/// merge_asof previously REJECTED datetime keys ("must be numeric") — the primary
+/// time-series asof case. Shifting is order- and difference-preserving (both sides
+/// by the same min), so the f64 asof match + tolerance stay exact whenever the ns
+/// RANGE fits 2^53 (~104 days). Returns:
+/// - `None`: not both Datetime64 → caller uses the f64 numeric path unchanged.
+/// - `Some(Err)`: range too wide for exact f64 → clean rejection (better than the
+///   silently-wrong result a lossy cast would give).
+/// - `Some(Ok((left,right)))`: shifted f64 keys, NaT/null → NaN.
+fn try_asof_datetime_shift(
+    left_key: &Column,
+    right_key: &Column,
+    on: &str,
+) -> Option<Result<(Vec<f64>, Vec<f64>), JoinError>> {
+    if left_key.dtype() != DType::Datetime64 || right_key.dtype() != DType::Datetime64 {
+        return None;
+    }
+    let ld = left_key.as_datetime64_slice()?;
+    let rd = right_key.as_datetime64_slice()?;
+    let lv = left_key.validity();
+    let rv = right_key.validity();
+    let valid = |data: &[i64], v: &fp_columnar::ValidityMask, i: usize| -> bool {
+        v.get(i) && data[i] != fp_types::Timestamp::NAT
+    };
+    // Global min/max over the valid (non-NaT) ns of both sides.
+    let mut lo = i64::MAX;
+    let mut hi = i64::MIN;
+    let mut any = false;
+    for i in 0..ld.len() {
+        if valid(ld, lv, i) {
+            lo = lo.min(ld[i]);
+            hi = hi.max(ld[i]);
+            any = true;
+        }
+    }
+    for i in 0..rd.len() {
+        if valid(rd, rv, i) {
+            lo = lo.min(rd[i]);
+            hi = hi.max(rd[i]);
+            any = true;
+        }
+    }
+    if !any {
+        // All-NaT/empty: every shifted value is NaN; produce that directly.
+        return Some(Ok((vec![f64::NAN; ld.len()], vec![f64::NAN; rd.len()])));
+    }
+    if (hi as i128 - lo as i128) >= (1i128 << 53) {
+        return Some(Err(JoinError::Frame(FrameError::CompatibilityRejected(format!(
+            "merge_asof: Datetime64 key '{on}' spans more than ~104 days of nanoseconds, \
+             which exceeds f64 asof precision; not yet supported"
+        )))));
+    }
+    let shift = |data: &[i64], v: &fp_columnar::ValidityMask| -> Vec<f64> {
+        (0..data.len())
+            .map(|i| {
+                if valid(data, v, i) {
+                    (data[i] - lo) as f64
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect()
+    };
+    Some(Ok((shift(ld, lv), shift(rd, rv))))
+}
+
 fn asof_numeric_values(column: &Column, side: &str, on: &str) -> Result<Vec<f64>, JoinError> {
     // Typed fast path: an all-valid Int64/Float64 key column reads the raw slice
     // directly, skipping the per-cell values() Scalar materialization + to_f64
@@ -9071,8 +9139,15 @@ fn merge_asof_simple(
         )))
     })?;
 
-    let left_vals = asof_numeric_values(left_key, "left", on)?;
-    let right_vals = asof_numeric_values(right_key, "right", on)?;
+    // Datetime64 keys: shift-to-f64 (exact for <~104-day ns ranges) instead of the
+    // rejected/precision-lossy direct cast. Falls back to the f64 numeric path.
+    let (left_vals, right_vals) = match try_asof_datetime_shift(left_key, right_key, on) {
+        Some(shifted) => shifted?,
+        None => (
+            asof_numeric_values(left_key, "left", on)?,
+            asof_numeric_values(right_key, "right", on)?,
+        ),
+    };
 
     // pandas pd.merge_asof accepts NaN keys: the NaN row gets a null in
     // the joined columns (no match). The strict "reject null keys" check
@@ -9125,8 +9200,15 @@ fn merge_asof_grouped(
         )))
     })?;
 
-    let left_vals = asof_numeric_values(left_key, "left", on)?;
-    let right_vals = asof_numeric_values(right_key, "right", on)?;
+    // Datetime64 keys: shift-to-f64 (exact for <~104-day ns ranges) instead of the
+    // rejected/precision-lossy direct cast. Falls back to the f64 numeric path.
+    let (left_vals, right_vals) = match try_asof_datetime_shift(left_key, right_key, on) {
+        Some(shifted) => shifted?,
+        None => (
+            asof_numeric_values(left_key, "left", on)?,
+            asof_numeric_values(right_key, "right", on)?,
+        ),
+    };
 
     // pandas pd.merge_asof accepts NaN keys: the NaN row gets a null in
     // the joined columns (no match). The strict "reject null keys" check
