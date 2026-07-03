@@ -8738,3 +8738,14 @@ bench 2M rows, wide-i64 (~1M distinct, *7919), best-of-5, pandas 2.2.3:
 | `Series.duplicated` wide-i64 | 204.7ms | 80.5ms | 34.9ms | 0.29x -> 1.73x WIN (pandas 60.3ms) |
 
 FLIPS LOSS->WIN. The open-addressing i64 table is the "custom open-addr i64 table UNTRIED" lever from the khash-floor notes — it beats FxHashSet<i64> by ~2.3x here. Shared via duplicated_flags_over_i64 so drop_duplicates(keep=first/last) inherit it. REMAINING khash-floor siblings still on FxHashMap: value_counts wide-i64 0.41x, unique/nunique wide-i64 0.73x (candidate for the same open-addr table adapted to counting / first-seen collection).
+
+### 2026-07-02 BlackThrush — Series.unique / nunique on WIDE/high-cardinality Int64: open-addressing i64 set (LOSS -> 1.4-1.6x WIN)
+Sibling of the duplicated wide-i64 fix (prior entry). unique() and nunique() had typed wide-range Int64 fast paths but on `FxHashSet<i64>`, which loses to pandas' khash on wide/high-cardinality data (unique 0.73x, nunique 0.74x). Added `Self::oa_distinct_i64(data, collect)` — the same custom open-addressing i64 table as oa_dup_flags_i64 (power-of-two, linear probe, splitmix64, inline slots + occupied byte-map, load factor <=0.75), returning the distinct count and (for unique) the first-seen distinct values. Swapped both FxHashSet sites for it. Bit-identical: VERIFIED vs pandas 2.2.3 on 30k wide-i64 — unique() first-seen ORDER exactly matches pandas.unique(), nunique() count EXACT. fp-frame 3109/0.
+
+bench 2M rows, wide-i64 (~1M distinct, *7919), best-of-5, pandas 2.2.3:
+| op | before (FxHashSet) | after (open-addr) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `Series.nunique` wide-i64 | 72.0ms | 32.8ms | 0.74x -> 1.63x WIN (pandas 53.4ms) |
+| `Series.unique`  wide-i64 | 76.0ms | 39.8ms | 0.73x -> 1.40x WIN (pandas 55.8ms) |
+
+FLIPS LOSS->WIN. Extends the open-addressing lever to the distinct-collection ops. REMAINING khash-floor sibling: value_counts wide-i64 0.41x (needs the table + a per-key count payload + first-seen-order emit) — the last and biggest of the wide-i64 hash losses.
