@@ -8998,7 +8998,7 @@ COLD 500k x 5 (4 nullable-numeric @10% null + 1 str), min-of-many, load ~19, pan
 | fp before (Scalar fallback) | fp after (typed+validity) | pandas | ratio |
 | ---: | ---: | ---: | ---: |
 | 212.2ms | 156.5ms | 148.6ms | 0.70x -> 0.95x (near-parity) |
-All-valid numeric path unchanged (adds only a None-check branch per cell; valid stays None). read_csv mixed now near-parity/win across all-valid AND nullable numeric shapes. (Regression re-measure of the all-valid path was blocked by box contention at commit time; 605/0 confirms correctness.)
+All-valid numeric path unchanged (adds only a None-check branch per cell; valid stays None). read_csv mixed now near-parity/win across all-valid AND nullable numeric shapes. CONFIRMED no regression on the all-valid path (re-measured quiet-box: numeric-heavy 172.5ms vs 177ms pre-nullable baseline — within noise, marginally faster).
 
 ### 2026-07-03 BlackThrush — read_json is a WIN (don't chase); read_csv 2-pass raw-avoidance REJECTED
 Dug for a fresh IO lever after closing read_csv. TWO findings (both keep future turns off dead ends):
