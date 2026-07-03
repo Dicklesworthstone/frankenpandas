@@ -8999,3 +8999,10 @@ COLD 500k x 5 (4 nullable-numeric @10% null + 1 str), min-of-many, load ~19, pan
 | ---: | ---: | ---: | ---: |
 | 212.2ms | 156.5ms | 148.6ms | 0.70x -> 0.95x (near-parity) |
 All-valid numeric path unchanged (adds only a None-check branch per cell; valid stays None). read_csv mixed now near-parity/win across all-valid AND nullable numeric shapes. (Regression re-measure of the all-valid path was blocked by box contention at commit time; 605/0 confirms correctness.)
+
+### 2026-07-03 BlackThrush — read_json is a WIN (don't chase); read_csv 2-pass raw-avoidance REJECTED
+Dug for a fresh IO lever after closing read_csv. TWO findings (both keep future turns off dead ends):
+
+(1) read_json IS ALREADY A WIN. read_json_str uses the same Vec<Scalar> round-trip (column_from_json_values) that read_csv had, BUT pandas read_json is slow (unlike its C csv tokenizer) so fp wins anyway: 300k x 3 records COLD, fp 189.9ms vs pandas 293.7ms = 1.55x (measured even under box load ~60). Applying the read_csv typed-accumulator would amplify it (~189→~140ms) but it's gold-plating a WIN (>1.0x) — deprioritized. DON'T re-chase read_json as a loss.
+
+(2) read_csv 2-pass raw-avoidance REJECTED (analyzed, not landed). The read_csv residual is that raw bytes are built for ALL columns though only Utf8-result (Fallback) columns consult them (~36% of parse per memory). A single pass CANNOT avoid raw for numeric columns because a column's type is unknown until the last row (it can drop to Fallback anytime, needing all prior verbatim raw). The 2-pass alternative (pass1 typed-classify no-raw; pass2 re-parse+raw only Fallback cols) REGRESSES text-heavy CSVs: an all-text frame does pass1 (typed-attempt every cell, all fail) THEN pass2 (re-tokenize + parse_scalar + raw every cell) = strictly MORE work than today's single pass. A "cheap classification pass" isn't cheap (deciding numeric-vs-text IS the parse). Lossy reconstruction of numeric-cell verbatim from the typed buffer is the verbatim blocker. So raw-for-all is inherent to the single-pass design; read_csv stays at its current near-parity/win. The mixed-CSV gap is effectively closed.
