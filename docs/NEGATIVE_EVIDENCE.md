@@ -8656,3 +8656,14 @@ bench 2M rows, sparse i64 key (card 200k, *1_000_003), nullable Int64 (20%-null)
 | `sgb.max`  sparse-i64 nullable | 671ms | 192.5ms | ~0.45x -> 1.56x WIN (pandas 300ms) |
 
 FLIPS LOSS->WIN. The typed FxHashMap<i64,gid> grouping (already used for all-valid sparse-i64 values) was the missing rung for the nullable value case — same template as the bounded-Int64 and contiguous-Utf8 nullable branches. REMAINING: an EAGER Utf8 key nullable value still uses build_groups (needs a scalar-Utf8-key dense path in agg_numeric — separate lever, covers all-valid too).
+
+### 2026-07-02 BlackThrush — SeriesGroupBy.count NULLABLE value + Int64/Utf8 key: typed present-count (LOSS -> 1.8-3.1x WIN)
+count()'s dense/typed fast paths all gate on `!has_any_missing()` (all-valid value ⇒ count == group size). A NULLABLE value column fell to the generic build_groups tail (SipHash + per-row Scalar `.values()[idx].is_missing()`) — 0.47x pandas for a bounded-Int64 key, collapsing to 0.16x for a sparse/wide-Int64 key (SipHash-dominated). Added a nullable-value handler ahead of the tail: precompute a `present` mask once off the raw validity (`as_i64_slice_with_validity` ⇒ `validity.get(i)`; `as_f64_slice_with_validity` ⇒ `validity.get(i) && !is_nan`, since a valid-but-NaN Float64 slot is `is_missing()`), then group via the same typed key structures the all-valid paths use — bounded-Int64 dense table, sparse-Int64 FxHashMap<i64,gid>, contiguous-Utf8 FxHashMap<&[u8],gid> — creating a gid on first-seen KEY (pandas keeps an all-missing group ⇒ count 0) and adding `present[i]` per row. Bit-identical: VERIFIED vs pandas 2.2.3 on a differential (9000 rows, bounded card 37 + sparse card 600 *1_000_003, group-4 fully-missing value + 25% null), bounded AND sparse counts all EXACT incl. the count-0 group.
+
+bench 2M rows, nullable Int64 (20%-null) value, best-of-6, quiet box, pandas 2.2.3:
+| op | before (generic) | after | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `sgb.count` bounded-i64 key | 64.7ms | 9.86ms | 0.47x -> 3.06x WIN (pandas 30.2ms) |
+| `sgb.count` sparse-i64 key  | 605.8ms | 52.9ms | 0.16x -> 1.82x WIN (pandas 96.1ms) |
+
+FLIPS LOSS->WIN. count was a SEPARATE path from agg_numeric (counts non-missing per group, not a reduction) — this closes the documented `sgb.count nullable-i64 0.44x` gap plus the far worse sparse-i64 case. Same template family as the agg_numeric nullable branches (bounded/sparse-i64 + contiguous-Utf8). REMAINING: EAGER Utf8 key (in-memory, as_utf8_contiguous==None) nullable value still build_groups.
