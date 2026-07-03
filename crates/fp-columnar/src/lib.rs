@@ -8939,6 +8939,25 @@ impl Column {
                 };
             }
 
+            // Datetime64 sibling of the Int64 gather: a Datetime64 column stores
+            // its ns as an i64 backing (`as_datetime64_slice`), so gather the raw
+            // ns by position into a typed Datetime64 column instead of the generic
+            // per-row Vec<Scalar::Datetime64> materialization (~32 B/elem boxing +
+            // from_values rescan — datetime take/iloc/merge-output/sort was ~8.5×
+            // slower than the i64 sibling and ~0.12× pandas). Bit-identical:
+            // `from_datetime64_values` (lazy_all_valid_datetime64) materializes
+            // `Scalar::Datetime64(ns)` exactly as the primitive path would, same
+            // all-valid mask, and a NaT sentinel is carried through unchanged.
+            if self.dtype == DType::Datetime64
+                && let Some(src) = self.as_datetime64_slice()
+            {
+                let mut data = Vec::with_capacity(n);
+                for &pos in positions {
+                    data.push(src[pos]);
+                }
+                return Self::from_datetime64_values(data);
+            }
+
             // Zero-copy contiguous-range view (br-frankenpandas-jbyuc.1.1.1):
             // when the requested positions are a contiguous ascending range over
             // an Arc-shared contiguous-Utf8 backing, share the source `bytes`/

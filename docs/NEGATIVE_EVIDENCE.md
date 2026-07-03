@@ -9072,3 +9072,11 @@ Clean same-load A/B (load ~9), 1M/1M short-range datetime backward:
 | --- | ---: | ---: | ---: |
 | merge_asof(datetime) 1M/1M | 21.3ms | 17.5ms | 15.5ms (0.73x -> 0.89x) |
 ~18% faster, near parity. df.corrwith (9.7x) + df.nlargest (20x) confirmed WINS this pass (pandas loops in Python) — not levers.
+
+### 2026-07-03 BlackThrush — Datetime64 typed scattered gather in take_positions — LOSS 0.12x -> 0.35x (3x fp-side)
+Column::take_positions (the gather behind Series.take / df.iloc / merge output / sort_values / loc on a datetime column) had typed Float64/Int64/Utf8 arms but NO Datetime64 arm — a Datetime64 column fell to the generic per-row Vec<Scalar::Datetime64> materialization (32 B/elem boxing + from_values rescan). Measured 2M scattered gather: datetime 146ms vs the i64 sibling 25ms (~5.8x slower) and vs pandas .take 17.3ms = 0.12x. Added a Datetime64 arm mirroring the Int64 gather (as_datetime64_slice -> gather ns by position -> from_datetime64_values). Bit-identical (Datetime64 stores i64 ns; from_datetime64_values materializes Scalar::Datetime64(ns) exactly as the primitive path, NaT sentinel carried through; verified + fp-columnar 467/0 + fp-frame 3109/0).
+2M scattered take, min-of-8, pandas(numpy) 2.2.3:
+| op | before (Scalar) | after (typed) | pandas | ratio |
+| --- | ---: | ---: | ---: | ---: |
+| datetime take 2M scattered | 146ms | 49ms | 17.3ms | 0.12x -> 0.35x |
+3x fp-side, broad (all datetime-column gathers). RESIDUAL to reach ~parity (i64 is 15ms): lazy_all_valid_datetime64 does Arc::from(Vec) = a 16MB copy (TRIPLES memory traffic: gather-write + copy-read + copy-write) where the i64 path MOVES via lazy_all_valid_int64_owned. Needs a LazyAllValidDatetime64Vec owned variant (substantial — touches every ScalarValues match arm), deferred. Timedelta64 has the same gap (no from_timedelta64_values ctor).
