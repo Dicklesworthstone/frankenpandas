@@ -8728,3 +8728,13 @@ bench 2M rows, 2 Int64 keys (~2000 groups), mixed nullable Float64 + Int64 value
 | `dfgb.mean` multi-Int64 key | 165.9ms | 25.4ms | 0.60x -> 3.93x WIN (pandas 99.8ms) |
 
 FLIPS LOSS->WIN. Extends the single-key nullable dfgb wins to the multi-key case. DataFrameGroupBy nullable-value surface (single AND multi Int64/Utf8 keys × nullable Int64/Float64 values × all reducers) now fully WIN.
+
+### 2026-07-02 BlackThrush — Series.duplicated on WIDE/high-cardinality Int64: custom open-addressing i64 hash set (LOSS -> 1.73x WIN)
+duplicated_flags_i64_direct required a BOUNDED-range dense histogram; a wide/high-cardinality Int64 column (range too large for the direct-address table) returned None and fell to the generic `.values()` + ScalarKey + SipHash path — 0.29x pandas (204ms vs 60ms), the classic khash floor. Two-step fix: (1) route wide-range Int64 through the existing typed `duplicated_flags_over_i64` (was FxHashSet<i64>, used by the Datetime64 wide-span path) instead of bailing — got to 80ms/0.75x, still a loss (FxHashSet loses to khash); (2) replace its First/Last arms with a custom open-addressing i64 hash set (khash-style: power-of-two table, linear probing, splitmix64 hash, inline i64 slots + occupied byte-map, load factor <=0.75) — one contiguous alloc, no per-op modulo, cache-friendly probe. 204ms -> 34.9ms. Bit-identical (VERIFIED vs pandas 2.2.3 duplicated(keep='first') on 20k wide-i64, EXACT; Last symmetric, None unchanged on FxHashSet). fp-frame 3109/0.
+
+bench 2M rows, wide-i64 (~1M distinct, *7919), best-of-5, pandas 2.2.3:
+| op | before (Scalar) | +FxHashSet | +open-addr | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `Series.duplicated` wide-i64 | 204.7ms | 80.5ms | 34.9ms | 0.29x -> 1.73x WIN (pandas 60.3ms) |
+
+FLIPS LOSS->WIN. The open-addressing i64 table is the "custom open-addr i64 table UNTRIED" lever from the khash-floor notes — it beats FxHashSet<i64> by ~2.3x here. Shared via duplicated_flags_over_i64 so drop_duplicates(keep=first/last) inherit it. REMAINING khash-floor siblings still on FxHashMap: value_counts wide-i64 0.41x, unique/nunique wide-i64 0.73x (candidate for the same open-addr table adapted to counting / first-seen collection).
