@@ -8990,3 +8990,12 @@ COLD parse (distinct input/iter so the parse cache never hits), min-of-many, loa
 | read_csv 500k x 3 mixed (int/float/str) | 139.7ms | 114.4ms | 112.2ms | 0.80x -> 0.98x (parity) |
 | read_csv 500k x 6 (5 numeric + 1 str) | 257.6ms | 177.1ms | 181.3ms | 0.70x -> 1.02x WIN |
 Numeric-heavy (the common real CSV shape) now BEATS pandas; canonical 3-col mixed reaches parity. The more numeric columns, the bigger the win (each skips the Scalar round-trip). Was "the biggest remaining pandas gap". RESIDUAL: nullable-numeric + Utf8 columns still take the Scalar fallback (raw building for all columns remains); a 2-pass classify-then-parse could lift those too — deferred, lower-EV now that the gap is closed to parity.
+
+### 2026-07-03 BlackThrush — read_csv NULLABLE-numeric columns typed too — LOSS 0.70x -> 0.95x (near-parity)
+Follow-on to bfbe0e397. That commit fast-pathed only pure-numeric-NO-null columns; a numeric column with any missing value still hit the Scalar fallback, so a CSV with missing data in numeric columns stayed a loss (500k x 5, 4 numeric @10% null + 1 str: fp 212ms vs pandas 148.6ms = 0.70x). Extended the per-column accumulator to carry an Option<Vec<bool>> validity (None = all-valid, the free common case; Some once an NA appears). A nullable numeric column now emits from_i64_values_with_validity / from_f64_values_with_validity directly. Bit-identical (PROBED + 605/0 + dump): Int64 missing -> Null(Null); Float64 missing -> Null(NaN) (matches build_csv_object_aware_column's Float normalize); int->null->float promotes to Float64; ALL-NA or 0-row column routes to Fallback -> Null dtype (a has_value guard — an all-null typed column would be the wrong dtype). Only bool/text still triggers full Fallback.
+
+COLD 500k x 5 (4 nullable-numeric @10% null + 1 str), min-of-many, load ~19, pandas 2.2.3:
+| fp before (Scalar fallback) | fp after (typed+validity) | pandas | ratio |
+| ---: | ---: | ---: | ---: |
+| 212.2ms | 156.5ms | 148.6ms | 0.70x -> 0.95x (near-parity) |
+All-valid numeric path unchanged (adds only a None-check branch per cell; valid stays None). read_csv mixed now near-parity/win across all-valid AND nullable numeric shapes. (Regression re-measure of the all-valid path was blocked by box contention at commit time; 605/0 confirms correctness.)

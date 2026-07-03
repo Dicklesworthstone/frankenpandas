@@ -1461,13 +1461,19 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     // equivalent Scalars: all-Int64 → Int64 (from_i64_values), any-Float64-no-null
     // → Float64 with ints coerced to `x as f64` (from_f64_values) — exactly what
     // Column::from_values + build_csv_object_aware_column produce for those inputs.
+    // `valid: None` = all-valid so far (the common fast case, no per-cell bit
+    // tracking); `Some(mask)` = at least one NA has appeared. A numeric column
+    // with nulls stays typed — fp's from_values keeps int+null as NULLABLE Int64
+    // and float+null as Float64, and build_csv_object_aware_column normalizes a
+    // Float null to NaN; `from_{i64,f64}_values_with_validity` reproduce those
+    // exactly (Int64 missing → Null(Null); Float64 missing → Null(NaN); verified).
     enum ColAcc {
-        Int(Vec<i64>),
-        Float(Vec<f64>),
+        Int(Vec<i64>, Option<Vec<bool>>),
+        Float(Vec<f64>, Option<Vec<bool>>),
         Fallback,
     }
     let mut accs: Vec<ColAcc> = (0..header_count)
-        .map(|_| ColAcc::Int(Vec::with_capacity(row_hint)))
+        .map(|_| ColAcc::Int(Vec::with_capacity(row_hint), None))
         .collect();
 
     let mut row_count: i64 = 0;
@@ -1484,24 +1490,52 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
             // Mirror parse_scalar's decision order EXACTLY: NA (untrimmed) →
             // Int64(trimmed) → Float64(trimmed) → else (bool/text) = ambiguous.
             if is_pandas_default_na(field) {
-                *acc = ColAcc::Fallback;
+                match acc {
+                    ColAcc::Int(buf, valid) => {
+                        valid.get_or_insert_with(|| vec![true; buf.len()]).push(false);
+                        buf.push(0);
+                    }
+                    ColAcc::Float(buf, valid) => {
+                        valid.get_or_insert_with(|| vec![true; buf.len()]).push(false);
+                        buf.push(0.0);
+                    }
+                    ColAcc::Fallback => {}
+                }
                 continue;
             }
             let trimmed = field.trim();
             if let Ok(v) = trimmed.parse::<i64>() {
                 match acc {
-                    ColAcc::Int(buf) => buf.push(v),
-                    ColAcc::Float(buf) => buf.push(v as f64),
+                    ColAcc::Int(buf, valid) => {
+                        buf.push(v);
+                        if let Some(vv) = valid {
+                            vv.push(true);
+                        }
+                    }
+                    ColAcc::Float(buf, valid) => {
+                        buf.push(v as f64);
+                        if let Some(vv) = valid {
+                            vv.push(true);
+                        }
+                    }
                     ColAcc::Fallback => {}
                 }
             } else if let Ok(v) = trimmed.parse::<f64>() {
                 match acc {
-                    ColAcc::Int(buf) => {
+                    ColAcc::Int(buf, valid) => {
                         let mut promoted: Vec<f64> = buf.iter().map(|&i| i as f64).collect();
                         promoted.push(v);
-                        *acc = ColAcc::Float(promoted);
+                        if let Some(vv) = valid.as_mut() {
+                            vv.push(true);
+                        }
+                        *acc = ColAcc::Float(promoted, valid.take());
                     }
-                    ColAcc::Float(buf) => buf.push(v),
+                    ColAcc::Float(buf, valid) => {
+                        buf.push(v);
+                        if let Some(vv) = valid {
+                            vv.push(true);
+                        }
+                    }
                     ColAcc::Fallback => {}
                 }
             } else {
@@ -1511,17 +1545,52 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
         row_count += 1;
     }
 
+    // Build a ValidityMask from a per-row bool vec (all-true entries are the
+    // default). Returns None if every entry is valid (caller uses the all-valid
+    // constructor) or if none are (caller falls back — an all-NA column is Null
+    // dtype in the Scalar path, not typed).
+    fn validity_from_bools(valid: &[bool]) -> Option<fp_columnar::ValidityMask> {
+        if valid.iter().all(|&b| b) {
+            return None;
+        }
+        let mut mask = fp_columnar::ValidityMask::all_valid(valid.len());
+        for (i, &ok) in valid.iter().enumerate() {
+            if !ok {
+                mask.set(i, false);
+            }
+        }
+        Some(mask)
+    }
+
     let mut out_columns = BTreeMap::new();
     let mut column_order = Vec::with_capacity(header_count);
     for (idx, acc) in accs.into_iter().enumerate() {
         let name = headers.get(idx).cloned().unwrap_or_default();
+        // An empty (0-row) or all-NA numeric column is Null/empty dtype in the
+        // Scalar path, not Int64 — route it to the fallback for exact parity.
+        let has_value = |buf_len: usize, valid: &Option<Vec<bool>>| -> bool {
+            buf_len > 0
+                && valid
+                    .as_ref()
+                    .map_or(true, |v| v.iter().any(|&b| b))
+        };
         let column = match acc {
-            // Typed fast paths: only taken when EVERY cell was clean-numeric with
-            // no null/bool/text, so the output dtype is unambiguous.
-            ColAcc::Int(buf) => Column::from_i64_values(buf),
-            ColAcc::Float(buf) => Column::from_f64_values(buf),
-            // Any ambiguous cell → exact legacy path from the verbatim raw bytes.
-            ColAcc::Fallback => {
+            // Typed fast paths (all-valid OR nullable): taken when every cell was
+            // clean-numeric (possibly NA), so the output dtype is unambiguous.
+            ColAcc::Int(buf, valid) if has_value(buf.len(), &valid) => {
+                match valid.as_deref().and_then(validity_from_bools) {
+                    Some(mask) => Column::from_i64_values_with_validity(buf, mask),
+                    None => Column::from_i64_values(buf),
+                }
+            }
+            ColAcc::Float(buf, valid) if has_value(buf.len(), &valid) => {
+                match valid.as_deref().and_then(validity_from_bools) {
+                    Some(mask) => Column::from_f64_values_with_validity(buf, mask),
+                    None => Column::from_f64_values(buf),
+                }
+            }
+            // Any ambiguous cell, all-NA, or empty → exact legacy path from raw.
+            _ => {
                 let raw_b = &raw_bytes[idx];
                 let raw_o = &raw_offsets[idx];
                 let mut values = Vec::with_capacity(raw_o.len().saturating_sub(1));
