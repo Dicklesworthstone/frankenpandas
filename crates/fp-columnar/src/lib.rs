@@ -1910,6 +1910,16 @@ enum ScalarValues {
         data: Arc<Vec<i64>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Owned all-valid Timedelta64 (nanosecond) backing — the Timedelta sibling of
+    /// `LazyAllValidDatetime64Vec` (Timedelta64 otherwise has no lazy typed variant,
+    /// only `ColumnData::Timedelta64`). Lets a scattered timedelta gather move its
+    /// `Vec<i64>` nanos in instead of boxing a `Scalar::Timedelta64` per row.
+    /// Materializes `Scalar::Timedelta64(data[i])` (a NaT sentinel is carried
+    /// through unchanged).
+    LazyAllValidTimedelta64Vec {
+        data: Arc<Vec<i64>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyAllValidFloat64 {
         data: Arc<[f64]>,
         all_finite: OnceLock<bool>,
@@ -2368,6 +2378,14 @@ impl ScalarValues {
     /// with no element copy. Used by the scattered Datetime64 gather.
     fn lazy_all_valid_datetime64_owned(data: Vec<i64>) -> Self {
         Self::LazyAllValidDatetime64Vec {
+            data: Arc::new(data),
+            values: OnceLock::new(),
+        }
+    }
+
+    /// Move-not-copy Timedelta64 backing (sibling of the datetime owned ctor).
+    fn lazy_all_valid_timedelta64_owned(data: Vec<i64>) -> Self {
+        Self::LazyAllValidTimedelta64Vec {
             data: Arc::new(data),
             values: OnceLock::new(),
         }
@@ -3812,6 +3830,9 @@ impl ScalarValues {
             Self::LazyAllValidDatetime64Vec { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Datetime64).collect())
                 .as_slice(),
+            Self::LazyAllValidTimedelta64Vec { data, values } => values
+                .get_or_init(|| data.iter().copied().map(Scalar::Timedelta64).collect())
+                .as_slice(),
             Self::LazyAllValidFloat64 { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
                 .as_slice(),
@@ -4475,6 +4496,7 @@ impl ScalarValues {
             Self::LazyAllValidInt64Chunks { len, .. } => *len,
             Self::LazyAllValidDatetime64 { data, .. } => data.len(),
             Self::LazyAllValidDatetime64Vec { data, .. } => data.len(),
+            Self::LazyAllValidTimedelta64Vec { data, .. } => data.len(),
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64Vec { data, .. } => data.len(),
             Self::LazyAllValidFloat64Chunks { len, .. } => *len,
@@ -4728,6 +4750,10 @@ impl Clone for ScalarValues {
                 Self::lazy_all_valid_datetime64_arc(Arc::clone(data))
             }
             Self::LazyAllValidDatetime64Vec { data, .. } => Self::LazyAllValidDatetime64Vec {
+                data: Arc::clone(data),
+                values: OnceLock::new(),
+            },
+            Self::LazyAllValidTimedelta64Vec { data, .. } => Self::LazyAllValidTimedelta64Vec {
                 data: Arc::clone(data),
                 values: OnceLock::new(),
             },
@@ -8328,6 +8354,9 @@ impl Column {
         if self.dtype != DType::Timedelta64 {
             return None;
         }
+        if let ScalarValues::LazyAllValidTimedelta64Vec { data, .. } = &self.values {
+            return Some(data.as_slice());
+        }
         if let Some(ColumnData::Timedelta64(data)) = &self.data {
             return Some(data.as_slice());
         }
@@ -8988,6 +9017,22 @@ impl Column {
                 return Self {
                     dtype: DType::Datetime64,
                     values: ScalarValues::lazy_all_valid_datetime64_owned(data),
+                    validity: ValidityMask::all_valid(n),
+                    data: None,
+                };
+            }
+
+            // Timedelta64 sibling of the Datetime64 gather (both store i64 ns).
+            if self.dtype == DType::Timedelta64
+                && let Some(src) = self.as_timedelta64_slice()
+            {
+                let mut data = Vec::with_capacity(n);
+                for &pos in positions {
+                    data.push(src[pos]);
+                }
+                return Self {
+                    dtype: DType::Timedelta64,
+                    values: ScalarValues::lazy_all_valid_timedelta64_owned(data),
                     validity: ValidityMask::all_valid(n),
                     data: None,
                 };

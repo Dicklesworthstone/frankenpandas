@@ -9088,3 +9088,11 @@ Closed the residual from 34e4374b8. The Datetime64 take arm used from_datetime64
 | --- | ---: | ---: | ---: | ---: |
 | datetime take 2M scattered | 49ms | 20.5ms | 17.3ms | 0.35x -> 0.84x |
 Now ~parity with the i64 sibling (18.2ms). Full arc: 146ms (0.12x) -> 49ms (typed gather) -> 20.5ms (move) = 0.84x. Broad — every datetime-column gather (take/iloc/merge-output/sort/loc). Timedelta64 still has the original Scalar-gather gap (no owned ctor / from_timedelta64_values).
+
+### 2026-07-03 BlackThrush — Timedelta64 typed scattered gather in take_positions — 0.10x -> 0.33x (3.2x)
+The Timedelta64 sibling of the Datetime64 gather fix (34e4374b8/542631050). take_positions had no Timedelta64 arm → generic per-row Vec<Scalar::Timedelta64> materialization; 2M scattered take was 128ms vs pandas 13.3ms = 0.10x. Added the FIRST lazy typed Timedelta64 backing — a LazyAllValidTimedelta64Vec ScalarValues variant (Arc<Vec<i64>> move) + lazy_all_valid_timedelta64_owned + a take arm (as_timedelta64_slice -> gather ns -> owned move) + as_timedelta64_slice coverage for the new variant. Exhaustive match flagged exactly 3 arms (values/len/clone) — compile-safe. Bit-identical (timedelta take value check + fp-columnar 467/0 + fp-frame 3109/0).
+2M scattered take, min-of-8, pandas(numpy):
+| op | before (Scalar) | after (typed+move) | pandas | ratio |
+| --- | ---: | ---: | ---: | ---: |
+| timedelta take 2M scattered | 128ms | 39.8ms | 13.3ms | 0.10x -> 0.33x |
+3.2x fp-side, broad (all timedelta-column gathers). Slightly behind datetime's 0.84x because a from_values timedelta source carries BOTH a Scalar backing and the ColumnData::Timedelta64 cache (more memory pressure) vs datetime's pure LazyAllValidDatetime64. GOTCHA: after a fp-columnar lib change, force-rebuild the example (touch) — a stale-linked bench binary read 123ms (unchanged) and hid the win; take_positions direct was already 10.9ms.
