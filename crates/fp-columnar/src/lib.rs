@@ -1920,6 +1920,22 @@ enum ScalarValues {
         data: Arc<Vec<i64>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Nullable Datetime64 backing (the temporal mirror of `LazyNullableInt64`):
+    /// contiguous ns `data` + `validity`; an invalid slot materializes
+    /// `Scalar::Null(NullKind::NaT)` (= `missing_for_dtype(Datetime64)`), a valid
+    /// slot `Scalar::Datetime64(data[i])`. Used by null-introducing datetime
+    /// gathers (outer join / align / reindex on a datetime column).
+    LazyNullableDatetime64 {
+        data: Vec<i64>,
+        validity: ValidityMask,
+        values: OnceLock<Vec<Scalar>>,
+    },
+    /// Nullable Timedelta64 sibling of `LazyNullableDatetime64`.
+    LazyNullableTimedelta64 {
+        data: Vec<i64>,
+        validity: ValidityMask,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyAllValidFloat64 {
         data: Arc<[f64]>,
         all_finite: OnceLock<bool>,
@@ -2387,6 +2403,22 @@ impl ScalarValues {
     fn lazy_all_valid_timedelta64_owned(data: Vec<i64>) -> Self {
         Self::LazyAllValidTimedelta64Vec {
             data: Arc::new(data),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_datetime64(data: Vec<i64>, validity: ValidityMask) -> Self {
+        Self::LazyNullableDatetime64 {
+            data,
+            validity,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_nullable_timedelta64(data: Vec<i64>, validity: ValidityMask) -> Self {
+        Self::LazyNullableTimedelta64 {
+            data,
+            validity,
             values: OnceLock::new(),
         }
     }
@@ -3833,6 +3865,42 @@ impl ScalarValues {
             Self::LazyAllValidTimedelta64Vec { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Timedelta64).collect())
                 .as_slice(),
+            Self::LazyNullableDatetime64 {
+                data,
+                validity,
+                values,
+            } => values
+                .get_or_init(|| {
+                    data.iter()
+                        .enumerate()
+                        .map(|(i, &v)| {
+                            if validity.get(i) {
+                                Scalar::Datetime64(v)
+                            } else {
+                                Scalar::Null(NullKind::NaT)
+                            }
+                        })
+                        .collect()
+                })
+                .as_slice(),
+            Self::LazyNullableTimedelta64 {
+                data,
+                validity,
+                values,
+            } => values
+                .get_or_init(|| {
+                    data.iter()
+                        .enumerate()
+                        .map(|(i, &v)| {
+                            if validity.get(i) {
+                                Scalar::Timedelta64(v)
+                            } else {
+                                Scalar::Null(NullKind::NaT)
+                            }
+                        })
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyAllValidFloat64 { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
                 .as_slice(),
@@ -4497,6 +4565,8 @@ impl ScalarValues {
             Self::LazyAllValidDatetime64 { data, .. } => data.len(),
             Self::LazyAllValidDatetime64Vec { data, .. } => data.len(),
             Self::LazyAllValidTimedelta64Vec { data, .. } => data.len(),
+            Self::LazyNullableDatetime64 { data, .. } => data.len(),
+            Self::LazyNullableTimedelta64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64Vec { data, .. } => data.len(),
             Self::LazyAllValidFloat64Chunks { len, .. } => *len,
@@ -4757,6 +4827,12 @@ impl Clone for ScalarValues {
                 data: Arc::clone(data),
                 values: OnceLock::new(),
             },
+            Self::LazyNullableDatetime64 { data, validity, .. } => {
+                Self::lazy_nullable_datetime64(data.clone(), validity.clone())
+            }
+            Self::LazyNullableTimedelta64 { data, validity, .. } => {
+                Self::lazy_nullable_timedelta64(data.clone(), validity.clone())
+            }
             Self::LazyAllValidFloat64 {
                 data, all_finite, ..
             } => Self::lazy_all_valid_float64_arc_with_finite(
@@ -7968,6 +8044,49 @@ impl Column {
         }
     }
 
+    /// Datetime64 counterpart of [`Self::from_i64_values_with_validity`]: invalid
+    /// slots materialize `Scalar::Null(NullKind::NaT)` (= `missing_for_dtype`),
+    /// valid slots `Scalar::Datetime64(data[i])`. All-valid folds to the owned
+    /// move backing. Used by the null-introducing datetime gather.
+    #[doc(hidden)]
+    pub fn from_datetime64_values_with_validity(data: Vec<i64>, validity: ValidityMask) -> Self {
+        debug_assert_eq!(data.len(), validity.len());
+        if validity.all() {
+            return Self {
+                dtype: DType::Datetime64,
+                values: ScalarValues::lazy_all_valid_datetime64_owned(data),
+                validity,
+                data: None,
+            };
+        }
+        Self {
+            dtype: DType::Datetime64,
+            values: ScalarValues::lazy_nullable_datetime64(data, validity.clone()),
+            validity,
+            data: None,
+        }
+    }
+
+    /// Timedelta64 sibling of [`Self::from_datetime64_values_with_validity`].
+    #[doc(hidden)]
+    pub fn from_timedelta64_values_with_validity(data: Vec<i64>, validity: ValidityMask) -> Self {
+        debug_assert_eq!(data.len(), validity.len());
+        if validity.all() {
+            return Self {
+                dtype: DType::Timedelta64,
+                values: ScalarValues::lazy_all_valid_timedelta64_owned(data),
+                validity,
+                data: None,
+            };
+        }
+        Self {
+            dtype: DType::Timedelta64,
+            values: ScalarValues::lazy_nullable_timedelta64(data, validity.clone()),
+            validity,
+            data: None,
+        }
+    }
+
     /// Build a `Bool` column from already-typed contiguous values plus a
     /// validity mask (br-frankenpandas-rcvpj). The nullable counterpart of
     /// [`Column::from_bool_values`]: an all-valid mask folds to the contiguous
@@ -10389,6 +10508,52 @@ impl Column {
                 }
             }
             return Ok(Self::from_f64_values_with_validity(
+                data,
+                ValidityMask::from_words(words, n),
+            ));
+        }
+        // Datetime64 / Timedelta64 null-introducing gather (temporal sibling of the
+        // Int64 arm): gather the raw ns by position into a typed nullable backing,
+        // skipping the per-row Scalar clone + Column::new revalidation. Missing slots
+        // (None / out-of-range) materialize Null(NaT) = missing_for_dtype; valid slots
+        // Datetime64/Timedelta64(ns). All-valid source only (a NAT sentinel in a valid
+        // slot is carried through unchanged, matching the Scalar path).
+        if self.validity.all()
+            && self.dtype == DType::Datetime64
+            && let Some(slice) = self.as_datetime64_slice()
+        {
+            let mut data = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, slot) in positions.iter().enumerate() {
+                match slot {
+                    Some(idx) if *idx < slice.len() => {
+                        data.push(slice[*idx]);
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                    _ => data.push(Timestamp::NAT),
+                }
+            }
+            return Ok(Self::from_datetime64_values_with_validity(
+                data,
+                ValidityMask::from_words(words, n),
+            ));
+        }
+        if self.validity.all()
+            && self.dtype == DType::Timedelta64
+            && let Some(slice) = self.as_timedelta64_slice()
+        {
+            let mut data = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, slot) in positions.iter().enumerate() {
+                match slot {
+                    Some(idx) if *idx < slice.len() => {
+                        data.push(slice[*idx]);
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                    _ => data.push(Timedelta::NAT),
+                }
+            }
+            return Ok(Self::from_timedelta64_values_with_validity(
                 data,
                 ValidityMask::from_words(words, n),
             ));
