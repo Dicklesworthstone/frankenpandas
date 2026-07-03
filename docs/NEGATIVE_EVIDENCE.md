@@ -8717,3 +8717,14 @@ bench 2M rows, ~1000 groups, mixed nullable Int64 + Float64 value cols, best-of-
 | `dfgb.mean` eager-Utf8 key    | 149.1ms | 53.2ms | 0.59x -> 1.66x WIN (pandas 88.2ms) |
 
 FLIPS LOSS->WIN. DataFrameGroupBy nullable-value surface (sum/mean/max/min/var/std/prod/median/first/last/count × {bounded-Int64, contiguous/eager-Utf8} keys × {nullable Int64, nullable Float64} values) now fully WIN. LESSON: nullable-Int64 groupby output dtype follows the GENERIC path, not the all-valid dense arm (prod Int64->Float64 divergence) — always capture the generic per-func dtype first.
+
+### 2026-07-02 BlackThrush — DataFrameGroupBy MULTI-key (>=2 Int64 keys) sum/mean/count/var/std on NULLABLE (or all-valid Int64) values: route through dense emit (LOSS -> 3.9x WIN)
+Multi-key sum/mean/count/var/std went through `agg_typed_pairs_dense_f64_moments`, gated on ALL value columns being all-valid Float64 — so an all-valid-Int64 OR any nullable value column bailed to generic build_groups (~0.6x pandas). The sibling multi-key arm (`aggregate_multi_int64_dense` -> multi_int64_dense_grouping + the shared dense_aggregate_emit, which now has typed AND nullable-skipna branches) only listed min/max/first/last/prod/median. Widened it to ALSO cover sum/mean/count/var/std and admit nullable value columns (as_f64/i64_slice_with_validity). The all-Float64 moments engine still takes all-valid-f64 sum/mean/count/var/std FIRST (unchanged); this arm now catches the Int64/nullable cases it declined. Bit-identical: dense_aggregate_emit matches the generic path (verified single-key), multi_int64_dense_grouping matches build_groups' composite-key order (the min/max arm already relies on it). VERIFIED 540 checks vs pandas 2.2.3 (2 Int64 keys, nullable-Float64 + nullable-Int64 cols, 9 funcs) all EXACT. fp-frame 3109/0.
+
+bench 2M rows, 2 Int64 keys (~2000 groups), mixed nullable Float64 + Int64 value cols, best-of-6, pandas 2.2.3:
+| op | before (generic) | after | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `dfgb.sum`  multi-Int64 key | 157.6ms | 24.8ms | 0.62x -> 3.94x WIN (pandas 97.7ms) |
+| `dfgb.mean` multi-Int64 key | 165.9ms | 25.4ms | 0.60x -> 3.93x WIN (pandas 99.8ms) |
+
+FLIPS LOSS->WIN. Extends the single-key nullable dfgb wins to the multi-key case. DataFrameGroupBy nullable-value surface (single AND multi Int64/Utf8 keys × nullable Int64/Float64 values × all reducers) now fully WIN.
