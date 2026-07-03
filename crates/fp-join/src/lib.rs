@@ -7340,6 +7340,213 @@ fn typed_wide_two_i64_key_positions(
     Some((left_positions, right_positions, None))
 }
 
+/// General K-key (K >= 3) sibling of `typed_wide_two_i64_key_positions` for wide
+/// Int64 key columns that overflow `dense_packed_int64_inner_positions` and exceed
+/// the 2-key u128 packer. Factorizes each key column over left ∪ right into dense
+/// gids (first-seen), then packs each row's per-column gids into a single u128
+/// (column 0 most-significant) — a bijection whenever the summed gid bit-widths
+/// fit 127 bits (else `None` → generic Scalar composite path). With the composite
+/// as one integer, this reuses the exact same inner/left/outer emit as the 2-key
+/// path. OUTER argsorts groups by the SEMANTIC original (i64,..,i64) tuple captured
+/// at gid creation (packed-gid order is first-seen, not sorted). Bit-identical to
+/// the `CompositeJoinKey` path (same left-order probe + ascending-right-per-key emit
+/// for inner/left; same key-ascending group emit for outer). Returns `None` for
+/// non-Inner/Left/Outer, K < 3, unequal K, any non-all-valid-Int64 component, or a
+/// composite too wide for u128.
+fn typed_wide_multi_i64_key_positions(
+    join_type: JoinType,
+    left_cols: &[&Column],
+    right_cols: &[&Column],
+) -> Option<MergeRowPositions> {
+    if !matches!(join_type, JoinType::Inner | JoinType::Left | JoinType::Outer) {
+        return None;
+    }
+    let k = left_cols.len();
+    if k < 3 || right_cols.len() != k {
+        return None;
+    }
+    let mut ls: Vec<&[i64]> = Vec::with_capacity(k);
+    let mut rs: Vec<&[i64]> = Vec::with_capacity(k);
+    for c in 0..k {
+        ls.push(left_cols[c].as_i64_slice()?);
+        rs.push(right_cols[c].as_i64_slice()?);
+    }
+    let nl = ls[0].len();
+    let nr = rs[0].len();
+    if ls.iter().any(|s| s.len() != nl) || rs.iter().any(|s| s.len() != nr) {
+        return None;
+    }
+
+    // Factorize each key column over left ∪ right into dense first-seen gids.
+    let mut lgid: Vec<Vec<u32>> = Vec::with_capacity(k);
+    let mut rgid: Vec<Vec<u32>> = Vec::with_capacity(k);
+    let mut cards: Vec<u64> = Vec::with_capacity(k);
+    for c in 0..k {
+        let mut m: FxHashMap<i64, u32> =
+            FxHashMap::with_capacity_and_hasher(nl + nr, Default::default());
+        let mut next: u32 = 0;
+        let mut lg = Vec::with_capacity(nl);
+        for &v in ls[c] {
+            let g = *m.entry(v).or_insert_with(|| {
+                let x = next;
+                next += 1;
+                x
+            });
+            lg.push(g);
+        }
+        let mut rg = Vec::with_capacity(nr);
+        for &v in rs[c] {
+            let g = *m.entry(v).or_insert_with(|| {
+                let x = next;
+                next += 1;
+                x
+            });
+            rg.push(g);
+        }
+        cards.push(next as u64);
+        lgid.push(lg);
+        rgid.push(rg);
+    }
+
+    // Per-column bit widths; bail if the packed composite exceeds u128.
+    let mut bits: Vec<u32> = Vec::with_capacity(k);
+    let mut total: u32 = 0;
+    for &card in &cards {
+        let b = if card <= 1 {
+            0
+        } else {
+            64 - (card - 1).leading_zeros()
+        };
+        bits.push(b);
+        total += b;
+    }
+    if total > 127 {
+        return None;
+    }
+
+    let pack = |gids: &[Vec<u32>], row: usize| -> u128 {
+        let mut p: u128 = 0;
+        for c in 0..k {
+            p = (p << bits[c]) | u128::from(gids[c][row]);
+        }
+        p
+    };
+
+    if matches!(join_type, JoinType::Outer) {
+        let mut gid_of: FxHashMap<u128, u32> = FxHashMap::with_capacity_and_hasher(
+            nl.saturating_add(nr),
+            Default::default(),
+        );
+        // Semantic original tuple per composite gid (for the key-ascending sort).
+        let mut gid_tuple: Vec<Vec<i64>> = Vec::new();
+        let mut left_g: Vec<u32> = Vec::with_capacity(nl);
+        for row in 0..nl {
+            let key = pack(&lgid, row);
+            let g = *gid_of.entry(key).or_insert_with(|| {
+                let x = gid_tuple.len() as u32;
+                gid_tuple.push((0..k).map(|c| ls[c][row]).collect());
+                x
+            });
+            left_g.push(g);
+        }
+        let mut right_g: Vec<u32> = Vec::with_capacity(nr);
+        for row in 0..nr {
+            let key = pack(&rgid, row);
+            let g = *gid_of.entry(key).or_insert_with(|| {
+                let x = gid_tuple.len() as u32;
+                gid_tuple.push((0..k).map(|c| rs[c][row]).collect());
+                x
+            });
+            right_g.push(g);
+        }
+        let ng = gid_tuple.len();
+        let mut loff = vec![0u32; ng + 1];
+        for &g in &left_g {
+            loff[g as usize + 1] += 1;
+        }
+        let mut roff = vec![0u32; ng + 1];
+        for &g in &right_g {
+            roff[g as usize + 1] += 1;
+        }
+        for g in 0..ng {
+            loff[g + 1] += loff[g];
+            roff[g + 1] += roff[g];
+        }
+        let mut lpos = vec![0u32; nl];
+        let mut lw = loff[..ng].to_vec();
+        for (i, &g) in left_g.iter().enumerate() {
+            let g = g as usize;
+            lpos[lw[g] as usize] = i as u32;
+            lw[g] += 1;
+        }
+        let mut rpos = vec![0u32; nr];
+        let mut rw = roff[..ng].to_vec();
+        for (i, &g) in right_g.iter().enumerate() {
+            let g = g as usize;
+            rpos[rw[g] as usize] = i as u32;
+            rw[g] += 1;
+        }
+        let mut order: Vec<u32> = (0..ng as u32).collect();
+        order.sort_unstable_by(|&a, &b| gid_tuple[a as usize].cmp(&gid_tuple[b as usize]));
+        let mut left_positions = Vec::<Option<usize>>::new();
+        let mut right_positions = Vec::<Option<usize>>::new();
+        for &g in &order {
+            let g = g as usize;
+            let lsl = &lpos[loff[g] as usize..loff[g + 1] as usize];
+            let rsl = &rpos[roff[g] as usize..roff[g + 1] as usize];
+            match (lsl.is_empty(), rsl.is_empty()) {
+                (false, false) => {
+                    for &l in lsl {
+                        for &r in rsl {
+                            left_positions.push(Some(l as usize));
+                            right_positions.push(Some(r as usize));
+                        }
+                    }
+                }
+                (false, true) => {
+                    for &l in lsl {
+                        left_positions.push(Some(l as usize));
+                        right_positions.push(None);
+                    }
+                }
+                (true, false) => {
+                    for &r in rsl {
+                        left_positions.push(None);
+                        right_positions.push(Some(r as usize));
+                    }
+                }
+                (true, true) => {}
+            }
+        }
+        return Some((left_positions, right_positions, None));
+    }
+
+    // Inner / Left: right composite -> ascending-position map, probe left in order.
+    let mut right_map = FxHashMap::<u128, JoinPositionBucket>::with_capacity_and_hasher(
+        nr,
+        Default::default(),
+    );
+    for pos in 0..nr {
+        right_map.entry(pack(&rgid, pos)).or_default().push(pos);
+    }
+    let is_left = matches!(join_type, JoinType::Left);
+    let mut left_positions = Vec::<Option<usize>>::new();
+    let mut right_positions = Vec::<Option<usize>>::new();
+    for left_pos in 0..nl {
+        let key = pack(&lgid, left_pos);
+        if let Some(matches) = right_map.get(&key) {
+            for &right_pos in matches {
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(right_pos));
+            }
+        } else if is_left {
+            left_positions.push(Some(left_pos));
+            right_positions.push(None);
+        }
+    }
+    Some((left_positions, right_positions, None))
+}
+
 fn dense_packed_int64_inner_positions(
     left_cols: &[&Column],
     right_cols: &[&Column],
@@ -8097,6 +8304,19 @@ pub fn merge_dataframes_on_with_options(
         None
     };
 
+    // Typed general K-key (K >= 3) wide-Int64 positions: factorize-to-gid + u128
+    // pack, bypassing the Scalar collect_composite_keys path. Same fast-path gates.
+    let typed_multi_key = if !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && packed_inner.is_none()
+        && typed_two_key.is_none()
+    {
+        typed_wide_multi_i64_key_positions(join_type, &left_key_columns, &right_key_columns)
+    } else {
+        None
+    };
+
     let (left_positions, right_positions, _out_row_keys): MergeRowPositions =
         if let Some((lp, rp)) = packed_inner {
             (
@@ -8105,6 +8325,8 @@ pub fn merge_dataframes_on_with_options(
                 None,
             )
         } else if let Some(typed) = typed_two_key {
+            typed
+        } else if let Some(typed) = typed_multi_key {
             typed
         } else {
             // Convert key columns to hashable composite keys.
