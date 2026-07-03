@@ -7189,6 +7189,58 @@ fn hash_i64_inner_positions_slices(left: &[i64], right: &[i64]) -> (Vec<usize>, 
 /// byte-for-byte the same as the hash path. Returns `None` (caller falls back to
 /// the composite-hash path) for any non-Int64 / any-missing component or when
 /// the packed span exceeds the bounded direct-address gate.
+/// Typed INNER/LEFT positions for a 2-column all-valid Int64 composite key that's
+/// too WIDE for `dense_packed_int64_inner_positions` (its packed mixed-radix span
+/// exceeds the bounded gate on a high-cardinality component), which otherwise
+/// dropped multi-key merge to the generic `collect_composite_keys` Scalar path
+/// (2-i64-key merge was 0.65x inner / 0.69x left pandas). Packs each row's
+/// `(k0, k1)` into a `u128` — a bijection, so key equality is exact — builds the
+/// right key -> ascending-position map, and probes left in order: one row per
+/// (left, matching right), or (for Left) a single `(Some, None)` null-fill for an
+/// unmatched left row. Bit-identical to the generic `CompositeJoinKey` path (same
+/// left iteration + ascending-right-per-key emit). Returns `None` for non-Inner/
+/// Left, non-2-key, or any non-all-valid-Int64 component.
+fn typed_wide_two_i64_key_positions(
+    join_type: JoinType,
+    left_cols: &[&Column],
+    right_cols: &[&Column],
+) -> Option<MergeRowPositions> {
+    if !matches!(join_type, JoinType::Inner | JoinType::Left) {
+        return None;
+    }
+    if left_cols.len() != 2 || right_cols.len() != 2 {
+        return None;
+    }
+    let l0 = left_cols[0].as_i64_slice()?;
+    let l1 = left_cols[1].as_i64_slice()?;
+    let r0 = right_cols[0].as_i64_slice()?;
+    let r1 = right_cols[1].as_i64_slice()?;
+    let pack = |a: i64, b: i64| -> u128 { (u128::from(a as u64) << 64) | u128::from(b as u64) };
+    let mut right_map = FxHashMap::<u128, JoinPositionBucket>::with_capacity_and_hasher(
+        r0.len(),
+        Default::default(),
+    );
+    for pos in 0..r0.len() {
+        right_map.entry(pack(r0[pos], r1[pos])).or_default().push(pos);
+    }
+    let is_left = matches!(join_type, JoinType::Left);
+    let mut left_positions = Vec::<Option<usize>>::new();
+    let mut right_positions = Vec::<Option<usize>>::new();
+    for left_pos in 0..l0.len() {
+        let key = pack(l0[left_pos], l1[left_pos]);
+        if let Some(matches) = right_map.get(&key) {
+            for &right_pos in matches {
+                left_positions.push(Some(left_pos));
+                right_positions.push(Some(right_pos));
+            }
+        } else if is_left {
+            left_positions.push(Some(left_pos));
+            right_positions.push(None);
+        }
+    }
+    Some((left_positions, right_positions, None))
+}
+
 fn dense_packed_int64_inner_positions(
     left_cols: &[&Column],
     right_cols: &[&Column],
@@ -7933,6 +7985,19 @@ pub fn merge_dataframes_on_with_options(
         None
     };
 
+    // Typed wide 2-i64-key INNER/LEFT positions (bypasses the Scalar composite
+    // path when a component is too wide for the packed dense gate). Same fast-path
+    // gates as packed_inner (no sort/indicator, validate allows fast positions).
+    let typed_two_key = if !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && packed_inner.is_none()
+    {
+        typed_wide_two_i64_key_positions(join_type, &left_key_columns, &right_key_columns)
+    } else {
+        None
+    };
+
     let (left_positions, right_positions, _out_row_keys): MergeRowPositions =
         if let Some((lp, rp)) = packed_inner {
             (
@@ -7940,6 +8005,8 @@ pub fn merge_dataframes_on_with_options(
                 rp.into_iter().map(Some).collect(),
                 None,
             )
+        } else if let Some(typed) = typed_two_key {
+            typed
         } else {
             // Convert key columns to hashable composite keys.
             let left_keys = collect_composite_keys(&left_key_columns);

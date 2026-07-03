@@ -8800,3 +8800,14 @@ bench 1M x 1M rows, wide-i64 key, best-of-5, quiet box, pandas 2.2.3:
 | `merge` OUTER wide-i64 | 1201ms | 448ms (0.71x) | ~215ms | 0.34x -> 1.48x WIN (pandas 317ms) |
 
 FLIPS LOSS->WIN. merge LEFT already won 1.31x (prior), INNER 1.85x. REMAINING: merge RIGHT wide-i64 ~0.96x (parity — pandas right is unusually fast here; the typed hash right path improved it but doesn't cross 1.0x, left un-landed). LESSON (again): profile the position-build phases — the SmallVec-per-key map was 2.6x the CSR light-map build.
+
+### 2026-07-03 BlackThrush — multi-key (2-column) merge INNER/LEFT on wide Int64 keys: u128-packed typed positions (LOSS -> 1.5x WIN)
+Composite-key merge had only `dense_packed_int64_inner_positions` (inner, and it packs via mixed-radix so a HIGH-cardinality component blows the bounded gate); left/outer had NO typed multi-key path at all. So a 2-wide-i64-key merge fell to the generic `collect_composite_keys` -> Vec<SmallVec<[JoinKeyComponent;1]>> Scalar path + FxHashMap<&CompositeJoinKey> (inner 0.65x, left 0.69x pandas). Added `typed_wide_two_i64_key_positions`: pack each row's (k0,k1) into a u128 (a bijection, so exact equality), build the right key -> ascending-position map, probe left in order (one row per match, or (Some,None) null-fill for Left). Injected into the multi-key position dispatch before the Scalar fallback (same gates as packed_inner: no sort/indicator, validate allows fast positions). Bit-identical to the CompositeJoinKey path (same left order + ascending-right-per-key); VERIFIED vs pandas 2.2.3 on a 3000-row 2-wide-i64-key merge with duplicates — inner AND left, 3513 rows, EXACT order. fp-join tests green.
+
+bench 1M x 1M rows, 2 Int64 keys (k0 wide, k1 bounded), best-of-5, pandas 2.2.3:
+| op | before (Scalar) | after (u128 typed) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `merge` INNER 2-key wide-i64 | 453ms | 190ms | 0.65x -> 1.55x WIN (pandas 295ms) |
+| `merge` LEFT  2-key wide-i64 | 464ms | 216ms | 0.69x -> 1.49x WIN (pandas 322ms) |
+
+FLIPS LOSS->WIN. REMAINING: 2-key OUTER wide-i64 still 0.29x (1820ms vs 542ms) — needs the composite-key union sort (like single-key outer's CSR, but sorting by the (k0,k1) tuple); >2 keys still Scalar (u128 pack is 2-key-specific — a general-K typed composite is the follow-up). LESSON: the u128 bijection makes a 2-i64 composite a single hashable, reusing the single-key hash-join shape.
