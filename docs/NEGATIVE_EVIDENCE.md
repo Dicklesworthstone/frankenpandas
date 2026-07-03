@@ -8949,3 +8949,15 @@ bench 1M + 1M rows, cond/other index offset 200k, global-min over many runs on a
 | `s.where(cond_s, other_s)` UNALIGNED all-valid | 80.7ms | >=1.69x WIN (pandas 136.7ms) |
 
 Covers where + mask. Before = the Scalar align+reindex+per-cell path (same lever/tax as the DF where fix, there 0.85x->3.9x); the typed gather eliminates the Vec<Scalar> materialization. Ratio is a floor — the box was under heavy contention; a quiet box measures lower.
+
+### 2026-07-03 BlackThrush — SURFACED (not landed): merge on >2 WIDE i64 keys falls to Scalar composite path (~0.49-0.93x)
+merge_dataframes_on(left, right, ["k0","k1","k2"], Inner) with 3 WIDE i64 key columns is a genuine loss. The dense-packed multi-key path (dense_packed_int64_inner_positions, fp-join ~8082) bails because the mixed-radix product span overflows on a wide component; the typed 2-key path (typed_wide_two_i64_key_positions, ~8095) is u128-2-key-ONLY. So 3+ wide keys fall to collect_composite_keys (fp-join ~8111) = a Vec<CompositeJoinKey> (Vec<SmallVec<[JoinKeyComponent;1]>>) materialized per row — ~2M SmallVec allocs at 1M x (3 keys) — then FxHashMap build/probe over the boxed composites.
+
+MEASURED (1M x 1M, keys k0 card ~700k *7919, k1/k2 card ~400 *primes, ~1M output rows, pandas 2.2.3), HEAVILY LOADED box (loadavg 60-65):
+| merge INNER 3 wide-i64 keys | fp | pandas | ratio |
+| --- | ---: | ---: | ---: |
+| COLD one-shot (fresh frames) | 1088ms | 1016ms | 0.93x LOSS |
+| WARM amortized (frame reuse, OnceLock caches key .values()) | 505ms | 246ms | 0.49x LOSS (2x) |
+fp loses BOTH ways — even WITH the OnceLock .values() caching helping the warm case, it's 2x pandas. (Per the join memory: bench one-shot, not amortized — the cold 0.93x is the real-world number; the 0.49x warm shows fp is slow even past the materialization.)
+
+FIX PLAN (turnkey, mirrors the 2-key u128 win e47cf3ea7/58906e4ab): generalize typed_wide_two_i64_key_positions to K keys. Read each key col via as_i64_slice (gate: all-valid Int64/Datetime64/Timedelta64, no nulls). Either (a) per-column factorize to a dense gid (0..card_c) then pack into u64/u128 when the cardinality product fits (k0~700k * k1~400 * k2~400 = 1.1e11 < 2^64 here), or (b) hash the K-tuple into a u64 seed with an exact SmallVec<[i64;K]> tie-break map. Build right positions, probe left; emit typed (l,r) positions bypassing collect_composite_keys. INNER first (no null-fill); LEFT/RIGHT add null-fill; OUTER needs argsort by the SEMANTIC decoded (i64,..,i64) tuple (NOT packed order — negatives mis-sort, see the 2-key outer note). Bit-identical target: 3-way differential with WIDE+NEGATIVE keys + disjoint sides. Not landed this turn: correct general-K inner/left/right/outer + outer sort is substantial and correctness-critical; deferred rather than rush a core join path under box contention.
