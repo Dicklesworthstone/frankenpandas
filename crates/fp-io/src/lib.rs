@@ -1429,9 +1429,6 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     // Capacity hint from byte length avoids reallocation for typical CSVs.
     let header_count = headers.len();
     let row_hint = input.len() / (header_count * 8).max(1);
-    let mut columns: Vec<Vec<Scalar>> = (0..header_count)
-        .map(|_| Vec::with_capacity(row_hint))
-        .collect();
     // Keep each cell's original text so an object-fallback column can preserve
     // the verbatim literal like pandas (see build_csv_object_aware_column). Stored
     // as ONE contiguous byte buffer + offsets per column rather than a
@@ -1450,24 +1447,92 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
         })
         .collect();
 
+    // Per-column typed accumulator (br-frankenpandas csv-typed-numeric-col): a
+    // mixed CSV bails the frame-wide numeric fast paths, so historically EVERY
+    // column round-tripped through a `Vec<Scalar>` (parse_scalar per cell + a
+    // from_values re-scan) — even a purely-numeric column sitting next to one
+    // Utf8 column. Accumulate each column into a typed Int64/Float64 buffer and,
+    // the instant a cell is a null / bool / non-numeric-text (an AMBIGUOUS
+    // promotion — fp's from_values keeps int+null as NULLABLE Int64, coerces
+    // int+bool to Int64, etc.; see the probe in the commit msg), drop that column
+    // to `Fallback` and rebuild it via the UNCHANGED Scalar path from the raw
+    // bytes (already captured for verbatim). A pure-numeric-no-null column then
+    // emits its typed column directly, bit-identical to from_values over the
+    // equivalent Scalars: all-Int64 → Int64 (from_i64_values), any-Float64-no-null
+    // → Float64 with ints coerced to `x as f64` (from_f64_values) — exactly what
+    // Column::from_values + build_csv_object_aware_column produce for those inputs.
+    enum ColAcc {
+        Int(Vec<i64>),
+        Float(Vec<f64>),
+        Fallback,
+    }
+    let mut accs: Vec<ColAcc> = (0..header_count)
+        .map(|_| ColAcc::Int(Vec::with_capacity(row_hint)))
+        .collect();
+
     let mut row_count: i64 = 0;
     for row in reader.records() {
         let record = row?;
         for idx in 0..header_count {
             let field = record.get(idx).unwrap_or_default();
-            columns[idx].push(parse_scalar(field));
             raw_bytes[idx].extend_from_slice(field.as_bytes());
             raw_offsets[idx].push(raw_bytes[idx].len());
+            let acc = &mut accs[idx];
+            if matches!(acc, ColAcc::Fallback) {
+                continue;
+            }
+            // Mirror parse_scalar's decision order EXACTLY: NA (untrimmed) →
+            // Int64(trimmed) → Float64(trimmed) → else (bool/text) = ambiguous.
+            if is_pandas_default_na(field) {
+                *acc = ColAcc::Fallback;
+                continue;
+            }
+            let trimmed = field.trim();
+            if let Ok(v) = trimmed.parse::<i64>() {
+                match acc {
+                    ColAcc::Int(buf) => buf.push(v),
+                    ColAcc::Float(buf) => buf.push(v as f64),
+                    ColAcc::Fallback => {}
+                }
+            } else if let Ok(v) = trimmed.parse::<f64>() {
+                match acc {
+                    ColAcc::Int(buf) => {
+                        let mut promoted: Vec<f64> = buf.iter().map(|&i| i as f64).collect();
+                        promoted.push(v);
+                        *acc = ColAcc::Float(promoted);
+                    }
+                    ColAcc::Float(buf) => buf.push(v),
+                    ColAcc::Fallback => {}
+                }
+            } else {
+                *acc = ColAcc::Fallback;
+            }
         }
         row_count += 1;
     }
 
     let mut out_columns = BTreeMap::new();
     let mut column_order = Vec::with_capacity(header_count);
-    for (idx, values) in columns.into_iter().enumerate() {
+    for (idx, acc) in accs.into_iter().enumerate() {
         let name = headers.get(idx).cloned().unwrap_or_default();
-        let column =
-            build_csv_object_aware_column(values, &raw_bytes[idx], &raw_offsets[idx])?;
+        let column = match acc {
+            // Typed fast paths: only taken when EVERY cell was clean-numeric with
+            // no null/bool/text, so the output dtype is unambiguous.
+            ColAcc::Int(buf) => Column::from_i64_values(buf),
+            ColAcc::Float(buf) => Column::from_f64_values(buf),
+            // Any ambiguous cell → exact legacy path from the verbatim raw bytes.
+            ColAcc::Fallback => {
+                let raw_b = &raw_bytes[idx];
+                let raw_o = &raw_offsets[idx];
+                let mut values = Vec::with_capacity(raw_o.len().saturating_sub(1));
+                for w in raw_o.windows(2) {
+                    let field = std::str::from_utf8(&raw_b[w[0]..w[1]])
+                        .expect("csv fields originate from a &str input");
+                    values.push(parse_scalar(field));
+                }
+                build_csv_object_aware_column(values, raw_b, raw_o)?
+            }
+        };
         out_columns.insert(name.clone(), column);
         column_order.push(name);
     }
