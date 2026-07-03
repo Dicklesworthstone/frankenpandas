@@ -8882,3 +8882,13 @@ bench 1M rows, 5 Float64 cols, aligned bool cond, best-of-6, pandas 2.2.3:
 | `df.mask(cond_df, other_df)` | ~330ms | 8.34ms | ~0.12x -> 4.58x WIN (pandas 38.2ms) |
 
 FLIPS LOSS->WIN. Completes the where/mask DataFrame-other typed-select pair (with 4.59x where sibling d8399b1b7).
+
+### 2026-07-03 BlackThrush — DataFrame.update — typed overwrite path (LOSS -> 10.6x WIN)
+DataFrame.update (fp-frame ~59667) overwrote self with other's non-null values via a pointer-key BTreeMap over other's labels + per-cell `.values()` Scalar clones of both frames — 574ms vs pandas 91ms = 0.16x. Added a typed fast path (identical unique index, every self column Float64, every shared other column Float64): out[i] = other-present-and-non-NaN ? other : self, straight from the f64+validity slices; a column absent from other keeps self. Bit-identical to the general `!other_val.is_missing()` overwrite; VERIFIED vs pandas 2.2.3 on a 3000-row df.update with NULLS in self AND other, x/y EXACT. fp-frame 3109/0.
+
+bench 1M rows, 5 Float64 cols, aligned (other ~33% null), best-of-6, pandas 2.2.3:
+| op | before (Scalar BTreeMap) | after (typed) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `df.update` | 574ms | 8.66ms | 0.16x -> 10.6x WIN (pandas 91.4ms) |
+
+FLIPS LOSS->WIN. Series.update already had the typed path; only DataFrame.update lacked it. Another instance of the recurring per-cell-Scalar-select pattern (where/mask/combine_first/arithmetic).
