@@ -8759,3 +8759,14 @@ bench 2M-row haystack, 100k wide-i64 needles, best-of-5, quiet box, pandas 2.2.3
 | `Series.isin` wide-i64 | 83.7ms | 20.6ms | 0.37x -> 1.43x WIN (pandas 29.5ms) |
 
 FLIPS LOSS->WIN. Fifth reuse of the open-addressing i64 table (after duplicated / unique / nunique) — the build-then-probe membership variant. searchsorted wide-i64 already WINS 3.84x (finger-search). REMAINING wide-i64 hash floor: value_counts 0.76x (bottlenecked on Index::new(1M labels), not the tally — needs an fp-index lazy result-index lever, surfaced separately).
+
+### 2026-07-02 BlackThrush — DataFrame.duplicated / drop_duplicates on a single wide/high-card Int64 column: route to open-addressing i64 table (PARITY/LOSS -> 1.1-1.75x WIN)
+DataFrame's single-Int64-column dedup fast path (`duplicated_single_i64`, used by df.duplicated / drop_duplicates / duplicated_mask) keyed First/Last on `FxHashMap<i64>` — only PARITY with pandas on wide/high-cardinality data (df.duplicated 1col 1.00x) and a LOSS for drop_duplicates (0.80x, which adds the row gather), while Series.duplicated on the same column was already 1.73x via the open-addressing table. Routed the First/Last arms to `Series::oa_dup_flags_i64` (the committed khash-style open-addressing table); None keeps its FxHashMap counts. Bit-identical (same per-keep first/last semantics; the existing `duplicated_single_i64_matches_oracle_blackthrush` oracle test + full suite pass). fp-frame 3109/0.
+
+bench 2M rows, single wide-i64 column (~n distinct), best-of-5, quiet box, pandas 2.2.3:
+| op | before (FxHashMap) | after (open-addr) | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: |
+| `df.duplicated` 1col wide-i64      | 87.2ms | ~49ms | 1.00x -> 1.75x WIN (pandas 86.1ms) |
+| `df.drop_duplicates` 1col wide-i64 | 109.8ms | ~80ms | 0.80x -> 1.10x WIN (pandas 87.7ms) |
+
+FLIPS PARITY/LOSS->WIN. Sixth reuse of the open-addressing i64 table (duplicated/unique/nunique/isin/now df-dedup). NOTE: multi-column df.duplicated/drop_duplicates on wide-i64 ALREADY dominate pandas massively (2col dup 19x, drop 6.5x — pandas row-tuple hashing is very slow); only the single-Int64-column path had the khash floor.
