@@ -9403,6 +9403,39 @@ impl Column {
                     data: None,
                 };
             }
+
+            // Datetime64 / Timedelta64 run gather (temporal sibling of the Int64
+            // arm; both store i64 ns) — MOVE the gathered Vec in via the owned
+            // backing instead of falling to the per-row Scalar path. Bit-identical.
+            if self.dtype == DType::Datetime64
+                && let Some(src) = self.as_datetime64_slice()
+            {
+                let mut data = Vec::with_capacity(out_len);
+                for &(start, len) in runs {
+                    data.extend_from_slice(&src[start..start + len]);
+                }
+                return Self {
+                    dtype: DType::Datetime64,
+                    values: ScalarValues::lazy_all_valid_datetime64_owned(data),
+                    validity: ValidityMask::all_valid(out_len),
+                    data: None,
+                };
+            }
+
+            if self.dtype == DType::Timedelta64
+                && let Some(src) = self.as_timedelta64_slice()
+            {
+                let mut data = Vec::with_capacity(out_len);
+                for &(start, len) in runs {
+                    data.extend_from_slice(&src[start..start + len]);
+                }
+                return Self {
+                    dtype: DType::Timedelta64,
+                    values: ScalarValues::lazy_all_valid_timedelta64_owned(data),
+                    validity: ValidityMask::all_valid(out_len),
+                    data: None,
+                };
+            }
         }
 
         let typed_f64: Option<&[f64]> = match &self.values {
