@@ -6731,6 +6731,106 @@ fn hash_int64_left_positions(
     Some((left_positions, right_positions))
 }
 
+/// OUTER positions for wide/sparse Int64 keys. Uses a LIGHT `FxHashMap<i64,u32>`
+/// key -> gid (first-seen) plus CSR position lists per gid — far cheaper than a
+/// `FxHashMap<i64,(SmallVec,SmallVec)>` (whose 40-byte value dominated the build
+/// at ~270ms). Emits per key ASCENDING (gids argsorted by key), left×right cross
+/// product per key, else unmatched-left/right — bit-identical to
+/// `dense_int64_outer_positions` (its key-min buckets walk keys ascending with
+/// the same per-bucket order; the CSR scatter preserves ascending row order per
+/// key, matching the dense per-bucket push order).
+fn hash_int64_outer_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<OptionalJoinPositions> {
+    let left = left_key.as_i64_slice()?;
+    let right = right_key.as_i64_slice()?;
+    let mut gid_of: FxHashMap<i64, u32> = FxHashMap::with_capacity_and_hasher(
+        left.len().saturating_add(right.len()),
+        Default::default(),
+    );
+    let mut gid_keys: Vec<i64> = Vec::new();
+    let mut left_gid: Vec<u32> = Vec::with_capacity(left.len());
+    for &key in left {
+        let g = *gid_of.entry(key).or_insert_with(|| {
+            let x = gid_keys.len() as u32;
+            gid_keys.push(key);
+            x
+        });
+        left_gid.push(g);
+    }
+    let mut right_gid: Vec<u32> = Vec::with_capacity(right.len());
+    for &key in right {
+        let g = *gid_of.entry(key).or_insert_with(|| {
+            let x = gid_keys.len() as u32;
+            gid_keys.push(key);
+            x
+        });
+        right_gid.push(g);
+    }
+    let ng = gid_keys.len();
+    // CSR offsets from per-gid counts.
+    let mut loff = vec![0u32; ng + 1];
+    for &g in &left_gid {
+        loff[g as usize + 1] += 1;
+    }
+    let mut roff = vec![0u32; ng + 1];
+    for &g in &right_gid {
+        roff[g as usize + 1] += 1;
+    }
+    for g in 0..ng {
+        loff[g + 1] += loff[g];
+        roff[g + 1] += roff[g];
+    }
+    let mut lpos = vec![0u32; left.len()];
+    let mut lw = loff[..ng].to_vec();
+    for (i, &g) in left_gid.iter().enumerate() {
+        let g = g as usize;
+        lpos[lw[g] as usize] = i as u32;
+        lw[g] += 1;
+    }
+    let mut rpos = vec![0u32; right.len()];
+    let mut rw = roff[..ng].to_vec();
+    for (i, &g) in right_gid.iter().enumerate() {
+        let g = g as usize;
+        rpos[rw[g] as usize] = i as u32;
+        rw[g] += 1;
+    }
+    let mut order: Vec<u32> = (0..ng as u32).collect();
+    order.sort_unstable_by_key(|&g| gid_keys[g as usize]);
+    let mut left_positions = Vec::<Option<usize>>::new();
+    let mut right_positions = Vec::<Option<usize>>::new();
+    for &g in &order {
+        let g = g as usize;
+        let ls = &lpos[loff[g] as usize..loff[g + 1] as usize];
+        let rs = &rpos[roff[g] as usize..roff[g + 1] as usize];
+        match (ls.is_empty(), rs.is_empty()) {
+            (false, false) => {
+                for &l in ls {
+                    for &r in rs {
+                        left_positions.push(Some(l as usize));
+                        right_positions.push(Some(r as usize));
+                    }
+                }
+            }
+            (false, true) => {
+                for &l in ls {
+                    left_positions.push(Some(l as usize));
+                    right_positions.push(None);
+                }
+            }
+            (true, false) => {
+                for &r in rs {
+                    left_positions.push(None);
+                    right_positions.push(Some(r as usize));
+                }
+            }
+            (true, true) => {}
+        }
+    }
+    Some((left_positions, right_positions))
+}
+
 /// Hash build+probe over raw UTF-8 byte spans for all-valid contiguous-Utf8
 /// keys (br-frankenpandas-i388q). Mirrors the generic `JoinKeyComponent` inner
 /// path exactly — right positions pushed ascending per key bucket, left probed
@@ -7729,6 +7829,25 @@ pub fn merge_dataframes_on_with_options(
         && validate_allows_fast_positions
         && let Some((left_positions, right_positions)) =
             dense_int64_outer_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_ordered_unique_outer_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &right_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Outer)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some((left_positions, right_positions)) =
+            hash_int64_outer_positions(left_key_columns[0], right_key_columns[0])
     {
         return build_single_key_ordered_unique_outer_merge_output(
             left,

@@ -8790,3 +8790,13 @@ bench 1M x 1M rows, wide-i64 key (~unique, *2654435761), best-of-5, pandas 2.2.3
 | `merge` LEFT wide-i64 | 447ms | 224ms | 0.65x -> 1.31x WIN (pandas 293.6ms) |
 
 FLIPS LOSS->WIN. merge INNER wide-i64 already WON 1.85x (168ms vs 311ms). REMAINING: merge OUTER wide-i64 still 0.34x (1200ms vs 412ms) — the generic Scalar path + an IndexLabel-comparison union sort; needs a typed hash_int64_outer_positions + typed-i64 union sort (bigger, the outer null-fill + pandas key-sort semantics need care). Next lever.
+
+### 2026-07-03 BlackThrush — merge OUTER on a wide/high-cardinality Int64 key: CSR light-map position build (LOSS -> 1.48x WIN)
+Sibling of the merge-LEFT fix. OUTER's typed Int64 paths were ordered-unique / dense only; a wide-i64 key fell to the generic JoinKeyComponent Scalar path — 0.34x pandas (1201ms vs 317ms), CATASTROPHIC. A first typed attempt (FxHashMap<i64,(SmallVec,SmallVec)> key->buckets + key sort) reached only 0.71x — PROFILING showed the 40-byte-value map build over ~1.5M distinct keys dominated at ~270ms of 478ms (sort 20ms, emit 100ms, builder 100ms). Fix: a LIGHT `FxHashMap<i64,u32>` key->gid (first-seen) + CSR position lists per gid (count -> offsets -> scatter, all flat Vec<u32>), then argsort gids by key and emit key-ascending (left×right cross product / unmatched-left / unmatched-right). Bit-identical to dense_int64_outer_positions (its key-min buckets walk keys ascending with the same per-bucket order; CSR scatter preserves ascending row order per key). VERIFIED vs pandas 2.2.3 on a 3000-row wide-i64 outer merge with duplicates — 8070 rows match EXACTLY in ORDER (key-sorted, both-side null-fill). fp-join tests green.
+
+bench 1M x 1M rows, wide-i64 key, best-of-5, quiet box, pandas 2.2.3:
+| op | before (generic) | +SmallVec map | +CSR light-map | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | ---: |
+| `merge` OUTER wide-i64 | 1201ms | 448ms (0.71x) | ~215ms | 0.34x -> 1.48x WIN (pandas 317ms) |
+
+FLIPS LOSS->WIN. merge LEFT already won 1.31x (prior), INNER 1.85x. REMAINING: merge RIGHT wide-i64 ~0.96x (parity — pandas right is unusually fast here; the typed hash right path improved it but doesn't cross 1.0x, left un-landed). LESSON (again): profile the position-build phases — the SmallVec-per-key map was 2.6x the CSR light-map build.
