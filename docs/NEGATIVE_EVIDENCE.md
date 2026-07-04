@@ -9338,6 +9338,31 @@ well enough, and the real residual remains the structural Arrow-buffer boundary:
 storage and does not depend on Arrow buffers. The next viable lever is an explicit foreign-buffer/Arrow-backed column
 variant or ownership-transfer interface, with row-isomorphism tests and all typed accessors wired through it; that is a
 multi-site storage design, not a safe single-loop perf commit.
+
+### 2026-07-04 BlackThrush - read_parquet file-byte ownership NO-SHIP: ~1.02x FP-side, still 0.32x vs pandas
+Targeted the same remaining `read_parquet` all-valid numeric residual after the exact-width Arrow slice-copy probe above.
+Alien-graveyard mapping: vectorized execution / Arrow boundary minimization; artifact-coding proof obligation: preserve borrowed
+`read_parquet_bytes(&[u8])` semantics while testing whether file-backed `read_parquet(path)` can avoid one redundant file-buffer
+copy. Current code reads `Vec<u8>` from disk, then `read_parquet_bytes(&data)` clones it into `bytes::Bytes`; candidate factored a
+private owned-bytes helper so `read_parquet(path)` moved the `Vec<u8>` into `Bytes` directly while leaving the public bytes API
+unchanged. This only removes one 23 MB input copy for `/tmp/bench_num.parquet`; it does not change Arrow decode or Arrow-buffer ->
+FrankenPandas owned-column conversion.
+
+Gates: required `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod rch exec -- cargo bench --release -p fp-io`
+was attempted and Cargo rejected the redundant `--release` form. Valid per-crate fallback
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod rch exec -- cargo bench -p fp-io` completed green
+locally after RCH reported `no admissible workers: critical_pressure=1,insufficient_slots=10` (fp-io has 605 ignored tests and 0
+measured bench fns). Fixture-bound timing used `crates/fp-io/examples/bench_parquet_num.rs` on the same local `/tmp/bench_num.parquet`
+fixture because remote workers do not have that `/tmp` file.
+
+| workload | ORIG current main | owned-bytes candidate | pandas 2.2.3 | ratio |
+| --- | ---: | ---: | ---: | --- |
+| `read_parquet` 1M x 6 numeric | 73.22 ms / 75.83 ms | 73.84 ms / 71.86 ms | 22.75 ms | best candidate **1.02x FP-side** and **0.32x vs pandas** |
+
+Verdict: NO-SHIP / reverted. The tiny best-case 73.22 -> 71.86 ms move is noise-scale and does not affect the dominant floor:
+Parquet decode plus Arrow-buffer -> owned `Column` gathering. Avoiding the file-byte clone is too small for a real measured commit;
+the viable radical lever remains an Arrow/foreign-buffer-backed column representation or a file/reader API that keeps decoded Arrow
+buffers alive through typed consumers.
 ### 2026-07-04 Codex — RangeIndex bulk get_indexer precomputes bounds once (3.31x fp-side local fallback)
 `RangeIndex::get_indexer` / `get_indexer_non_unique` / fallback `reindex` already reused `source_len`, but every target still recomputed the representable first/last bounds via widened arithmetic before doing the cheap step-membership test. FIX: precompute `(lower, upper)` once per bulk call and feed it to the same checked per-value arithmetic helper; if the endpoint arithmetic overflows, the helper keeps the original i128 fallback. Bit-identical: same bounds, same `checked_sub` / `checked_rem` / `checked_div`, same `-1` missing positions.
 
