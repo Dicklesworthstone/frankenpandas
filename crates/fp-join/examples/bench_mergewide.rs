@@ -21,5 +21,6 @@ fn main(){
     let l=mkdf(n,1,true); let r=mkdf(n,2,true);
     timeit("merge inner wide-i64", || { std::hint::black_box(merge_dataframes(&l,&r,"k",JoinType::Inner).unwrap()); });
     timeit("merge left wide-i64", || { std::hint::black_box(merge_dataframes(&l,&r,"k",JoinType::Left).unwrap()); });
+    timeit("merge right wide-i64", || { std::hint::black_box(merge_dataframes(&l,&r,"k",JoinType::Right).unwrap()); });
     timeit("merge outer wide-i64", || { std::hint::black_box(merge_dataframes(&l,&r,"k",JoinType::Outer).unwrap()); });
 }

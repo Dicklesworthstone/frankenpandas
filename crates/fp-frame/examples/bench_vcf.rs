@@ -1,42 +1,17 @@
-//! value_counts on Float64 (~1000 distinct floored floats) — the case that falls to the
-//! general ScalarKey path (values() materialize + FloatBits FxHash clustering). Candidate
-//! for a typed f64-bits + splitmix path like unique/mode.
-//!
-//! Run: cargo run -p fp-frame --example bench_vcf --release -- 2000000 30
-
-use std::time::Instant;
-
 use fp_frame::Series;
-use fp_index::IndexLabel;
+use fp_index::Index;
+use fp_columnar::Column;
 use fp_types::Scalar;
-
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let n: usize = args
-        .get(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2_000_000);
-    let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
-    let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
-    let mut st: u64 = 0xabcd_1234_5678_9f01;
-    let mut nextf = || {
-        st = st.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-        ((st >> 11) as f64) / (1u64 << 53) as f64
-    };
-    let vals: Vec<Scalar> = (0..n)
-        .map(|_| Scalar::Float64((nextf() * 1000.0).floor()))
-        .collect();
-    let s = Series::from_values("v", labels, vals).unwrap();
-
-    let mut best = u128::MAX;
-    for _ in 0..iters {
-        let t = Instant::now();
-        let out = s.value_counts().expect("value_counts");
-        let e = t.elapsed().as_nanos();
-        std::hint::black_box(&out);
-        if e < best {
-            best = e;
-        }
-    }
-    println!("value_counts_f64 n={n} iters={iters}: best={best}ns");
+fn sm(i: usize, s: u64) -> u64 { let mut h=(i as u64).wrapping_add(s).wrapping_mul(0x9E3779B97F4A7C15); h=(h^(h>>30)).wrapping_mul(0xBF58476D1CE4E5B9); h^(h>>31) }
+fn timeit(l:&str, mut f: impl FnMut()){ let mut b=u128::MAX; for _ in 0..5 { let t=std::time::Instant::now(); f(); b=b.min(t.elapsed().as_nanos()); } println!("{l}: {:.2}ms", b as f64/1e6); }
+fn main(){
+    let n=2_000_000usize; let idx=Index::from_range(0,n as i64,1);
+    // wide high-card f64 (~half distinct)
+    let fv:Vec<Scalar>=(0..n).map(|i| Scalar::Float64(((sm(i,1)%(n as u64/2)) as f64)*1.5)).collect();
+    let sf=Series::new("sf", idx.clone(), Column::from_values(fv).unwrap()).unwrap();
+    timeit("value_counts WIDE-f64", || { std::hint::black_box(sf.value_counts().unwrap()); });
+    // wide high-card Utf8 (~half distinct)
+    let uv:Vec<Scalar>=(0..n).map(|i| Scalar::Utf8(format!("id{}", sm(i,1)%(n as u64/2)))).collect();
+    let su=Series::new("su", idx.clone(), Column::from_values(uv).unwrap()).unwrap();
+    timeit("value_counts WIDE-utf8", || { std::hint::black_box(su.value_counts().unwrap()); });
 }
