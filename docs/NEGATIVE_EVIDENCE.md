@@ -9412,3 +9412,27 @@ FIX: factored the two existing i64 arms into a shared `dense_gids_from_i64(&[i64
 | .mean()  | 3687.8ms | 522.3ms | 7.1x |
 | .count() | 3619.0ms | 473.4ms | 7.6x |
 Correctness: output index now `Datetime64(...)` (was `Utf8("NaN")`); group count 490872 MATCHES the proven DataFrameGroupBy temporal path exactly. fp-frame test suite GREEN (cargo test exit 0 — no test locked the old buggy Utf8 behavior, confirming it was untested). vs pandas: the open-addr wide-i64 machinery this reuses is measured 1.84x WIN on wide-i64 keys (seriesgroupby-wide-i64-key-khash-floor); Datetime64 ns are wide-i64, so this flips a ~0.05x loss to a likely ~1.8x WIN (absolute pandas ratio not re-measured — box was ~4x loaded, e.g. reindex read 1343ms warm vs the 288ms quiet baseline; the 6.7-7.6x fp-side ratio is load-robust). LESSON (again): a temporal KEY is just an i64 key with a different label variant — every i64 groupby/join/index fast path needs a Datetime64/Timedelta64 sibling; check the DataFrameGroupBy vs SeriesGroupBy pair for asymmetry.
+
+### 2026-07-04 BlackThrush - Series.between nullable-f64 invalid-slot guard NO-SHIP: 0.89x FP-side, still 0.56x vs pandas
+Targeted the residual nullable `Series::between` gap after the prior SIMD fast path made all-valid Float64 a win but left
+nullable Float64 slower than pandas. Current code computes the raw f64 interval predicate in a vectorizable pass, then clears
+invalid validity ranges to `false` so missing rows match pandas. Alien-graveyard mapping: vectorized execution plus sparse
+validity sidecar; artifact-coding proof obligation: never treat an invalid slot's raw payload as present. Candidate first
+scanned invalid ranges to prove every invalid raw payload already evaluated false; only if an invalid payload could match did it
+run the existing clear pass. This is correct for arbitrary `LazyNullableFloat64` payloads, including arithmetic outputs where
+invalid slots are not guaranteed to be the constructor's 0.0 sentinel.
+
+Gates: required `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo bench --release -p fp-frame`
+was attempted and Cargo rejected `--release` for `bench`. Short per-crate timing used
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo run -q -p fp-frame --example bench_between_bt --release`.
+The clean remote baseline on `vmi1149989` was `between_nullable 8.08ms`; post-patch rch had no admissible workers and fell open
+locally, so the accepted keep/reject proof is the same local target warm A/B below. The candidate was reverted before commit.
+
+| workload | ORIG current main | invalid-slot guard candidate | pandas 2.2.3 | ratio |
+| --- | ---: | ---: | ---: | --- |
+| `Series.between` nullable Float64, 2M rows / 20% NaN | 6.49 ms | 7.32 ms | 3.66 ms | **0.89x FP-side REGRESSION**, **0.56x vs pandas ORIG** |
+
+Verdict: NO-SHIP / reverted. Reading invalid payloads and branching once per invalid run costs more than simply clearing the
+random sparse invalid slots after the vectorized predicate pass. Do not retry "prove-invalids-already-false" for this workload;
+the remaining gap is the boolean output/validity representation itself (pandas writes a compact native bool/NumPy mask, while
+FrankenPandas emits `Vec<bool>`/typed Bool and still pays validity sidecar traversal).
