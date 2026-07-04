@@ -49,10 +49,19 @@ fn main() {
             "head" => {
                 std::hint::black_box(df.groupby(&["k"]).unwrap().head(5).unwrap());
             }
+            "sgb_nth" => {
+                std::hint::black_box(vs.groupby(&keys).unwrap().nth(0).unwrap());
+            }
+            "sgb_head" => {
+                std::hint::black_box(vs.groupby(&keys).unwrap().head(5).unwrap());
+            }
             "sgb_tf_std" => {
                 std::hint::black_box(vs.groupby(&keys).unwrap().transform("std").unwrap());
             }
-            _ => panic!(),
+            other => {
+                eprintln!("unknown op '{other}'");
+                std::process::exit(2);
+            }
         };
         let e = t.elapsed().as_nanos();
         if e < best {
