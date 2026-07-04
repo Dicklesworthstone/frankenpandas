@@ -9326,3 +9326,25 @@ well enough, and the real residual remains the structural Arrow-buffer boundary:
 storage and does not depend on Arrow buffers. The next viable lever is an explicit foreign-buffer/Arrow-backed column
 variant or ownership-transfer interface, with row-isomorphism tests and all typed accessors wired through it; that is a
 multi-site storage design, not a safe single-loop perf commit.
+### 2026-07-04 Codex — RangeIndex bulk get_indexer precomputes bounds once (3.31x fp-side local fallback)
+`RangeIndex::get_indexer` / `get_indexer_non_unique` / fallback `reindex` already reused `source_len`, but every target still recomputed the representable first/last bounds via widened arithmetic before doing the cheap step-membership test. FIX: precompute `(lower, upper)` once per bulk call and feed it to the same checked per-value arithmetic helper; if the endpoint arithmetic overflows, the helper keeps the original i128 fallback. Bit-identical: same bounds, same `checked_sub` / `checked_rem` / `checked_div`, same `-1` missing positions.
+
+Measured against a clean `origin/main` worktree in `/data/projects/.scratch/frankenpandas-codex-range-bounds-baseline-20260704`, focused per-crate bench:
+`CARGO_TARGET_DIR=.../.rch-targets/local-codex-fpindex-20260704 AGENT_NAME=Codex cargo bench -p fp-index --bench range_index_indexers current_get_indexer_miss_heavy -- --sample-size 10 --measurement-time 2`.
+RCH required-remote runs were attempted first, but worker affinity was ignored and selected `hz2`, `vmi1149989`, `vmi1227854`, and a noisy `vmi1167313`, so the accepted proof is the same-machine local fallback. RCH sanity still showed the after path in the normal remote band (`vmi1149989`: 1M 2.5835ms; `vmi1227854`: 1M 2.6129ms).
+
+| RangeIndex get_indexer miss-heavy | original clean main | after | ratio |
+| --- | ---: | ---: | ---: |
+| 100k targets | 1.5215ms | 0.30713ms | **4.95x fp-side WIN** |
+| 1M targets | 12.653ms | 3.8230ms | **3.31x fp-side WIN** |
+
+This is a production lever, not a bench-only artifact: the public bulk APIs now avoid O(n_targets) repeated endpoint derivation while preserving the wide-overflow path.
+
+### 2026-07-04 BlackThrush — SeriesGroupBy by a Datetime64/Timedelta64 KEY: dense temporal arm — 6.7-7.6x fp-side + correctness fix (was Utf8("NaN") index)
+SeriesGroupBy on a temporal KEY Series (`vals.groupby(&datetime_key).sum()`) fell to the generic per-row Scalar + SipHash build_groups path: `compute_dense_group_ids`/`dense_group_labels` handled Int64 (dense+open-addr) and Utf8 but had NO Datetime64/Timedelta64 arm (ns are i64 but `as_i64_slice` is Int64-gated). Two failures at 2M rows / 490k groups: (1) ~3.6s (0.0x); (2) the output index was mislabeled `Utf8("NaN")` instead of a DatetimeIndex. The DataFrameGroupBy sibling (groupby by a Datetime64 COLUMN) ALREADY had the correct temporal fast path (FxHashMap<i64,gid> → ScalarKey::Datetime64) — SeriesGroupBy was the uncovered sibling.
+FIX: factored the two existing i64 arms into a shared `dense_gids_from_i64(&[i64])` helper (dense-histogram if bounded, else open-addr splitmix — the wide-i64 primitive that WINS vs khash) and added a temporal arm to `compute_dense_group_ids` (via `as_datetime64_slice()`/`as_timedelta64_slice()`, bail on any i64::MIN/NaT so dropna stays correct) + a matching `dense_group_labels` arm emitting `IndexLabel::Datetime64`/`Timedelta64`. ONE change flips every dense consumer (sum/mean/max/min/count/var/std/cum*/transform). Existing i64/Utf8 arms untouched.
+| SeriesGroupBy Datetime64 key 2M/490k | BEFORE | AFTER | fp-side |
+| .sum()   | 3610.8ms | 541.8ms | 6.7x |
+| .mean()  | 3687.8ms | 522.3ms | 7.1x |
+| .count() | 3619.0ms | 473.4ms | 7.6x |
+Correctness: output index now `Datetime64(...)` (was `Utf8("NaN")`); group count 490872 MATCHES the proven DataFrameGroupBy temporal path exactly. fp-frame test suite GREEN (cargo test exit 0 — no test locked the old buggy Utf8 behavior, confirming it was untested). vs pandas: the open-addr wide-i64 machinery this reuses is measured 1.84x WIN on wide-i64 keys (seriesgroupby-wide-i64-key-khash-floor); Datetime64 ns are wide-i64, so this flips a ~0.05x loss to a likely ~1.8x WIN (absolute pandas ratio not re-measured — box was ~4x loaded, e.g. reindex read 1343ms warm vs the 288ms quiet baseline; the 6.7-7.6x fp-side ratio is load-robust). LESSON (again): a temporal KEY is just an i64 key with a different label variant — every i64 groupby/join/index fast path needs a Datetime64/Timedelta64 sibling; check the DataFrameGroupBy vs SeriesGroupBy pair for asymmetry.
