@@ -12390,34 +12390,35 @@ impl Column {
         if let Some(data) = self.as_f64_slice()
             && let Ok(s) = scalar.to_f64()
         {
-            let bools: Vec<bool> = data
-                .iter()
-                .map(|&v| match op {
-                    ComparisonOp::Gt => v > s,
-                    ComparisonOp::Lt => v < s,
-                    ComparisonOp::Eq => v == s,
-                    ComparisonOp::Ne => v != s,
-                    ComparisonOp::Ge => v >= s,
-                    ComparisonOp::Le => v <= s,
-                })
-                .collect();
+            // Hoist the `op` match OUT of the per-element closure: a `match op`
+            // inside the map body is a loop-invariant branch that blocks SIMD
+            // (scalar eq was 0.44x pandas). Six monomorphic `v <op> s` loops each
+            // auto-vectorize to a packed f64 compare. Bit-identical (same per-op
+            // comparison; only the dispatch moved out of the loop).
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => data.iter().map(|&v| v > s).collect(),
+                ComparisonOp::Lt => data.iter().map(|&v| v < s).collect(),
+                ComparisonOp::Eq => data.iter().map(|&v| v == s).collect(),
+                ComparisonOp::Ne => data.iter().map(|&v| v != s).collect(),
+                ComparisonOp::Ge => data.iter().map(|&v| v >= s).collect(),
+                ComparisonOp::Le => data.iter().map(|&v| v <= s).collect(),
+            };
             return Ok(Self::from_bool_values(bools));
         }
         if let Some(data) = self.as_i64_slice()
             && let Scalar::Int64(s) = scalar
         {
             let s = *s;
-            let bools: Vec<bool> = data
-                .iter()
-                .map(|&v| match op {
-                    ComparisonOp::Gt => v > s,
-                    ComparisonOp::Lt => v < s,
-                    ComparisonOp::Eq => v == s,
-                    ComparisonOp::Ne => v != s,
-                    ComparisonOp::Ge => v >= s,
-                    ComparisonOp::Le => v <= s,
-                })
-                .collect();
+            // Hoist `op` out of the closure (see the Float64 arm) so each
+            // monomorphic i64 compare loop auto-vectorizes. Bit-identical.
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => data.iter().map(|&v| v > s).collect(),
+                ComparisonOp::Lt => data.iter().map(|&v| v < s).collect(),
+                ComparisonOp::Eq => data.iter().map(|&v| v == s).collect(),
+                ComparisonOp::Ne => data.iter().map(|&v| v != s).collect(),
+                ComparisonOp::Ge => data.iter().map(|&v| v >= s).collect(),
+                ComparisonOp::Le => data.iter().map(|&v| v <= s).collect(),
+            };
             return Ok(Self::from_bool_values(bools));
         }
 
@@ -12434,17 +12435,18 @@ impl Column {
         if let Some((data, validity)) = self.as_f64_slice_with_validity()
             && let Ok(s) = scalar.to_f64()
         {
-            let bools: Vec<bool> = data
-                .iter()
-                .map(|&v| match op {
-                    ComparisonOp::Gt => v > s,
-                    ComparisonOp::Lt => v < s,
-                    ComparisonOp::Eq => v == s,
-                    ComparisonOp::Ne => v != s,
-                    ComparisonOp::Ge => v >= s,
-                    ComparisonOp::Le => v <= s,
-                })
-                .collect();
+            // Hoist `op` out of the closure (see the all-valid Float64 arm): the
+            // compare over the raw &[f64] vectorizes; masked slots are dropped by
+            // the carried validity, so the bool value there is never observed.
+            // Bit-identical.
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => data.iter().map(|&v| v > s).collect(),
+                ComparisonOp::Lt => data.iter().map(|&v| v < s).collect(),
+                ComparisonOp::Eq => data.iter().map(|&v| v == s).collect(),
+                ComparisonOp::Ne => data.iter().map(|&v| v != s).collect(),
+                ComparisonOp::Ge => data.iter().map(|&v| v >= s).collect(),
+                ComparisonOp::Le => data.iter().map(|&v| v <= s).collect(),
+            };
             return Ok(Self::from_bool_values_with_validity(bools, validity.clone()));
         }
 

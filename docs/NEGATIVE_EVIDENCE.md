@@ -9205,3 +9205,12 @@ FIX: typed all-valid Float64 fast path. Same-index ⇒ blocked_dot_f64 (8-lane f
 | Series.dot 2M f64 | before | after | pandas | ratio |
 | same-index | 19.2ms | 4.93ms | 7.16ms | 0.37x -> 1.45x WIN |
 Verified: fp-frame 3269/0; fp dot = 64898976556933.515625 vs numpy 64898976556933.742188 (rel ~3.5e-15, dot is order-dependent — blocked degenerates to left-fold for len<8 so conformance fixtures are bit-exact). Also this probe (all WINS, blocked-sum lever propagated): Series.var 4.33x / std 4.71x (now use blocked f64_valid_sum_count), df.sum(axis=0) 3.77x, df.mean(axis=0) 6.80x, Series.prod 2.25x. sum/mean/dot were the only non-groupby reduction losses; all CLOSED.
+
+### 2026-07-03 BlackThrush — scalar comparison hoist match-out-of-closure — 4.3x fp-side (0.10x->0.42x); residual is SSE2-vs-AVX2 target gap
+Series.eq/ne/gt/ge/lt/le _scalar (Column::compare_scalar) had `match op` INSIDE the per-element map closure. Even though `op` is loop-invariant, the branch was not hoisted → the compare didn't vectorize → scalar eq f64 2M = 3.345ms vs pandas 0.327ms = 0.10x. (Memory series-comparison-vein's "compare_scalar ~1.0x already unswitched" was a stale/phantom read.)
+FIX: hoist the `match op` OUT of the closure into 6 monomorphic `v <op> s` loops (all three typed arms: all-valid f64, i64, nullable-f64). Bit-identical (pure reorganization — same per-op comparison). fp-columnar 467/0, fp-frame 3269/0.
+| scalar compare 2M | before | after | pandas | ratio |
+| eq f64 | 3.345ms | 0.78ms | 0.327ms | 0.10x -> 0.42x |
+| gt f64 | ~3.3ms | 0.78ms | 0.398ms | -> 0.51x |
+| gt i64 | ~3.3ms | 1.05ms | 0.371ms | -> 0.35x |
+4.3x fp-side (enables SSE2 vectorization). NOT a win vs pandas: RESIDUAL is the SSE2-baseline-vs-AVX2 gap — numpy runtime-dispatches AVX2 (2x compare/pack width) while fp builds baseline x86-64 per a DELIBERATE .cargo/config decision. CRUCIAL: that decision (br-frankenpandas-jawxr, 2026-06-13) reverted +avx2 because it was NEUTRAL for the corr/cov/spearman GRAM (compute-bound, not FP-throughput-limited) — it did NOT test bandwidth-bound elementwise ops. HIGH-LEVERAGE META-SURFACE: an AVX2 build (or per-fn #[target_feature]) would likely close scalar-compare AND single-col round (0.60x, same SSE2 root, see prior entry) AND other elementwise bandwidth ops AT ONCE — the target-cpu decision deserves re-evaluation SPECIFICALLY for elementwise ops, separate from the Gram. Landed the hoist (strictly-better bit-identical code); the AVX gap is a build-policy lever, not a code defect.
