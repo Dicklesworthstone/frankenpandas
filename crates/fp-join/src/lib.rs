@@ -7205,7 +7205,10 @@ fn typed_wide_two_i64_key_positions(
     left_cols: &[&Column],
     right_cols: &[&Column],
 ) -> Option<MergeRowPositions> {
-    if !matches!(join_type, JoinType::Inner | JoinType::Left | JoinType::Outer) {
+    if !matches!(
+        join_type,
+        JoinType::Inner | JoinType::Left | JoinType::Outer
+    ) {
         return None;
     }
     if left_cols.len() != 2 || right_cols.len() != 2 {
@@ -7320,7 +7323,10 @@ fn typed_wide_two_i64_key_positions(
         Default::default(),
     );
     for pos in 0..r0.len() {
-        right_map.entry(pack(r0[pos], r1[pos])).or_default().push(pos);
+        right_map
+            .entry(pack(r0[pos], r1[pos]))
+            .or_default()
+            .push(pos);
     }
     let is_left = matches!(join_type, JoinType::Left);
     let mut left_positions = Vec::<Option<usize>>::new();
@@ -7358,7 +7364,10 @@ fn typed_wide_multi_i64_key_positions(
     left_cols: &[&Column],
     right_cols: &[&Column],
 ) -> Option<MergeRowPositions> {
-    if !matches!(join_type, JoinType::Inner | JoinType::Left | JoinType::Outer) {
+    if !matches!(
+        join_type,
+        JoinType::Inner | JoinType::Left | JoinType::Outer
+    ) {
         return None;
     }
     let k = left_cols.len();
@@ -7433,14 +7442,12 @@ fn typed_wide_multi_i64_key_positions(
     };
 
     if matches!(join_type, JoinType::Outer) {
-        let mut gid_of: FxHashMap<u128, u32> = FxHashMap::with_capacity_and_hasher(
-            nl.saturating_add(nr),
-            Default::default(),
-        );
+        let mut gid_of: FxHashMap<u128, u32> =
+            FxHashMap::with_capacity_and_hasher(nl.saturating_add(nr), Default::default());
         // Semantic original tuple per composite gid (for the key-ascending sort).
         let mut gid_tuple: Vec<Vec<i64>> = Vec::new();
         let mut left_g: Vec<u32> = Vec::with_capacity(nl);
-        for row in 0..nl {
+        for (row, _) in ls[0].iter().enumerate().take(nl) {
             let key = pack(&lgid, row);
             let g = *gid_of.entry(key).or_insert_with(|| {
                 let x = gid_tuple.len() as u32;
@@ -7450,7 +7457,7 @@ fn typed_wide_multi_i64_key_positions(
             left_g.push(g);
         }
         let mut right_g: Vec<u32> = Vec::with_capacity(nr);
-        for row in 0..nr {
+        for (row, _) in rs[0].iter().enumerate().take(nr) {
             let key = pack(&rgid, row);
             let g = *gid_of.entry(key).or_insert_with(|| {
                 let x = gid_tuple.len() as u32;
@@ -7522,10 +7529,8 @@ fn typed_wide_multi_i64_key_positions(
     }
 
     // Inner / Left: right composite -> ascending-position map, probe left in order.
-    let mut right_map = FxHashMap::<u128, JoinPositionBucket>::with_capacity_and_hasher(
-        nr,
-        Default::default(),
-    );
+    let mut right_map =
+        FxHashMap::<u128, JoinPositionBucket>::with_capacity_and_hasher(nr, Default::default());
     for pos in 0..nr {
         right_map.entry(pack(&rgid, pos)).or_default().push(pos);
     }
@@ -7648,10 +7653,8 @@ fn bounded_composite_multi_i64_key_positions(
 
     // LEFT: right composite -> ascending-position buckets, probe left in order
     // (mirror of hash_int64_left_positions on the composite slices).
-    let mut right_map = FxHashMap::<i64, JoinPositionBucket>::with_capacity_and_hasher(
-        nr,
-        Default::default(),
-    );
+    let mut right_map =
+        FxHashMap::<i64, JoinPositionBucket>::with_capacity_and_hasher(nr, Default::default());
     for (pos, &key) in rcomp.iter().enumerate() {
         right_map.entry(key).or_default().push(pos);
     }
@@ -9113,11 +9116,13 @@ impl MergeAsofOptions {
 /// - `Some(Err)`: range too wide for exact f64 → clean rejection (better than the
 ///   silently-wrong result a lossy cast would give).
 /// - `Some(Ok((left,right)))`: shifted f64 keys, NaT/null → NaN.
+type ShiftedDatetimeAsofKeys = (Vec<f64>, Vec<f64>);
+
 fn try_asof_datetime_shift(
     left_key: &Column,
     right_key: &Column,
     on: &str,
-) -> Option<Result<(Vec<f64>, Vec<f64>), JoinError>> {
+) -> Option<Result<ShiftedDatetimeAsofKeys, JoinError>> {
     if left_key.dtype() != DType::Datetime64 || right_key.dtype() != DType::Datetime64 {
         return None;
     }
@@ -9157,10 +9162,12 @@ fn try_asof_datetime_shift(
         return Some(Ok((vec![f64::NAN; ld.len()], vec![f64::NAN; rd.len()])));
     }
     if (hi as i128 - lo as i128) >= (1i128 << 53) {
-        return Some(Err(JoinError::Frame(FrameError::CompatibilityRejected(format!(
-            "merge_asof: Datetime64 key '{on}' spans more than ~104 days of nanoseconds, \
+        return Some(Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            format!(
+                "merge_asof: Datetime64 key '{on}' spans more than ~104 days of nanoseconds, \
              which exceeds f64 asof precision; not yet supported"
-        )))));
+            ),
+        ))));
     }
     let shift = |data: &[i64], v: &fp_columnar::ValidityMask, all: bool| -> Vec<f64> {
         (0..data.len())
@@ -9174,6 +9181,241 @@ fn try_asof_datetime_shift(
             .collect()
     };
     Some(Ok((shift(ld, lv, l_all), shift(rd, rv, r_all))))
+}
+
+#[derive(Clone, Copy)]
+struct Datetime64AsofKey<'a> {
+    data: &'a [i64],
+    validity: &'a ValidityMask,
+    all_valid: bool,
+}
+
+impl Datetime64AsofKey<'_> {
+    #[inline]
+    fn is_valid(self, i: usize) -> bool {
+        (self.all_valid || self.validity.get(i)) && self.data[i] != fp_types::Timestamp::NAT
+    }
+}
+
+fn datetime64_key_parts(column: &Column) -> Option<Datetime64AsofKey<'_>> {
+    let data = column.as_datetime64_slice()?;
+    let validity = column.validity();
+    Some(Datetime64AsofKey {
+        data,
+        validity,
+        all_valid: validity.all(),
+    })
+}
+
+fn ensure_sorted_non_decreasing_datetime64(
+    key: Datetime64AsofKey<'_>,
+    side: &str,
+    on: &str,
+) -> Result<(), JoinError> {
+    let mut prev: Option<i64> = None;
+    for i in 0..key.data.len() {
+        if !key.is_valid(i) {
+            continue;
+        }
+        let value = key.data[i];
+        if let Some(prev_value) = prev
+            && value < prev_value
+        {
+            return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+                format!("merge_asof: {side} column '{on}' must be sorted"),
+            )));
+        }
+        prev = Some(value);
+    }
+    Ok(())
+}
+
+fn within_datetime64_tolerance(left: i64, right: i64, tolerance: Option<f64>) -> bool {
+    match tolerance {
+        Some(tol) => ((left as i128 - right as i128).abs() as f64) <= tol,
+        None => true,
+    }
+}
+
+fn compute_asof_matches_datetime64(
+    left: Datetime64AsofKey<'_>,
+    right: Datetime64AsofKey<'_>,
+    direction: AsofDirection,
+    allow_exact_matches: bool,
+    tolerance: Option<f64>,
+) -> Vec<Option<usize>> {
+    let mut right_valid_values = Vec::new();
+    let mut right_valid_positions = Vec::new();
+    for i in 0..right.data.len() {
+        if right.is_valid(i) {
+            right_valid_values.push(right.data[i]);
+            right_valid_positions.push(i);
+        }
+    }
+
+    let mut right_matches = Vec::with_capacity(left.data.len());
+
+    match direction {
+        AsofDirection::Backward => {
+            let mut best: Option<usize> = None;
+            let mut best_val: Option<i64> = None;
+            let mut j = 0usize;
+            for i in 0..left.data.len() {
+                if !left.is_valid(i) {
+                    right_matches.push(None);
+                    continue;
+                }
+                let lv = left.data[i];
+                while j < right_valid_values.len() {
+                    let rv = right_valid_values[j];
+                    let should_include = if allow_exact_matches {
+                        rv <= lv
+                    } else {
+                        rv < lv
+                    };
+                    if !should_include {
+                        break;
+                    }
+                    best = Some(right_valid_positions[j]);
+                    best_val = Some(rv);
+                    j += 1;
+                }
+
+                let matched = match (best, best_val) {
+                    (Some(idx), Some(rv)) if within_datetime64_tolerance(lv, rv, tolerance) => {
+                        Some(idx)
+                    }
+                    _ => None,
+                };
+                right_matches.push(matched);
+            }
+        }
+        AsofDirection::Forward => {
+            let mut j = 0usize;
+            for i in 0..left.data.len() {
+                if !left.is_valid(i) {
+                    right_matches.push(None);
+                    continue;
+                }
+                let lv = left.data[i];
+                while j < right_valid_values.len() {
+                    let rv = right_valid_values[j];
+                    let should_skip = if allow_exact_matches {
+                        rv < lv
+                    } else {
+                        rv <= lv
+                    };
+                    if !should_skip {
+                        break;
+                    }
+                    j += 1;
+                }
+
+                if j < right_valid_values.len() {
+                    let rv = right_valid_values[j];
+                    if within_datetime64_tolerance(lv, rv, tolerance) {
+                        right_matches.push(Some(right_valid_positions[j]));
+                    } else {
+                        right_matches.push(None);
+                    }
+                } else {
+                    right_matches.push(None);
+                }
+            }
+        }
+        AsofDirection::Nearest => {
+            for i in 0..left.data.len() {
+                if !left.is_valid(i) {
+                    right_matches.push(None);
+                    continue;
+                }
+                if right_valid_values.is_empty() {
+                    right_matches.push(None);
+                    continue;
+                }
+
+                let lv = left.data[i];
+                let (lower, upper) = if allow_exact_matches {
+                    let lo = right_valid_values.partition_point(|rv| *rv <= lv);
+                    let up = right_valid_values.partition_point(|rv| *rv < lv);
+                    (
+                        if lo > 0 { Some(lo - 1) } else { None },
+                        if up < right_valid_values.len() {
+                            Some(up)
+                        } else {
+                            None
+                        },
+                    )
+                } else {
+                    let lo = right_valid_values.partition_point(|rv| *rv < lv);
+                    let up = right_valid_values.partition_point(|rv| *rv <= lv);
+                    (
+                        if lo > 0 { Some(lo - 1) } else { None },
+                        if up < right_valid_values.len() {
+                            Some(up)
+                        } else {
+                            None
+                        },
+                    )
+                };
+
+                let chosen = match (lower, upper) {
+                    (Some(l), Some(u)) => {
+                        let lower_dist = (right_valid_values[l] as i128 - lv as i128).abs();
+                        let upper_dist = (right_valid_values[u] as i128 - lv as i128).abs();
+                        if upper_dist < lower_dist {
+                            Some(u)
+                        } else {
+                            Some(l)
+                        }
+                    }
+                    (Some(l), None) => Some(l),
+                    (None, Some(u)) => Some(u),
+                    (None, None) => None,
+                };
+
+                let matched = match chosen {
+                    Some(idx)
+                        if within_datetime64_tolerance(lv, right_valid_values[idx], tolerance) =>
+                    {
+                        Some(right_valid_positions[idx])
+                    }
+                    _ => None,
+                };
+                right_matches.push(matched);
+            }
+        }
+    }
+
+    right_matches
+}
+
+fn try_asof_datetime_matches(
+    left_key: &Column,
+    right_key: &Column,
+    on: &str,
+    direction: AsofDirection,
+    allow_exact_matches: bool,
+    tolerance: Option<f64>,
+) -> Option<Result<Vec<Option<usize>>, JoinError>> {
+    if left_key.dtype() != DType::Datetime64 || right_key.dtype() != DType::Datetime64 {
+        return None;
+    }
+    let left = datetime64_key_parts(left_key)?;
+    let right = datetime64_key_parts(right_key)?;
+
+    Some((|| {
+        ensure_sorted_non_decreasing_datetime64(left, "left", on)?;
+        ensure_sorted_non_decreasing_datetime64(right, "right", on)?;
+
+        Ok(compute_asof_matches_datetime64(
+            left,
+            right,
+            direction,
+            allow_exact_matches,
+            tolerance,
+        ))
+    })())
 }
 
 fn asof_numeric_values(column: &Column, side: &str, on: &str) -> Result<Vec<f64>, JoinError> {
@@ -9287,8 +9529,21 @@ fn merge_asof_simple(
         )))
     })?;
 
-    // Datetime64 keys: shift-to-f64 (exact for <~104-day ns ranges) instead of the
-    // rejected/precision-lossy direct cast. Falls back to the f64 numeric path.
+    if let Some(datetime_matches) = try_asof_datetime_matches(
+        left_key,
+        right_key,
+        on,
+        direction,
+        options.allow_exact_matches,
+        options.tolerance,
+    ) {
+        let right_matches = datetime_matches?;
+        return build_asof_output(left, right, on, &right_matches, None);
+    }
+
+    // Non-Datetime64 keys: use the f64 numeric path. The grouped Datetime64
+    // route below still uses the old shift-to-f64 bridge until it gets its own
+    // i64 grouped path.
     let (left_vals, right_vals) = match try_asof_datetime_shift(left_key, right_key, on) {
         Some(shifted) => shifted?,
         None => (
@@ -16122,6 +16377,45 @@ mod tests {
             result.columns.get("quote").unwrap().values()[0],
             Scalar::Float64(20.0)
         );
+    }
+
+    #[test]
+    fn merge_asof_datetime64_wide_ns_range_uses_i64_path() {
+        use super::AsofDirection;
+
+        let day_ns = 86_400_000_000_000i64;
+        let base = 1_600_000_000_000_000_000i64;
+        let dt = |days: i64| Scalar::Datetime64(base + days * day_ns);
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![dt(0), dt(200), dt(400)]),
+                (
+                    "val",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                ("time", vec![dt(-1), dt(199), dt(401)]),
+                (
+                    "quote",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
+        let quote_col = result.columns.get("quote").unwrap();
+        assert_eq!(quote_col.values()[0], Scalar::Int64(10));
+        assert_eq!(quote_col.values()[1], Scalar::Int64(20));
+        assert_eq!(quote_col.values()[2], Scalar::Int64(20));
     }
 
     #[test]
