@@ -9363,6 +9363,33 @@ Verdict: NO-SHIP / reverted. The tiny best-case 73.22 -> 71.86 ms move is noise-
 Parquet decode plus Arrow-buffer -> owned `Column` gathering. Avoiding the file-byte clone is too small for a real measured commit;
 the viable radical lever remains an Arrow/foreign-buffer-backed column representation or a file/reader API that keeps decoded Arrow
 buffers alive through typed consumers.
+
+### 2026-07-04 BlackThrush - read_parquet Float64Vec validity witness NO-SHIP: 0.83x raw-read regression
+Targeted the same `read_parquet` numeric residual from the consumer side. Current `arrow_array_to_column_typed` already moves
+all-valid Float64 Arrow gathers into `Column::from_f64_values_owned`, but `Column::as_f64_slice_with_validity` did not accept the
+resulting `LazyAllValidFloat64Vec` backing. Candidate added that witness arm so read-from-Parquet Float64 columns could enter
+nullable-aware typed consumers without falling through to scalar materialization. This is semantically valid, but it does not
+attack the measured raw-read workload itself, whose dominant floor is still Parquet decode plus Arrow-buffer -> owned-column copy.
+
+Gates: required `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod rch exec -- cargo bench --release -p fp-columnar`
+ran on `vmi1149989` and Cargo rejected `--release` for `bench`. Valid per-crate fallback
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod rch exec -- cargo bench -p fp-columnar`
+completed green locally after RCH reported `no admissible workers: critical_pressure=1,insufficient_slots=10` (476 ignored tests,
+0 measured bench fns). Focused proof test for the candidate witness,
+`rch exec -- cargo test -p fp-columnar owned_float64_exposes_slice_with_validity -- --nocapture`, passed on `ovh-a`.
+
+Fixture-bound timing used `crates/fp-io/examples/bench_parquet_num.rs` on local `/tmp/bench_num.parquet`; remote workers do not
+have that fixture. The box was noisy versus the prior quiet 73ms ledger, so only a large effect would be accepted.
+
+| workload | ORIG current main | candidate | pandas 2.2.3 prior clean | ratio |
+| --- | ---: | ---: | ---: | --- |
+| `read_parquet` 1M x 6 numeric | 103.50 ms warm (first cold/noisy 138.74 ms) | 124.10 ms | 22.75 ms | **0.83x FP-side**, still **0.18x vs pandas** in this noisy window |
+
+Verdict: NO-SHIP / reverted. The witness is behavior-preserving, but it does not move the raw read frontier and regressed the
+short subset in the only comparable window. Do not spend more turns on typed-consumer witness plumbing for this raw-read gap;
+the remaining viable radical lever is a true Arrow/foreign-buffer-backed column representation that eliminates the Arrow-buffer
+copy, not a consumer-side accessor arm.
+
 ### 2026-07-04 Codex — RangeIndex bulk get_indexer precomputes bounds once (3.31x fp-side local fallback)
 `RangeIndex::get_indexer` / `get_indexer_non_unique` / fallback `reindex` already reused `source_len`, but every target still recomputed the representable first/last bounds via widened arithmetic before doing the cheap step-membership test. FIX: precompute `(lower, upper)` once per bulk call and feed it to the same checked per-value arithmetic helper; if the endpoint arithmetic overflows, the helper keeps the original i128 fallback. Bit-identical: same bounds, same `checked_sub` / `checked_rem` / `checked_div`, same `-1` missing positions.
 
