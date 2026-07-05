@@ -9611,3 +9611,39 @@ boxes that thrash cache and (when thread-parallel) saturate the allocator; when 
 the (value,count) set, a typed sort-and-scan is 2-12x faster and lets parallelism actually scale. Prefix-sampling makes
 it data-adaptive so the low-card fast path is untouched. Untried siblings: high-card `value_counts`/`nunique`/`unique`
 typed sort-scan; the same passthrough for Int64 mode columns.
+
+### 2026-07-05 IronQuail — read_json(orient="records") flat-records scanner: skip the serde_json Value tree — ~3.2x fp-side WIN
+
+`read_json_str(Records)` was the single hottest profiled op: ~3168 ms (fp-bench `json_read_records`, 1M×10 f64, a
+**260 MB** records JSON). It parsed the whole input into a `serde_json::Value` tree (n×m Value nodes + one
+`preserve_order` map PER record = 1M maps), then double-iterated it (once for column names, once for values) into
+per-column `Vec<Scalar>`. FP (3168 ms) barely beat pandas 2.2.3 (3444 ms); even C `json.loads` (tree, no frame) is
+2914 ms — the Value-tree tokenize+allocate IS the floor.
+
+FIX (extreme-optimization: replace the general parser+tree with a specialized single-pass **byte scanner** that streams
+straight into typed column builders): `try_read_json_records_flat` scans a FLAT records array
+(`[{...}, ...]`, values ∈ {number, string, bool, null}) directly into per-column `Vec<Scalar>` — no `Value` tree, no
+per-record map, single pass. Number tokens are parsed via `serde_json::from_str::<Number>` so the `as_i64`/`as_f64`
+classification is **bit-identical** to the Value path (incl. serde_json's non-round-trip f64 — a `str::parse` variant was
+1 ULP off on ~10% of values, rejected). Returns `None` to defer to the untouched Value-tree path on ANY deviation
+(nested value, escaped string/key, `NaN`/`Infinity`, trailing garbage), so the frame is bit-identical for EVERY input:
+same first-seen column order, `Null` backfill for missing keys, last-value-wins for duplicate keys, same
+`column_from_json_values` + `promote_synthetic_row_multiindex_if_present` tail.
+
+Prototype (`crates/fp-io/examples/zz_json_scan_ironquail.rs`, not committed) on the same 260 MB fixture:
+serde_json::Value parse 2189 ms → hand-rolled scanner (serde number parse) **677 ms = 3.23x**, and **0 bit-diffs** across
+all 10M values vs `Value::as_f64`.
+
+| workload | ORIG main (json path) | scanner cand | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | --- |
+| serde Value parse only (260 MB) | 2189 ms | 677 ms | **3.23x** (0 bit-diffs) | — |
+| fp-bench `json_read_records` 1M×10 (end-to-end) | 3084.1 ms | 999.2 ms | **3.09x** | 3.45x (pandas 3444 ms, was 1.09x) |
+
+GREEN: 48 fp-io json lib tests + full fp-io suite + fp-conformance (the existing Records tests —
+strings+ints, nullable-int+null, and `[{"b":1,"a":2},{"c":3}]` column-order/backfill — exercise the scanner directly).
+
+LESSON: a hot JSON/text read that goes through a general parser's DOM/Value tree pays n-node allocation + a per-record
+map + a re-walk; when the schema is a flat array of records, a purpose-built single-pass byte scanner into typed column
+builders is ~3x faster, and delegating just the number-token parse back to serde_json keeps it bit-identical (matching
+the reference parser's exact rounding). Same primitive applies to `read_json(columns/split/index)` and is the read-side
+mirror of the already-landed streaming to_json serializer.

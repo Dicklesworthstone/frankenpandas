@@ -6001,7 +6001,225 @@ fn promote_synthetic_row_multiindex_if_present(frame: &DataFrame) -> Result<Data
     promote_frame_index_columns(frame, &refs)
 }
 
+/// Fast path for `read_json_str(JsonOrient::Records)`: scan a FLAT records array
+/// (`[{...}, ...]` whose values are only number / string / bool / null) directly into
+/// per-column `Vec<Scalar>` builders, skipping the `serde_json::Value` tree + the
+/// per-record map allocation. Returns `Ok(None)` to defer to the generic Value-tree
+/// path on ANY deviation (nested value, escaped string/key, `NaN`/`Infinity` token,
+/// trailing garbage, malformed structure), so the produced frame is BIT-IDENTICAL to
+/// the generic path for every input it accepts:
+/// - each `Scalar` is built exactly as `json_value_to_scalar` would (number tokens are
+///   parsed by `serde_json`, so `as_i64`/`as_f64` classification is identical);
+/// - column order is first-seen (same as the generic path's first-seen collection);
+/// - a key missing from a record backfills `Null`, a duplicate key keeps the last value
+///   (matching `serde_json`'s `preserve_order` map);
+/// - the frame is assembled with the same `column_from_json_values` +
+///   `promote_synthetic_row_multiindex_if_present` tail.
+fn try_read_json_records_flat(input: &str) -> Result<Option<DataFrame>, IoError> {
+    let s = input.as_bytes();
+    let n = s.len();
+    let mut i = 0usize;
+    macro_rules! ws {
+        () => {
+            while i < n && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r') {
+                i += 1;
+            }
+        };
+    }
+    ws!();
+    if i >= n || s[i] != b'[' {
+        return Ok(None);
+    }
+    i += 1;
+    ws!();
+    if i < n && s[i] == b']' {
+        // Empty array: defer to the generic path's canonical empty-frame handling.
+        return Ok(None);
+    }
+
+    let mut col_names: Vec<String> = Vec::new();
+    let mut cols: Vec<Vec<Scalar>> = Vec::new();
+    // `last_seen[c]` = the last record index that pushed a value for column c, so a
+    // duplicate key in the same record overwrites and an absent key backfills Null.
+    let mut last_seen: Vec<usize> = Vec::new();
+    let mut name_to_idx: std::collections::HashMap<Vec<u8>, usize> =
+        std::collections::HashMap::new();
+    let mut rec: usize = 0;
+
+    loop {
+        ws!();
+        if i >= n || s[i] != b'{' {
+            return Ok(None);
+        }
+        i += 1;
+        loop {
+            ws!();
+            if i < n && s[i] == b'}' {
+                i += 1;
+                break;
+            }
+            // key: a plain (unescaped) JSON string
+            if i >= n || s[i] != b'"' {
+                return Ok(None);
+            }
+            i += 1;
+            let kstart = i;
+            while i < n && s[i] != b'"' {
+                if s[i] == b'\\' {
+                    return Ok(None);
+                }
+                i += 1;
+            }
+            if i >= n {
+                return Ok(None);
+            }
+            let key = &s[kstart..i];
+            i += 1;
+            ws!();
+            if i >= n || s[i] != b':' {
+                return Ok(None);
+            }
+            i += 1;
+            ws!();
+            if i >= n {
+                return Ok(None);
+            }
+            // value: number | string | true | false | null (else bail)
+            let scalar = match s[i] {
+                b'-' | b'0'..=b'9' => {
+                    let vstart = i;
+                    if s[i] == b'-' {
+                        i += 1;
+                    }
+                    let mut any = false;
+                    while i < n && matches!(s[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
+                        any = true;
+                        i += 1;
+                    }
+                    if !any {
+                        return Ok(None);
+                    }
+                    let Ok(numstr) = std::str::from_utf8(&s[vstart..i]) else {
+                        return Ok(None);
+                    };
+                    // Parse via serde_json so as_i64/as_f64 classification is identical
+                    // to the Value path (bit-identical, incl. the non-round-trip f64).
+                    match serde_json::from_str::<serde_json::Number>(numstr) {
+                        Ok(num) => {
+                            if let Some(v) = num.as_i64() {
+                                Scalar::Int64(v)
+                            } else if let Some(v) = num.as_f64() {
+                                Scalar::Float64(v)
+                            } else {
+                                Scalar::Utf8(num.to_string())
+                            }
+                        }
+                        Err(_) => return Ok(None),
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    let vstart = i;
+                    while i < n && s[i] != b'"' {
+                        if s[i] == b'\\' {
+                            return Ok(None); // escaped string -> generic path
+                        }
+                        i += 1;
+                    }
+                    if i >= n {
+                        return Ok(None);
+                    }
+                    let raw = &s[vstart..i];
+                    i += 1;
+                    match std::str::from_utf8(raw) {
+                        Ok(st) => Scalar::Utf8(st.to_owned()),
+                        Err(_) => return Ok(None),
+                    }
+                }
+                b't' if s[i..].starts_with(b"true") => {
+                    i += 4;
+                    Scalar::Bool(true)
+                }
+                b'f' if s[i..].starts_with(b"false") => {
+                    i += 5;
+                    Scalar::Bool(false)
+                }
+                b'n' if s[i..].starts_with(b"null") => {
+                    i += 4;
+                    Scalar::Null(NullKind::Null)
+                }
+                _ => return Ok(None),
+            };
+            let ci = match name_to_idx.get(key) {
+                Some(&c) => c,
+                None => {
+                    let c = cols.len();
+                    name_to_idx.insert(key.to_vec(), c);
+                    col_names.push(String::from_utf8_lossy(key).into_owned());
+                    let mut v: Vec<Scalar> = Vec::new();
+                    v.resize(rec, Scalar::Null(NullKind::Null)); // backfill prior records
+                    cols.push(v);
+                    last_seen.push(usize::MAX);
+                    c
+                }
+            };
+            if last_seen[ci] == rec {
+                *cols[ci].last_mut().expect("seen this record => non-empty") = scalar;
+            } else {
+                cols[ci].push(scalar);
+                last_seen[ci] = rec;
+            }
+            ws!();
+            if i < n && s[i] == b',' {
+                i += 1;
+                continue;
+            }
+        }
+        // Pad every column not present in this record with Null.
+        for c in 0..cols.len() {
+            if last_seen[c] != rec {
+                cols[c].push(Scalar::Null(NullKind::Null));
+            }
+        }
+        rec += 1;
+        ws!();
+        if i < n && s[i] == b',' {
+            i += 1;
+            continue;
+        }
+        if i < n && s[i] == b']' {
+            i += 1;
+            break;
+        }
+        return Ok(None);
+    }
+    ws!();
+    if i != n {
+        return Ok(None); // trailing garbage -> generic path
+    }
+
+    let row_count = rec as i64;
+    let mut out = BTreeMap::new();
+    for (name, vals) in col_names.iter().zip(cols) {
+        out.insert(name.clone(), column_from_json_values(vals)?);
+    }
+    let index = Index::from_i64((0..row_count).collect());
+    let frame = DataFrame::new_with_column_order(index, out, col_names)?;
+    Ok(Some(promote_synthetic_row_multiindex_if_present(&frame)?))
+}
+
 pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoError> {
+    // Records fast path (must precede the Value-tree parse): scan a FLAT records
+    // array directly into per-column Scalar builders, skipping the serde_json::Value
+    // tree + per-record map allocation that dominates a large records JSON (a 260 MB
+    // input is ~3.2s via the tree). `try_read_json_records_flat` returns `None` to
+    // defer to the generic path below on any non-flat input, so the frame is
+    // bit-identical for every input.
+    if matches!(orient, JsonOrient::Records)
+        && let Some(frame) = try_read_json_records_flat(input)?
+    {
+        return Ok(frame);
+    }
     let parsed = parse_json_value_allowing_pandas_nan(input)?;
 
     match orient {
