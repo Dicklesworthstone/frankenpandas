@@ -2181,81 +2181,136 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
         }
         out.push('\n');
     }
-    for r in 0..n {
-        if let Some(labels) = index_labels
-            && let IndexLabel::Int64(v) = &labels[r]
-        {
-            append_i64_decimal(&mut out, *v);
-        }
-        for (c, col) in cols.iter().enumerate() {
-            if c > 0 || index_labels.is_some() {
-                out.push(delim_c);
+    // Per-row-range writer (br-frankenpandas-csvpar): writes rows `[lo, hi)` into
+    // `dst`, reading ONLY the shared read-only typed slices, so each row's bytes are
+    // independent of chunk boundaries. Shared by the serial and chunked-parallel
+    // drivers below — the parallel concat is byte-for-byte identical to the serial
+    // output (header + rows 0..n in order).
+    let write_range = |lo: usize, hi: usize, dst: &mut String| {
+        for r in lo..hi {
+            if let Some(labels) = index_labels
+                && let IndexLabel::Int64(v) = &labels[r]
+            {
+                append_i64_decimal(dst, *v);
             }
-            match col {
-                // Float64 uses format_pandas_float (Python str(float): keeps
-                // "1.0", signed 2-digit sci notation) — EXACTLY what
-                // scalar_to_csv_with_na uses, NOT Rust's Display (which drops the
-                // ".0"). as_f64_slice yields an all-valid (NaN-free) buffer so the
-                // NaN branch never fires; kept for defensive parity.
-                FastCol::F {
-                    values,
-                    quarter_plan,
-                } => {
-                    if quarter_plan.is_some_and(|plan| plan.append_row(&mut out, r)) {
-                        continue;
-                    }
-                    let v = values[r];
-                    if v.is_nan() {
-                        // Unreachable in practice (as_f64_slice is NaN-free), but kept
-                        // isomorphic with the general path: a sole empty na_rep is quoted.
-                        if single_field && options.na_rep.is_empty() {
-                            out.push_str("\"\"");
-                        } else {
-                            out.push_str(&options.na_rep);
+            for (c, col) in cols.iter().enumerate() {
+                if c > 0 || index_labels.is_some() {
+                    dst.push(delim_c);
+                }
+                match col {
+                    // Float64 uses format_pandas_float (Python str(float): keeps
+                    // "1.0", signed 2-digit sci notation) — EXACTLY what
+                    // scalar_to_csv_with_na uses, NOT Rust's Display (which drops the
+                    // ".0"). as_f64_slice yields an all-valid (NaN-free) buffer so the
+                    // NaN branch never fires; kept for defensive parity.
+                    FastCol::F {
+                        values,
+                        quarter_plan,
+                    } => {
+                        if quarter_plan.is_some_and(|plan| plan.append_row(dst, r)) {
+                            continue;
                         }
-                    } else {
-                        write_pandas_float(&mut out, v);
-                    }
-                }
-                // Int64 formats via the hand-rolled append_i64_decimal fast path
-                // (byte-identical to Rust Display / scalar_to_csv's `v.to_string()`,
-                // but writes straight into `out` with no temporary String alloc — so
-                // this is already optimal; don't "speed it up" with to_string/itoa).
-                FastCol::I(s) => {
-                    append_i64_decimal(&mut out, s[r]);
-                }
-                // Bool uses pandas to_csv spelling: capitalized True/False.
-                FastCol::B(s) => {
-                    out.push_str(if s[r] { "True" } else { "False" });
-                }
-                // Utf8 cell: the raw &str (= Scalar::Utf8's value in scalar_to_csv),
-                // CSV-quoted only when it contains the delimiter, a quote, CR, or
-                // LF — pandas/csv QUOTE_MINIMAL, with internal quotes doubled.
-                FastCol::U(bytes, offsets) => {
-                    let field = &bytes[offsets[r]..offsets[r + 1]];
-                    // SAFETY-FREE: contiguous Utf8 backing is valid UTF-8.
-                    let field = std::str::from_utf8(field).unwrap_or("");
-                    append_csv_minimal_field(&mut out, field, delim, single_field);
-                }
-                // Datetime64: NaT → na_rep (isomorphic with the F NaN arm's sole
-                // empty-na quoting); else the column-uniform format string, routed
-                // through QUOTE_MINIMAL exactly like scalar_to_csv_cell's output.
-                FastCol::Dt(s, fmt) => {
-                    let v = s[r];
-                    if v == Timestamp::NAT {
-                        if single_field && options.na_rep.is_empty() {
-                            out.push_str("\"\"");
+                        let v = values[r];
+                        if v.is_nan() {
+                            // Unreachable in practice (as_f64_slice is NaN-free), but kept
+                            // isomorphic with the general path: a sole empty na_rep is quoted.
+                            if single_field && options.na_rep.is_empty() {
+                                dst.push_str("\"\"");
+                            } else {
+                                dst.push_str(&options.na_rep);
+                            }
                         } else {
-                            out.push_str(&options.na_rep);
+                            write_pandas_float(dst, v);
                         }
-                    } else {
-                        let rendered = format_datetime_csv(v, *fmt);
-                        append_csv_minimal_field(&mut out, &rendered, delim, single_field);
+                    }
+                    // Int64 formats via the hand-rolled append_i64_decimal fast path
+                    // (byte-identical to Rust Display / scalar_to_csv's `v.to_string()`,
+                    // but writes straight into `dst` with no temporary String alloc — so
+                    // this is already optimal; don't "speed it up" with to_string/itoa).
+                    FastCol::I(s) => {
+                        append_i64_decimal(dst, s[r]);
+                    }
+                    // Bool uses pandas to_csv spelling: capitalized True/False.
+                    FastCol::B(s) => {
+                        dst.push_str(if s[r] { "True" } else { "False" });
+                    }
+                    // Utf8 cell: the raw &str (= Scalar::Utf8's value in scalar_to_csv),
+                    // CSV-quoted only when it contains the delimiter, a quote, CR, or
+                    // LF — pandas/csv QUOTE_MINIMAL, with internal quotes doubled.
+                    FastCol::U(bytes, offsets) => {
+                        let field = &bytes[offsets[r]..offsets[r + 1]];
+                        // SAFETY-FREE: contiguous Utf8 backing is valid UTF-8.
+                        let field = std::str::from_utf8(field).unwrap_or("");
+                        append_csv_minimal_field(dst, field, delim, single_field);
+                    }
+                    // Datetime64: NaT → na_rep (isomorphic with the F NaN arm's sole
+                    // empty-na quoting); else the column-uniform format string, routed
+                    // through QUOTE_MINIMAL exactly like scalar_to_csv_cell's output.
+                    FastCol::Dt(s, fmt) => {
+                        let v = s[r];
+                        if v == Timestamp::NAT {
+                            if single_field && options.na_rep.is_empty() {
+                                dst.push_str("\"\"");
+                            } else {
+                                dst.push_str(&options.na_rep);
+                            }
+                        } else {
+                            let rendered = format_datetime_csv(v, *fmt);
+                            append_csv_minimal_field(dst, &rendered, delim, single_field);
+                        }
                     }
                 }
             }
+            dst.push('\n');
         }
-        out.push('\n');
+    };
+
+    // Chunked-parallel serialization: for a large frame, format contiguous row
+    // ranges into per-thread buffers and concatenate them IN ORDER onto `out`
+    // (which already holds the header). ryu float formatting is CPU-bound and the
+    // rows are independent, so this scales with available cores; bit-identical to
+    // the serial `write_range(0, n)` since chunk boundaries don't affect row bytes.
+    const CSV_PAR_MIN_ROWS: usize = 50_000;
+    const CSV_PAR_MIN_ROWS_PER_WORKER: usize = 16_384;
+    let workers = if n >= CSV_PAR_MIN_ROWS {
+        std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(16)
+            .min(n / CSV_PAR_MIN_ROWS_PER_WORKER)
+            .max(1)
+    } else {
+        1
+    };
+    if workers >= 2 {
+        let chunk = n.div_ceil(workers);
+        let write_range = &write_range;
+        let parts: Vec<String> = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
+            let mut start = 0;
+            while start < n {
+                let end = (start + chunk).min(n);
+                handles.push(scope.spawn(move || {
+                    let mut buf = String::with_capacity(
+                        (end - start)
+                            .saturating_mul(field_count)
+                            .saturating_mul(8)
+                            + 16,
+                    );
+                    write_range(start, end, &mut buf);
+                    buf
+                }));
+                start = end;
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("csv writer thread"))
+                .collect()
+        });
+        for p in parts {
+            out.push_str(&p);
+        }
+    } else {
+        write_range(0, n, &mut out);
     }
     Some(out)
 }
@@ -13912,6 +13967,63 @@ mod tests {
         let csv = write_csv_string(&df).expect("write");
         let header = csv.lines().next().expect("header line");
         assert_eq!(header, "alpha,beta,gamma", "header order; csv={csv:?}");
+    }
+
+    // Deterministic n-row frame whose row `i` depends ONLY on `i`, using the typed
+    // constructors so try_write_csv_typed's fast path applies. Exercises every
+    // FastCol arm: an AFFINE Float64 (quarter_plan), a non-affine Float64 (ryu),
+    // Int64, Bool, and contiguous Utf8 with embedded commas (QUOTE_MINIMAL).
+    fn csv_bitident_frame_ironquail(n: usize) -> DataFrame {
+        let idx = Index::from_range(0, n as i64, 1);
+        let aff: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let flt: Vec<f64> = (0..n)
+            .map(|i| ((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11) as f64 / (1u64 << 53) as f64 * 1e6)
+            .collect();
+        let int: Vec<i64> = (0..n as i64).collect();
+        let boo: Vec<bool> = (0..n).map(|i| i % 3 == 0).collect();
+        let mut sbytes: Vec<u8> = Vec::new();
+        let mut soff: Vec<usize> = vec![0];
+        for i in 0..n {
+            let s = if i % 7 == 0 { format!("a,b{i}") } else { format!("x{i}") };
+            sbytes.extend_from_slice(s.as_bytes());
+            soff.push(sbytes.len());
+        }
+        let mut cols = BTreeMap::new();
+        cols.insert("aff".to_string(), Column::from_f64_values(aff));
+        cols.insert("flt".to_string(), Column::from_f64_values(flt));
+        cols.insert("int".to_string(), Column::from_i64_values(int));
+        cols.insert("boo".to_string(), Column::from_bool_values(boo));
+        cols.insert("str".to_string(), Column::from_utf8_contiguous(sbytes, soff));
+        DataFrame::new_with_column_order(
+            idx,
+            cols,
+            vec![
+                "aff".to_string(),
+                "flt".to_string(),
+                "int".to_string(),
+                "boo".to_string(),
+                "str".to_string(),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn csv_parallel_path_matches_serial_prefix_ironquail() {
+        // The 49k frame writes via the SERIAL path (< CSV_PAR_MIN_ROWS); the 51k frame
+        // writes via the CHUNKED-PARALLEL path (>= CSV_PAR_MIN_ROWS). Row `i` depends
+        // only on `i`, so rows 0..49000 are identical between the frames — hence the
+        // 51k CSV must have the 49k CSV as a BYTE-EXACT prefix, proving the parallel
+        // writer is byte-identical to the serial writer across chunk boundaries.
+        let small = csv_bitident_frame_ironquail(49_000);
+        let large = csv_bitident_frame_ironquail(51_000);
+        let csv_small = write_csv_string(&small).expect("serial write");
+        let csv_large = write_csv_string(&large).expect("parallel write");
+        assert!(csv_large.len() > csv_small.len(), "large must be longer");
+        assert!(
+            csv_large.as_bytes().starts_with(csv_small.as_bytes()),
+            "parallel CSV diverges from serial on the shared 0..49000 rows"
+        );
     }
 
     #[test]

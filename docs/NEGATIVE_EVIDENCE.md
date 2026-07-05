@@ -9647,3 +9647,41 @@ map + a re-walk; when the schema is a flat array of records, a purpose-built sin
 builders is ~3x faster, and delegating just the number-token parse back to serde_json keeps it bit-identical (matching
 the reference parser's exact rounding). Same primitive applies to `read_json(columns/split/index)` and is the read-side
 mirror of the already-landed streaming to_json serializer.
+
+### 2026-07-05 IronQuail — to_csv typed writer: chunked-parallel serialization — 5.13x fp-side WIN
+
+`write_csv_string` (fp-bench `csv_write`, 1M×10 f64) was among the hottest profiled ops (~460 ms). Its typed fast path
+`try_write_csv_typed` (br-qk2i9) already formats straight from contiguous typed slices with ryu (`write_pandas_float`) —
+single-threaded-optimal — so the remaining lever is PARALLELISM. The prior BTreeMap-hoist attempt was 0-gain (the lookup
+was never the cost; the ryu formatting into the output String is), and parallelism was never tried.
+
+FIX (extreme-optimization: parallelize the embarrassingly-parallel serialization): factor the per-row writer into a
+`write_range(lo, hi, dst)` closure over the shared read-only typed slices, then for a large frame split rows into up to
+16 contiguous chunks, format each into its own `String` on a `std::thread::scope` worker, and concatenate them IN ORDER
+onto `out` (which already holds the header). ryu float formatting is CPU-bound and rows are independent, so it scales
+with cores. BIT-IDENTICAL: each row's bytes depend only on its absolute index (the affine-column `quarter_plan` and the
+index label both use absolute `r`), so chunk boundaries never change output — `out = header + rows[0..n]` exactly as the
+serial writer produces. Gated `n >= 50_000` and `>= 16_384 rows/worker` (small frames keep the zero-overhead serial path).
+
+Bit-identity proof (new test `csv_parallel_path_matches_serial_prefix_ironquail`): a 49k-row frame (serial path) and a
+51k-row frame (parallel path) built so row `i` depends only on `i` — the 51k CSV must have the 49k CSV as a BYTE-EXACT
+prefix, and does; the frame exercises every FastCol arm (affine Float64/`quarter_plan`, non-affine Float64/ryu, Int64,
+Bool, contiguous Utf8 with embedded commas / QUOTE_MINIMAL). The standalone prototype's serial vs parallel outputs were
+also byte-identical.
+
+Interleaved same-box A/B (cand4 serial vs cand5 parallel, best-of-2 p50, 1M×10 f64; box loaded ~58/64 so absolute times
+are inflated but the interleaving cancels it):
+
+| workload | ORIG serial (cand4) | chunked-parallel (cand5) | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `csv_write` 1M×10 | 458.8 ms | 89.4 ms | **5.13x** |
+
+vs pandas: csv_write was already a ~195x WIN; this deepens the fp-side margin ~5x further. GREEN: new bit-identity test +
+full fp-io suite + fp-conformance.
+
+LESSON: a large ordered text/binary SERIALIZATION (to_csv, and by extension to_json/to_parquet writers) whose per-row
+work is independent is embarrassingly parallel — format contiguous row ranges into per-thread buffers and concat in
+order. The concat (one memcpy of the output) is the only serial floor, so the speedup tracks core count up to memory
+bandwidth. Bit-identical because row bytes are position-independent. Untried siblings: the same chunked-parallel driver
+for the typed json writers (`try_write_json_{records,columns,index,split,values}_typed`) and the general CSV/markdown
+writers. NOTE: measure with an INTERLEAVED A/B on a loaded box — absolute numbers are load-inflated but the ratio holds.
