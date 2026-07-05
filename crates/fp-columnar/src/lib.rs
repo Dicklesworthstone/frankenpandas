@@ -2123,6 +2123,22 @@ enum ScalarValues {
         affine_selection: OnceLock<Option<BoolAffineSelectionWitness>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Deferred all-valid Bool shift.
+    ///
+    /// Semantically identical to building the shifted Bool buffer eagerly:
+    /// vacated slots materialize as `fill`, surviving slots read the source
+    /// row at the positional shift offset. This keeps metadata-only consumers
+    /// from paying the Bool output allocation while preserving a contiguous
+    /// `&[bool]` view on first typed read.
+    LazyShiftedBool {
+        source: Arc<[bool]>,
+        periods: i64,
+        fill: bool,
+        len: usize,
+        data: OnceLock<Vec<bool>>,
+        affine_selection: OnceLock<Option<BoolAffineSelectionWitness>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     /// Contiguous backing for all-valid Utf8 columns
     /// (br-frankenpandas-2krr0): one rolling byte buffer + n+1 offsets (row
     /// `i` = `bytes[offsets[i]..offsets[i+1]]`, always valid UTF-8 by
@@ -2720,6 +2736,40 @@ impl ScalarValues {
             affine_selection: OnceLock::new(),
             values: OnceLock::new(),
         }
+    }
+
+    fn lazy_shifted_bool(source: Arc<[bool]>, periods: i64, fill: bool, len: usize) -> Self {
+        debug_assert!(source.len() >= len);
+        Self::LazyShiftedBool {
+            source,
+            periods,
+            fill,
+            len,
+            data: OnceLock::new(),
+            affine_selection: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn materialize_shifted_bool(
+        source: &[bool],
+        periods: i64,
+        fill: bool,
+        len: usize,
+    ) -> Vec<bool> {
+        let abs = saturating_i64_abs_to_usize(periods);
+        if abs >= len {
+            return vec![fill; len];
+        }
+        let mut out = Vec::with_capacity(len);
+        if periods > 0 {
+            out.resize(abs, fill);
+            out.extend_from_slice(&source[..len - abs]);
+        } else {
+            out.extend_from_slice(&source[abs..len]);
+            out.resize(len, fill);
+        }
+        out
     }
 
     fn lazy_contiguous_utf8(bytes: Vec<u8>, offsets: Vec<usize>) -> Self {
@@ -4137,6 +4187,25 @@ impl ScalarValues {
             Self::LazyAllValidBool { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Bool).collect())
                 .as_slice(),
+            Self::LazyShiftedBool {
+                source,
+                periods,
+                fill,
+                len,
+                data,
+                values,
+                ..
+            } => values
+                .get_or_init(|| {
+                    data.get_or_init(|| {
+                        Self::materialize_shifted_bool(source, *periods, *fill, *len)
+                    })
+                    .iter()
+                    .copied()
+                    .map(Scalar::Bool)
+                    .collect()
+                })
+                .as_slice(),
             Self::LazyContiguousUtf8 {
                 bytes,
                 offsets,
@@ -4694,6 +4763,7 @@ impl ScalarValues {
             Self::LazyStridedFloat64 { len, .. } => *len,
             Self::LazyNullableFloat64 { data, .. } => data.len(),
             Self::LazyAllValidBool { data, .. } => data.len(),
+            Self::LazyShiftedBool { len, .. } => *len,
             Self::LazyContiguousUtf8 { offsets, .. } => offsets.len() - 1,
             Self::LazyLowerHexSequenceUtf8 { len, .. } => *len,
             Self::LazyNullableUtf8 { offsets, .. } => offsets.len() - 1,
@@ -5033,6 +5103,13 @@ impl Clone for ScalarValues {
                 Self::lazy_nullable_float64(data.clone(), validity.clone())
             }
             Self::LazyAllValidBool { data, .. } => Self::lazy_all_valid_bool_arc(Arc::clone(data)),
+            Self::LazyShiftedBool {
+                source,
+                periods,
+                fill,
+                len,
+                ..
+            } => Self::lazy_shifted_bool(Arc::clone(source), *periods, *fill, *len),
             Self::LazyContiguousUtf8 { bytes, offsets, .. } => {
                 Self::lazy_contiguous_utf8_arc(Arc::clone(bytes), Arc::clone(offsets))
             }
@@ -9188,8 +9265,37 @@ impl Column {
             if let ScalarValues::LazyAllValidBool { data, .. } = &self.values {
                 return Some(data.as_ref());
             }
+            if let ScalarValues::LazyShiftedBool {
+                source,
+                periods,
+                fill,
+                len,
+                data,
+                ..
+            } = &self.values
+            {
+                return Some(
+                    data.get_or_init(|| {
+                        ScalarValues::materialize_shifted_bool(source, *periods, *fill, *len)
+                    })
+                    .as_slice(),
+                );
+            }
         }
         None
+    }
+
+    fn bool_arc_view_source(&self) -> Option<Arc<[bool]>> {
+        if self.dtype != DType::Bool || !self.validity.all() {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyAllValidBool { data, .. } => Some(Arc::clone(data)),
+            _ => match &self.data {
+                Some(ColumnData::Bool(data)) => Some(Arc::clone(data)),
+                _ => None,
+            },
+        }
     }
 
     /// Return a cached affine-selection witness for all-valid Bool masks.
@@ -9209,6 +9315,23 @@ impl Column {
             } = &self.values
         {
             return *affine_selection.get_or_init(|| certify_bool_affine_selection(data.as_ref()));
+        }
+        if self.dtype == DType::Bool
+            && self.validity.all()
+            && let ScalarValues::LazyShiftedBool {
+                source,
+                periods,
+                fill,
+                len,
+                data,
+                affine_selection,
+                ..
+            } = &self.values
+        {
+            let shifted = data.get_or_init(|| {
+                ScalarValues::materialize_shifted_bool(source, *periods, *fill, *len)
+            });
+            return *affine_selection.get_or_init(|| certify_bool_affine_selection(shifted));
         }
         None
     }
@@ -19894,22 +20017,16 @@ impl Column {
             return Ok(Self::from_i64_values_owned(out));
         }
         // Bool sibling of the Int64 path: `shift(..., fill_value=false/true)`
-        // over an all-valid Bool column emits only present Bool values, so a
-        // direct copy into the lazy all-valid Bool backing is the same
-        // positional contract without the `Vec<Scalar>` rebuild.
-        if let (Some(data), Scalar::Bool(fill_b)) = (self.as_bool_slice(), &fill) {
-            if abs >= len {
-                return Ok(Self::from_bool_values(vec![*fill_b; len]));
-            }
-            let mut out = Vec::with_capacity(len);
-            if periods > 0 {
-                out.resize(abs, *fill_b);
-                out.extend_from_slice(&data[..len - abs]);
-            } else {
-                out.extend_from_slice(&data[abs..]);
-                out.resize(len, *fill_b);
-            }
-            return Ok(Self::from_bool_values(out));
+        // over an all-valid Bool column emits only present Bool values. Carry a
+        // proof-carrying shifted view so metadata-only consumers pay O(1), while
+        // typed/scalar readers materialize the exact same bool buffer on demand.
+        if let (Some(data), Scalar::Bool(fill_b)) = (self.bool_arc_view_source(), &fill) {
+            return Ok(Self {
+                dtype: DType::Bool,
+                values: ScalarValues::lazy_shifted_bool(data, periods, *fill_b, len),
+                validity: ValidityMask::all_valid(len),
+                data: None,
+            });
         }
         let mut out: Vec<Scalar> = Vec::with_capacity(len);
         if abs >= len {
@@ -25297,6 +25414,32 @@ mod tests {
                 assert_eq!(shifted.dtype(), DType::Bool);
                 assert_eq!(shifted.values(), expected, "period {p}");
             }
+        }
+
+        #[test]
+        fn shift_typed_bool_valid_fill_defers_materialization_until_read() {
+            let typed = Column::from_bool_values(vec![true, false, true, false]);
+            let shifted = typed.shift(1, Scalar::Bool(false)).unwrap();
+            assert!(matches!(
+                &shifted.values,
+                ScalarValues::LazyShiftedBool { data, values, .. }
+                    if data.get().is_none() && values.get().is_none()
+            ));
+            assert_eq!(shifted.len(), 4);
+            assert!(matches!(
+                &shifted.values,
+                ScalarValues::LazyShiftedBool { data, values, .. }
+                    if data.get().is_none() && values.get().is_none()
+            ));
+            assert_eq!(
+                shifted.as_bool_slice(),
+                Some(&[false, true, false, true][..])
+            );
+            assert!(matches!(
+                &shifted.values,
+                ScalarValues::LazyShiftedBool { data, values, .. }
+                    if data.get().is_some() && values.get().is_none()
+            ));
         }
 
         #[test]
