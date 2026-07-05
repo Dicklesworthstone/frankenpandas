@@ -9505,3 +9505,28 @@ AND blocks vectorization. Tile the rows + stream columns to convert it into sequ
 accumulator, without changing the per-row fold order (so it stays bit-identical). Open siblings on the same vein:
 `reduce_rows_func_f64` (var/std/sem/skew axis=1 — needs a tiled two-pass moment kernel: tiled row-sum -> row-means,
 then tiled `(col - mean)^2` accumulation) and `reduce_rows_int64`.
+
+### 2026-07-05 BlackThrush - DataFrame var/std/sem(axis=1) tiled two-pass moment kernel NO-SHIP: 0.975x FP-side
+
+Targeted the open sibling from the landed axis=1 f64 tiled fold: `reduce_rows_func_f64` for row sample moments. This is a
+different primitive than the shipped simple fold kernel: a cache-blocked two-pass moment plan, first streaming each column
+tile into per-row sums, then streaming columns again to accumulate each row's `m2 = sum((x - mean)^2)`.
+
+Alien-graveyard mapping: cache-blocked/vectorized execution for an axis orthogonal to columnar storage. Alien-artifact
+proof obligation: preserve pandas/FP sample-variance semantics by keeping each row's first-pass sum in column order and
+each row's second-pass squared-deviation sum in the same column order; only lanes across different rows may vectorize.
+
+Candidate added a guarded all-valid Float64 helper for `var_axis1`, `std_axis1`, and `sem_axis1`; nullable/mixed/generic
+paths were untouched. It was fully reverted after measurement.
+
+Short per-crate bench used the required target dir and same RCH worker:
+
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo run -q -p fp-frame --example bench_axis1 --release -- 1000000 10 var`
+
+| workload | ORIG current main | tiled two-pass moment candidate | ratio |
+| --- | ---: | ---: | ---: |
+| `df.var(axis=1)`, 1M x 10 all-valid Float64 | 27.044924 ms | 27.741073 ms | **0.975x FP-side REGRESSION** |
+
+Verdict: NO-SHIP / reverted. Do not retry the separate row-sums plus second-pass `m2` tile for all-valid f64 row variance:
+the extra full output-sized sums buffer and second streaming pass erase the locality/vectorization benefit on this shape.
+The viable frontier would need a different algebraic primitive with a stronger proof story, not this two-pass tiled helper.
