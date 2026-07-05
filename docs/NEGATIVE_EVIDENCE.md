@@ -9568,3 +9568,46 @@ generic quickselect, not the gather. A data-oblivious sorting network (branchles
 stack buffer, parallel Batcher layers) removes the allocation, the comparator closure, AND the branch mispredicts —
 2-3.6x for small k, bit-identical. Same primitive applies to any small-k row order statistic (row-quantile,
 row-nlargest/nsmallest axis=1).
+
+### 2026-07-05 IronQuail — DataFrame.mode() high-cardinality: cardinality-adaptive sort-scan mode — ~12x fp-side WIN
+
+`df.mode()` was the single hottest profiled op: ~988 ms (fp-bench `df_mode`, 1M×10 all-distinct Float64), Series::mode
+~300 ms per column. Root cause on the near-unique (high-cardinality) worst case: `Series::mode_with_dropna`'s ScalarKey
+hashmap tally builds an n-entry FxHashMap + an n-entry `Vec<(Scalar, usize)>`, Scalar-filters to the max count, then
+`scalar_key_cmp`-sorts the modes and `build_mode_column`s them — enum-boxed, cache-thrashing work — and
+`mode_axis0` then RE-materializes each column's modes via `values().to_vec()` + rebuild. Across 10 thread-parallel
+columns the ~48 MB/col of Scalar/hashmap allocation saturates the allocator, so parallelism barely helped
+(10 cols in 758 ms vs 300 ms/col).
+
+FIX (extreme-optimization / alien-graveyard: replace hash aggregation with **sort-and-scan** on the typed slice; keep it
+data-adaptive): a new `mode_f64_highcard_sortscan` that (1) prefix-samples the first 100k values to detect a >50%
+distinct fraction — a cheap O(sample) cardinality probe — and returns `None` for low-card columns so they keep the fast
+hashmap; (2) for high-card, sorts the raw `&[f64]` once by `total_cmp` and scans maximal equal-value runs for the max
+count and the max-count run representatives, emitting a **typed** `Column::from_f64_values_owned` — NO hashmap, NO
+Scalar tally/filter/sort/build. Plus a `mode_axis0` no-padding passthrough that reuses each column's typed mode column
+directly instead of the `values().to_vec()` round-trip. BIT-IDENTICAL for the gated shape (all-valid, no-NaN,
+**zero-free** Float64): identical (value,count) multiset, identical max-count values in ascending order
+(`total_cmp` == `scalar_key_cmp` for zero-free no-NaN finite/±inf f64), identical all-valid Float64 output column.
+Zeros bail to the hashmap because it normalizes `-0.0`→`+0.0` for the KEY but stores the first-seen ORIGINAL sign as the
+value — a raw sort cannot reproduce that, so any zero present skips the fast path.
+
+Correctness: a differential harness (`examples/zz_mode_probe_ironquail.rs`, not committed) verifies the sort-scan output
+equals a brute-force reference tally for all-distinct 800k, high-card 600k with planted ties, and high-card 500k with a
+`+inf` mode — all match bit-for-bit including sorted order.
+
+Same-example same-box A/B (real fp-frame API, 1M all-distinct / 1M×10, exact fp-bench fixture):
+
+| workload | ORIG main (a878259b0) | sort-scan cand | fp-side | vs pandas 2.2.3 |
+| --- | ---: | ---: | ---: | --- |
+| `Series::mode` 1M all-distinct (serial) | 300.0 ms | 31.9 ms | **9.4x** | — |
+| `DataFrame::mode` 1M×10 (parallel) | 758.3 ms | 62.1 ms | **12.2x** | ~25.7x (pandas 1594 ms) |
+| fp-bench `df_mode` 1M×10 (interleaved) | 691.0 ms | 64.4 ms | **10.73x** | ~24.8x (pandas 1594 ms) |
+
+GREEN: 41 mode lib tests + full fp-frame suite + fp-conformance; differential harness passes. Low-card Series.mode is
+untouched (sample returns `None` → existing hashmap path, ~1 sampling pass of overhead).
+
+LESSON: a hash-aggregation (mode/value_counts/nunique) over a HIGH-cardinality column pays an n-entry hashmap + n Scalar
+boxes that thrash cache and (when thread-parallel) saturate the allocator; when the op only needs order statistics of
+the (value,count) set, a typed sort-and-scan is 2-12x faster and lets parallelism actually scale. Prefix-sampling makes
+it data-adaptive so the low-card fast path is untouched. Untried siblings: high-card `value_counts`/`nunique`/`unique`
+typed sort-scan; the same passthrough for Int64 mode columns.
