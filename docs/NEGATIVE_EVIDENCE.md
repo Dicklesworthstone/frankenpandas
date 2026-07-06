@@ -9812,3 +9812,35 @@ eagerly); the to_dict/to_dict_dict floor is the object-output `Vec<Vec<(String, 
 would need a shared-key representation — a multi-crate public-API change). LESSON (reconfirmed): parallelization wins
 only for CPU-bound ops (csv-write ryu, json-read parse); it LOSES for allocation/output-bandwidth-bound ops (json
 write, to_dict). Probe whether an op is CPU-bound BEFORE parallelizing.
+
+### 2026-07-06 IronQuail — to_multi_index typed Int64 level build — 1.14x fp-side WIN (reshape/set_index MultiIndex floor)
+
+After the wide_to_long typed-column-gather win (1.70x, a32d59ad4), its residual floor is `set_index_multi → to_multi_index`
+(the row-MultiIndex level build), shared by wide_to_long / stack / unstack / set_index_multi / pivot / groupby-as-index.
+NOTE (corrects last round's guess): `Index::new` is LAZY (just wraps the labels + a fresh identity; no eager hashmap),
+so the flat-index STRING build is only ~4% (direct-buffer `to_flat_index` was 1.04x, reverted); the real level-build cost
+is the per-cell `col.value(i)` **Scalar materialization** in `to_multi_index` (n × #index-cols) + `MultiIndex::from_arrays`
+factorize.
+
+FIX (typed level gather): `to_multi_index` built each level as `(0..n).map(|i| col.value(i) -> match Scalar -> IndexLabel)`.
+Added an all-valid Int64 fast path: `col.as_i64_slice()` → `s.iter().map(|&v| IndexLabel::Int64(v))` — straight from the
+raw `&[i64]`, no per-cell Scalar. BIT-IDENTICAL (the generic path turns `Scalar::Int64(v)` into `IndexLabel::Int64(v)`;
+`as_i64_slice` is `Some` only for an all-valid Int64 column so no missing/other-dtype reaches it; those keep the generic
+per-cell path). Verified by the existing set_index_multi / wide_to_long / stack / pivot suite + conformance.
+
+Interleaved same-box A/B (cand9 generic vs cand12 typed, best-of-4 p50, 1M):
+
+| workload | ORIG (cand9) | typed to_multi_index (cand12) | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `wide_to_long` 1M (both index levels i64) | 167.3 ms | 146.5 ms | **1.14x** |
+| fp-bench `df_stack` 1M (one Utf8 level = column names) | 143.5 ms | 139.0 ms | 1.03x |
+
+GREEN: full fp-frame suite + fp-conformance. The win is understated by these two benches — it applies to EVERY
+`set_index_multi` / `to_multi_index` with Int64 index columns (pivot, groupby-with-int-keys-as-index, multi-key set_index).
+RESIDUAL floor: `MultiIndex::from_arrays` factorize + the flat legacy-fallback string index; a bigger lever would make
+that flat index lazy (built on demand) or a typed/packed composite, not the level extraction.
+
+LESSON: a MultiIndex level build that does per-cell `col.value(i)` pays the Scalar-box tax; gather typed levels straight
+from `as_i64_slice` (same single-dtype-gate lever as melt/stack/concat/wide_to_long). f64/Utf8/bool levels still stringify
+(a per-cell alloc that `to_string`/Display can't avoid) — only Int64 fully skips the box, but Int64 index columns are the
+common case (default RangeIndex-derived keys, group ids, wide_to_long's numeric j).
