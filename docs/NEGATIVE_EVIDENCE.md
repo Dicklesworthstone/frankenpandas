@@ -9685,3 +9685,31 @@ order. The concat (one memcpy of the output) is the only serial floor, so the sp
 bandwidth. Bit-identical because row bytes are position-independent. Untried siblings: the same chunked-parallel driver
 for the typed json writers (`try_write_json_{records,columns,index,split,values}_typed`) and the general CSV/markdown
 writers. NOTE: measure with an INTERLEAVED A/B on a loaded box — absolute numbers are load-inflated but the ratio holds.
+
+### 2026-07-05 IronQuail — json typed writers: chunked-parallel AND direct-ryu BOTH NO-SHIP (0.96–1.02x)
+
+After landing chunked-parallel to_csv (5.13x), the obvious sibling was the same driver for the typed json writers
+(`try_write_json_{records,index,columns,split,values}_typed`, the hottest write ops at 367–530 ms on a quiet box). TWO
+distinct levers were tried and BOTH are zero-gain — json write is at a fundamentally different floor than csv.
+
+(1) **Chunked-parallel serialization** (a reusable `parallel_serialize_row_body(n, open, sep, close, …)` helper wired
+into the records + index writers, bit-identical — verified by a prefix test: a 51k-row parallel json has the 49k-row
+serial json as a byte-exact prefix after stripping the wrapper). Interleaved A/B (cand5 serial vs cand6 parallel, quiet
+box): `json_write_index` 456.6→474.9 ms **0.96x** (regression), `json_write_records` 353.7→342.1 ms **1.03x**. NO WIN —
+whereas the IDENTICAL primitive gives to_csv **5.54x** on the same box (re-confirmed: cand4 459.4 → cand5 82.9 ms). So
+csv is CPU-bound (ryu formatting parallelizes), json write is NOT.
+
+(2) **Direct-ryu float write** (skip the per-value `serde_json CompactFormatter.write_f64` → scratch `Vec<u8>` →
+`from_utf8` → `push_str` double-copy, writing ryu straight into the output String). `CompactFormatter` IS ryu for finite
+f64 except it signs a POSITIVE exponent (`1e+16` vs ryu `1e16`); the one-char exponent fix makes normalized-ryu
+BYTE-IDENTICAL (verified 0 diffs over 3M random + a full 10^-320..10^308 sweep; full fp-io + conformance GREEN).
+Interleaved A/B (cand5 CompactFormatter vs cand7 direct-ryu): index 445.2→438.0 **1.02x**, columns 383.2→380.9 **1.01x**,
+records 348.3→343.1 **1.02x**, values 254.9→261.1 **0.98x**. NO WIN — the scratch-Vec double-copy is NOT the bottleneck.
+
+Verdict: NO-SHIP / both reverted. The json write floor is neither CPU (parallel no-help) nor the scratch-buffer copy
+(direct-ryu no-help). Unlike csv's bare-value output, json emits a per-cell KEY (`"col_k":`) + the value + structural
+braces, so its output is bigger and key-copy-heavy; the writer is memory/allocation-bound on building the 260–400 MB
+String, a floor that neither threading (memory bandwidth shared) nor removing one digit-copy moves. DO NOT re-try
+parallel or direct-ryu on the typed json writers. A real json-write lever would need a fundamentally smaller/streamed
+output representation (write to a sink instead of a materialized String) or an output-bandwidth reduction — not a
+formatting or threading rearrangement. (to_csv parallel stays a genuine 5.5x WIN; the divergence is the finding.)
