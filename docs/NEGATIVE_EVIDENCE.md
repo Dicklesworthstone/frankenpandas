@@ -10072,3 +10072,31 @@ to allocator contention, the lever is to REDUCE THE ALLOCATION COUNT first (fewe
 the two levers COMPOUND. SIBLING: `to_dict("dict")`/`("index")` are now also shared-key (`Mapping { keys, values:
 BTreeMap<String, Vec<Scalar>> }`) — same per-column/per-label `Vec<Scalar>` structure, so the same parallel gather should
 win there too (untried this round).
+
+### 2026-07-07 IronQuail — DataFrame.to_records() parallelized — 1.43x fp-side WIN (structural-loss op)
+
+`df.to_records()` (~100ms@1M×10) is one of the hottest profiled dataframe ops and the documented STRUCTURAL loss vs pandas
+(pandas returns an O(1) 2D-block record array; FP materializes `Vec<Vec<Scalar>>` row-major = a real transpose). The neg-ev
+notes it as structural but NEVER as a parallel no-ship — so parallelism is untried here. Applied the exact primitive that
+just unlocked `to_dict("records")` (8b19e667b, 1.96x): each output record is an independent per-ROW `Vec<Scalar>` of
+`[index_label, col0, col1, ...]` — one per-row allocation + cheap value clones, NOT a per-cell String tax — so the build is
+allocator-arena-friendly and parallelizes. Split rows across ≤16 `thread::scope` workers, each building a contiguous row
+range, then concatenate by MOVING the inner row-Vec pointers (no per-cell copy). Bit-identical (new prefix test: 60k-row
+PARALLEL records have the 40k-row SERIAL records as an exact prefix across chunk boundaries).
+
+Interleaved same-box A/B (alternating cand20/cand21 per trial, min-of-9, 1M×10 f64):
+
+| workload | serial (cand20) | parallel (cand21) | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_to_records` 1M×10 | 100.4 ms | 70.0 ms | **1.43x** |
+| fp-bench `df_to_dict_dict` (control, untouched) | 96.9 ms | 96.6 ms | 1.00x (validates the measurement) |
+
+Still a LOSS vs pandas's O(1) block view (the transpose is materialized either way) — this is a ratio-vs-ORIG (FP-side)
+win that HALVES the gap. 1.43x vs records' 1.96x because to_records does slightly more per row (the leading index-label
+`Scalar` build + the `Option<&[Scalar]>` map per cell). GREEN: full fp-frame (+ new parallel prefix test) + fp-conformance.
+
+LESSON: the "reduce allocation count, THEN parallelism compounds" pattern generalizes across the whole per-row object-output
+FAMILY — any op that materializes `Vec<Vec<Scalar>>` / `Vec<Vec<_>>` row-major (to_dict records DONE 1.96x, to_records DONE
+1.43x) parallelizes once it's off the per-cell-String tax. SIBLINGS STILL UNTRIED: `iterrows`/`itertuples` (same per-row
+`Vec` shape, borrowed `&str` keys so already off the String tax) and the COLUMN-oriented `to_dict("dict")`/`("index")`
+(m per-column `Vec<Scalar>` copies — parallelize across the ≤m columns instead of rows).
