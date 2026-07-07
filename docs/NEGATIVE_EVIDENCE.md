@@ -9876,3 +9876,37 @@ for the allocation-bound object-output ops that parallelization couldn't touch (
 the same tax: `to_dict("index")` (keys per row) and `to_dict("dict")`/`"mapping"` (index-label String cloned per cell,
 `label_str.clone()`) — same shared-key/interned-label fix. NOTE: this changes the public `DataFrameDictResult::Records`
 shape (workspace-internal only), so it is a deliberate representation change, not a bit-for-bit-type-preserving one.
+
+### 2026-07-06 IronQuail — to_dict(dict)/(index) shared-key representation — 1.60x fp-side WIN (hottest op)
+
+Follow-on to last round's to_dict(records) shared-key win (1.58x, be0c1fd7d). With `records` fixed, `df.to_dict("dict")`
+became the new hottest profiled dataframe op (~153ms@1M×10). Same tax: the `Mapping(BTreeMap<String, Vec<(String, Scalar)>>)`
+result cloned the INNER KEY into every one of the n×m cells — for `"dict"` that key is the index label
+(`label_str.clone()` per cell), for `"index"` it is the column name (`col_name.clone()` per cell). Either way = 10M short-String
+heap allocations, ~half the op's cost, and unavoidable while each cell stores an owned `String`.
+
+RADICAL PRIMITIVE (shared-key, same lever as records): changed the variant to
+`Mapping { keys: Vec<String>, values: BTreeMap<String, Vec<Scalar>> }` — the inner keys are carried ONCE in `keys`, and each
+outer entry stores only its bare values aligned position-for-position with `keys`. For `"dict"`: outer = column, `keys` =
+index labels, `values[col][i]` is the value at label `keys[i]` (build is now just per-column `values().to_vec()`, no label
+clone). For `"index"`: outer = label, `keys` = column names, `values[label][j]` is the value in column `keys[j]` (no col-name
+clone). Semantically identical: the nested `{outer: {inner: value}}` map is exactly recoverable by zipping `keys` with each
+outer's values. Contained to fp-frame: `Mapping` is consumed only by the two orient builds + 4 unit tests (all updated);
+fp-python's `to_dict` is column-oriented and never touches it, and no conformance path consumes it. `as_mapping()` now
+returns `(&[String], &BTreeMap<String, Vec<Scalar>>)`.
+
+Interleaved same-box A/B (cand13 per-cell-key vs cand14 shared-key, best-of-6 p50, 1M×10):
+
+| workload | ORIG (cand13) | shared-key (cand14) | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_to_dict_dict` 1M×10 f64 | 152.7 ms | 95.4 ms | **1.60x** |
+| fp-bench `df_to_dict_records` (control, untouched) | 103.1 ms | 102.4 ms | 1.01x |
+
+GREEN: full fp-frame suite (4 updated to_dict tests) + fp-conformance. The `"index"` orient gets the same fix (not directly
+benched but the same 10M col-name clones removed).
+
+LESSON (reconfirmed from records): a nested-map result type that stores the INNER KEY in every cell pays an n×m String-alloc
+tax when there are only k distinct inner keys; carry the keys once (shared-key) and store bare value vectors. With
+`records` (a3..) + `dict`/`index` (this) done, the whole to_dict object-output family is now off the per-cell-key tax — the
+remaining `to_dict` residual is the honest Scalar/Vec materialization, not key duplication. (`"list"`/`"split"`/`"tight"`
+already stored bare values.)
