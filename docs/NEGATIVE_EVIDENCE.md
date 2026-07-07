@@ -9910,3 +9910,38 @@ tax when there are only k distinct inner keys; carry the keys once (shared-key) 
 `records` (a3..) + `dict`/`index` (this) done, the whole to_dict object-output family is now off the per-cell-key tax — the
 remaining `to_dict` residual is the honest Scalar/Vec materialization, not key duplication. (`"list"`/`"split"`/`"tight"`
 already stored bare values.)
+
+### 2026-07-06 IronQuail — reshape flat index: contiguous-Utf8 backing + no round-trip — 1.43x fp-side WIN (wide_to_long)
+
+wide_to_long (~142ms@1M) is the hottest profiled dataframe op after the to_dict family was fixed. Its residual (after
+last round's typed to_multi_index) is the flat composite index built by `MultiIndex::to_flat_index` inside `set_index_multi`.
+CORRECTION to last round's guess: `MultiIndex::from_arrays` is CHEAP (just stores the level arrays — no factorization),
+and `Index::new` is lazy — so the real cost is (a) `to_flat_index` building n separate `IndexLabel::Utf8(String)` (one heap
+alloc per row) and (b) set_index_multi immediately `.labels().to_vec()`-ing that Index and rebuilding `Index::new(labels)`,
+re-materializing every composite label into a fresh String. Last round's direct-buffer to_flat_index (still built n Strings)
+was only 1.04x — proof the per-row STRING ALLOCATION, not the intermediate `Vec<String>`+`join`, is the floor.
+
+RADICAL PRIMITIVE (contiguous-Utf8 flat index, the to_period / stack / str-groupby lever): `to_flat_index` now writes ALL
+n composite labels into ONE growing String buffer, records n+1 byte offsets, and constructs the Index via the lazy
+contiguous-Utf8 backing (`Index::from_utf8_contiguous`, br-frankenpandas-nbspq) — one big allocation instead of n small ones,
+no per-row `IndexLabel` box. AND set_index_multi keeps that contiguous Index and just `.set_name()`s it (a cheap Arc-clone)
+instead of the `.labels().to_vec()` + `Index::new` round-trip that threw the whole benefit away. Semantically identical: the
+backing materializes the same `IndexLabel::Utf8` labels on demand (`write!("{}", level[i])` == `to_string()`, `sep` between
+levels == `parts.join(sep)`), so labels(), get_loc, and duplicate detection are unchanged.
+
+Interleaved same-box A/B (best-of-5 p50, 1M), isolating each half:
+
+| workload | ORIG (cand14) | contiguous only (cand15) | contiguous + no-round-trip (cand15b) |
+| --- | ---: | ---: | ---: |
+| fp-bench `wide_to_long` 1M | 142.2 ms | 125.4 ms (1.13x) | **99.5 ms (1.43x)** |
+| fp-bench `df_stack` 1M | 141.4 ms | 143.0 ms (0.99x) | 141.5 ms (1.00x) |
+
+Both halves are needed (contiguous alone 1.13x; the no-round-trip in set_index_multi unlocks the rest to 1.43x). GREEN: full
+fp-frame + fp-index + fp-conformance. df_stack is UNAFFECTED — it builds its reshaped index via a different path (not
+set_index_multi's to_flat_index), a separate future lever. Two files: fp-index (to_flat_index) + fp-frame (set_index_multi).
+
+LESSON: (1) a hot builder that produces n `IndexLabel::Utf8(String)` labels should build ONE contiguous byte buffer + offsets
+and use the lazy Utf8 Index backing — n small allocs → 1 big one. (2) ALWAYS check the CALLER: set_index_multi was
+`.labels().to_vec()`-ing the freshly-built index straight back into a Vec, so the contiguous build alone did almost nothing
+until the caller's round-trip was removed too. Applies to any op building a composite/derived string index (pivot/unstack
+set_index paths worth checking for the same `.labels().to_vec()` anti-pattern).

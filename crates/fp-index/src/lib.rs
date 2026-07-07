@@ -18681,18 +18681,33 @@ impl MultiIndex {
     /// Matches `pd.MultiIndex.to_flat_index()` (approximately).
     #[must_use]
     pub fn to_flat_index(&self, sep: &str) -> Index {
+        use std::fmt::Write as _;
         let n = self.len();
-        let labels: Vec<IndexLabel> = (0..n)
-            .map(|i| {
-                let parts: Vec<String> = self
-                    .levels
-                    .iter()
-                    .map(|level| level[i].to_string())
-                    .collect();
-                IndexLabel::Utf8(parts.join(sep))
-            })
-            .collect();
-        Index::new(labels)
+        // Contiguous-Utf8 flat index (br-frankenpandas-flatidx-contig): the old form
+        // built n separate `IndexLabel::Utf8(String)` — one heap allocation per row —
+        // then `Index::new(Vec<IndexLabel>)`. This is the reshape MultiIndex floor hit
+        // by wide_to_long / stack / unstack / set_index_multi, and it is built eagerly
+        // even though the row MultiIndex is stored alongside. Instead write ALL n
+        // composite labels into ONE growing String buffer, recording byte offsets, and
+        // hand the buffer + offsets to the lazy contiguous-Utf8 Index backing (nbspq):
+        // one big allocation instead of n small ones, no per-row IndexLabel box, no
+        // per-row `Vec<String>` + `join`. Semantically identical — the backing
+        // materializes the same `IndexLabel::Utf8` labels on demand (same bytes:
+        // `write!("{}", level[i])` == `level[i].to_string()`, `sep` between levels ==
+        // `parts.join(sep)`), so labels(), lookups, and duplicate detection are unchanged.
+        let mut buf = String::new();
+        let mut offsets: Vec<usize> = Vec::with_capacity(n + 1);
+        offsets.push(0);
+        for i in 0..n {
+            for (li, level) in self.levels.iter().enumerate() {
+                if li > 0 {
+                    buf.push_str(sep);
+                }
+                let _ = write!(buf, "{}", level[i]);
+            }
+            offsets.push(buf.len());
+        }
+        Index::from_utf8_contiguous(Arc::from(buf.into_bytes()), Arc::from(offsets))
     }
 
     /// Drop a level from this MultiIndex, returning a new MultiIndex
