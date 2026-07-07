@@ -9945,3 +9945,35 @@ and use the lazy Utf8 Index backing — n small allocs → 1 big one. (2) ALWAYS
 `.labels().to_vec()`-ing the freshly-built index straight back into a Vec, so the contiguous build alone did almost nothing
 until the caller's round-trip was removed too. Applies to any op building a composite/derived string index (pivot/unstack
 set_index paths worth checking for the same `.labels().to_vec()` anti-pattern).
+
+### 2026-07-07 IronQuail — DataFrame.apply(axis=1) reused row buffer — 1.17x WIN (+ stack blocked-transpose NO-SHIP)
+
+df_stack (~146ms) was the hottest profiled dataframe op; df_apply_row (~93ms) the next winnable one. Two levers tried:
+
+**(1) stack cache-blocked value transpose — NO-SHIP (0.92x REGRESSION, reverted).** stack already builds its composite
+label index as ONE contiguous Utf8 buffer and gathers the value column typed. Hypothesis: the row-major value gather
+(`for row { for col { push x_col[row] } }`) strides across m column arrays (80MB > L3) with cache-missing reads, so a
+cache-blocked transpose (read each column contiguously within a 256-row block, scatter into the cached output block) would
+win. Reality: 139.6→152.1ms = **0.92x**. The blocked form needs a preallocated `vec![0.0; total]` (an 80MB zeroing pass the
+row-major `push` avoids), and the row-major gather was NOT the bottleneck — the hardware prefetcher/OOO already hides the
+strided reads. stack's real floor is the ~120MB composite-LABEL byte build (structural flat-composite-string, pandas dodges
+it with a real MultiIndex), not the value gather. Reverted cleanly.
+
+**(2) DataFrame.apply(func, axis=1) reused row buffer — 1.17x WIN (landed).** The row-wise path `collect()`-ed a fresh
+`Vec<Scalar>` for every row just to hand `func` a `&[Scalar]` — n heap allocations + n frees. Replaced with ONE reused
+buffer (`row_vals.clear(); row_vals.extend(...)` per row). Bit-identical: `func` sees the identical slice contents each row;
+only the transient per-row Vec is elided. Benefits every row-wise `apply`, not just the bench closure.
+
+Interleaved same-box A/B (best-of-6 p50, 1M×10 f64):
+
+| workload | ORIG (cand15b) | reused buffer (cand17) | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_apply_row` 1M×10 | 92.8 ms | 79.2 ms | **1.17x** |
+| fp-bench `df_stack` (control, blocked-transpose reverted) | 140.1 ms | 142.0 ms | 0.99x |
+
+GREEN: full fp-frame + fp-conformance. LESSON: (a) a hot loop that `collect()`s a throwaway `Vec` per iteration just to
+borrow it should clear+extend ONE reused buffer — elides n allocs, bit-identical. (b) A cache-blocked transpose only pays
+off when the strided access is genuinely cache-miss-bound AND you don't have to add a zeroing pass to get random-access
+writes; here the prefetcher already covered the strided reads, so the extra `vec![0; n]` made it a net loss. stack's
+residual is the structural composite-label string build (a lazy composite Index backing would be the bold next lever, but
+that's a deeper fp-index change).
