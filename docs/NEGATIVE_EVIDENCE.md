@@ -10100,3 +10100,51 @@ FAMILY — any op that materializes `Vec<Vec<Scalar>>` / `Vec<Vec<_>>` row-major
 1.43x) parallelizes once it's off the per-cell-String tax. SIBLINGS STILL UNTRIED: `iterrows`/`itertuples` (same per-row
 `Vec` shape, borrowed `&str` keys so already off the String tax) and the COLUMN-oriented `to_dict("dict")`/`("index")`
 (m per-column `Vec<Scalar>` copies — parallelize across the ≤m columns instead of rows).
+
+### 2026-07-08 BlackThrush - to_dict(dict) shared-key column gather parallelized - 1.33x fp-side WIN
+
+This lands the sibling explicitly left open by the 2026-07-07 `to_dict("records")` keep. It is NOT a retry of the rejected
+pre-shared-key `to_dict(records)` parallel lever: the `Mapping { keys, values }` representation already carries each index
+label once and stores bare per-column `Vec<Scalar>` values, so the old n*m per-cell `String` allocation tax is gone. The
+remaining `to_dict("dict")` hot path was copying each column's values serially.
+
+Primitive: for large mapping builds, hoist the shared index keys once, split independent per-column `values().to_vec()`
+copies across scoped workers, and reassemble the resulting `(column_name, Vec<Scalar>)` pairs into the same `BTreeMap`.
+Small frames and one-column frames stay serial. Observable semantics are unchanged: identical shared keys, identical
+per-column value order, and the same sorted mapping key order from `BTreeMap`.
+
+Same-worker RCH proof, current `main` ORIG vs candidate, 1M x 10 f64:
+
+| workload | ORIG best | candidate best | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_to_dict_dict` | 58.714518 ms | 44.142858 ms | **1.33x** |
+
+Commands:
+
+- ORIG: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_to_dict_dict --size 1M --dtype float64 --json`
+- Candidate: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush RCH_WORKER=vmi1293453 RCH_REQUIRE_REMOTE=1 rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_to_dict_dict --size 1M --dtype float64 --json`
+
+Both decisive rows ran on worker `vmi1293453`. ORIG best was `58714.518 us`; candidate best was `44142.858 us`;
+ratio-vs-ORIG = `58714.518 / 44142.858 = 1.33x`.
+
+GREEN / caveats:
+
+- `rch exec -- cargo test -p fp-frame to_dict_dict_parallel_matches_serial_prefix_blackthrush --lib -- --nocapture`: PASS
+  before and after final formatting adjustment.
+- `rch exec -- cargo test -p fp-frame --lib --quiet`: PASS, 3137 fp-frame lib tests.
+- `rch exec -- cargo test -p fp-conformance --lib --quiet`: PASS, 1596 conformance tests.
+- `rch exec -- cargo check --workspace --all-targets`: PASS with pre-existing example warnings.
+- `git diff --check`: PASS.
+- `rch exec -- cargo bench --release -p fp-frame`: Cargo rejected `--release` for bench in this workspace; the valid fallback
+  `rch exec -- cargo bench -p fp-frame` built and ran the fp-frame bench harness with 0 measured libtest benches.
+- `rch exec -- cargo clippy --workspace --all-targets -- -D warnings`: blocked by pre-existing `fp-columnar` lint inventory,
+  not this hunk.
+- `cargo fmt --check`: blocked by pre-existing workspace formatting drift in fp-frame/fp-io/fp-join examples/tests; the touched
+  hunk was manually formatted and `git diff --check` is clean.
+- `timeout 180s ubs crates/fp-frame/src/lib.rs`: reproduced the known fp-frame scanner timeout/stall behavior without a
+  focused finding.
+
+LESSON: representation changes can flip the verdict for a parallel primitive. Pre-shared-key object-output parallelism lost
+because the old shape cloned per-cell strings; the shared-key `to_dict("dict")` shape copies a small number of whole columns,
+so scoped per-column workers now help. Remaining sibling: `to_dict("index")` has the same shared-key mapping family but a
+different output layout, so it should be measured separately rather than assumed.
