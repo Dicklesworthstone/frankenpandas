@@ -10148,3 +10148,30 @@ LESSON: representation changes can flip the verdict for a parallel primitive. Pr
 because the old shape cloned per-cell strings; the shared-key `to_dict("dict")` shape copies a small number of whole columns,
 so scoped per-column workers now help. Remaining sibling: `to_dict("index")` has the same shared-key mapping family but a
 different output layout, so it should be measured separately rather than assumed.
+
+### 2026-07-08 IronQuail — to_dict("dict") parallel KEY build — 1.86x fp-side WIN (Amdahl bottleneck, holds under load 31)
+
+`df.to_dict("dict")` (~102ms@1M×10) already parallelized its per-column VALUE gather (across ≤m columns), but its shared `keys`
+build — `self.index.labels().iter().map(|l| l.to_string())` = n independent `String` allocations — was STILL SERIAL, and once
+the values went parallel this became the Amdahl bottleneck (roughly half the op). Parallelized the key build across row ranges
+too: each worker formats a contiguous label range into its own `Vec<String>` (per-thread allocator arenas — the alloc-bound
+lever from the to_dict-records win), then concat preserves order → bit-identical (new prefix test: 60k-row PARALLEL keys have
+the 40k-row SERIAL keys + column values as exact prefixes).
+
+Interleaved same-box A/B (alternating cand21/cand22 per trial, min-of-11, on a SATURATED box — load ~31, 1M×10 f64):
+
+| workload | serial keys (cand21) | parallel keys (cand22) | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_to_dict_dict` 1M×10 | 101.8 ms | 54.7 ms | **1.86x** |
+| fp-bench `df_stack` (control, untouched) | 98.9 ms | 97.7 ms | 1.01x (validates the measurement) |
+
+GREEN: full fp-frame (+ new parallel-keys prefix test) + fp-conformance.
+
+LESSON (two of them): (1) After parallelizing the "obvious" part of an op, RE-PROFILE for the new Amdahl bottleneck — here the
+per-column value gather was already parallel, so the residual serial key build (1M `to_string`) dominated, and parallelizing it
+gave nearly 2x on top. (2) ALLOC-BOUND per-thread-arena parallelism SCALES EVEN ON A SATURATED BOX (this landed 1.86x at load
+31, control pinned 1.01x): each worker's `String` allocations hit its own mimalloc arena, so there's no shared-resource
+contention to serialize on — unlike BANDWIDTH-bound parallelism (the stack value gather capped at 1.05x). When the box is
+loaded, prefer alloc/CPU-bound parallel levers over bandwidth-bound ones. SIBLING untried: the same serial-key build in
+`to_dict("index")` (keys = column names, only m of them → not worth it) and the label `to_string` itself (hand-rolled i64
+formatter, a further single-threaded lever).
