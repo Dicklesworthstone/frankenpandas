@@ -18695,19 +18695,77 @@ impl MultiIndex {
         // materializes the same `IndexLabel::Utf8` labels on demand (same bytes:
         // `write!("{}", level[i])` == `level[i].to_string()`, `sep` between levels ==
         // `parts.join(sep)`), so labels(), lookups, and duplicate detection are unchanged.
-        let mut buf = String::new();
-        let mut offsets: Vec<usize> = Vec::with_capacity(n + 1);
-        offsets.push(0);
-        for i in 0..n {
-            for (li, level) in self.levels.iter().enumerate() {
-                if li > 0 {
-                    buf.push_str(sep);
+        // The n composite-label bytes are independent per row and the assembly is
+        // CPU-bound (per-row `write!` formatting + `push_str`, not raw bandwidth), so
+        // build it in PARALLEL — each worker fills its own local byte buffer + relative
+        // offsets for a contiguous row range, then the chunks are concatenated in row
+        // order with offsets shifted by the running byte base. Bit-identical to the
+        // serial build. This is the reshape MultiIndex floor hit by wide_to_long / stack
+        // / unstack / set_index_multi; CPU-bound per-thread-buffer parallelism scales
+        // even on a loaded box (no shared-allocator/bandwidth contention).
+        let levels = &self.levels;
+        let build = |lo: usize, hi: usize| -> (Vec<u8>, Vec<usize>) {
+            let mut buf = String::new();
+            let mut offs: Vec<usize> = Vec::with_capacity(hi - lo);
+            for i in lo..hi {
+                for (li, level) in levels.iter().enumerate() {
+                    if li > 0 {
+                        buf.push_str(sep);
+                    }
+                    let _ = write!(buf, "{}", level[i]);
                 }
-                let _ = write!(buf, "{}", level[i]);
+                offs.push(buf.len());
             }
-            offsets.push(buf.len());
-        }
-        Index::from_utf8_contiguous(Arc::from(buf.into_bytes()), Arc::from(offsets))
+            (buf.into_bytes(), offs)
+        };
+        const FLATIDX_PAR_MIN_ROWS: usize = 50_000;
+        const FLATIDX_PAR_MIN_PER_WORKER: usize = 16_384;
+        let workers = if n >= FLATIDX_PAR_MIN_ROWS {
+            std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(16)
+                .min(n / FLATIDX_PAR_MIN_PER_WORKER)
+                .max(1)
+        } else {
+            1
+        };
+        let (bytes, offsets): (Vec<u8>, Vec<usize>) = if workers >= 2 {
+            let chunk = n.div_ceil(workers);
+            let build = &build;
+            let parts: Vec<(Vec<u8>, Vec<usize>)> = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(workers);
+                let mut start = 0;
+                while start < n {
+                    let end = (start + chunk).min(n);
+                    handles.push(scope.spawn(move || build(start, end)));
+                    start = end;
+                }
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("to_flat_index thread"))
+                    .collect()
+            });
+            let total: usize = parts.iter().map(|(b, _)| b.len()).sum();
+            let mut bytes = Vec::with_capacity(total);
+            let mut offsets = Vec::with_capacity(n + 1);
+            offsets.push(0);
+            let mut base = 0usize;
+            for (b, offs) in &parts {
+                for &o in offs {
+                    offsets.push(base + o);
+                }
+                base += b.len();
+                bytes.extend_from_slice(b);
+            }
+            (bytes, offsets)
+        } else {
+            let (b, offs) = build(0, n);
+            let mut offsets = Vec::with_capacity(n + 1);
+            offsets.push(0);
+            offsets.extend_from_slice(&offs);
+            (b, offsets)
+        };
+        Index::from_utf8_contiguous(Arc::from(bytes), Arc::from(offsets))
     }
 
     /// Drop a level from this MultiIndex, returning a new MultiIndex

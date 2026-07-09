@@ -10240,3 +10240,34 @@ The row work parallelizes, but each shard pays its own tree-insertion overhead a
 materialize the lexicographic map structure. The next viable `to_dict("index")` primitive needs to attack the output
 contract directly: a representation-level mapping view, a sorted flat pair buffer with a cheaper finalization path, or a
 specialized int-range key tape. Do not retry per-worker BTreeMap shards.
+
+### 2026-07-08 IronQuail — MultiIndex::to_flat_index parallelized — ~1.4x fp-side WIN on wide_to_long (reshape floor)
+
+wide_to_long (~164ms@1M, the hottest profiled dataframe op by a wide margin) spends its residual in the flat composite index
+built by `MultiIndex::to_flat_index` (via set_index_multi). I landed the contiguous-Utf8 single-buffer form of that build 3
+rounds ago (a1cbbfaba) but it was still SERIAL. The n composite-label bytes are independent per row and the assembly is
+CPU-BOUND (per-row `write!` formatting + `push_str`, not raw bandwidth), so I parallelized it exactly like the stack label
+build: each worker fills its own local byte buffer + relative offsets for a contiguous row range, then the chunks are
+concatenated in row order with offsets shifted by the running byte base. Bit-identical (new set_index_multi prefix test:
+60k-row PARALLEL flat index has the 40k-row SERIAL flat index as an exact prefix, incl. a boundary-spanning label
+`ll[55000] == "55000_110000"`). In fp-index → propagates to wide_to_long / stack-set_index / unstack / set_index_multi /
+any MultiIndex flatten.
+
+Interleaved same-box A/B (alternating cand22/cand23 per trial, min-of-15, load ~39, 1M):
+
+| workload | serial (cand22) | parallel (cand23) | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `wide_to_long` 1M | 164.1 ms | 111.7 ms | **1.47x** (control-adjusted ~1.4x) |
+| fp-bench `df_apply_row` (control) | 107.5 ms | 104.3 ms | 1.03x |
+| fp-bench `df_to_dict_records` (control) | 60.0 ms | 56.9 ms | 1.05x |
+
+MEASUREMENT NOTE: a first min-of-11 pass at load ~58 gave wide_to_long 1.19x with the apply_row control at 1.11x (both inside
+one noise band — untrustworthy). Re-run at load ~39 (min-of-15) tightened both controls to ~1.03-1.05x and separated
+wide_to_long to 1.47x — confirming the win is real AND that the contention-muted 1.19x was the same op with fewer effective
+cores. GREEN: full fp-frame (+ new set_index_multi prefix test) + fp-index + fp-conformance. df_stack unaffected (1.01x — it
+builds its own label buffer, NOT via MultiIndex::to_flat_index).
+
+LESSON: (1) the composite-string-build parallel lever generalizes from the stack DataFrame path down into the fp-index
+MultiIndex primitive — one fix, every reshape that flattens a MultiIndex benefits. (2) On a saturated box, re-measure the SAME
+A/B once load eases: a contention-muted ratio (1.19x @ load 58) and a clean ratio (1.47x @ load 39) are the SAME code — the
+control disagreement (1.01x vs 1.11x) is the tell that the first read was untrustworthy.
