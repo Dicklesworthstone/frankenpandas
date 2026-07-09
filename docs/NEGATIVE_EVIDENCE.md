@@ -10584,3 +10584,40 @@ Commands/evidence:
 LESSON: for certified `RangeIndex(0..n)` transpose, the public column map can be built as a packed lexicographic B-tree
 without changing observable `column_order`. The failed subvariant proves the tree builder is only a win when the key stream
 is already lexicographic; sorting one million numeric strings in the timed path destroys tail latency.
+
+### 2026-07-09 BlackThrush - to_dict(index) RangeIndex lexicographic BTree bulk build - NO-SHIP (no completing timing vector)
+
+Consulted this ledger first. This does not retry the rejected `to_dict(index)` per-worker `BTreeMap` row shards, nor the
+transpose descriptor chunks / pair buffers / owned row columns. It tried to transfer the successful transpose packed-tree
+primitive to a different hot path: `DataFrame::to_dict("index")`.
+
+Profile routing after the latest transpose lexicographic bulk-build keep showed `df_transpose` at only ~15.5 ms median on a
+100k x 10 Float64 RCH probe (`hz2`; best `15263.407 us`, median around `15536 us`). The object-output sibling remained the
+suspect path: current `df_to_dict_index` 100k x 10 Float64 on RCH `vmi1227854` produced no JSON timing vector after multiple
+30s polls and was interrupted, matching the prior ledger's warning that this row can run away.
+
+Primitive tried and reverted: for certified `RangeIndex(0..n)`, avoid materializing `self.index.labels()` and build
+`(row_label_string, row_values)` entries in decimal-string lexicographic order before collecting into `BTreeMap`. This
+preserves the current public `DataFrameDictResult::Mapping` shape (`keys = column names`, outer map ordered by
+`BTreeMap<String, _>`) and is a different lever from row-sharding: no worker-local maps, no merge, just sorted entry
+generation for std's packed B-tree build.
+
+Verdict: **NO-SHIP / reverted**. The focused semantic test passed, but the candidate did not produce a usable benchmark
+vector even after explicitly warming the release `fp-bench` binary on the comparator worker. With no completing timing
+vector, there is no measured win to land.
+
+Commands/evidence:
+
+- Current profile control: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_transpose --size 100k --dtype float64 --json`; RCH selected `hz2`, best `15263.407 us`, median about `15536 us`.
+- Current hot-path probe: `AGENT_NAME=BlackThrush RCH_WORKER=hz2 RCH_WORKERS=hz2 RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_to_dict_index --size 100k --dtype float64 --json`; RCH selected `vmi1227854`, produced no JSON after repeated polls, interrupted with code 130.
+- Candidate proof-only gate before revert: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo test -p fp-frame dataframe_to_dict_index_range_bulk_build_preserves_rows_blackthrush --lib -- --nocapture`; PASS on `vmi1149989`.
+- Candidate warm build: `AGENT_NAME=BlackThrush RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo build --release -p fp-bench`; PASS on `vmi1149989` after building the release bench binary.
+- Candidate timing attempt after warm build: `AGENT_NAME=BlackThrush RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_to_dict_index --size 10k --dtype float64 --json`; no JSON after the warmed-build window, interrupted with code 130.
+- After revert, conformance: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo test -p fp-conformance --lib --quiet`; PASS on `hz2`, 1596/1596.
+- After revert, requested per-crate bench: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo bench --profile release -p fp-frame`; PASS on `hz2`, fp-frame bench harness built under `release` profile and reported 0 measured / 3141 ignored.
+- After revert, `git diff --check`: PASS; final production diff is docs-only.
+
+LESSON: the transpose lexicographic BTree bulk-build primitive does not automatically transfer to `to_dict("index")`.
+`to_dict(index)` still has to allocate one row `Vec<Scalar>` per output row and clone every row value; sorting the outer key
+stream is not enough to create a measured keep. Do not retry this RangeIndex lexicographic bulk-build for `to_dict(index)`
+unless the row-value representation changes first or an in-process A/B produces a completing timing vector.
