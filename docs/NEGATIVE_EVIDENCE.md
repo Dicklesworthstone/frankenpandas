@@ -10693,3 +10693,28 @@ box has core headroom (here ~40 free cores → 3.70x) and mutes under saturation
 alloc-bound parallelism on a loaded box, CPU-bound parallelism on an idle one. RESIDUAL: the row-order concat re-copies the
 n×m f64 output (80MB) serially — a preallocated disjoint-slice write (avoiding the concat) is the next lever if this op
 re-surfaces as hot.
+
+### 2026-07-09 BlackThrush - to_dict(index) RangeIndex lexicographic BTree bulk build after rebase - NO-SHIP (superseded)
+
+Consulted this ledger first in a scratch worktree at `cf573180b`, before the newer upstream `to_dict("index")` entries above
+were visible locally. The tried primitive was the RangeIndex-only lexicographic BTree bulk build: generate certified
+`"0"`..`"n-1"` keys in map order, skip `Vec<IndexLabel>` materialization, and collect one flat entry stream. It produced a
+same-worker RCH vector versus that older LEGACY ORIGINAL (`vmi1152480`, 1M x 10 Float64): ORIG best/median/p95
+`409.559/818.614/1773.212 ms`, candidate `170.377/197.643/476.919 ms`.
+
+Verdict after `git pull --rebase origin main`: **NO-SHIP / code removed**. Current `origin/main` already carries the
+stronger generic parallel pair-build + one-tree-finalization primitive above (`103.59 ms` best in its interleaved A/B). The
+RangeIndex branch would bypass that generic parallel path for the default index and is slower than the already-landed main
+evidence. The production hunk and its focused test were removed during conflict resolution; this row is docs-only.
+
+Additional gates run before the rebase exposed the superseding main commit:
+
+- Focused semantic test for the RangeIndex branch: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo test -p fp-frame to_dict_index_range_lexical_bulk_matches_generic_blackthrush --lib -- --nocapture`; PASS, 1/1.
+- Fixture/packet conformance: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush RCH_WORKER=vmi1152480 RCH_WORKERS=vmi1152480 RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p fp-conformance -- --nocapture`; PASS on `vmi1152480`, including `1596/1596` lib tests plus integration/doc tests. Live legacy pandas checkout was absent on the scratch/RCH path, so live-oracle cases reported structured skips/fallbacks.
+- Requested per-crate bench form: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush RCH_WORKER=vmi1152480 RCH_WORKERS=vmi1152480 RCH_REQUIRE_REMOTE=1 rch exec -- cargo bench --profile release -p fp-conformance --bench vs_pandas -- dataframe_ops/`; PASS on `vmi1152480`.
+- Workspace check: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush RCH_WORKER=vmi1152480 RCH_WORKERS=vmi1152480 RCH_REQUIRE_REMOTE=1 rch exec -- cargo check --workspace --all-targets`; PASS with pre-existing example unused-import warnings.
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush RCH_WORKER=vmi1152480 RCH_WORKERS=vmi1152480 RCH_REQUIRE_REMOTE=1 rch exec -- cargo clippy --workspace --all-targets -- -D warnings`: blocked by pre-existing `fp-columnar` lint inventory before this touched hunk.
+- `timeout 180s ubs crates/fp-frame/src/lib.rs`: timed out with exit 124 and no focused finding output, matching the known broad fp-frame scanner timeout/stall behavior.
+
+LESSON: do not land a path-specific RangeIndex fast path after a newer generic output-contract primitive already wins on the
+same hot row. Rebase evidence matters: a measured win versus an older original can become a regression against current main.
