@@ -10301,3 +10301,31 @@ tile-a-name build), don't emit it row-by-row — build the bytes by `extend_from
 ARITHMETIC. This is a single-threaded lever that beats the parallel-concat family on a saturated box (no thread contention,
 no bandwidth-bound concat). The residual in melt is now the value-column concat (80MB typed memcpy) + the id tile — both
 bandwidth-bound, at the safe floor.
+
+### 2026-07-08 IronQuail — Series.explode typed Int64 labels — 1.09x fp-side WIN (modest, single-threaded)
+
+df_explode (~60ms@1M, "aN,bN,cN".split(",")→3M rows) is a hot reshape. df_transpose (~2s, peer-owned floor), df_stack
+(~100ms, safe parallel-concat floor) and apply_row (Sync-blocked: fp-python passes non-Sync Python callbacks) are all off
+the table, so explode was the fresh winnable op — and its lever is single-threaded → robust to the loaded box.
+
+The typed contiguous-Utf8 explode path built its output index as `new_labels: Vec<IndexLabel>` (each source row's label
+cloned once PER PART = ~n*parts boxed 24 B enum labels, 72 MB for 3M rows) then `Index::new`. But when the source index is
+all-Int64 (`int64_label_values()` → `Some`), each exploded row's label is just the source row's i64 repeated by its part
+count — emit those as a raw `Vec<i64>` → `Index::from_i64_values` (24 MB, no per-part enum boxing). Bit-identical
+(`IndexLabel::Int64(v)` == the typed backing's label). Non-Int64 indexes keep the generic `label_at`/`IndexLabel` path.
+
+Interleaved same-box A/B (alternating cand24/cand25 per trial, min-of-11, load ~11, 1M×10):
+
+| workload | ORIG (cand24) | typed labels (cand25) | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_explode` 1M | 60.5 ms | 55.5 ms | **1.09x** |
+| fp-bench `df_stack` (control, untouched) | 98.6 ms | 96.5 ms | 1.02x |
+
+MODEST (~7% above the 1.02x control — real, control-validated, not 0-gain). Small because the label materialization (48 MB
+saved) is NOT explode's dominant cost — that is the per-part `str::split` scan + the ~n*parts tiny byte appends + offset
+pushes. Bit-identical, single-threaded, generalizes to any Int64-indexed explode. GREEN: full fp-frame (explode tests) +
+fp-conformance.
+
+LESSON: a per-output-row `IndexLabel` build over an Int64 source index pays the 24 B/enum boxing tax; carry it as raw i64 →
+`Index::from_i64_values` (same typed-output lever as melt/stack). RESIDUAL: explode is split/byte-append-bound — a
+byte-level (memchr) split for single-char separators + a bulk part-append is the next single-threaded lever (untried).
