@@ -10175,3 +10175,36 @@ contention to serialize on — unlike BANDWIDTH-bound parallelism (the stack val
 loaded, prefer alloc/CPU-bound parallel levers over bandwidth-bound ones. SIBLING untried: the same serial-key build in
 `to_dict("index")` (keys = column names, only m of them → not worth it) and the label `to_string` itself (hand-rolled i64
 formatter, a further single-threaded lever).
+
+### 2026-07-09 BlackThrush - df.transpose descriptor-backed f64 row chunks - NO-SHIP (0.76x fp-side)
+
+Profile target selection after the 2026-07-08 to_dict family wins: current `fp-bench` dataframe sweep still puts
+`df_transpose` far above the rest of the frame surface. Local `fp-bench --category dataframe_ops --workload df_transpose
+--size 1M --dtype float64` was about 1.5s median in the initial hotspot pass; the next tier (`df_stack`, `wide_to_long`,
+object-output rows) was roughly 0.1-0.2s. The canonical graveyard match was vectorized/morsel-driven execution / chunked
+data-plane representation: avoid materializing per-row tiny f64 buffers when the transpose is really selecting one element
+from each immutable source column.
+
+Primitive tried and reverted: for all-valid Float64 source columns with shared `Arc<[f64]>` backing, build each transposed
+output column as `Column::from_f64_all_valid_chunks([(src_col_0, row, 1), ...])` instead of allocating a fresh 10-f64
+`Vec` and calling `from_f64_values`. This was bit-identical by construction, but the constants are bad for the 1M x 10
+shape: it replaces one tiny row buffer with 10 chunk descriptors per output column, increasing metadata pressure and making
+later scalar/typed access pay chunk materialization costs.
+
+Same-machine local A/B, clean ORIG worktree `/data/projects/.scratch/frankenpandas-blackthrush-digdeeper-orig-20260708-1`
+vs candidate scratch worktree `/data/projects/.scratch/frankenpandas-blackthrush-digdeeper-20260708-1`, `df_transpose`
+1M x 10 f64:
+
+| workload | ORIG median | descriptor chunks median | fp-side |
+| --- | ---: | ---: | --- |
+| `df_transpose` 1M x 10 f64 | 2095.499 ms | 2753.179 ms | **0.76x REGRESSION** |
+
+Supporting evidence: candidate RCH on `hz2` produced ~1.19s median, but RCH could not provide a same-worker ORIG and the
+ORIG run fell open locally, so the accepted verdict is the same-machine local pair. `rch exec -- cargo bench --profile
+release -p fp-frame` ran on `vmi1227854` and completed with 0 measured tests / 3138 ignored; `rch exec -- cargo test -p
+fp-conformance --lib --quiet` passed 1596/1596. Code hunk was reverted before this docs-only row.
+
+LESSON: for transpose's pathological tall-to-wide materialization, per-column descriptor laziness is not free. At 1M output
+columns, metadata cardinality beats saved f64 copies. Do not retry 1-element chunk-descriptor transpose. The remaining real
+frontier is still the larger architectural one already tracked in the ledger/beads: a block-backed or lazy transposed
+DataFrame representation that avoids creating 1M independent `Column` objects at all.
