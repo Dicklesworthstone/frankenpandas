@@ -10448,3 +10448,43 @@ LESSON: keep the semantic certificate at the storage boundary instead of reconst
 needs their public spelling. For default RangeIndex-shaped transposes, affine Int64 metadata is enough to preserve pandas
 observable column names and avoid one full label-vector allocation/walk. Do not generalize this to mixed labels: distinct
 typed labels can still collide after `to_string()`, so the generic collision guard remains mandatory there.
+
+### 2026-07-09 BlackThrush - df.transpose all-valid owned row columns - NO-SHIP (0.997x fp-side)
+
+Profile target selection on current `origin/main` after the trusted-constructor keep and pair-buffer rejection still pointed
+at `df_transpose`: local 100k x 10 Float64 routing measured `df_transpose` median **58.877 ms**, while `wide_to_long` and
+`df_stack` were both about **12 ms** median. The ledger already rejects 1-element chunk descriptors and flattened
+pair-buffer morsels, so this pass targeted a different primitive: proof-carrying f64 row-column construction.
+
+Graveyard/artifact match: §8.2 vectorized execution's proof-carrying batch discipline plus §9.6 communication-avoiding
+data movement. Primitive tried and reverted: add a hidden `Column::from_f64_values_all_valid_owned_unchecked(Vec<f64>)`
+constructor and use it only in `DataFrame::transpose`'s all-valid Float64 path. Because every source slice came from
+`as_f64_slice()`, the row buffer is certified NaN-free; the candidate skipped `from_f64_values`' per-row NaN scan and avoided
+`Arc::from(Vec)` copying for each tiny transposed row column.
+
+Verdict: **NO-SHIP / reverted**. The quick 100k local screen looked positive, but the decisive same-worker 1M RCH proof was
+flat-to-slightly-negative:
+
+| workload | ORIG median | candidate median | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `df_transpose` 1M x 10 f64 | 686.098 ms | 687.910 ms | **0.997x** |
+
+Best-row note: candidate best was lower (`575.743 ms` vs ORIG `611.247 ms`, 1.06x), but medians are the keep gate here and
+the median ratio is a no-gain. Focused transpose tests passed on RCH `ovh-a` (7/7), so this was a pure performance rejection,
+not a correctness failure. The production hunk was removed before this docs-only row.
+
+Commands/evidence:
+
+- Hotness routing: `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_transpose --size 100k --dtype float64 --json`; RCH fell open locally, median `58876.697 us`.
+- Controls: same local pass, `wide_to_long` median about `12030 us`; `df_stack` median about `12027 us`.
+- ORIG proof: `AGENT_NAME=BlackThrush RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_transpose --size 1M --dtype float64 --json`; RCH selected `vmi1152480`, median `686098.163 us`.
+- Candidate proof: same command from `/data/projects/.scratch/frankenpandas-blackthrush-digdeeper-20260709-012408`, pinned to `vmi1152480`, median `687910.149 us`.
+- Proof-only gate before revert: `rch exec -- cargo test -p fp-frame dataframe_transpose --lib -- --nocapture`; RCH `ovh-a`, PASS 7/7.
+- After revert, `rch exec -- cargo test -p fp-conformance --lib --quiet`: PASS, 1596/1596 conformance tests.
+- After revert, `rch exec -- cargo bench --profile release -p fp-frame`: PASS on RCH `ovh-a`; fp-frame bench harness built and reported 0 measured / 3140 ignored.
+- After revert, `git diff --check`: PASS.
+
+LESSON: after the trusted-constructor keep, the remaining transpose wall is not the tiny f64 row constructor's scan/copy.
+The durable cost is the public representation cardinality: one `String`, one `Column`, and one `BTreeMap` entry per source
+row. Do not retry all-valid owned-unchecked row columns for transpose; the next viable frontier is still a representation
+change that removes the 100k-1M independent public-column objects.
