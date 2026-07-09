@@ -10371,3 +10371,40 @@ LESSON: proof-carrying internal constructors are a strong primitive for self-gen
 already established shape/order invariants locally, generic public-constructor validation can become a second O(number of
 output columns) pass. The safety rule is to guard any semantic compression boundary first; here that boundary is
 `IndexLabel::to_string()` turning distinct source labels into public column names.
+
+### 2026-07-09 BlackThrush - df.transpose flattened pair-buffer morsels - NO-SHIP (0.61x routing regression)
+
+Profile pass after the `to_dict` family and `MultiIndex::to_flat_index` keeps: current `df_transpose` is still the hot
+reachable dataframe row. A focused 100k x 10 Float64 RCH probe on `hz2` measured `df_transpose` at **68.781982 ms best**,
+while the post-keep `wide_to_long` row on the same worker measured **8.192311 ms best**. A `df_to_dict_index` 100k probe on
+`vmi1167313` produced no JSON after more than five minutes and was canceled, so it was not used as keep/reject proof.
+
+Post-rebase note: `origin/main` now includes the trusted-constructor transpose keep above. This row records the separately
+measured flattened pair-buffer primitive from the pre-certificate scratch base and rejects that lever; it is not evidence
+against the trusted-constructor keep.
+
+Graveyard/artifact match: §4.6 nested data parallelism / flattening transform + §8.2 vectorized execution / morsel-driven
+parallelism. Primitive tried and reverted: for all-valid Float64 transpose, split source rows into worker morsels, have each
+worker build an ordered `Vec<(String, Column)>` pair buffer for its row range, then finalize the public `BTreeMap<String,
+Column>` once on the main thread. This was intentionally not the already-rejected one-element chunk-descriptor transpose and
+not the `to_dict(index)` per-worker `BTreeMap` shard primitive.
+
+Verdict: **NO-SHIP / reverted**. Focused parity passed
+(`transpose_f64_parallel_pair_buffer_matches_serial_prefix_blackthrush` on RCH `vmi1227854`), but candidate timing regressed:
+`df_transpose` 100k x 10 Float64 on `vmi1149989` best **111.942506 ms** with samples mostly `112-202 ms` and remote wall time
+`265.8s`. The live ORIG profile row from `hz2` gives a routing ratio `68.781982 / 111.942506 = 0.61x`; RCH later refused a
+same-worker ORIG rerun on `vmi1149989` because that worker entered critical pressure. The production hunk and test were
+removed before landing this docs-only rejection.
+
+Commands/evidence:
+
+- ORIG routing profile: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_transpose --size 100k --dtype float64 --json`; RCH selected `hz2`, best `68781.982 us`.
+- Hotness control: same worker `wide_to_long` 100k best `8192.311 us`.
+- Candidate proof-only gate: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo test -p fp-frame transpose_f64_parallel_pair_buffer_matches_serial_prefix_blackthrush --lib -- --nocapture`; RCH selected `vmi1227854`, test passed.
+- Candidate bench: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_transpose --size 100k --dtype float64 --json`; RCH selected `vmi1149989`, best `111942.506 us`.
+
+LESSON: for the current `DataFrame` representation, parallelizing row-column materialization does not beat the structural
+transpose wall. The final shape still creates one owned `Column` per source row and one `BTreeMap` entry per output column;
+pair buffers add thread orchestration and an extra staging vector without deleting that cardinality. Do not retry f64
+transpose flattened pair buffers. The remaining real frontier is still the architectural `br-frankenpandas-l4vzc` class:
+lazy transposed views or homogeneous 2D block-backed storage that avoids constructing 100k-1M independent `Column` objects.
