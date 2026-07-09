@@ -10208,3 +10208,35 @@ LESSON: for transpose's pathological tall-to-wide materialization, per-column de
 columns, metadata cardinality beats saved f64 copies. Do not retry 1-element chunk-descriptor transpose. The remaining real
 frontier is still the larger architectural one already tracked in the ledger/beads: a block-backed or lazy transposed
 DataFrame representation that avoids creating 1M independent `Column` objects at all.
+
+### 2026-07-08 BlackThrush - to_dict(index) BTreeMap row shards - NO-SHIP
+
+Profile routing after the `to_dict("dict")` keep found the unmeasured sibling was the new hot row: adding a focused
+`fp-bench` workload for `df_to_dict_index` measured `to_dict("index")` at **275.992507 ms best** on `ovh-a` for 1M x 10
+f64, while the already-optimized `df_stack` row bottomed at **49.607013 ms** on `vmi1293453`. This made
+`to_dict("index")` the correct dig target, not another stack/value-gather retry.
+
+Attempted primitive: a nested-data-parallel / morsel-style row-shard builder for `orient="index"`. Each worker built a
+private `BTreeMap<String, Vec<Scalar>>` over its row range, then the result maps were merged with `BTreeMap::append`. The
+intended payoff was to parallelize row `Vec<Scalar>` materialization and index-label `String` construction while preserving
+the exact public output type and `BTreeMap` lexicographic key order.
+
+Verdict: **NO-SHIP / reverted**. The focused semantic test passed
+(`to_dict_index_parallel_matches_serial_prefix_blackthrush` on RCH `vmi1149989`), but the candidate benchmark on
+`df_to_dict_index` did not complete its 25-iteration JSON after repeated 30s polls on `vmi1149989`; it was interrupted
+instead of being allowed to burn more fleet time. The original row completed and produced the full timing vector on `ovh-a`;
+the candidate's wall-clock runaway is already outside the keep threshold, so the production hunk and test were removed.
+
+Evidence:
+
+- ORIG profile command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod-digdeeper AGENT_NAME=BlackThrush rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_to_dict_index --size 1M --dtype float64 --json`
+- ORIG `df_to_dict_index` times on `ovh-a`: best `275992.507 us`, with most samples clustered around `276000-292000 us`.
+- Candidate proof-only gate: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p fp-frame to_dict_index_parallel_matches_serial_prefix_blackthrush --lib -- --nocapture`; RCH selected `vmi1149989`, test passed.
+- Candidate bench command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush RCH_WORKER=vmi1149989 RCH_REQUIRE_REMOTE=1 rch exec -- cargo run --release -q -p fp-bench -- --category dataframe_ops --workload df_to_dict_index --size 1M --dtype float64 --json`; interrupted after repeated no-output polls, no keepable timing vector.
+- Requested short per-crate bench shape was exercised with `CARGO_TARGET_DIR=/data/projects/.rch-targets/pandas-cod AGENT_NAME=BlackThrush rch exec -- cargo bench --profile release -p fp-frame`; it fell open locally under RCH pressure, built, and ran the fp-frame bench harness with 0 measured libtest benches.
+
+LESSON: sharding nested row materialization is not automatically useful when the output contract is a sorted `BTreeMap`.
+The row work parallelizes, but each shard pays its own tree-insertion overhead and the final tree append/merge still has to
+materialize the lexicographic map structure. The next viable `to_dict("index")` primitive needs to attack the output
+contract directly: a representation-level mapping view, a sorted flat pair buffer with a cheaper finalization path, or a
+specialized int-range key tape. Do not retry per-worker BTreeMap shards.

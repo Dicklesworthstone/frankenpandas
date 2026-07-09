@@ -2009,6 +2009,9 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         ("dataframe_ops", "df_to_dict_dict") => time_us(|| {
             let _ = df.to_dict("dict").expect("to_dict");
         }),
+        ("dataframe_ops", "df_to_dict_index") => time_us(|| {
+            let _ = df.to_dict("index").expect("to_dict");
+        }),
         ("dataframe_ops", "df_to_records") => time_us(|| {
             let _ = df.to_records();
         }),
