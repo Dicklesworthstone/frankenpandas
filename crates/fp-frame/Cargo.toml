@@ -17,9 +17,10 @@ default = []
 # resample, IO). Off by default so users who don't attach a tracing
 # subscriber pay no dependency cost. Per br-frankenpandas-7gd4.
 tracing = ["dep:tracing"]
-# Experimental first slice of br-frankenpandas-l4vzc: build a lazy Float64
-# transposed view without constructing one public Column/BTreeMap entry per
-# source row. Off by default while the full DataFrame storage integration lands.
+# Experimental br-frankenpandas-l4vzc storage path: build a lazy homogeneous
+# Float64/Int64/Bool/Datetime64/Timedelta64 transpose without constructing one
+# public String/Column/BTreeMap entry per source row. Off by default while the
+# full DataFrame storage integration lands.
 lazy-transpose-view = []
 
 [dependencies]

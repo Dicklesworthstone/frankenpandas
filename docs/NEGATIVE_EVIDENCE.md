@@ -12823,6 +12823,57 @@ allocator state, then time a short same-function batch and report the per-operat
 interleaved AB/BA, the candidate-only profile, binary SHA, worker, CV, and per-function null median/floor unchanged. No code
 or performance verdict is landed from this attempt.
 
+### 2026-07-10 cod_fp — WIN: sparse direct transpose slot deletes the 312-byte pair cardinality for named access (24,228.67x)
+
+Ledger-grep of attempt 1 came first and its retry condition was applied without changing the production lever. Each sample
+now executes one untimed invocation of **the same arm** to drain cross-arm allocator carry-over, then times three consecutive
+same-arm operations. Adjacent ORIG/ORIG and candidate/candidate A/A controls still run first in every repetition; the real
+experiment still alternates AB/BA in one routine and one binary. Exact full-Column parity is asserted in the perf binary,
+and the separate public-path test proves Float64, Int64, Bool, Datetime64, and Timedelta64 against eager materialization.
+
+Bounded fail-closed command:
+
+`timeout 900s sh -c 'RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p fp-frame --profile release-perf --features lazy-transpose-view --lib transpose_reject_reaudit_cod_fp::audit_direct_indexed_lazy_slot_cod_fp -- --ignored --exact --nocapture --test-threads=1'`
+
+Provenance: RCH worker **`ovh-a`**, test hostname **`fixmydocuments`**; binary SHA-256
+**`4c0a271616131263085ea03bddf9531d3ae53eb13081c2aa028e95b16811d4ba`**; 100,000 x 10 Float64; 9 pairs x 3 timed
+same-arm operations; `black_box` input and result; full drops inside each arm.
+
+| arm | median | p95 | cv_pct | A/A null median | A/A floor |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ORIG `transpose().columns().get("50000")` | 45.065331 ms | 46.508045 ms | 2.8863% | 0.990420x | 7.9017% |
+| candidate `transpose().column("50000")` | **0.001860 ms** | 0.002221 ms | 11.3473% | 1.244444x | 97.6148% |
+
+**Median ratio = 24,228.672401x (+2,422,767.2401%). WIN and decidable:** the effect clears the maximum per-function A/A
+floor by roughly 24,820x. CV is reported as information, not used as the gate. Candidate timing is necessarily noisy in
+relative terms because it is about 1.9 microseconds, but even the candidate's deliberately conservative maximum observed
+A/A deviation is five orders of magnitude below the effect.
+
+Profile integrity passes independently: named `direct_indexed_lazy_slot_candidate_cod_fp` flat self-time is
+**1.040000%**. Ranked candidate-only frames at or above 0.1% are headed by `_int_malloc` 11.90%,
+`DataFrame::transpose` 10.60%, `DataFrame::transpose_view` 10.41%, paged-slot root drop 9.13%,
+`__memcmp_avx2_movbe` 5.89%, `__memmove_avx_unaligned_erms` 5.85%, per-page slot drop 4.73%,
+`IndexLabels::new` 3.73%, String clone 3.49%, `Column::as_f64_slice` 3.42%, `Column::from_f64_values` 3.04%, and the
+candidate sentinel 1.04%. Unlike the historical rejected families, the measured function is live and explicitly named.
+
+Mechanism: the feature-gated plan holds a tiny outer page directory (one entry per 256 possible output columns). A named
+lookup validates the exact canonical Int64 label, allocates one page of empty `OnceLock<Box<Column>>` slots, and constructs
+only the requested boxed Column. It owns **zero output-key Strings and zero BTree nodes**, and no inline 288-byte Column is
+reserved for an unused row. `columns()`, iteration, serde, equality, and mutation remain explicit full-map promotion
+boundaries and reuse any already-initialized slot by value clone. This directly removes the measured one
+`(String, Column)` 312-byte pair per row from the real public `DataFrame::column` path while preserving stable repeated
+references and eager observable values.
+
+Raw ORIG ms:
+`[46.315617, 46.508045, 44.521426, 45.610412, 44.128951, 43.037741, 45.065331, 46.131961, 42.832609]`.
+Raw candidate ms:
+`[0.001860, 0.001703, 0.001994, 0.001660, 0.002221, 0.001606, 0.002054, 0.001617, 0.002024]`.
+
+**KEEP.** Land the one production lever plus its permanent one-binary/null-floor/profile harness. The standard
+`df_transpose_materialize` vs-pandas 2.2.3 sibling is the next required external ratio; unlike the old dead benchmark, it
+calls `column_names()` and then this real `column(name)` observer, so it exercises the slot while still pricing all output
+name Strings.
+
 ### 2026-07-10 cc_fp — DEAD-END MAP for the "attack the 312-byte pair" levers, with a reason per idea. The one real lever (shrink ScalarValues) is a sized epic, surfaced not rushed.
 
 Two orthogonal levers were requested: (A) take the transcendental AVX2 win, (B) attack the 312-byte pair via intern-String or
