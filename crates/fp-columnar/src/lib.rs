@@ -18112,6 +18112,49 @@ impl Column {
             )));
         }
 
+        // Contiguous-Utf8 fast path (cardinality-vein sibling of
+        // unique/value_counts/nunique/mode): the generic loops below iterate
+        // `&self.values`, forcing `as_slice()` to materialize a `Vec<Scalar::Utf8>`
+        // -- one heap `String` per row -- then key each by `Key::Utf8(&str)`.
+        // Compute the duplicate flags directly over `&[u8]` byte spans
+        // (byte-equality is exactly `&str`-equality for valid UTF-8) with ZERO
+        // per-row `String` alloc. `as_utf8_contiguous` matches only an all-valid
+        // backing, so the `Key::Null` bucket never arises -- bit-identical to the
+        // generic `Key` path for every policy. Also speeds `drop_duplicates`,
+        // which is `duplicated_keep` + a filter.
+        if let Some((bytes, offsets)) = self.as_utf8_contiguous() {
+            let n = offsets.len().saturating_sub(1);
+            let mut flags = vec![false; n];
+            match policy {
+                DupPolicy::First => {
+                    let mut seen: FxHashSet<&[u8]> = FxHashSet::default();
+                    for (idx, flag) in flags.iter_mut().enumerate() {
+                        *flag = !seen.insert(&bytes[offsets[idx]..offsets[idx + 1]]);
+                    }
+                }
+                DupPolicy::Last => {
+                    let mut seen: FxHashSet<&[u8]> = FxHashSet::default();
+                    for idx in (0..n).rev() {
+                        flags[idx] = !seen.insert(&bytes[offsets[idx]..offsets[idx + 1]]);
+                    }
+                }
+                DupPolicy::None => {
+                    let mut seen_once: FxHashSet<&[u8]> = FxHashSet::default();
+                    let mut seen_multiple: FxHashSet<&[u8]> = FxHashSet::default();
+                    for idx in 0..n {
+                        let span = &bytes[offsets[idx]..offsets[idx + 1]];
+                        if !seen_once.insert(span) {
+                            seen_multiple.insert(span);
+                        }
+                    }
+                    for (idx, flag) in flags.iter_mut().enumerate() {
+                        *flag = seen_multiple.contains(&bytes[offsets[idx]..offsets[idx + 1]]);
+                    }
+                }
+            }
+            return Ok(Self::from_bool_values(flags));
+        }
+
         let mut flags = vec![false; self.values.len()];
         match policy {
             DupPolicy::First => {
@@ -35481,6 +35524,199 @@ mod ab_utf8_mode_ccfp {
         );
         println!(
             "  CAND contiguous &[u8] tally   min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_statements)]
+mod ab_utf8_duplicated_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, DType, FxHashSet, Scalar};
+
+    /// Seeded (splitmix64) contiguous-Utf8 buffer: `n` rows drawn from `distinct`
+    /// fixed-width `"val_{:07}"` labels. Every label is a distinct heap `String`
+    /// once materialized, so the generic path pays one alloc per row.
+    fn mk(n: usize, distinct: usize) -> (Vec<u8>, Vec<usize>) {
+        let mut s: u64 = 0x1234_5678_9ABC_DEF1;
+        let mut bytes: Vec<u8> = Vec::with_capacity(n * 11);
+        let mut offsets: Vec<usize> = Vec::with_capacity(n + 1);
+        offsets.push(0);
+        for _ in 0..n {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let key = (z as usize) % distinct;
+            bytes.extend_from_slice(b"val_");
+            let mut buf = [0u8; 7];
+            let mut k = key;
+            for slot in buf.iter_mut().rev() {
+                *slot = b'0' + (k % 10) as u8;
+                k /= 10;
+            }
+            bytes.extend_from_slice(&buf);
+            offsets.push(bytes.len());
+        }
+        (bytes, offsets)
+    }
+
+    /// Reference for the pre-lever generic path: force the `Vec<Scalar::Utf8>`
+    /// materialization (one `String` per row) via `as_slice`, then FxHashSet
+    /// `&str` duplicate-flag computation per policy -- byte-for-byte the shipped
+    /// `Key` path's cost for an all-valid Utf8 column, minus the fast-path
+    /// interception (CONSERVATIVE: omits the per-elem `is_missing()` / `Key` enum
+    /// wrap it also pays).
+    fn orig_duplicated_utf8(col: &Column, policy: &str) -> Column {
+        let scalars = col.values.as_slice();
+        let n = scalars.len();
+        let mut flags = vec![false; n];
+        match policy {
+            "first" => {
+                let mut seen: FxHashSet<&str> = FxHashSet::default();
+                for (idx, v) in scalars.iter().enumerate() {
+                    if let Scalar::Utf8(s) = v {
+                        flags[idx] = !seen.insert(s.as_str());
+                    }
+                }
+            }
+            "last" => {
+                let mut seen: FxHashSet<&str> = FxHashSet::default();
+                for idx in (0..n).rev() {
+                    if let Scalar::Utf8(s) = &scalars[idx] {
+                        flags[idx] = !seen.insert(s.as_str());
+                    }
+                }
+            }
+            _ => {
+                let mut seen_once: FxHashSet<&str> = FxHashSet::default();
+                let mut seen_multiple: FxHashSet<&str> = FxHashSet::default();
+                for v in scalars {
+                    if let Scalar::Utf8(s) = v
+                        && !seen_once.insert(s.as_str())
+                    {
+                        seen_multiple.insert(s.as_str());
+                    }
+                }
+                for (idx, v) in scalars.iter().enumerate() {
+                    if let Scalar::Utf8(s) = v {
+                        flags[idx] = seen_multiple.contains(s.as_str());
+                    }
+                }
+            }
+        }
+        Column::new(DType::Bool, flags.into_iter().map(Scalar::Bool).collect()).expect("bool")
+    }
+
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_utf8_duplicated() {
+        const N: usize = 2_000_000;
+        const DISTINCT: usize = 50_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let (bytes, offsets) = mk(N, DISTINCT);
+        let mk_col = || Column::from_utf8_contiguous(bytes.clone(), offsets.clone());
+
+        // Parity across every policy (first/last/none): the fast path's Bool
+        // flags == the generic reference's, element-for-element. Also checks
+        // drop_duplicates (= duplicated + filter) agrees for keep="first".
+        for policy in ["first", "last", "false"] {
+            let orig = orig_duplicated_utf8(&mk_col(), policy);
+            let cand = mk_col().duplicated_keep(policy).expect("duplicated");
+            assert_eq!(orig.dtype(), cand.dtype(), "dtype diverged");
+            assert_eq!(
+                orig.values.as_slice(),
+                cand.values.as_slice(),
+                "duplicated flags diverged (policy={policy})"
+            );
+        }
+        {
+            let dd = mk_col().drop_duplicates_keep("first").expect("drop_dup");
+            // distinct count preserved: drop_duplicates("first") keeps DISTINCT rows.
+            assert_eq!(dd.len(), DISTINCT, "drop_duplicates kept wrong count");
+        }
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_duplicated_utf8(&mk_col(), "first"));
+            std::hint::black_box(mk_col().duplicated_keep("first").unwrap());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_duplicated_utf8(std::hint::black_box(&co), "first"));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).duplicated_keep("first").unwrap());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).duplicated_keep("first").unwrap());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!(
+            "AB utf8 duplicated keep=first (ONE binary, ONE invocation) N={N} distinct={DISTINCT}"
+        );
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG generic Key::Utf8 flags min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND contiguous &[u8] flags  min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

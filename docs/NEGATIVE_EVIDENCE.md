@@ -13495,3 +13495,39 @@ lib **475/0**, fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. N
 per-ROW `Vec<Scalar::Utf8>` materialization is now bypassed for every core cardinality/frequency op on contiguous-Utf8. NEXT:
 re-profile for a fresh vein — candidates outside this family: `duplicated`/`drop_duplicates` (do they materialize Utf8?), `isin`
 Utf8 membership, or pivot from string-ops to a groupby/temporal hot path.
+
+### 2026-07-10 cc_fp — WIN: contiguous-Utf8 `duplicated_keep` computes flags over byte spans — 2.076x fp-side, bit-identical (also speeds `drop_duplicates`)
+
+The BIGGEST Utf8-materialization-bypass win yet — because the generic duplicated path is the heaviest per-row. `duplicated_keep`
+had typed paths for Int64 (direct-address / wide) and Float64 (bits) but a contiguous-Utf8 column fell to the generic
+`FxHashSet<Key>` loop, which iterates `&self.values` → `as_slice()` materializes a **`Vec<Scalar::Utf8>` (one heap `String` per
+row)** then per row calls `key_of` (is_missing + `Key::Utf8(&str)` enum build) + `seen.insert`. Added a fast path covering ALL
+three keep policies: for an all-valid contiguous-Utf8 backing, compute the Bool flags directly over `&[u8]` byte spans
+(byte-equality == `&str`-equality for valid UTF-8), `first`/`last` = `!seen.insert(span)` forward/reverse, `none` = two-pass
+seen_once/seen_multiple. **Zero per-row `String` alloc, no `key_of`/`Key`-enum dispatch.** `as_utf8_contiguous` matches only
+all-valid so the `Key::Null` bucket never arises. Also speeds `drop_duplicates` (= `duplicated_keep` + filter), a very hot op.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG reference vs CAND `duplicated_keep("first")` interleaved,
+per-arm adjacent A/A null control; 2M rows, 50k distinct; ORIG replays the generic path — `as_slice()` materialize +
+`FxHashSet<&str>` first-seen flags — CONSERVATIVE, omits the shipped `is_missing()`/`Key`-enum wrap, which is why ORIG here is
+the heaviest of the vein at 905 ms and the ratio the highest):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `02695e193385adc4e1a71bfea74751af0305ae0c161621564870bdc4a6c78233` |
+| worker | `vmi1227854` |
+| ORIG generic `Key::Utf8` flags | 905.294 ms (cv 4.24%) |
+| CAND contiguous `&[u8]` flags | 436.174 ms (cv 9.80%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0309x -> 3.09% floor** |
+| **fp-side ratio (min-of-blocks)** | **2.076x (+107.6%) — DECIDABLE (107.6% is ~35x the 3.09% floor)** |
+
+CAND cv is higher this run (9.80%, noisy worker `vmi1227854`) but the min-of-blocks ratio and the 35x-over-floor margin make the
+verdict robust. BIT-IDENTICAL: the A/B parity block asserts the Bool flags equal the generic reference across ALL THREE policies
+(`first`/`last`/`false`), plus a `drop_duplicates("first")` count check (keeps exactly DISTINCT rows). GREEN remote fail-closed:
+fp-columnar lib **475/0**, fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. No local build. `crates/fp-frame`
+untouched.
+
+**UTF8-MATERIALIZATION-BYPASS VEIN (cc_fp, all bit-identical): `unique` 1.457x, `value_counts` 1.430x, `nunique` 1.486x, `mode`
+1.570x, `duplicated`/`drop_duplicates` 2.076x.** The per-ROW `Vec<Scalar::Utf8>` materialization is bypassed for the entire
+cardinality/dedup surface on contiguous-Utf8; `factorize` was already covered. NEXT candidate still open: `isin` (Utf8 membership
+scan materializes `self.values`).
