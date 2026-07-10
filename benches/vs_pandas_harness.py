@@ -63,6 +63,7 @@ MIN_ITERATIONS = 10
 MAX_ITERATIONS = 100
 WARMUP_ITERATIONS = 3
 TAKE_BATCH = 256
+TRANSPOSE_BATCH = 8192
 
 
 @dataclass
@@ -164,6 +165,29 @@ def time_operation(func, warmup: int = WARMUP_ITERATIONS,
 
     return times
 
+def time_operation_repeated(func, repeat: int, warmup: int = WARMUP_ITERATIONS,
+                            min_iters: int = MIN_ITERATIONS,
+                            max_iters: int = MAX_ITERATIONS) -> list[float]:
+    """Time a tiny operation as a fixed-size batch and return batch microseconds."""
+    for _ in range(warmup):
+        for _ in range(repeat):
+            func()
+
+    times = []
+    for _ in range(max_iters):
+        start = time.perf_counter_ns()
+        for _ in range(repeat):
+            func()
+        elapsed_us = (time.perf_counter_ns() - start) / 1000
+        times.append(elapsed_us)
+
+        if len(times) >= min_iters:
+            cv = (stdev(times) / mean(times) * 100) if mean(times) > 0 else 0
+            if cv <= CV_THRESHOLD:
+                break
+
+    return times
+
 
 # IO Workloads (pandas)
 def bench_csv_read_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
@@ -203,6 +227,9 @@ def bench_value_counts_pandas(df: pd.DataFrame) -> list[float]:
 
 def bench_cumsum_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df.cumsum())
+
+def bench_df_transpose_pandas(df: pd.DataFrame) -> list[float]:
+    return time_operation_repeated(lambda: df.T, TRANSPOSE_BATCH)
 
 
 # GroupBy Workloads (pandas)
@@ -411,6 +438,7 @@ PANDAS_WORKLOADS = {
         "drop_duplicates": bench_drop_duplicates_pandas,
         "value_counts": bench_value_counts_pandas,
         "cumsum": bench_cumsum_pandas,
+        "df_transpose": bench_df_transpose_pandas,
     },
     "groupby": {
         "groupby_sum_int64": bench_groupby_sum_pandas,

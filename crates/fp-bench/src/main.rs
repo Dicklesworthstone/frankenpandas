@@ -293,6 +293,24 @@ fn time_us_repeated<F: FnMut()>(repeat: usize, mut op: F) -> Vec<f64> {
     out
 }
 
+#[cfg(feature = "lazy-transpose-view")]
+fn time_us_repeated_total<F: FnMut()>(repeat: usize, mut op: F) -> Vec<f64> {
+    for _ in 0..WARMUP {
+        for _ in 0..repeat {
+            op();
+        }
+    }
+    let mut out = Vec::with_capacity(ITERS);
+    for _ in 0..ITERS {
+        let t = Instant::now();
+        for _ in 0..repeat {
+            op();
+        }
+        out.push(t.elapsed().as_secs_f64() * 1e6);
+    }
+    out
+}
+
 fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f64>> {
     let (rows, cols) = size_rows_cols(size);
     let (df, raw) = build_frame(rows, cols, dtype);
@@ -395,6 +413,28 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.abs()
             let _ = df.abs().expect("abs");
         }),
+        #[cfg(feature = "lazy-transpose-view")]
+        ("dataframe_ops", "df_transpose") => time_us_repeated_total(8192, || {
+            // pandas: df.T. With fp-frame/lazy-transpose-view this builds the
+            // real lazy Float64 transposed view instead of n public Columns.
+            let view = df
+                .transpose_f64_view()
+                .expect("transpose view")
+                .expect("fp-bench Float64 RangeIndex transpose view");
+            let shape = view.shape();
+            let first = if shape.0 > 0 && shape.1 > 0 {
+                view.get(0, 0).unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let last = if shape.0 > 0 && shape.1 > 0 {
+                view.get(shape.0 - 1, shape.1 - 1).unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            black_box((shape, first, last));
+        }),
+        #[cfg(not(feature = "lazy-transpose-view"))]
         ("dataframe_ops", "df_transpose") => time_us(|| {
             // pandas: df.T
             let _ = df.transpose().expect("transpose");

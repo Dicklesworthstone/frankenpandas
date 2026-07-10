@@ -1,0 +1,71 @@
+{
+  "schema_version": "v3",
+  "timestamp": "2026-07-10T03:28:56.940419+00:00",
+  "engine_identity": {
+    "frankenpandas": {
+      "version": "0.1.0",
+      "profile": "release-perf",
+      "role": "Subject"
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "role": "Oracle"
+    }
+  },
+  "parameters": {
+    "sizes": [
+      "10k"
+    ],
+    "dtypes": [
+      "float64"
+    ],
+    "categories": [
+      "dataframe_ops"
+    ],
+    "cv_threshold": 5.0,
+    "min_iterations": 10,
+    "warmup_iterations": 3
+  },
+  "results": [
+    {
+      "workload": "df_transpose",
+      "category": "dataframe_ops",
+      "size": "10k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 2833.15,
+        "p95_us": 3174.73,
+        "p99_us": 3202.5,
+        "mean_us": 2883.52,
+        "stddev_us": 126.53,
+        "cv_pct": 4.39,
+        "throughput_rows_sec": 3529640,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 289923.81,
+        "p95_us": 296889.39,
+        "p99_us": 299841.25,
+        "mean_us": 290307.92,
+        "stddev_us": 4195.63,
+        "cv_pct": 1.45,
+        "throughput_rows_sec": 34492,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 102.333,
+      "verdict": "FASTER"
+    }
+  ],
+  "summary": {
+    "total_workloads": 1,
+    "valid_workloads": 1,
+    "dropped_high_cv": 0,
+    "category_scores": {
+      "dataframe_ops": 102.333
+    },
+    "weighted_score": 21.567,
+    "claim_validated": false
+  }
+}

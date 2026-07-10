@@ -26,3 +26,4 @@ mimalloc = { workspace = true }
 
 [features]
 lazy-transpose-prototype = []
+lazy-transpose-view = ["fp-frame/lazy-transpose-view"]

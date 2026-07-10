@@ -10930,6 +10930,52 @@ metadata over a homogeneous block instead of materializing 10k row columns. Next
 should move this shape into `fp-frame` as a trait-isolated block-backed/lazy-transposed storage variant with fallback
 materialization and conformance, not another `BTreeMap` construction tweak.
 
+### 2026-07-09 cod_fp - feature-gated `fp-frame` Float64 lazy transpose view - WIN (102.33x at 10k; 100k CV-rejected)
+
+Ledger-grep before coding found the structural wall rows above: the remaining transpose cost is public representation
+cardinality, not row-copy compute. This attempt did not retry sorted sequential `BTreeMap::insert`, owned row columns,
+descriptor chunks, flattened pair buffers, or `to_dict(index)` lexicographic transfer. It promoted the prior bench-only
+primitive into `fp-frame` behind `--features lazy-transpose-view` as a narrow `DataFrameF64TransposeView` for all-valid
+Float64 frames with an Int64 range index. The view stores only source column slices plus axis metadata and can read cells or
+materialize one output column on demand; it does not build the n public transposed `Column` objects or n-entry output
+`BTreeMap`. The default `DataFrame::transpose()` path is unchanged.
+
+Correctness/proof gates completed under explicit timeouts:
+
+| gate | result |
+| --- | --- |
+| `timeout 180s rch exec -- cargo check -p fp-frame --features lazy-transpose-view` | PASS on `ovh-a` |
+| `timeout 180s rch exec -- cargo test -p fp-frame --features lazy-transpose-view dataframe_lazy_transpose_view_materializes_one_column_cod_fp --lib -- --nocapture` | PASS on `hz2`, 1/1 |
+| `timeout 180s cargo build --profile release-perf -p fp-bench --features lazy-transpose-view` | PASS locally |
+| `timeout 120s cargo fmt -p fp-bench --check` | PASS |
+| `timeout 30s python3 -m py_compile benches/vs_pandas_harness.py` | PASS |
+| `timeout 180s ubs crates/fp-bench/src/main.rs benches/vs_pandas_harness.py` | nonzero from existing broad bench/harness inventory; the only critical is the pre-existing guarded `subprocess.run` in `benches/vs_pandas_harness.py` |
+| `timeout 180s ubs crates/fp-frame/src/lib.rs` | exit 124 before findings; known fp-frame whole-file UBS stall/inventory tracked in `artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md` |
+
+Official `benches/vs_pandas_harness.py` measurements:
+
+| artifact | workload | FP | pandas 2.2.3 | verdict |
+| --- | --- | ---: | ---: | --- |
+| `artifacts/bench/cod_fp_l4vzc_lazy_transpose_view_vs_pandas_10k_batch8192_final.json` | 10k x 10 Float64, 8192 transposes/sample, `taskset -c 2` | p50 `2833.15 us`, cv `4.39%` | p50 `289923.81 us`, cv `1.45%` | **WIN `102.333x`** |
+| `artifacts/bench/cod_fp_l4vzc_lazy_transpose_view_vs_pandas_100k_batch8192_final.json` | 100k x 10 Float64, 8192 transposes/sample, `taskset -c 2` | p50 `4963.24 us`, cv `30.90%` | p50 `427291.25 us`, cv `17.25%` | `DROPPED_HIGH_CV` |
+| `artifacts/bench/cod_fp_l4vzc_lazy_transpose_view_vs_pandas_10k_batch8192.json` | 10k x 10 Float64, 8192 transposes/sample | p50 `3202.85 us`, cv `6.09%` | p50 `414376.96 us`, cv `22.45%` | `DROPPED_HIGH_CV` |
+| `artifacts/bench/cod_fp_l4vzc_lazy_transpose_view_vs_pandas_10k_batch8192_taskset2.json` | same, `taskset -c 2` | p50 `3242.10 us`, cv `9.41%` | p50 `395463.38 us`, cv `31.23%` | `DROPPED_HIGH_CV` |
+| `artifacts/bench/cod_fp_l4vzc_lazy_transpose_view_vs_pandas_100k_batch8192.json` | 100k x 10 Float64, 8192 transposes/sample | p50 `5771.34 us`, cv `20.27%` | p50 `451361.64 us`, cv `19.85%` | `DROPPED_HIGH_CV` |
+
+Earlier bounded harness probes used pre-final per-op normalization while tuning the batch size; all were rejected by the same
+CV gate: `cod_fp_l4vzc_lazy_transpose_view_vs_pandas_100k.json` (FP p50 `0.77 us`, cv `25.84%`; pandas p50 `109.26 us`, cv
+`72.37%`), `cod_fp_l4vzc_lazy_transpose_view_vs_pandas_100k_batched.json` (FP p50 `0.39 us`, cv `15.54%`; pandas p50
+`39.35 us`, cv `3.41%`), `cod_fp_l4vzc_lazy_transpose_view_vs_pandas_100k_batched2.json` (FP p50 `0.39 us`, cv `9.98%`;
+pandas p50 `41.07 us`, cv `3.47%`), and `cod_fp_l4vzc_lazy_transpose_view_vs_pandas_100k_batched4m.json` (FP p50
+`0.53 us`, cv `11.25%`; pandas p50 `51.48 us`, cv `13.98%`).
+
+Decision: keep the feature-gated lazy view path as the first production increment because the official harness produced a
+CV-valid 102.333x win on the small slice. Do not claim a 100k ratio yet: every 100k run on this shared host failed the CV
+gate, even though the p50s are directionally consistent with the cardinality fix. The default `DataFrame::transpose()` path
+is intentionally unchanged in this increment, so this is a feature-gated storage/view win, not a default-API speed claim.
+Next increment: wire the view into a real `DataFrame` storage variant with on-demand public-column materialization or move to
+homogeneous 2D block-backed frame construction; do not return to public `BTreeMap<String, Column>` construction tweaks.
+
 ### 2026-07-09 cc_fp - to_json parallel body for columns/index/split/values - WIN (2.78x-3.01x, byte-identical)
 
 Ledger-grep before the attempt: no prior rejection of a parallel `to_json` element body. The proven sibling is the
