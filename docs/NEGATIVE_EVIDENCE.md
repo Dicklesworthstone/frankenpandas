@@ -12360,3 +12360,77 @@ profile-integrity gate with `perf must be installed on the RCH worker: Os { code
 self-time and the >=0.1% ranked frame table are unmeasured. The historical do-not-retry row remains withdrawn and this
 lever remains OPEN. Retry condition: a perf-equipped fail-closed worker plus a robust paired estimator with both CVs below
 5%; the present 1.048640x is routing evidence only and must not be shipped as a win.
+
+### 2026-07-10 cc_fp — WHAT the 95.9% IS: 93.6% is owning + re-homing n 312-byte `(String, Column)` pairs. NOT the String formatting (4.2%), NOT the ctor (1.9%). Retracts my own itoa sub-target.
+
+The previous entry localized transpose construction to fp-frame. This one names the component, per the ask: *"say precisely
+WHAT the 95.9 percent is (the String? the Column? the BTreeMap entry? the allocation, or the construction call itself?)"*
+
+**METHOD.** `DataFrame::transpose` finalizes, per source row: format a decimal `String` label; construct a `Column`; push the
+pair into a `Vec<(String, Column)>` in lexical key order; `collect()` that into `BTreeMap<String, Column>`. Only `Column` is
+ours — `String`, `Vec`, `BTreeMap` are std — so the whole shape is reproducible inside **fp-columnar**, with zero risk of
+colliding with `cod_fp`'s live `fp-frame`. Four CUMULATIVE arms give one component per delta. Keys are pre-sorted into
+lexical order outside the timer, matching `push_lexical_transpose_row_entry`. Drops sit outside the timer, matching how the
+construction arm of `ab_transpose_materialize` was measured.
+
+**PROVENANCE.** binary sha256 `1774d4073b2b114c8cf88ba85fe7dba3a5129a079a453cd12fa9bf4bc2547346` (hz2 run) /
+`--release`; workers `hz2` (hostname `hetzner2`) and `ovh-a` (hostname `fixmydocuments`); ONE binary, ONE fail-closed
+`rch exec` per run; arms alternating inside a single measured routine; `black_box` in+out; 200_000 rows x 10 cols;
+9 blocks x 3 reps, min-of-block. **A/A NULL CONTROL RUN FIRST IN EVERY REP**, per the rule.
+
+| arm | hz2 min | ovh-a min |
+| --- | ---: | ---: |
+| MAP (full finalize) | 73.336 ms (cv 1.74%) | 53.6 ms (cv <5%) |
+| **NULL (identical MAP)** | **73.830 ms (cv 1.79%)** | — |
+| null-control ratio | **0.9933x** | **1.0103x** |
+
+**THE DECOMPOSITION** (all arms cv < 5% on both workers):
+
+| component | hz2 ns/row | hz2 % of construction | ovh-a % of construction |
+| --- | ---: | ---: | ---: |
+| label `String` (format) | 14.79 | **4.0%** | **4.4%** |
+| `Column::from_f64_transpose_row` | 6.10 | **1.7%** | **2.0%** |
+| **`Vec<(String, Column)>` push** | **147.44** | **40.2%** | **43.2%** |
+| **`BTreeMap::from_iter` (sort + bulk build)** | **198.36** | **54.1%** | **50.4%** |
+
+The 6.10 ns/row ctor independently reproduces the 5.93 ns/column measured in the previous entry on the same worker, by a
+different harness. Two workers agree on every component to within ~4 percentage points.
+
+**THE ANSWER, PRECISELY.** The 95.9% is **not the construction call and not the formatting**. It is
+**`Vec` push (40-43%) + `BTreeMap` collect (50-54%) = 93.6%**: the cost of *owning* n live `(String, Column)` pairs and then
+*re-homing* every one of them into a tree node. The bytes make it concrete:
+
+> `size_of::<Column>() = 288`, `size_of::<ScalarValues>() = 200`, `size_of::<(String, Column)>() = 312`
+> ⇒ at 200_000 source rows the pair vector alone is **62.4 MB**, which `BTreeMap::from_iter` then moves again.
+
+That is "representation cardinality is the wall" with bytes attached, measured by ablation, agreeing with the profile
+(`__memmove` 33.79% self, `__memcmp` 30.10% self, `bulk_build` + BTree drops).
+
+**RETRACTION OF MY OWN HANDOFF (one commit old).** In `c7a691931` I listed as ranked sub-target #2: *"the `String` label,
+`usize::_fmt_inner` 4.38% self — `push_i64_decimal` applies, the same lever that gave 2.53x/4.53x on dt.date/dt.time."*
+**Measured: the entire label `String` is 4.0-4.4% of construction**, i.e. 1.06% (hz2) to 2.57% (ovh-a) of total transpose.
+Even a perfect itoa that removed two-thirds of it buys **1.0071x-1.0175x end-to-end**. **REJECT that sub-target before anyone
+spends a session on it**, with attribution: label self-time 14.79 ns/row, cv 1.44%, null-control 0.9933x, worker `hetzner2`,
+binary sha256 above. The `_fmt_inner` 4.38% *self*-time in the profile was never 4.38% of the op — I over-read a self-time
+percentage as an opportunity size. Same class of error as my retracted "26.5%".
+
+**WHAT IS ACTUALLY ATTACKABLE, sized.** The 93.6% is traffic in 312-byte pairs. `Column` is 288 bytes because
+`ScalarValues` is a 200-byte enum (its widest variants carry two `OnceLock<Vec<_>>` plus an `Arc`). Boxing the large
+variants — or the enum — would take `(String, Column)` from 312 B toward ~96 B and cut pair traffic ~3x. **This is in
+`fp-columnar`, i.e. my file, not cod_fp's.** It is NOT free: boxing adds one heap allocation per Column (~15-20 ns), against
+a ctor that currently costs 5.5-6.1 ns, so it must be measured with the A/A floor and gated on conformance — `Column` is on
+every hot path in the workspace. **Not attempted this window; recorded as the next sized lever with its risk stated.**
+
+The other 50.4-54.1% (`BTreeMap::from_iter`) is not reachable without changing the public
+`BTreeMap<String, Column>` return contract: the keys already arrive in lexical order, but std's `FromIterator` sorts anyway
+and there is no stable public `from_sorted_iter`. The representation change that *does* delete this cost is exactly
+`cod_fp`'s lazy transpose view (which is why it scores 779x-4474x on construction). Do not re-derive it.
+
+GREEN, remote and fail-closed: fp-columnar **475 passed / 0 failed** (`ovh-a`); `rustfmt --check` clean; no local build
+(repo `target/` untouched). `crates/fp-frame` untouched — `cod_fp` is editing it live.
+
+**Standing, unchanged:** two of four transpose rejects are unsound (pair-buffer morsels: cross-worker ratio; BTreeMap row
+shards: no timing vector) and remain REOPENED; sorted-insert is SOUND and `cod_fp`'s `4367e77e4` invalidated only *their
+rerun* ("neither WIN nor REJECT"). arg-extrema has been complete since `46b3374a8` (~7.5x) — four call sites →
+`arg_axis1_names_parallel` → per-thread `(Vec<u8>, Vec<usize>)` → `Column::from_utf8_contiguous`; the only remaining
+`Vec<Scalar::Utf8>` is the documented null-row correctness fallback.

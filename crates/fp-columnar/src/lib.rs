@@ -32870,6 +32870,204 @@ mod ab_transpose_row_typed_ccfp {
         100.0 * var.sqrt() / mean
     }
 
+    /// Decomposes the 95.9% of transpose CONSTRUCTION that does NOT live in the
+    /// per-column ctor (cc_fp). `DataFrame::transpose` finalizes by, per source row:
+    /// formatting a decimal `String` label, constructing a `Column`, pushing the pair
+    /// into a `Vec<(String, Column)>` in lexical key order, then `collect()`ing that
+    /// into `BTreeMap<String, Column>`. Only `Column` is fp-columnar; `String`, `Vec`
+    /// and `BTreeMap` are std, so the whole shape is reproducible HERE, without
+    /// touching `crates/fp-frame` (cod_fp's live file).
+    ///
+    /// Cumulative arms, so each delta attributes one component:
+    ///   L    = label `String` only
+    ///   LC   = label + `Column::from_f64_transpose_row`
+    ///   LCV  = label + ctor + push into `Vec<(String, Column)>`
+    ///   MAP  = LCV + `BTreeMap::from_iter` (the sort + bulk build)
+    ///   NULL = MAP again, identical arm -> the A/A floor, measured FIRST in each rep.
+    ///
+    /// Keys are pre-sorted into lexical order outside the timer, matching
+    /// `push_lexical_transpose_row_entry`. Drops happen outside the timer, matching how
+    /// `ab_transpose_materialize`'s construction arm was measured.
+    #[test]
+    #[ignore = "perf ablation; run with --ignored --nocapture"]
+    fn ab_transpose_construction_decomposition() {
+        use std::collections::BTreeMap;
+
+        const ROWS: usize = 200_000;
+        const COLS: usize = 10;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+
+        let handle = plan_for(ROWS, COLS);
+        // Lexical key order, exactly as push_lexical_transpose_row_entry emits.
+        let mut order: Vec<usize> = (0..ROWS).collect();
+        order.sort_by_key(|r| r.to_string());
+        let order = order;
+
+        let arm_l = |ord: &[usize]| {
+            let mut n = 0usize;
+            for &r in ord {
+                n += std::hint::black_box(r.to_string()).len();
+            }
+            n
+        };
+        let arm_lc = |ord: &[usize], h: &Float64TransposeRows| {
+            let mut n = 0usize;
+            for &r in ord {
+                let k = std::hint::black_box(r.to_string());
+                let c = Column::from_f64_transpose_row(h, r);
+                n += k.len() + std::hint::black_box(&c).len();
+            }
+            n
+        };
+        let arm_lcv = |ord: &[usize], h: &Float64TransposeRows| {
+            let mut v: Vec<(String, Column)> = Vec::with_capacity(ord.len());
+            for &r in ord {
+                v.push((r.to_string(), Column::from_f64_transpose_row(h, r)));
+            }
+            std::hint::black_box(v)
+        };
+        let arm_map = |ord: &[usize], h: &Float64TransposeRows| {
+            let mut v: Vec<(String, Column)> = Vec::with_capacity(ord.len());
+            for &r in ord {
+                v.push((r.to_string(), Column::from_f64_transpose_row(h, r)));
+            }
+            let m: BTreeMap<String, Column> = v.into_iter().collect();
+            std::hint::black_box(m)
+        };
+
+        for _ in 0..2 {
+            let (o, h) = (std::hint::black_box(&order), std::hint::black_box(&handle));
+            std::hint::black_box(arm_l(o));
+            std::hint::black_box(arm_lc(o, h));
+            drop(arm_lcv(o, h));
+            drop(arm_map(o, h));
+        }
+
+        let (mut ln, mut lc, mut lcv, mut map, mut null) = (
+            Vec::with_capacity(BLOCKS),
+            Vec::with_capacity(BLOCKS),
+            Vec::with_capacity(BLOCKS),
+            Vec::with_capacity(BLOCKS),
+            Vec::with_capacity(BLOCKS),
+        );
+        for _ in 0..BLOCKS {
+            let (mut b_l, mut b_lc, mut b_lcv, mut b_map, mut b_null) = (
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::INFINITY,
+            );
+            for _ in 0..REPS {
+                let (o, h) = (std::hint::black_box(&order), std::hint::black_box(&handle));
+
+                // A/A floor first, per the rule: paired(base, base) before paired(base, cand).
+                let t0 = Instant::now();
+                let m = arm_map(o, h);
+                b_map = b_map.min(t0.elapsed().as_secs_f64() * 1e3);
+                drop(m);
+
+                let t0 = Instant::now();
+                let m = arm_map(o, h);
+                b_null = b_null.min(t0.elapsed().as_secs_f64() * 1e3);
+                drop(m);
+
+                let t0 = Instant::now();
+                std::hint::black_box(arm_l(o));
+                b_l = b_l.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let t0 = Instant::now();
+                std::hint::black_box(arm_lc(o, h));
+                b_lc = b_lc.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let t0 = Instant::now();
+                let v = arm_lcv(o, h);
+                b_lcv = b_lcv.min(t0.elapsed().as_secs_f64() * 1e3);
+                drop(v);
+            }
+            ln.push(b_l);
+            lc.push(b_lc);
+            lcv.push(b_lcv);
+            map.push(b_map);
+            null.push(b_null);
+        }
+
+        let (l, c, v, m, n) = (
+            min_of(&ln),
+            min_of(&lc),
+            min_of(&lcv),
+            min_of(&map),
+            min_of(&null),
+        );
+        let per = |ms: f64| 1e6 * ms / ROWS as f64;
+        println!("AB transpose construction decomposition (ONE binary, ONE invocation)");
+        println!("  binary_sha256 = {}", binary_sha256());
+        println!("  worker        = {}", worker_hostname());
+        println!("  rows={ROWS} cols={COLS} (lexical key order, drops outside timer)");
+        println!(
+            "  size_of: Column={} ScalarValues={} (String,Column)={} -> Vec bytes={:.1} MB",
+            std::mem::size_of::<Column>(),
+            std::mem::size_of::<super::ScalarValues>(),
+            std::mem::size_of::<(String, Column)>(),
+            (ROWS * std::mem::size_of::<(String, Column)>()) as f64 / 1e6
+        );
+        println!(
+            "  MAP  full finalize   min={m:9.3} ms  cv={:5.2}%",
+            cv_of(&map)
+        );
+        println!(
+            "  NULL identical MAP   min={n:9.3} ms  cv={:5.2}%",
+            cv_of(&null)
+        );
+        println!("  NULL-CONTROL ratio (map/null) = {:.4}x", m / n);
+        println!(
+            "  L    label String    min={l:9.3} ms  cv={:5.2}%",
+            cv_of(&ln)
+        );
+        println!(
+            "  LC   +Column ctor    min={c:9.3} ms  cv={:5.2}%",
+            cv_of(&lc)
+        );
+        println!(
+            "  LCV  +Vec push       min={v:9.3} ms  cv={:5.2}%",
+            cv_of(&lcv)
+        );
+        println!("  --- attributed components (per source row) ---");
+        println!(
+            "  label String      = {:8.3} ms ({:6.2} ns/row, {:5.1}% of MAP)",
+            l,
+            per(l),
+            100.0 * l / m
+        );
+        println!(
+            "  Column ctor       = {:8.3} ms ({:6.2} ns/row, {:5.1}% of MAP)",
+            c - l,
+            per(c - l),
+            100.0 * (c - l) / m
+        );
+        println!(
+            "  Vec<(S,C)> push   = {:8.3} ms ({:6.2} ns/row, {:5.1}% of MAP)",
+            v - c,
+            per(v - c),
+            100.0 * (v - c) / m
+        );
+        println!(
+            "  BTreeMap collect  = {:8.3} ms ({:6.2} ns/row, {:5.1}% of MAP)",
+            m - v,
+            per(m - v),
+            100.0 * (m - v) / m
+        );
+        println!(
+            "  cv<5% all arms: map={} null={} l={} lc={} lcv={}",
+            cv_of(&map) < 5.0,
+            cv_of(&null) < 5.0,
+            cv_of(&ln) < 5.0,
+            cv_of(&lc) < 5.0,
+            cv_of(&lcv) < 5.0
+        );
+    }
+
     /// Localizes the transpose CONSTRUCTION wall (cc_fp). `df.transpose()` construction
     /// = per-column `Column::from_f64_transpose_row` (fp-columnar) + the `String` label,
     /// the `(String, Column)` stable sort, and the `BTreeMap` bulk build (fp-frame).
