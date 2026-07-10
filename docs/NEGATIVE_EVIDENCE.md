@@ -10857,3 +10857,40 @@ LESSON: for construction-only pandas object results, the output contract does no
 A lazy result enum variant can preserve the exact accessor payload while moving row-major map construction to the first
 consumer that actually asks for it. This is the row-value representation change the previous `to_dict(index)` rejection
 identified as necessary.
+
+### 2026-07-09 cod_fp - df.transpose sorted sequential BTree insert - REJECT (0.42x best / 0.36x median)
+
+Ledger-grep before the attempt found the active lane rows: the structural transpose wall is known to be one public
+`String` + one public `Column` + one `BTreeMap` entry per source row; rejected levers already include flattened pair
+buffers, owned all-valid row columns, and `to_dict(index)` RangeIndex lexicographic bulk-build transfer. This attempt did
+not retry those. It tested only a narrower sublever exposed by the live profile: keep the existing lazy Float64 row plan and
+lexicographic RangeIndex key stream, but replace the final `BTreeMap::from_iter`/`collect()` with explicit sorted sequential
+`insert()` calls to avoid the stable-sort/memcmp phase visible in perf.
+
+Profile first, current `main`, `df_transpose` 100k x 10 Float64, `release-perf`:
+
+| evidence | result |
+| --- | --- |
+| RCH `fp-bench df_transpose` on `ovh-a` | best `11761.590 us`, median `12344.715 us`, cv `3.33%` |
+| local `perf stat` | `2,256,292,993 cycles`, `3,370,436,368 instructions`, IPC `1.49`, `18,428,326 cache-misses` |
+| flamegraph/perf artifact | `artifacts/perf/cod_fp_df_transpose_100k_release_perf.{data,svg}` |
+| perf top symbols | `__memmove_avx_unaligned_erms` 33.79%, `__memcmp_avx2_movbe` 30.10%, BTree bulk-build 17.39% children, drop paths 16.81% children, integer formatting ~4.38% |
+
+The repository criterion harness (`fp-conformance` `vs_pandas`) has dataframe-op groups but no `transpose` or `to_dict`
+row, and `fp-frame`'s bench harness currently reports no measured benchmarks for this lane, so the meaningful lane
+measurement remains `fp-bench` plus perf counters/flamegraph.
+
+Same-machine A/B after applying only the ordered-insert swap:
+
+| workload | current-main control | sorted sequential insert candidate | fp-side |
+| --- | ---: | ---: | --- |
+| local `fp-bench df_transpose` 100k x 10 Float64 | best `15051.168 us`; median `15394.037 us`; cv `2.06%` | best `36060.483 us`; median `42397.499 us`; cv `18.46%` | **0.42x best / 0.36x median REGRESSION** |
+
+RCH also routed the candidate to `vmi1293453` despite the requested `ovh-a` pin and measured best `31266.334 us`, median
+mid-30ms, so it was treated as routing evidence only, not as the keep/reject comparator.
+
+Decision: NO-SHIP. The source edit was reverted before commit. Do not retry sorted sequential `BTreeMap::insert` for
+transpose's RangeIndex row columns; it avoids the visible sort but pays much more in tree insertion and allocation path
+cost. Retry only if the public representation changes: a homogeneous 2D block-backed store, a lazy transposed-DataFrame
+view with accessor materialization, or a real sorted BTree builder/alternate map representation that avoids both n log n
+string comparisons and n independent public `Column` objects.
