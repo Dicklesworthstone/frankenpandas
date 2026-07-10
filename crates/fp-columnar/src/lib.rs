@@ -32909,10 +32909,15 @@ mod ab_transpose_row_typed_ccfp {
         };
         std::hint::black_box(warm(std::hint::black_box(&handle)));
 
+        // NULL CONTROL: `null` runs the IDENTICAL arm as `orig` (values()). The ratio
+        // orig/null is this harness's noise floor -- any effect smaller than that
+        // deviation is indistinguishable from drift. All three arms alternate inside
+        // the one measured routine, so they share the same scheduler/thermal history.
         let mut orig = Vec::with_capacity(BLOCKS);
+        let mut null = Vec::with_capacity(BLOCKS);
         let mut cand = Vec::with_capacity(BLOCKS);
         for _ in 0..BLOCKS {
-            let (mut bo, mut bc) = (f64::INFINITY, f64::INFINITY);
+            let (mut bo, mut bn, mut bc) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
             for _ in 0..REPS {
                 let h = std::hint::black_box(&handle);
 
@@ -32925,6 +32930,16 @@ mod ab_transpose_row_typed_ccfp {
                 std::hint::black_box(acc);
                 bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
 
+                // Identical to the ORIG arm, on purpose: this is the null control.
+                let t0 = Instant::now();
+                let mut acc = 0usize;
+                for r in 0..ROWS {
+                    let col = Column::from_f64_transpose_row(h, std::hint::black_box(r));
+                    acc += col.values().len();
+                }
+                std::hint::black_box(acc);
+                bn = bn.min(t0.elapsed().as_secs_f64() * 1e3);
+
                 let t0 = Instant::now();
                 let mut acc = 0usize;
                 for r in 0..ROWS {
@@ -32935,10 +32950,11 @@ mod ab_transpose_row_typed_ccfp {
                 bc = bc.min(t0.elapsed().as_secs_f64() * 1e3);
             }
             orig.push(bo);
+            null.push(bn);
             cand.push(bc);
         }
 
-        let (o, c) = (min_of(&orig), min_of(&cand));
+        let (o, n, c) = (min_of(&orig), min_of(&null), min_of(&cand));
         let cells = (ROWS * COLS) as f64;
         println!("AB transpose-row typed access (ONE binary, ONE invocation, interleaved)");
         println!("  binary_sha256 = {}", binary_sha256());
@@ -32957,10 +32973,23 @@ mod ab_transpose_row_typed_ccfp {
             o - c,
             1e6 * (o - c) / cells
         );
-        println!("  fp-side ratio = {:.3}x", o / c);
         println!(
-            "  cv<5% both arms: orig={} cand={}",
+            "  NULL  values()     min={n:9.3} ms  cv={:5.2}%   <- identical arm",
+            cv_of(&null)
+        );
+        println!(
+            "  NULL-CONTROL ratio (orig/null) = {:.4}x   <- noise floor",
+            o / n
+        );
+        println!("  fp-side ratio (orig/cand)      = {:.4}x", o / c);
+        println!(
+            "  effect deviation {:.1}x the null-control deviation",
+            (o / c - 1.0).abs() / (o / n - 1.0).abs().max(1e-9)
+        );
+        println!(
+            "  cv<5% all arms: orig={} null={} cand={}",
             cv_of(&orig) < 5.0,
+            cv_of(&null) < 5.0,
             cv_of(&cand) < 5.0
         );
     }

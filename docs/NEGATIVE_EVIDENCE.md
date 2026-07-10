@@ -12176,3 +12176,69 @@ exceeds the mandatory 5% gate and the worker failed the profile-integrity gate b
 `perf must be installed on the RCH worker: Os { code: 2, kind: NotFound }`. The process exit was 101 after a finishable
 333.845 s remote build/run. Retry condition: a fail-closed RCH worker with `perf` installed plus a longer robust paired
 estimator that brings both arms below 5%; only then may the historical reject be restored.
+
+### 2026-07-10 cc_fp — NULL CONTROL passes: transposed-column typed arm survives at 1.5913x, effect is 47.2x the noise floor (3 workers, all cv<5%)
+
+Applying the new NULL-CONTROL rule to my own WIN before defending it. Also corrects an inference about `cod_fp`'s
+sorted-insert row that is circulating.
+
+**NULL CONTROL (the identical arm, registered twice, alternating inside the same measured routine).**
+
+| field | value |
+| --- | --- |
+| binary sha256 | `c32372460b7c761670262ff4dacc9cfe7665b5fa11dd79a2cf3e35ec684d4e16` |
+| worker id | `vmi1227854` (rch trailer + in-test `hostname`) |
+| substrate | ONE binary, ONE fail-closed `rch exec`, 3 arms alternating in one routine, `black_box` in+out |
+| size | 200_000 row columns x 10 = 2M cells, 11 blocks x 5 reps, min-of-block; 2.39 s |
+
+| arm | min | cv_pct |
+| --- | ---: | ---: |
+| ORIG `values()` | 14.003 ms | **4.93%** |
+| **NULL `values()` (identical arm)** | **14.181 ms** | **3.85%** |
+| CAND `as_f64_slice()` | 8.800 ms | **4.24%** |
+
+- **NULL-CONTROL ratio (orig/null) = 0.9875x** ⇒ this harness's noise floor is a **1.25% deviation**.
+- **Effect ratio (orig/cand) = 1.5913x** ⇒ a **59.13% deviation**, i.e. **47.2x the null-control deviation**.
+- SELF-TIME BY ABLATION: boxing tax = 5.204 ms / 2M cells = **2.60 ns/cell**, non-zero ⇒ not a dead-code measurement.
+- All three arms cv < 5%. PARITY asserted in the same binary before timing.
+
+For calibration: franken_whisper reported a null control of **1.1163x at cv 29.0%**, meaning nothing under ~12% was
+resolvable there. This harness resolves to ~1.3%, so a 59% effect is not in question.
+
+**CROSS-WORKER, three gated runs of the same lever:**
+
+| worker | fp-side ratio | boxing tax |
+| --- | ---: | ---: |
+| `vmi1152480` | 1.6300x | 3.07 ns/cell |
+| `ovh-a` (in-test hostname `fixmydocuments`) | 1.5670x | 2.35 ns/cell |
+| `vmi1227854` | 1.5913x | 2.60 ns/cell |
+| **spread** | **3.9%** | **26.9%** |
+
+This is a clean empirical confirmation of the methodological point I recorded when retracting my own "26.5%": **an
+ORIG-vs-CAND ratio of the SAME operation is worker-robust (3.9% across three machines), while an absolute quantity or a
+part-of-whole decomposition is not (26.9%).** Quote the ratio; never quote the absolute across workers.
+PROVENANCE NUANCE worth recording: rch's worker label and the machine's own `hostname` can disagree (`ovh-a` reports
+`fixmydocuments`). Record BOTH; the rch label alone is not a machine identity.
+
+**CORRECTION OF AN INFERENCE ABOUT `cod_fp`'s ROW.** It is being read as "one of the four transpose rejects was benched on a
+path that never materialized, therefore INVALID." That is not what the row says. Verbatim from `4367e77e4`:
+*"sorted-insert materializing rerun attempt 1 **INVALID (CV gate); no verdict**"* … *"The directional ratio is
+ORIG/candidate **0.587204x**, but it is **not admissible**: both CVs exceed 5% … This row is **neither WIN nor REJECT** and
+does not restore the historical do-not-retry instruction."* The **rerun** was CV-invalid, not the original row. And its
+direction (candidate ~1.7x SLOWER) agrees with the historical 0.42x reject. **No transpose reject has yet been shown to have
+been benched on a never-materializing path**, and structurally none can be: all four changed CONSTRUCTION-path code, which
+the old bench already executed; `df_transpose_materialize` appends arms AFTER their code and can only dilute them. The two
+rows invalidated on 2026-07-10 remain invalid for the recorded reasons — a cross-worker ratio (68.78 ms `hz2` / 111.94 ms
+`vmi1149989`) and a missing timing vector — and remain REOPENED.
+
+**STANDING CORRECTIONS (unchanged, pointers only).**
+1. *"Construction is 26.5% of transpose"* was retracted in `351279ce3`: it is **26.5% on `hz2` and 58.5% on `ovh-a`**,
+   measured in-invocation on both. Ceiling for deleting ALL construction: **1.36x (`hz2`) to 2.41x (`ovh-a`)**.
+2. **arg-extrema is complete** since `46b3374a8` (~7.5x): four call sites → `arg_axis1_names_parallel` → per-thread
+   `(Vec<u8>, Vec<usize>)` under `std::thread::scope` → concat with running byte base → fp-frame:67127
+   `Column::from_utf8_contiguous(bytes, offsets)`. The only `Vec<Scalar::Utf8>` left is the documented null-row correctness
+   fallback. Nothing remains to apply.
+
+GREEN, all remote and fail-closed: fp-columnar **475/0**; `clippy -p fp-columnar --all-targets` emits no warning inside the
+new module; `rustfmt --check` clean. No local build (repo `target/` untouched). `crates/fp-frame` NOT touched — `cod_fp` is
+editing it live.
