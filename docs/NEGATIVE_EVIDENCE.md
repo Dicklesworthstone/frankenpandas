@@ -11291,3 +11291,70 @@ while dependency-enabled clippy stopped on the tracked fp-columnar lint backlog.
 the smaller Rust-file scan reproduced broad pre-existing inventory, and the required bounded 180 s fp-frame scan exited 124
 without a focused finding, matching the documented stall in
 `artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md` (`br-frankenpandas-yavyk`).
+
+### 2026-07-10 cc_fp — dt.date/dt.time hand-rolled ASCII digit writers — 2.53x / 4.53x fp-side WIN (1.78x -> 4.69x, 3.46x -> 19.01x vs pandas)
+
+Second lever of the Utf8-materialization lane, taken from the "NEXT" line of my own astype(str) entry above. Ranked baseline
+(fp-bench, release-perf, min-of-25, 1M) had put `dt_date` 68.8ms and `dt_time` 58.3ms as the hottest remaining serial Utf8
+producers, and both ~1.9x SLOWER than `dt_strftime` (37.0ms) which emits the identical `YYYY-MM-DD` bytes.
+
+MECHANISM FROM PROFILE (samply, symbolicated, `dt_date` 1M, self-time >=0.1%): `datetime64_civil_from_nanos` 14.90%
+(irreducible), then **~42% pure `core::fmt` dispatch** — `Formatter::pad_integral` 12.53%, `MaybeUninit<u8>::write` 7.72%,
+`Adapter<Vec<u8>>::write_str` 6.81%, `i64 as Display::fmt` 4.27%, `u64::_fmt_inner` 3.54%, `core::fmt::write` 2.54%,
+`Argument::fmt` 1.91%, `pad_integral::write_prefix` 1.91%, `write_char` 1.63% — plus `DatetimeAccessor::date` 8.17%. Both ops
+ALREADY built one contiguous byte buffer (no `Vec<Scalar::Utf8>`), but emitted each field with `write!(bytes, "{y:04}-…")`
+through `io::Write`, paying the Formatter + `pad_integral` width/fill/sign branches PER FIELD PER ROW.
+
+LEVER: replace every `write!` arm with the existing `push_4d_bytes`/`push_2d_bytes` hand-rolled ASCII digit writers (the
+`strftime` lever, 2026-06-27 TealOsprey, which explicitly named this as a reusable pattern). BIT-IDENTICAL, and now proven for
+ALL inputs, not just realistic dates: the i64-ns span is +/-292.3 years around 1970, so ANY `i64` datetime64[ns] code except
+`NAT` yields a year in [1678, 2262] — always positive, always exactly 4 digits, so `push_4d_bytes == {y:04}` universally;
+m/d in [1,31] and h/mi/sec in [0,59] are always exactly 2 digits, so `push_2d_bytes == {m:02}`. NaT / non-dense backings bail
+to the unchanged helper path.
+
+Interleaved same-binary A/B (temporary `FP_DT_NO_FASTFMT` env gate, removed before commit; alternating ORIG/CAND per block,
+9 blocks, min-of-block-minima, quiet box):
+
+| workload | ORIG (`write!`) | hand-rolled ASCII | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `dt_date` 1M | 67.616 ms (cv 0.35%) | 26.773 ms (cv 0.36%) | **2.53x** (median 2.53x) |
+| fp-bench `dt_time` 1M | 56.986 ms (cv 0.51%) | 12.587 ms (cv 1.54%) | **4.53x** (median 4.47x) |
+| fp-bench `dt_strftime` 1M (control, already hand-rolled) | 36.184 ms | 36.327 ms | 1.00x (validates the measurement) |
+
+`dt_time` gains more than `dt_date` because it formats THREE `{:02}` fields (all Formatter round-trips) while `dt_date` still
+pays the irreducible civil conversion; after the fix `dt_time` (10.4ms) is bounded by `rem_euclid` + three divisions only.
+
+vs pandas 2.2.3 (harness protocol + its own cv<=5% gate, 1M): pandas `.dt.date` p50 121.993 ms (min 120.040, cv 2.56%),
+`.dt.time` p50 203.294 ms (min 197.280, cv 3.36%). Shipping (ungated) fp binary min-of-25: `dt_date` 25.603 ms,
+`dt_time` 10.379 ms => **dt_date 1.78x -> 4.69x**, **dt_time 3.46x -> 19.01x**.
+
+⚠️ THREE HONESTY CAVEATS on that ratio, all recorded rather than smoothed over:
+1. **It is NOT a single `vs_pandas_harness.py` invocation.** A disk emergency (/data at 96%, 89G free, 11 concurrent local
+   cargo builds) banned local builds/benches mid-turn. The pandas half was run through the harness's own `time_operation`
+   (3 warmup, adaptive iters, cv<=5% gate) in-process; the fp half is the pre-emergency shipping-binary run. Conformance was
+   re-run REMOTELY via `rch exec`.
+2. **fp-bench's `datetime` generator silently OVERFLOWS i64.** It builds `base + i * 86_437_000_000_000` nanos, which exceeds
+   `i64::MAX` at n >= 100_000 (release wraps). So every `dt_*` bench number at 100k/1M — mine and every earlier one in this
+   ledger — is measured on WRAPPED nanos. It does NOT invalidate the A/B (both arms get identical inputs, and all years stay
+   4-digit so output byte lengths are unchanged), but pandas cannot build that series (`date_range` raises
+   `OutOfBoundsDatetime`), so the harness's pandas half uses `freq="600s"` instead. **The two halves therefore do not yet
+   measure one workload — do not gate on the harness `dt_date`/`dt_time` rows until fp-bench's step is fixed.** FOLLOW-UP.
+3. **Representation differs.** pandas `.dt.date`/`.dt.time` return object arrays of Python `datetime.date`/`datetime.time`;
+   FrankenPandas returns an ISO-8601 Utf8 column. The representation-equivalent pandas call is `s.dt.strftime(...)`, measured
+   here at p50 407.461 ms (min 397.545, cv 1.52%) for `%Y-%m-%d` — so against the string-producing pandas op fp's 25.6 ms
+   `dt_date` is ~15.5x. The 4.69x figure is the conservative one (vs pandas' same-named method) and is what this row claims.
+
+GREEN: fp-frame lib 3133/0 + 108 focused dt tests (date/time/strftime), fp-conformance **2048/0 re-run REMOTELY via
+`rch exec` on worker `vmi1149989`** under the disk freeze. `rustfmt --edition 2024 --check crates/fp-frame/src/lib.rs` is
+clean (0 drift sites, whole file). Shipping binary re-measured with `FP_DT_NO_FASTFMT` set and INERT (25.603 / 10.379 ms),
+proving the A/B gate was truly removed and the measured path is the shipped path. `timeout 180s ubs crates/fp-frame/src/lib.rs`
+stalled without emitting a focused finding — the documented large-file behavior (AGENTS.md; see
+`artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md`), not a new signal. clippy `-D warnings` on fp-frame NOT re-run this
+turn (needs a compile; local builds banned) — it is anyway documented-blocked by pre-existing dependency lints.
+
+LESSON: "already contiguous" does not mean "already fast". BOTH of this lane's levers found ops that had ALREADY escaped
+`Vec<Scalar::Utf8> -> from_values` into a contiguous buffer and were still 2.5-5x off — astype(str) because the BUILD was
+serial, dt.date/dt.time because each field went through `core::fmt`. The contiguous buffer is necessary, not sufficient:
+after it lands, profile the loop again and ask what per-row dispatch survives. Also: BENCH GENERATORS ARE CODE. An i64
+overflow in a bench's data generator can sit undetected for months and silently invalidate cross-engine comparison while
+leaving same-binary A/B perfectly valid.
