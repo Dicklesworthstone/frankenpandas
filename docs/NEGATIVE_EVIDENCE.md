@@ -13000,3 +13000,45 @@ this lands and box its widest cold field. Each increment is bit-identical, cold-
 full epic (box the hot payloads) remains gated on measuring Utf8-access regression; these cold-cache increments are not.
 
 `crates/fp-frame` untouched — `cod_fp` is editing it live.
+
+### 2026-07-10 cc_fp — Second cold-cache box: lower_hex_sequence. Column 248->232 B (288->232 cumulative, 19% smaller), bit-identical. Perf UNDECIDABLE (honest: a footprint reduction, not a speedup).
+
+Continued the cold-cache boxing lever on `fp-columnar` (cod_fp on transpose re-home; I stayed off transpose files).
+Profile-first: re-ran `scalarvalues_size_breakdown_ccfp` after the factorize box (a3d702ec5) — `ScalarValues` was 160 B, still
+sized by `LazyContiguousUtf8`, whose biggest remaining COLD field is `lower_hex_sequence: OnceLock<Option<Utf8LowerHexSequence>>`
+= 40 B (read only by `as_lower_hex_sequence_utf8*` on the ordered-join lower-hex-key path; the hot `values()`/`as_utf8_contiguous`
+never touch it). `values` (32 B) is bigger-ish but HOT (every materialization), so untouchable.
+
+**THE INCREMENT:** `lower_hex_sequence: OnceLock<Option<Box<Utf8LowerHexSequence>>>` (`Option<Box>` keeps the null-pointer
+niche, so `None` stays one word). Field 40 B -> 16 B. Two access sites changed: `.get_or_init(|| ...)` gains `.map(Box::new)`,
+`.as_ref().copied()` -> `.as_deref().copied()` (the struct is `Copy`, so the value copies out identically through the Box).
+
+> `ScalarValues` 160 -> **144 B**, `Column` 248 -> **232 B**. Cumulative with the factorize box: **Column 288 -> 232 B, 19%
+> smaller** — every `Column` in the workspace.
+
+**BIT-IDENTICAL — boxing a cache changes no value; the copied certificate is identical.** GREEN remote fail-closed:
+fp-columnar **475/0**, **fp-join 144/0** (the ordered-join lower-hex consumer — the path that actually reads this field),
+fp-conformance **2048/0**. `rustfmt --check` clean; clippy clean in the changed/new regions. No local build.
+`crates/fp-frame` untouched.
+
+**PERF — UNDECIDABLE, stated honestly, NOT claimed as a win.** The cross-binary transpose-pair ratio is worker-confounded
+(2.54x/1.82x/2.26x across ovh-a/vmi1149989/hz2 as the pair shrank 312/272/256 B — the "up" at 256 B is hz2's bandwidth, not a
+regression), so it is NOT usable as the shrink measurement. A same-binary worker-invariant test (`ab_column_size_move_ccfp`,
+permanent: move a 232-B block vs a 288-B block through the identical `Vec` push + `BTreeMap` collect, per-arm adjacent A/A,
+worker `hetzner1`) measured **OLD(288 B)/CUR(232 B) = 1.0753x (+7.5%)** — directionally correct (smaller moves faster) but
+**INSIDE its own 27.51% A/A null floor, so UNDECIDABLE.** Per the median-gate rule, no speedup is claimed. A 7.5% effect on a
+46 MB-allocation-per-run operation is below what this harness can resolve; tightening it further was not pursued this window.
+
+**SO THE HONEST VALUE OF BOTH INCREMENTS IS A MEMORY-FOOTPRINT REDUCTION, NOT A SPEEDUP.** `Column` is 56 B smaller (288->232);
+for a DataFrame with millions of columns/cells that is real memory saved, and the by-value move-traffic benefit is
+bounded-positive (a smaller struct cannot move slower) even though it is below the construction-time measurement floor. The
+change is bit-identical and cold-path-only, so it is a safe, correct footprint reduction. It is landed on that basis — not on
+a perf claim.
+
+**FOLLOW-UP is now GATED, not free.** After this, `LazyContiguousUtf8`'s remaining big field is `values: OnceLock<Vec<Scalar>>`
+(32 B) — the HOT materialization cache, in every variant. Boxing it would touch every `values()` call (the hottest path in
+the crate), so it is NOT a cold-cache increment; it needs the Utf8-access-regression measurement the epic is gated on. The
+easy cold-cache increments in this variant are EXHAUSTED (factorize + lower_hex done; `fixed_width` 24 B and
+`strictly_increasing` 8 B are small and also cold but yield <=8 B enum shrink each after alignment). Next real step: re-probe
+for the NEW widest variant (now that `LazyContiguousUtf8` is 144 B, another variant may tie/exceed it) and repeat only if its
+widest field is cold. Recorded so the next agent re-probes rather than assuming this variant is still the target.

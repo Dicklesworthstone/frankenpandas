@@ -2215,7 +2215,11 @@ enum ScalarValues {
         offsets: Arc<[usize]>,
         strictly_increasing: OnceLock<bool>,
         fixed_width: OnceLock<Option<usize>>,
-        lower_hex_sequence: OnceLock<Option<Utf8LowerHexSequence>>,
+        // Boxed cold cache: read only on the lower-hex join-key detection path
+        // (`as_lower_hex_sequence_utf8*`), never on the hot byte-access path. Boxing
+        // the `Option` payload (40 B -> 16 B) shrinks every `Column`; `Option<Box<_>>`
+        // uses the null-pointer niche so `None` stays a single word.
+        lower_hex_sequence: OnceLock<Option<Box<Utf8LowerHexSequence>>>,
         // Boxed: this cold factorize cache is the single widest field (56 B) of the
         // widest `ScalarValues` variant, so it alone sizes the whole enum. Boxing it
         // (56 B -> 16 B) shrinks `ScalarValues`/`Column` for every column in the
@@ -9350,8 +9354,10 @@ impl Column {
                     .as_ref()
                     .copied()?;
                 let certificate = lower_hex_sequence
-                    .get_or_init(|| contiguous_utf8_lower_hex_sequence(bytes, offsets, width))
-                    .as_ref()
+                    .get_or_init(|| {
+                        contiguous_utf8_lower_hex_sequence(bytes, offsets, width).map(Box::new)
+                    })
+                    .as_deref()
                     .copied()?;
                 Some((bytes.as_ref(), offsets.as_ref(), certificate))
             }
@@ -9411,8 +9417,10 @@ impl Column {
                     .as_ref()
                     .copied()?;
                 let certificate = lower_hex_sequence
-                    .get_or_init(|| contiguous_utf8_lower_hex_sequence(bytes, offsets, width))
-                    .as_ref()
+                    .get_or_init(|| {
+                        contiguous_utf8_lower_hex_sequence(bytes, offsets, width).map(Box::new)
+                    })
+                    .as_deref()
                     .copied()?;
                 let n = offsets.len().checked_sub(1)?;
                 let first_start = *offsets.first()?;
@@ -32969,6 +32977,104 @@ mod ab_transpose_row_typed_ccfp {
             cv_of(&ms)
         );
         println!("  throughput = {:.2} Gelem/s", N as f64 / (med / 1e3) / 1e9);
+    }
+
+    /// Same-binary, worker-invariant measurement of the Column-shrink benefit (cc_fp).
+    /// The cross-binary pair-shrink ratio is worker-confounded (memory bandwidth
+    /// differs per worker), so instead compare moving a struct of the CURRENT Column
+    /// size vs the PRE-SHRINK size (288 B) through the exact `Vec` push + `BTreeMap`
+    /// collect the transpose finalize uses, BOTH arms in ONE binary on ONE worker.
+    /// Isolates the size effect. Per-arm ADJACENT A/A null floor; gate on median.
+    #[test]
+    #[ignore = "perf ablation; run with --ignored --nocapture"]
+    fn ab_column_size_move_ccfp() {
+        use std::collections::BTreeMap;
+        const N: usize = 200_000;
+        const BLOCKS: usize = 11;
+        const REPS: usize = 5;
+        // Current Column size vs the pre-boxing size (288 B), as opaque blocks so the
+        // move cost is purely the byte count the BTreeMap re-homes.
+        const CUR: usize = std::mem::size_of::<Column>();
+        #[derive(Clone)]
+        struct Blk<const B: usize>([u8; B]);
+        let keys: Vec<String> = {
+            let mut v: Vec<usize> = (0..N).collect();
+            v.sort_by_key(|r| r.to_string());
+            v.into_iter().map(|r| r.to_string()).collect()
+        };
+        // arm parameterized by block size; returns elapsed ms
+        macro_rules! run {
+            ($B:expr) => {{
+                let mut v: Vec<(String, Blk<$B>)> = Vec::with_capacity(N);
+                for k in &keys {
+                    v.push((k.clone(), Blk::<$B>([0u8; $B])));
+                }
+                let m: BTreeMap<String, Blk<$B>> = v.into_iter().collect();
+                std::hint::black_box(&m);
+            }};
+        }
+        // Compile-time guard: the OLD(288) arm must stay >= the current Column.
+        const _: () = assert!(CUR <= 288, "Column grew past the pre-shrink 288 B size");
+        for _ in 0..2 {
+            run!(232);
+            run!(288);
+        }
+        let (mut cur, mut old, mut ncur) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bc, mut bo) = (f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                // adjacent A/A for CUR(232): two back-to-back timings -> ratio = floor
+                let t0 = Instant::now();
+                run!(232);
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let t0 = Instant::now();
+                run!(232);
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                ncur.push(a / b);
+                // OLD(288)
+                let t0 = Instant::now();
+                run!(288);
+                let c = t0.elapsed().as_secs_f64() * 1e3;
+                let t0 = Instant::now();
+                run!(288);
+                let d = t0.elapsed().as_secs_f64() * 1e3;
+                bo = bo.min(c.min(d));
+            }
+            cur.push(bc);
+            old.push(bo);
+        }
+        let (c, o) = (min_of(&cur), min_of(&old));
+        let (nlo, nhi) = spread_of(&ncur);
+        let floor = 100.0 * (nhi - 1.0).abs().max((nlo - 1.0).abs());
+        println!("AB Column-size move (ONE binary, ONE invocation, blocks x reps)");
+        println!("  binary_sha256 = {}", {
+            use std::process::Command;
+            Command::new("sha256sum")
+                .arg(std::env::current_exe().unwrap())
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+                .unwrap_or_default()
+        });
+        println!("  worker={}  CUR sizeof Column={CUR} B", {
+            use std::process::Command;
+            Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map_or_else(|| "?".into(), |s| s.trim().to_owned())
+        });
+        println!("  CUR(232 B) median={c:.3} ms  cv={:.2}%", cv_of(&cur));
+        println!("  OLD(288 B) median={o:.3} ms  cv={:.2}%", cv_of(&old));
+        println!("  A/A null floor (CUR arm) median-spread=[{nlo:.4},{nhi:.4}]  |dev|={floor:.2}%");
+        println!(
+            "  shrink effect (OLD/CUR) = {:.4}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0).abs() > floor
+        );
     }
 
     /// Size breakdown of the widest ScalarValues variant (cc_fp): finds the single
