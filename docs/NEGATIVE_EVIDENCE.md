@@ -11064,3 +11064,119 @@ in the touched ranges (pre-existing diffs elsewhere left untouched). `timeout 18
 br-frankenpandas-yavyk, not a new finding.
 
 RESIDUAL: `io/json_read_records` (~399ms) is now the single hottest io op and is still serial on the read side.
+
+### 2026-07-10 cod_fp - lazy transpose nullable-temporal admission - REJECT unsafe admission; correctness KEEP (perf rerun CV-rejected)
+
+Ledger-grep first re-read the four rejected transpose construction families and the already-landed homogeneous-view WIN.
+This follow-up does not retry any inner-loop lever and does not touch the cc-owned Utf8 materialization path. A parity review
+found that `as_datetime64_slice()` / `as_timedelta64_slice()` can expose cached raw nanos for an eager nullable temporal
+column, while `DataFrameTransposeView` carries no validity masks and rebuilt temporal output columns as all-valid. The lazy
+view therefore must reject that shape until the representation carries one validity witness per source column. Dense
+all-valid Float64/Int64/Bool/Datetime64/Timedelta64 remains the only admitted domain.
+
+The ranked current-main `release-perf` profile was replayed from the committed
+`artifacts/perf/cod_fp_df_transpose_100k_release_perf.data` with
+`timeout 30s perf report --stdio --no-children --percent-limit 0.1`. Every self-time frame at or above 0.1% is below:
+
+| rank | self | frame |
+| ---: | ---: | --- |
+| 1 | 33.79% | `__memmove_avx_unaligned_erms` |
+| 2 | 30.10% | `__memcmp_avx2_movbe` |
+| 3 | 8.59% | `BTreeMap<String, Column>::IntoIter::dying_next` |
+| 4 | 4.47% | `BTreeMap<String, Column>::bulk_build_from_sorted_iter` |
+| 5 | 4.45% | drop `BTreeMap<String, Column>` |
+| 6 | 4.38% | `usize::_fmt_inner` |
+| 7 | 4.12% | drop `Option<ColumnData>` |
+| 8 | 4.11% | `mi_theap_malloc_zero_aligned_at_generic` |
+| 9 | 4.11% | `mi_free` |
+| 10 | 0.35% | drop `DataFrame` |
+| 11 | 0.33% | `push_lexical_transpose_row_entry` |
+| 12 | 0.27% | unresolved kernel frame `0xffffffffafdd915a` |
+| 13 | 0.27% | unresolved kernel frame `0xffffffffafdd7229` |
+| 14 | 0.18% | `mi_heap_ensure_arena_pages` |
+| 15 | 0.17% | unresolved kernel frame `0xffffffffafda3415` |
+| 16 | 0.15% | unresolved loader/kernel frame `0xffffffffaf704109` |
+| 17 | 0.14% | unresolved kernel frame `0xffffffffafd420b2` |
+
+Mechanism: 94%+ of named self time is copying/comparing/building/dropping/formatting/allocating the public row-column map;
+there is no row-compute target to optimize. The top frames map to the already-rejected eager-construction family, so the
+live lever remains the feature-gated lazy representation, with a validity-domain guard as its proof obligation.
+
+Bounded measurement attempt before the guard, `df_transpose` 10k x 10 Datetime64, feature-enabled `release-perf`, 8192
+view constructions per sample: the requested `ovh-a` pin was not honored by RCH; the actual worker was `vmi1149989`.
+The 25-sample ORIG vector had p50 `3834.293 us`, mean `4297.138 us`, min `3397.566 us`, max `8863.135 us`, and
+cv `25.19%`. A same-worker warmed retry was bounded by `timeout 240s` and produced no timing vector before timeout.
+Decision: **REJECT the performance comparison under the mandatory cv <= 5% gate**; no candidate ratio or new pandas ratio
+is claimed. The prior official same-binary, CV-valid Datetime64 WIN remains the durable measurement (FP p50 `3097.43 us`,
+cv `1.41%`; pandas p50 `479079.01 us`, cv `0.35%`; `154.670x`).
+
+Correctness decision: **KEEP the admission guard**. `transpose_view()` now returns `Ok(None)` when a cached Datetime64 or
+Timedelta64 buffer has any invalid validity bit, preserving the eager fallback instead of exposing NaT as a present raw
+`i64`. All-valid columns retain the O(1) all-valid validity sentinel check and the exact prior typed-slice path; other dtypes
+and Utf8 are untouched. Proof: `timeout 240s rch exec -- cargo test -p fp-frame --features lazy-transpose-view
+dataframe_lazy_transpose_view_ --lib -- --nocapture` passed 2/2 on actual worker `vmi1149989`, covering all five dense
+homogeneous dtypes, mixed fallback, and nullable Datetime64/Timedelta64 fallback.
+
+Closeout gates: feature-enabled `fp-frame` lib suite passed `3135/0` with 15 ignored on RCH worker `ovh-a`; `fp-conformance`
+lib passed `1596/0` after RCH fell open locally because no worker was admissible; workspace `cargo check --all-targets`
+passed on `hz1` with existing example/test warnings. Workspace Clippy remains blocked before `fp-frame` by eight existing
+`fp-columnar` findings (`unnecessary_cast`, `manual_range_contains`, `collapsible_if`, and `manual_repeat_n`). Workspace
+`cargo fmt --check` remains blocked by peer-owned scratch examples and existing broad `fp-frame` drift; rustfmt's only
+suggestion in the new test was applied manually. `timeout 180s ubs crates/fp-frame/src/lib.rs` reached the documented
+whole-file stall without a focused finding, matching `artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md`.
+
+### 2026-07-10 cc_fp — astype(str) Float64→Utf8 PARALLEL contiguous-Utf8 build — 4.86-5.00x fp-side WIN (5.98x → 25.77x vs pandas)
+
+Lane: the Utf8 materialization bypass. The three named exemplars (arg-extrema axis=1, stack, to_flat_index) were already
+landed by peers, so this pass swept the REMAINING Utf8-output surface. Ranked baseline (fp-bench, release-perf, min-of-25,
+1M rows): `df_stack` 104.8ms (already parallel), **`astype_str_f64` 95.9ms**, `dt_date` 68.8ms, `dt_time` 58.3ms,
+`qcut_bins` 37.7ms, `dt_strftime` 37.0ms, `cut_explicit` 23.9ms, `cut_bins` 14.6ms, `dt_month_name` 14.0ms,
+`astype_str_i64` 7.1ms, `dt_day_name` 5.1ms, `astype_str_bool` 3.4ms. `astype_str_f64` is the hottest un-parallelized
+Utf8-output op.
+
+MECHANISM FROM PROFILE (samply, symbolicated, self-time ≥0.1%): the op is CPU-BOUND IN THE FORMATTER, not in the byte copy —
+grisu `format_shortest_opt` 5.34% + `format_shortest` 3.38% + `to_shortest_str` 0.88% + `decode::<f64>` 0.86% +
+`carrying_mul_add` 0.65% + `float_to_general_debug` 0.65% ≈ **11.8% float→decimal**; `core::fmt::write` 2.40% +
+`String::write_str` 1.82% + `write_formatted_parts` 0.67% + `format_inner` 0.67% ≈ **5.6% core::fmt**;
+`CharSearcher::next_match` 2.90% (the `split_once('e')` exponent scan); mimalloc `_mi_theap_realloc_zero` 2.36% +
+`mi_free_ex` 1.61% + `mi_theap_malloc_zero_aligned_at` 1.29% ≈ **5.3% allocator**. `Column::astype` Float64→Utf8 already
+built ONE contiguous byte buffer (no `Vec<Scalar::Utf8>`) but did so in a SERIAL `for &v in data` loop.
+
+LEVER: parallelize the contiguous-Utf8 build itself — each worker formats its own contiguous row range into a LOCAL byte
+buffer + LOCAL end offsets; chunks concat in row order with each chunk's offsets shifted by the running byte base →
+`from_utf8_contiguous`. Gated `workers > 1 && n >= 200_000`, workers capped at 8 (mirrors `par_map_i64_from_nanos`).
+Bit-identical: same formatter, same values, same order ⇒ same bytes, same offsets. New test
+`astype_float_to_utf8_parallel_matches_serial_ccfp` (n = 200_003 so every chunk boundary is ragged; per-arm widths differ —
+whole ".0" / shortest decimal / negative / "1e+16" / "…e-05" — so a mis-shifted offset corrupts a neighbour instead of
+cancelling).
+
+Interleaved same-binary A/B (temporary `FP_ASTYPE_NO_PAR` env gate, removed before commit; alternating ORIG/CAND per block,
+9 blocks, min-of-block-minima, loaded box load≈19/64T):
+
+| workload | ORIG | parallel contiguous-Utf8 | fp-side |
+| --- | ---: | ---: | --- |
+| fp-bench `astype_str_f64` 1M | 83.607 ms (cv 1.79%) | 16.719 ms (cv 2.18%) | **5.00x** (median-of-blocks 4.86x) |
+| fp-bench `astype_str_i64` 1M (control, untouched) | 6.917 ms | 6.993 ms | 0.99x (validates the measurement) |
+
+Head-to-head vs pandas 2.2.3 (`benches/vs_pandas_harness.py`, its own cv≤5% gate, bounded): **1M FASTER 25.77x** — pandas
+p50 499.634 ms (cv 3.73%) vs fp p50 19.387 ms (cv 4.35%). The SERIAL path scored 5.98x on the same pandas number, so this
+lever moves astype(str) on floats from **5.98x → 25.77x**. (100k was DROPPED_HIGH_CV by the harness on the loaded box —
+recorded, not cherry-picked.) Added `bench_astype_str_f64_pandas` to the harness as a permanent regression workload.
+
+GREEN: fp-columnar lib 475/0 (incl. the new parallel-boundary test), fp-frame astype 30/0, fp-conformance 2048/0.
+`rustfmt --check` clean on the changed file. Shipping (ungated) binary re-measured at 16.6–17.7 ms with `FP_ASTYPE_NO_PAR`
+inert, proving the A/B gate was truly removed and the measured path is the shipped path. clippy `-D warnings` on fp-columnar
+reports 9 pre-existing lints (RangeInclusive::contains / collapsible-if / repeat().take() / same-type cast / loop-index at
+lines 4981, 5669, 5676, 13120, 17313, 17346, 17355, 17694, 29179) — all OUTSIDE the two changed hunks (+17211..17259,
++31052..31084); my hunk adds zero. UBS on the file reports the documented broad whole-file inventory (22 critical / 5153
+warning across 36 flagged lines) — none on the changed hunks.
+
+LESSON: the "SERIAL `Vec<Scalar::Utf8>` → `from_values`" framing of this vein is too narrow. `astype(str)` had ALREADY
+escaped `from_values` into a contiguous buffer and was STILL 5x off, because the wall is the *serial* build, not the
+`Scalar` round-trip. Two conditions decide whether parallelizing that build pays, and the profile answers both: (1) per-row
+work must be COMPUTE-heavy (grisu ≫ memcpy) — this is the same regime boundary that made short-string `str.*` parallelism a
+~0-gain REJECT (2026-06-27 TealOsprey), and (2) a per-row `String` alloc is NOT disqualifying when the allocator is
+thread-caching (mimalloc `mi_theap_*` here), which is why this won where `to_dict`'s per-cell-alloc parallel LOST to
+allocator contention. NEXT in this vein (untried, same shape, ranked): `dt_date` 68.8ms and `dt_time` 58.3ms — both serial
+Utf8 builds that ALSO pay a `format!` String per row, and both are ~1.9x slower than `dt_strftime` (37.0ms) which formats the
+identical `YYYY-MM-DD` bytes with hand-rolled digit writers; fix the per-row `format!` first, then parallelize.

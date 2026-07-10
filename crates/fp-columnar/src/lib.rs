@@ -17208,6 +17208,55 @@ impl Column {
         if target == DType::Utf8
             && let Some(data) = self.as_f64_slice()
         {
+            // PARALLEL contiguous-Utf8 build. The serial fallback below is
+            // CPU-BOUND in the formatter itself (grisu shortest-round-trip
+            // float->decimal ~12% self-time, core::fmt ~6%, the exponent
+            // `split_once('e')` scan ~3%), not in the byte copy — so the whole
+            // per-row format+append is parallelized, output materialization
+            // included. Each worker formats its own contiguous row range into a
+            // LOCAL byte buffer plus LOCAL end offsets; the chunks are then
+            // concatenated in row order with each chunk's offsets shifted by the
+            // running byte base. Bit-identical to the serial build: same
+            // formatter on the same values in the same order, so the same bytes
+            // and the same offsets. (Parallelizing the compute WITHOUT the
+            // output build would be ~0-gain here, exactly as it was for the
+            // arg-extrema axis=1 family.)
+            const PAR_MIN_ROWS: usize = 200_000;
+            let n = data.len();
+            let workers = std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(8);
+            if workers > 1 && n >= PAR_MIN_ROWS {
+                let chunk = n.div_ceil(workers);
+                let mut parts: Vec<(Vec<u8>, Vec<usize>)> = (0..n.div_ceil(chunk))
+                    .map(|_| (Vec::new(), Vec::new()))
+                    .collect();
+                std::thread::scope(|scope| {
+                    for (src, part) in data.chunks(chunk).zip(parts.iter_mut()) {
+                        scope.spawn(move || {
+                            let mut local_bytes: Vec<u8> = Vec::with_capacity(src.len() * 6);
+                            let mut local_ends: Vec<usize> = Vec::with_capacity(src.len());
+                            for &v in src {
+                                local_bytes.extend_from_slice(
+                                    fp_types::float_to_string_for_astype(v).as_bytes(),
+                                );
+                                local_ends.push(local_bytes.len());
+                            }
+                            *part = (local_bytes, local_ends);
+                        });
+                    }
+                });
+                let total: usize = parts.iter().map(|(b, _)| b.len()).sum();
+                let mut bytes: Vec<u8> = Vec::with_capacity(total);
+                let mut offsets: Vec<usize> = Vec::with_capacity(n + 1);
+                offsets.push(0);
+                for (local_bytes, local_ends) in &parts {
+                    let base = bytes.len();
+                    bytes.extend_from_slice(local_bytes);
+                    offsets.extend(local_ends.iter().map(|end| end + base));
+                }
+                return Ok(Self::from_utf8_contiguous(bytes, offsets));
+            }
             let mut bytes: Vec<u8> = Vec::with_capacity(data.len() * 6);
             let mut offsets: Vec<usize> = Vec::with_capacity(data.len() + 1);
             offsets.push(0);
@@ -30998,6 +31047,46 @@ mod tests {
                     Scalar::Utf8("nan".to_owned()),
                 ]
             );
+        }
+
+        /// The Float64 -> Utf8 astype above the `PAR_MIN_ROWS` gate builds its
+        /// contiguous Utf8 output in parallel workers (per-thread byte buffers +
+        /// local end offsets, concatenated with a running byte base). Prove it is
+        /// bit-identical to the serial formatter over a row count that is NOT a
+        /// multiple of the worker count, so every chunk boundary is ragged, and
+        /// over values whose rendered widths differ (whole ".0", shortest decimal,
+        /// negative, and both scientific spellings) so a mis-shifted offset would
+        /// corrupt a neighbouring row rather than cancel out.
+        #[test]
+        fn astype_float_to_utf8_parallel_matches_serial_ccfp() {
+            // > PAR_MIN_ROWS (200_000) with a ragged final chunk.
+            let n = 200_003_usize;
+            // Widths differ per arm (whole ".0", shortest decimal, negative,
+            // and both scientific spellings) so a mis-shifted chunk offset
+            // corrupts a neighbouring row instead of cancelling out.
+            let values: Vec<f64> = (0..n)
+                .map(|i| match i % 5 {
+                    0 => i as f64,
+                    1 => i as f64 * 1.5,
+                    2 => -(i as f64) / 3.0,
+                    3 => 1e16 + i as f64,
+                    _ => 1e-5 / (i + 1) as f64,
+                })
+                .collect();
+
+            let col = Column::from_f64_values(values.clone());
+            let out = col.astype(DType::Utf8).expect("astype float->utf8");
+
+            assert_eq!(out.dtype(), DType::Utf8);
+            assert_eq!(out.len(), n);
+            let got = out.values();
+            for (i, &v) in values.iter().enumerate() {
+                let expected = Scalar::Utf8(fp_types::float_to_string_for_astype(v));
+                assert_eq!(
+                    got[i], expected,
+                    "row {i} diverged from the serial formatter"
+                );
+            }
         }
 
         #[test]

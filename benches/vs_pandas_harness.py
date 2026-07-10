@@ -243,6 +243,13 @@ def bench_cumsum_pandas(df: pd.DataFrame) -> list[float]:
 def bench_df_transpose_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation_repeated(lambda: df.T, TRANSPOSE_BATCH)
 
+def bench_astype_str_f64_pandas(df: pd.DataFrame) -> list[float]:
+    # Mirrors fp-bench dataframe_ops/astype_str_f64 exactly: a Float64 column
+    # holding i * 1.5 for i in 0..rows, cast to str. Built here (not taken from
+    # `df`) so both engines format the identical value sequence.
+    series = pd.Series(np.arange(len(df), dtype="float64") * 1.5)
+    return time_operation(lambda: series.astype(str))
+
 
 # GroupBy Workloads (pandas)
 def bench_groupby_sum_pandas(df: pd.DataFrame) -> list[float]:
@@ -451,6 +458,7 @@ PANDAS_WORKLOADS = {
         "value_counts": bench_value_counts_pandas,
         "cumsum": bench_cumsum_pandas,
         "df_transpose": bench_df_transpose_pandas,
+        "astype_str_f64": bench_astype_str_f64_pandas,
     },
     "groupby": {
         "groupby_sum_int64": bench_groupby_sum_pandas,
