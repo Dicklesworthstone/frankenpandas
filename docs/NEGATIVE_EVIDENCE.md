@@ -12571,6 +12571,32 @@ withdrawn; no production row-shard code is landed. Concrete blocker/retry condit
 perf sampling and both arm CVs below 5% in the same invocation. Until then the 2.620066x result remains unclaimed routing
 evidence.
 
+### 2026-07-10 cod_fp — all-valid owned-row materialization audit BLOCKED/DORMANT; no verdict
+
+Ledger-grep came first. The historical `0.997x` row remains INVALID/REOPEN-DORMANT: its discarded candidate combined two
+properties in `Column::from_f64_values_all_valid_owned_unchecked(Vec<f64>)` — **skip the NaN scan** and **move the Vec into
+the owned Float64 backing**. Current public fp-columnar APIs cannot reconstruct that combined lever exactly:
+
+| available constructor | skips NaN scan | moves Vec | exact historical backing/behavior |
+| --- | ---: | ---: | ---: |
+| `from_f64_values_owned` | no | yes | no — retains `data.iter().any(is_nan)` |
+| `from_f64_values_all_valid_unchecked` | yes | no | no — `Arc::from(Vec)` reallocates/copies |
+| `from_f64_values_nullable(..., all_valid)` | yes | yes | no — nullable backing, different typed access/clone behavior |
+| private `from_f64_all_valid_with_finite_opt(data, None)` | yes | yes | exact mechanics, but inaccessible outside fp-columnar |
+
+The ordinary all-valid Float64 public transpose no longer reaches this family: it admits the shared
+`Float64TransposeRows` plan and builds lazy row columns. A fallback fixture can force the old eager typed row loop, but the
+candidate still cannot construct the exact historical output from fp-frame. Adding the missing hidden constructor would
+edit `crates/fp-columnar/src/lib.rs`, which is the active cc-owned lane; the task explicitly says to stay out of those
+files. Approximating with either public constructor would measure a different lever and falsely satisfy the integrity
+audit.
+
+Therefore **no benchmark was run, no candidate binary exists, and candidate self-time remains UNMEASURED**. This is a
+concrete blocker rather than a REJECT: the row stays INVALID/DORMANT and contributes no evidence for a representation
+ceiling. Retry condition: either the exact no-scan + owned constructor becomes accessible on a live materializing path, or
+the fp-columnar owner explicitly coordinates its temporary restoration; then run the same 100,000 x 10 one-binary AB/BA
+harness with full output observation, binary SHA-256, worker identity, both CVs below 5%, and non-zero candidate self-time.
+
 ### 2026-07-10 cc_fp — MEASURED CEILING for the pair-shrink lever: boxing the Column out of the 312-byte pair is 2.54x on finalize (decidable, 153.6% vs 8.5% floor). The pair SIZE is the wall.
 
 Acting on "attack that 312-byte pair directly". Both suggested fixes -- borrowed/interned keys, or one columnar block
