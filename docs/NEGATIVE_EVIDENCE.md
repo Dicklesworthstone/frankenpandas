@@ -12782,3 +12782,55 @@ expect it to move the Utf8 or transpose numbers.** That is the sharper input to 
 Analysis-only; no code change, no build (freeze). The permanent probes from the previous entry
 (`isa_baseline_probe_ccfp`, `isa_sum_kernel_ccfp`) remain the instruments to re-check on any worker. `crates/fp-frame`
 untouched — `cod_fp` is editing it live.
+
+### 2026-07-10 cc_fp — DEAD-END MAP for the "attack the 312-byte pair" levers, with a reason per idea. The one real lever (shrink ScalarValues) is a sized epic, surfaced not rushed.
+
+Two orthogonal levers were requested: (A) take the transcendental AVX2 win, (B) attack the 312-byte pair via intern-String or
+single columnar block. Analysis-only (freeze): I checked each against code, and each is blocked, ineffective, or cod_fp's.
+Recording the REASONS so these specific ideas are not re-suggested.
+
+**(A) Transcendental AVX2 win — UNMEASURABLE via rch, unchanged from the prior two entries.** rch does not forward build
+flags (3/3 avx2=false), has no worker pin, the checkout is shared (a `.cargo/config.toml` change corrupts cod_fp's live
+A/Bs), and `forbid(unsafe_code)` blocks runtime dispatch. The transcendental family (sqrt 0.085x, log 0.20x, floor 0.089x)
+IS the right AVX2 target, but no AVX2 binary can be produced or run through the mandatory recipe. Repo-owner decision, as
+recorded in `3d8936c00`. Not re-litigated here.
+
+**(B1) Intern the String key — INEFFECTIVE for transpose, with two independent reasons.** (i) The output keys are the SOURCE
+row-index labels. For the common `RangeIndex` they are `"0".."n-1"` — ALL DISTINCT — so interning (which dedups REPEATED
+strings) removes zero allocations. (ii) Even if it did, the label `String` is only **4.0-4.4% of construction** and its
+ablation share sits INSIDE its own A/A null floor (20.05%) — undecidable (entry `81982a3db`). Interning the transpose key is
+a non-lever. Do not pursue.
+
+**(B2) Single columnar block — this IS cod_fp's lazy transpose view, already landed (779x-4474x on construction,
+`c7a691931`-era).** For non-f64 homogeneous dtypes the widened path already routes through
+`LazyDataFrameColumns::homogeneous_transpose` / `HomogeneousTransposeColumns::{Int64,Bool,Datetime64,Timedelta64}`
+(fp-frame ~49544, ~57800). Re-deriving it is re-doing cod_fp's shipped work. Not mine to take.
+
+**(B3) Extend my typed `as_f64_slice` transpose win to other dtypes — NO mine-lane surface.** There is exactly ONE
+per-Column transpose-row variant: `LazyAllValidFloat64TransposeRow`. Int64/Bool/Datetime64/Timedelta64 do NOT get per-Column
+lazy variants — they use cod_fp's frame-level `HomogeneousTransposeColumns` block. So `as_i64_slice`/`as_bool_slice`/
+`as_datetime64_slice` have nothing to attach a transpose arm to (confirmed: 0 TransposeRow arms, and none needed). My 1.630x
+`as_f64_slice` win (`38ab399ba`) is complete for the only dtype with a per-Column variant.
+
+**(B4) Shrink `Column` so the by-value pair is small — the ONE real lever, and it is an EPIC, surfaced with its numbers.**
+The transpose pays a 288-byte `Column` (312-byte pair) NOT because its own variant is big — `LazyAllValidFloat64TransposeRow`
+is ~80 B (plan Arc + source_row + `OnceLock<Vec<f64>>` + `OnceLock<Vec<Scalar>>`) — but because `ScalarValues` is a 200-byte
+enum SIZED TO ITS WIDEST VARIANT, which is `LazyContiguousUtf8` (2 `Arc<[..]>` + FIVE `OnceLock`s). So a transpose Column
+carries 120+ bytes of padding for a Utf8 variant it never uses.
+- **Upside, measured:** boxing `Column` out of the pair is **2.54x on finalize** (entry `bf3d4fb77`), and 91% of construction
+  is that pair traffic. Shrinking `ScalarValues` 200->~104 (box the widest variant) takes the pair 312->~160, capturing a
+  large share of that 2.54x on EVERY `BTreeMap<String,Column>` build in the workspace, not just transpose.
+- **Blast radius / risk, measured:** the widest variant `LazyContiguousUtf8` has **21 match/construct sites** in fp-columnar,
+  and it is the backing of EVERY contiguous-Utf8 column — i.e. the output of my own astype 25.77x / dt.date / to_flat_index
+  wins. Boxing it adds a pointer indirection to every Utf8-column access, which could REGRESS those wins. So it is not a
+  mechanical shrink; it is a shrink that trades frame-construction cost against Utf8-access cost, and the net is UNKNOWN
+  without building the change and re-benching both the transpose finalize AND the Utf8 access paths under full conformance.
+- **Verdict:** a genuine multi-turn, high-blast-radius epic with real upside (2.54x ceiling on all frame construction) and
+  real regression risk (hot Utf8 access). It CANNOT be responsibly attempted under a disk freeze where the change cannot be
+  locally checked and where a botched 21-site enum edit breaks 475 + 2048 tests. **Surfaced as the highest-value open
+  transpose lever, with ceiling (2.54x), blast radius (21 sites), and risk (Utf8-access deref) stated. Not rushed.**
+
+**NET for the window:** three of the four requested/implied levers are refuted with a concrete reason (AVX2 unmeasurable,
+intern-String ineffective, single-block is cod_fp's), and the fourth (shrink `ScalarValues`) is precisely sized as an epic,
+not a tail-of-hour edit. No code changed; `crates/fp-frame` untouched (cod_fp live); no build. This is a map, so the next
+session — or the repo owner — spends effort on the one lever that survives scrutiny, with its numbers already attached.
