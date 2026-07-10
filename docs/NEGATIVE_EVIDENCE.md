@@ -10894,3 +10894,38 @@ transpose's RangeIndex row columns; it avoids the visible sort but pays much mor
 cost. Retry only if the public representation changes: a homogeneous 2D block-backed store, a lazy transposed-DataFrame
 view with accessor materialization, or a real sorted BTree builder/alternate map representation that avoids both n log n
 string comparisons and n independent public `Column` objects.
+
+### 2026-07-09 cod_fp - df.transpose feature-gated 2D-block lazy view prototype - WIN (construction-only prototype)
+
+Ledger-grep before the attempt found the active structural wall rows and the latest local rejection above. This does not
+retry descriptor-backed chunks, flattened pair buffers, owned row columns, lexicographic map transfer to `to_dict(index)`,
+or sorted sequential `BTreeMap::insert`. It prototypes the remaining permitted primitive on a small slice only: a
+homogeneous f64 2D block plus a lazy transposed view that stores one `Arc<[f64]>` and shape metadata instead of constructing
+one public `String` + `Column` + `BTreeMap` entry per source row.
+
+First, bounded profile confirmation on the required workload, current checkout, `release-perf`, `df_transpose` 100k x 10
+Float64:
+
+| evidence | result |
+| --- | --- |
+| command | `timeout 90s perf record -F 99 -m 1 -g --call-graph fp -o artifacts/perf/cod_fp_l4vzc_df_transpose_100k_proto_profile.data -- /data/tmp/cargo-target/release-perf/fp-bench --category dataframe_ops --workload df_transpose --size 100k --dtype float64 --json` |
+| timings | best `15177.987 us`, median `15878.615 us`, p95 `17149.513 us`, cv `4.39%` |
+| artifacts | `artifacts/perf/cod_fp_l4vzc_df_transpose_100k_proto_profile.{data,svg}`; `perf report --stdio` top rows summarized below |
+| ranked hotspots | `__memmove_avx_unaligned_erms` 73.14% children, `BTreeMap<String, Column>` drop 14.96% children, BTree bulk-build 9.17% children, allocator path 8.98% children, lexical row-entry push 8.95% children, `__memcmp_avx2_movbe` 8.74% children |
+
+Prototype landed behind `fp-bench --features lazy-transpose-prototype` only. Setup builds the homogeneous block outside the
+timed window to model a frame that is already block-backed; the timed operation creates a lazy transposed view, checks shape,
+and reads first/last cells via checked offset arithmetic. The benchmark normalizes over 65,536 lazy-view constructions per
+sample to keep the direct timer out of the sub-operation path.
+
+Small-slice A/B, same binary and machine, 10k x 10 Float64:
+
+| workload | current eager transpose | feature-gated 2D-block lazy view prototype | signal |
+| --- | ---: | ---: | --- |
+| `fp-bench df_transpose` vs `df_transpose_2d_block_view_proto` | best `843.829 us`, median `864.829 us`, cv `9.94%` | best `0.002979 us`, median `0.003838 us`, cv `11.44%` | construction-only median signal: about `225k x` lower |
+
+Decision: keep the prototype harness. This is not a production `DataFrame::transpose` speedup and not a public API parity
+claim; it is a measured, feature-gated construction prototype proving the cardinality wall disappears when transpose returns
+metadata over a homogeneous block instead of materializing 10k row columns. Next production lever for `br-frankenpandas-l4vzc`
+should move this shape into `fp-frame` as a trait-isolated block-backed/lazy-transposed storage variant with fallback
+materialization and conformance, not another `BTreeMap` construction tweak.

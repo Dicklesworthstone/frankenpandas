@@ -23,3 +23,6 @@ fp-io = { path = "../fp-io", version = "0.1.2" }
 fp-join = { path = "../fp-join", version = "0.1.2" }
 fp-types = { path = "../fp-types", version = "0.1.2" }
 mimalloc = { workspace = true }
+
+[features]
+lazy-transpose-prototype = []

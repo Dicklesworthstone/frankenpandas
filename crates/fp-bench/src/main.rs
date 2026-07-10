@@ -12,6 +12,8 @@
 //! /ewm map to more setup-heavy harnesses and are filed as follow-up; the Python
 //! side simply reports those FP workloads as INCOMPLETE until added here.
 
+#[cfg(feature = "lazy-transpose-prototype")]
+use std::sync::Arc;
 use std::{collections::BTreeMap, hint::black_box, time::Instant};
 
 use fp_columnar::Column;
@@ -103,6 +105,65 @@ fn build_frame(rows: usize, cols: usize, dtype: &str) -> (DataFrame, Vec<Vec<f64
     let df = DataFrame::new_with_column_order(index, columns, column_order)
         .expect("fp-bench frame construction");
     (df, raw)
+}
+
+#[cfg(feature = "lazy-transpose-prototype")]
+struct PrototypeF64Block {
+    values: Arc<[f64]>,
+    rows: usize,
+    cols: usize,
+}
+
+#[cfg(feature = "lazy-transpose-prototype")]
+impl PrototypeF64Block {
+    fn from_column_vectors(raw: &[Vec<f64>]) -> Self {
+        let cols = raw.len();
+        let rows = raw.first().map_or(0, Vec::len);
+        let mut values = Vec::with_capacity(rows * cols);
+        for column in raw {
+            debug_assert_eq!(column.len(), rows);
+            values.extend_from_slice(column);
+        }
+        Self {
+            values: Arc::from(values),
+            rows,
+            cols,
+        }
+    }
+
+    fn transpose_view(&self) -> PrototypeF64TransposeView {
+        PrototypeF64TransposeView {
+            values: Arc::clone(&self.values),
+            source_rows: self.rows,
+            rows: self.cols,
+            cols: self.rows,
+        }
+    }
+}
+
+#[cfg(feature = "lazy-transpose-prototype")]
+struct PrototypeF64TransposeView {
+    values: Arc<[f64]>,
+    source_rows: usize,
+    rows: usize,
+    cols: usize,
+}
+
+#[cfg(feature = "lazy-transpose-prototype")]
+impl PrototypeF64TransposeView {
+    fn shape(&self) -> (usize, usize) {
+        (self.rows, self.cols)
+    }
+
+    fn get(&self, row: usize, col: usize) -> f64 {
+        let Some(offset) = row
+            .checked_mul(self.source_rows)
+            .and_then(|base| base.checked_add(col))
+        else {
+            return f64::NAN;
+        };
+        self.values.get(offset).copied().unwrap_or(f64::NAN)
+    }
 }
 
 /// Build the two merge inputs for the joins category — mirrors the criterion
@@ -214,9 +275,29 @@ fn time_us<F: FnMut()>(mut op: F) -> Vec<f64> {
     out
 }
 
+#[cfg(feature = "lazy-transpose-prototype")]
+fn time_us_repeated<F: FnMut()>(repeat: usize, mut op: F) -> Vec<f64> {
+    for _ in 0..WARMUP {
+        for _ in 0..repeat {
+            op();
+        }
+    }
+    let mut out = Vec::with_capacity(ITERS);
+    for _ in 0..ITERS {
+        let t = Instant::now();
+        for _ in 0..repeat {
+            op();
+        }
+        out.push(t.elapsed().as_secs_f64() * 1e6 / repeat as f64);
+    }
+    out
+}
+
 fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f64>> {
     let (rows, cols) = size_rows_cols(size);
     let (df, raw) = build_frame(rows, cols, dtype);
+    #[cfg(feature = "lazy-transpose-prototype")]
+    let transpose_block = PrototypeF64Block::from_column_vectors(&raw);
 
     let times = match (category, workload) {
         ("dataframe_ops", "sort_values_single") => time_us(|| {
@@ -317,6 +398,22 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         ("dataframe_ops", "df_transpose") => time_us(|| {
             // pandas: df.T
             let _ = df.transpose().expect("transpose");
+        }),
+        #[cfg(feature = "lazy-transpose-prototype")]
+        ("dataframe_ops", "df_transpose_2d_block_view_proto") => time_us_repeated(65_536, || {
+            let view = transpose_block.transpose_view();
+            let shape = view.shape();
+            let first = if shape.0 > 0 && shape.1 > 0 {
+                view.get(0, 0)
+            } else {
+                0.0
+            };
+            let last = if shape.0 > 0 && shape.1 > 0 {
+                view.get(shape.0 - 1, shape.1 - 1)
+            } else {
+                0.0
+            };
+            black_box((shape, first, last));
         }),
         ("dataframe_ops", "df_diff") => time_us(|| {
             // pandas: df.diff()
@@ -2225,5 +2322,23 @@ fn main() {
             );
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(all(test, feature = "lazy-transpose-prototype"))]
+mod tests {
+    use super::PrototypeF64Block;
+
+    #[test]
+    fn lazy_transpose_prototype_indexes_column_major_block() {
+        let raw = vec![vec![1.0, 2.0, 3.0], vec![10.0, 20.0, 30.0]];
+        let block = PrototypeF64Block::from_column_vectors(&raw);
+        let view = block.transpose_view();
+
+        assert_eq!(view.shape(), (2, 3));
+        assert_eq!(view.get(0, 0), 1.0);
+        assert_eq!(view.get(0, 2), 3.0);
+        assert_eq!(view.get(1, 0), 10.0);
+        assert_eq!(view.get(1, 2), 30.0);
     }
 }
