@@ -25,6 +25,10 @@ fp-types = { path = "../fp-types", version = "0.1.2" }
 mimalloc = { workspace = true }
 pyo3 = { workspace = true }
 
+[features]
+default = []
+lazy-transpose-view = ["fp-frame/lazy-transpose-view"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

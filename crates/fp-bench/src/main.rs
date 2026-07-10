@@ -471,25 +471,14 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let _ = df.abs().expect("abs");
         }),
         #[cfg(feature = "lazy-transpose-view")]
-        ("dataframe_ops", "df_transpose") => time_us_repeated_total(8192, || {
-            // pandas: df.T. With fp-frame/lazy-transpose-view this takes the
-            // public homogeneous transpose-view path instead of n public Columns.
-            let view = df
-                .transpose_view()
-                .expect("transpose view")
-                .expect("fp-bench homogeneous RangeIndex transpose view");
-            let shape = view.shape();
-            let first = if shape.0 > 0 && shape.1 > 0 {
-                view.get_scalar(0, 0)
-            } else {
-                None
-            };
-            let last = if shape.0 > 0 && shape.1 > 0 {
-                view.get_scalar(shape.0 - 1, shape.1 - 1)
-            } else {
-                None
-            };
-            black_box((shape, view.dtype(), first, last));
+        ("dataframe_ops", "df_transpose") => time_us_repeated_total(1024, || {
+            // pandas: df.T. Exercise the actual public DataFrame::transpose
+            // call; shape inspection is metadata-only for the feature-gated
+            // homogeneous storage and does not cross the materialization
+            // boundary.
+            let transposed = df.transpose().expect("transpose");
+            let shape = transposed.shape();
+            black_box((&transposed, shape));
         }),
         #[cfg(not(feature = "lazy-transpose-view"))]
         ("dataframe_ops", "df_transpose") => time_us(|| {

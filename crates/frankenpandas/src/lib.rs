@@ -22,6 +22,8 @@ pub use fp_expr::{
     DataFrameExprExt, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef, eval_str,
     eval_str_with_locals, evaluate, evaluate_on_dataframe, evaluate_on_dataframe_with_locals,
 };
+#[cfg(feature = "lazy-transpose-view")]
+pub use fp_frame::DataFrameTransposeView;
 pub use fp_frame::{
     CategoricalAccessor,
     CategoricalMetadata,

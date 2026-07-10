@@ -11198,3 +11198,96 @@ Decision: **REJECT this benchmark configuration, not the representation lever.**
 batch applied to both the fp benchmark and pandas harness so batch totals remain comparable, with the same 10k x 10 data,
 same local worker/core, release-perf binaries, pandas 2.2.3, and cv <= 5% gate. Do not retry batch 8,192 for the eager
 all-dtype public path.
+
+### 2026-07-10 cod_fp - feature-gated public homogeneous lazy transpose storage - WIN (31.93x-60.07x vs pandas; 779x-4474x vs eager ORIG)
+
+Ledger-grep preceded every idea and measurement. This increment does not retry sorted/sequential `BTreeMap` insertion,
+owned all-valid row columns, descriptor chunks, flattened pair buffers, or RangeIndex lexicographic transfer. The top
+profile frames belong to those already-rejected eager-construction families, so the selected next frame is the structural
+representation itself: keep the public `DataFrame::transpose()` signature, but store a certified homogeneous transpose plan
+and succinct Int64 unit-range column order until an observer crosses the public-column boundary.
+
+Bounded replay of the tracked current-main `release-perf` profile
+(`artifacts/perf/cod_fp_df_transpose_100k_release_perf.data`, `perf report --no-children --percent-limit 0.1`) produced this
+complete ranked self-time table at or above 0.1%:
+
+| rank | self | frame |
+| ---: | ---: | --- |
+| 1 | 33.79% | `__memmove_avx_unaligned_erms` |
+| 2 | 30.10% | `__memcmp_avx2_movbe` (stable sort / BTree bulk-build comparator) |
+| 3 | 8.59% | `BTreeMap::IntoIter::dying_next` / `ScalarValues` drop |
+| 4 | 4.47% | `BTreeMap::bulk_build_from_sorted_iter` |
+| 5 | 4.45% | `drop_in_place<BTreeMap<String, Column>>` |
+| 6 | 4.38% | `usize::_fmt_inner` (row-label formatting) |
+| 7 | 4.12% | `drop_in_place<Option<ColumnData>>` |
+| 8 | 4.11% | mimalloc allocation (`mi_theap_malloc_zero_aligned_at_generic`) |
+| 9 | 4.11% | `mi_free` / `Column` drop |
+| 10 | 0.35% | `drop_in_place<DataFrame>` |
+| 11 | 0.33% | `push_lexical_transpose_row_entry` |
+| 12 | 0.27% | unresolved kernel frame `0xffffffffafdd915a` |
+| 13 | 0.27% | unresolved kernel frame `0xffffffffafdd7229` |
+| 14 | 0.18% | `mi_heap_ensure_arena_pages` |
+| 15 | 0.17% | unresolved kernel frame `0xffffffffafda3415` |
+| 16 | 0.15% | unresolved loader/kernel frame `0xffffffffaf704109` |
+| 17 | 0.14% | unresolved kernel frame `0xffffffffafd420b2` |
+
+Mechanism: the named profile is overwhelmingly copy/compare/tree-build/drop/format/allocate work for one public `String`,
+`Column`, and `BTreeMap` entry per source row. There is no inner transpose-compute vein to optimize. The top frame maps to
+the already-rejected eager map/cardinality family, as do the next named frames, so this attempt changes representation.
+
+One lever: behind `lazy-transpose-view`, `DataFrame`'s private column and order stores can carry either the exact eager
+`BTreeMap<String, Column>` / `Vec<String>` wire shape or a `LazyTransposeFramePlan` plus `Int64UnitRange`. The real public
+`DataFrame::transpose()` now selects that plan for dense homogeneous Float64, Int64, Bool, Datetime64, and Timedelta64 with
+an Int64 unit-range index. `shape()` and `num_columns()` consume metadata without materialization; public map/order reads,
+mutation, serialization, equality, and owned iteration deterministically materialize the old representation. Mixed dtypes,
+empty-column frames, non-range or duplicate indexes, MultiIndexes, and nullable temporal columns retain the exact eager
+fallback. Generic all-valid temporal `Column::new` sources also materialize exactly if cloning normalizes their typed cache
+back to Scalars; the added fallback closes the discovered temporal panic. Utf8 construction is untouched.
+
+The feature is forwarded through both public crates: `frankenpandas --features lazy-transpose-view` and
+`fp-python --features lazy-transpose-view`; the existing PyO3 `transpose()` method already calls the same public Rust method.
+The permanent `fp-bench` feature row now calls `df.transpose()` plus metadata-only `shape()`, not `transpose_view()`.
+
+Behavior proof:
+
+- focused public-storage test: 1/1 passed, including all five dtypes, clone/serde/equality parity, generic cache-backed
+  temporal constructors, and mixed/empty eager fallbacks;
+- existing lazy-view/null-domain tests: 2/2 passed;
+- full feature-enabled fp-frame lib suite: **3136 passed, 15 ignored, 0 failed**;
+- workspace all-target check passed; feature-enabled `fp-python` + facade check passed.
+
+Honest A-B used detached eager ORIG `6167c4522` and the candidate working tree, both built as `release-perf` through RCH
+and copied back with worker/local SHA-256 agreement. Batch-1024 hashes were ORIG
+`c20ab858127304df7ef85c3f115422bba2014bacfa78612f8be758c600b82a3b` and candidate
+`7c62a8948bdc16a006e7b8f72c3c6bd4251b340e8147eddd82a0fe4c9e7d8269`. Both binaries then ran sequentially on local
+worker `thinkstation1`, `taskset -c 2`, 10k x 10, 1,024 transposes/sample, pandas 2.2.3, with explicit 600 s ORIG / 240 s
+candidate bounds. The pandas harness batch was overridden to the same 1,024 without editing the cc-owned harness file.
+Artifacts:
+
+- `artifacts/bench/cod_fp_public_transpose_orig_batch1024_10k_all_dense_20260710.json`
+- `artifacts/bench/cod_fp_public_transpose_candidate_batch1024_10k_all_dense_20260710.json`
+
+| dtype | eager ORIG p50 (cv) | public lazy candidate p50 (cv) | ORIG -> candidate | pandas p50 (cv) | candidate vs pandas |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Float64 | 852502.35 us (1.35%) | 1094.45 us (0.47%) | **778.93x** | 36125.84 us (1.53%) | **33.008x** |
+| Int64 | 4329386.05 us (0.45%) | 975.09 us (0.54%) | **4439.99x** | 34924.12 us (1.40%) | **35.816x** |
+| Bool | 4097602.99 us (0.44%) | 1091.60 us (1.53%) | **3753.76x** | 34851.86 us (1.46%) | **31.927x** |
+| Datetime64 | 4414265.48 us (0.33%) | 1024.25 us (1.26%) | **4309.75x** | 61530.99 us (0.61%) | **60.074x** |
+| Timedelta64 | 4385302.93 us (0.37%) | 980.28 us (1.84%) | **4473.52x** | 55212.33 us (1.60%) | **56.323x** |
+
+All ten engine CVs are below 5%. Keep gate was public candidate faster than pandas for every widened dtype and at least 10x
+faster than same-host eager ORIG; the observed minima are 31.927x and 778.93x respectively. **Decision: KEEP and ship.**
+
+Scope is intentionally precise: this proves public transpose construction/metadata latency. The first map/column/value
+observer currently materializes the entire output map (not one column), and shared-reference materialization retains the
+source plan alongside that map. Cache-backed generic Float64/temporal constructors can also pay an O(rows x source-cols)
+clone scan/boxing cost that the typed benchmark constructors avoid. Therefore this entry makes no `to_dict` materialization
+claim. The next different alien primitive is an indexable per-output-column lazy slot store with source-plan retirement and
+O(1)-shareable cache-backed temporal/float sources; do not return to eager BTree construction tweaks.
+
+Final hygiene: targeted rustfmt and `git diff --check` passed. No-dependency clippy passed for fp-bench and both public
+facades; fp-frame reproduced its 27 pre-existing whole-file lints, all outside the new lazy-store and parity-test ranges,
+while dependency-enabled clippy stopped on the tracked fp-columnar lint backlog. UBS passed the two changed Cargo manifests;
+the smaller Rust-file scan reproduced broad pre-existing inventory, and the required bounded 180 s fp-frame scan exited 124
+without a focused finding, matching the documented stall in
+`artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md` (`br-frankenpandas-yavyk`).

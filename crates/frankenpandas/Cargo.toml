@@ -52,6 +52,7 @@ sql-postgresql = ["fp-io/sql-postgresql"]
 sql-mysql = ["fp-io/sql-mysql"]
 tracing = ["fp-frame/tracing"]
 asupersync = ["fp-runtime/asupersync"]
+lazy-transpose-view = ["fp-frame/lazy-transpose-view"]
 
 [dev-dependencies]
 # fd90.196: serde_json round-trip integration test for the README's
