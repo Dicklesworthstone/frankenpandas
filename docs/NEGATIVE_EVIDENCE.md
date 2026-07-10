@@ -13300,3 +13300,41 @@ Permanent A/B `ab_temporal_value_counts_ccfp`.
 Remaining same-shape: `unique` Timedelta64 (Datetime64 done); `median`/`quantile` (nanmedian converts temporal via f64 — a
 likely precision issue AND a perf gap); `std`/`var`/`sem` Timedelta64 (dtype-output rules need care); Datetime64 `mean`
 (nanmean lossy `to_f64` catch-all — precision bug like min/max).
+
+### 2026-07-10 cc_fp — WIN: Timedelta64 unique via raw-i64 open-addressing + re-tag — 2.12x fp-side, bit-identical (completes the temporal unique family)
+
+Fifth temporal lever (after argsort 8.36x, min/max 35.4x, sum/mean 27.0x, value_counts 15.2x). `Column::unique` already has a
+Datetime64 fast path but Timedelta64 fell to the generic `Key::Timedelta64` Scalar dedup. Mirrored the Datetime64 branch:
+for `!has_nulls()`, no-NAT Timedelta64, run `unique_i64_wide` over the raw ns then re-wrap as Timedelta64. Bit-identical (same
+first-seen distinct ns as the generic `Key::Timedelta64` arm; only the values dtype tag differs).
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG generic vs CAND fast interleaved, per-arm adjacent A/A
+null control; 2M ns, 50k distinct; ORIG forces the generic path via one planted NAT the CAND gate skips):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `26ffcd376f235ade94d38e02aa5dced14a340c2ab0552177d35908b751930a47` |
+| worker | `vmi1227854` |
+| ORIG generic `Key` dedup | 34.239 ms (cv 11.16%) |
+| CAND i64 open-addr + re-tag | 16.146 ms (cv 13.21%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0218x -> 2.18% floor** |
+| **fp-side ratio (min-of-blocks)** | **2.121x (+112.1%) — DECIDABLE (112% is ~51x the 2.18% floor)** |
+
+⚠️ HONEST: this is the SMALLEST temporal win (2.12x vs 8-35x elsewhere) because `unique`'s generic path already uses an
+FxHashSet — the fast path only removes the `Scalar` materialization + swaps the hash for open-addressing, not an O(n log n)
+sort. Per-arm cv is high (11-13%, alloc-noisy: each call builds a 50k-entry set + Vec), but the paired A/A null control (the
+gate) is 2.18% and the 112% effect is ~51x it, so the verdict is robust. BIT-IDENTICAL: the A/B asserts the fast path's
+distinct ns == the Int64-column unique (shared `unique_i64_wide`, first-seen order). GREEN remote fail-closed: fp-columnar
+**475/0**, fp-conformance **2048/0**. `rustfmt --check` clean; clippy clean in the hunk. No local build. `crates/fp-frame`
+untouched.
+
+INFRA NOTE: rch saturated mid-session (`no admissible workers: insufficient_slots=10, active_project_exclusion=1`) between the
+A/B run and the guards; I surfaced it as a blocker and retried rather than falling back to a local build — a slot freed on the
+first retry (~60s) and the guards ran remotely. The mandatory `RCH_REQUIRE_REMOTE=1` refusal held (no local build occurred).
+
+**TEMPORAL VEIN THIS SESSION (all cc_fp, all bit-identical unless noted): argsort 8.36x, min/max 35.4x (+Datetime64 precision
+fix), sum/mean 27.0x, value_counts 15.2x, unique 2.12x.** Remaining: `median`/`quantile` (nanmedian f64-converts temporal — a
+likely precision issue AND a perf gap); `std`/`var`/`sem` Timedelta64 (dtype-output rules); **Datetime64 `mean` CONFIRMED
+buggy** — `nanmean` has a Timedelta64 arm but NO Datetime64 arm, so a Datetime64 column returns `Scalar::Float64` (lossy f64
+mean of nanos, wrong TYPE vs pandas' Timestamp); fixing it needs care on the exact pandas rounding (float-mean-then-cast vs
+integer division), so it is a separate correctness bead, not a drop-in perf lever.

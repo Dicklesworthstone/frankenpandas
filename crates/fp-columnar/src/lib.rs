@@ -20746,6 +20746,23 @@ impl Column {
             return Ok(Self::from_datetime64_values(unique_i64_wide(data)));
         }
 
+        // Timedelta64 sibling of the Datetime64 branch above: an all-valid, no-NAT
+        // column reuses the open-addressing i64 dedup over the raw ns, then re-wraps
+        // as Timedelta64 -- no Scalar materialization. Bit-identical: a non-NaT
+        // Timedelta64's key is its ns value, so first-seen order + re-wrapped
+        // Scalar::Timedelta64 match the generic Key::Timedelta64 arm exactly.
+        if !self.has_nulls()
+            && let Some(data) = self.as_timedelta64_slice()
+            && !data.contains(&i64::MIN)
+        {
+            let uniq = unique_i64_wide(data);
+            let len = uniq.len();
+            return Ok(Self::from_timedelta64_values_with_validity(
+                uniq,
+                ValidityMask::all_valid(len),
+            ));
+        }
+
         // All-valid (NaN-free) Float64: open-addressing over normalized float
         // bits, collecting first-seen originals (preserves -0.0). Avoids the
         // FxHashSet<FloatBits> + 5M-Scalar materialization of the generic path.
@@ -34403,6 +34420,141 @@ mod ab_temporal_value_counts_ccfp {
         );
         println!(
             "  CAND i64 tally + re-tag      min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+/// A/B for routing all-valid, NaT-free Timedelta64 unique through the raw-i64
+/// open-addressing dedup (`unique_i64_wide`) + re-tag, instead of the generic
+/// `Key::Timedelta64` Scalar dedup (cc_fp). Parity vs the Int64-column unique
+/// (shared `unique_i64_wide`, first-seen order). ORIG timing forces the generic
+/// path via one planted NAT the CAND gate skips. Median gate, per-arm A/A null.
+#[cfg(test)]
+mod ab_timedelta_unique_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, ValidityMask};
+
+    fn ns(n: usize, distinct: i64) -> Vec<i64> {
+        let mut s: u64 = 0x4F6C_DD1D_2545_F491;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                (z % distinct as u64) as i64 - distinct / 2
+            })
+            .collect()
+    }
+    fn td(v: Vec<i64>) -> Column {
+        let n = v.len();
+        Column::from_timedelta64_values_with_validity(v, ValidityMask::all_valid(n))
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_timedelta_unique() {
+        const N: usize = 2_000_000;
+        const DISTINCT: i64 = 50_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let src = ns(N, DISTINCT);
+
+        // Parity: Timedelta unique's distinct ns == Int64-column unique (both
+        // unique_i64_wide, first-seen order), re-tagged to Timedelta64.
+        {
+            let u = td(src.clone()).unique().expect("td unique");
+            let e = Column::from_i64_values_owned(src.clone())
+                .unique()
+                .expect("i64 unique");
+            assert_eq!(
+                u.as_timedelta64_slice().expect("td values"),
+                e.as_i64_slice().expect("i64 values"),
+                "distinct ns diverged"
+            );
+        }
+
+        // ORIG timing: plant a NAT so the no-NAT gate skips -> generic Key path.
+        let mut src_orig = src.clone();
+        src_orig[0] = i64::MIN;
+
+        for _ in 0..2 {
+            std::hint::black_box(td(src_orig.clone()).unique().unwrap());
+            std::hint::black_box(td(src.clone()).unique().unwrap());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = td(src_orig.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&co).unique().unwrap());
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = td(src.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).unique().unwrap());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = td(src.clone());
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).unique().unwrap());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB timedelta unique (ONE binary, ONE invocation) N={N} distinct={DISTINCT}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG generic Key dedup   min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND i64 open-addr+re-tag min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(
