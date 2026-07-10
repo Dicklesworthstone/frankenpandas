@@ -10976,6 +10976,49 @@ is intentionally unchanged in this increment, so this is a feature-gated storage
 Next increment: wire the view into a real `DataFrame` storage variant with on-demand public-column materialization or move to
 homogeneous 2D block-backed frame construction; do not return to public `BTreeMap<String, Column>` construction tweaks.
 
+### 2026-07-10 cod_fp - homogeneous dense lazy transpose view widening - WIN (76.72x-154.67x at 10k)
+
+Ledger-grep before coding re-read the structural transpose wall rows above. This attempt stayed on the only live lever:
+reduce output representation cardinality by returning a feature-gated lazy homogeneous transposed view, not by changing
+inner-loop row construction. It did not retry sorted `BTreeMap::insert`, owned row columns, descriptor chunks, flattened
+pair buffers, or `to_dict(index)` lexicographic transfer. It widened the prior `Float64` view into
+`DataFrameTransposeView` over dense homogeneous `Float64`, `Int64`, `Bool`, `Datetime64`, and `Timedelta64` columns, leaving
+Utf8/object materialization untouched for the cc-owned lane. The `fp-bench` `df_transpose` workload uses the public
+feature-gated `DataFrame::transpose_view()` path under `--features lazy-transpose-view`; eager `DataFrame::transpose()`
+still returns a materialized `DataFrame`, so this is not a default eager-API speed claim.
+
+Checks run under explicit timeouts:
+
+| gate | result |
+| --- | --- |
+| `timeout 180s rch exec -- cargo check -p fp-frame --features lazy-transpose-view` | PASS on `hz1` |
+| `timeout 180s rch exec -- cargo test -p fp-frame --features lazy-transpose-view dataframe_lazy_transpose_view_materializes_numeric_bool_columns_cod_fp --lib -- --nocapture` | PASS on `hz2`, 1/1 |
+| `timeout 420s cargo build --profile release-perf -p fp-bench --features lazy-transpose-view` | PASS locally, fresh binary timestamp `2026-07-10 01:11:21 -0400` |
+| `timeout 60s rustfmt --check crates/fp-bench/src/main.rs` | PASS |
+| `timeout 30s python3 -m py_compile benches/vs_pandas_harness.py` | PASS |
+| `timeout 120s cargo fmt -p fp-frame -p fp-bench --check` | FAILS on unrelated/pre-existing formatting drift in `crates/fp-frame/src/lib.rs` and untracked scratch examples; touched transpose hunks fixed manually |
+| `timeout 180s ubs crates/fp-bench/src/main.rs benches/vs_pandas_harness.py` | nonzero from existing guarded harness `subprocess.run` finding and setup-only bench warnings; no new timed transpose-view blocker |
+| `timeout 180s ubs crates/fp-frame/src/lib.rs` | exit 124 after scanner header; known fp-frame whole-file UBS stall/inventory tracked in `artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md` |
+| `timeout 240s rch exec -- cargo clippy -p fp-bench --features lazy-transpose-view -- -D warnings` | FAILS before fp-bench on unrelated existing `fp-columnar` clippy debt |
+
+Official `benches/vs_pandas_harness.py` measurements, all same current feature-enabled `release-perf` binary and pandas
+2.2.3, `taskset -c 2`, 10k x 10, 8192 transposes/sample:
+
+| artifact | dtype | FP | pandas 2.2.3 | verdict |
+| --- | --- | ---: | ---: | --- |
+| `artifacts/bench/cod_fp_l4vzc_homogeneous_transpose_view_10k_all_dense_dtypes.json` | Float64 | p50 `3081.80 us`, cv `0.43%` | p50 `286531.64 us`, cv `0.88%` | **WIN `92.975x`** |
+| `artifacts/bench/cod_fp_l4vzc_homogeneous_transpose_view_10k_all_dense_dtypes.json` | Int64 | p50 `2996.34 us`, cv `0.94%` | p50 `290307.86 us`, cv `0.72%` | **WIN `96.888x`** |
+| `artifacts/bench/cod_fp_l4vzc_homogeneous_transpose_view_10k_all_dense_dtypes.json` | Datetime64 | p50 `3097.43 us`, cv `1.41%` | p50 `479079.01 us`, cv `0.35%` | **WIN `154.670x`** |
+| `artifacts/bench/cod_fp_l4vzc_homogeneous_transpose_view_10k_all_dense_dtypes.json` | Timedelta64 | p50 `3374.26 us`, cv `0.49%` | p50 `440105.40 us`, cv `0.53%` | **WIN `130.430x`** |
+| `artifacts/bench/cod_fp_l4vzc_homogeneous_transpose_view_10k_all_dense_dtypes.json` | Bool | p50 `3693.81 us`, cv `0.74%` | p50 `286479.05 us`, cv `15.57%` | `DROPPED_HIGH_CV` |
+| `artifacts/bench/cod_fp_l4vzc_homogeneous_transpose_view_10k_bool_retry.json` | Bool | p50 `3659.12 us`, cv `0.92%` | p50 `280717.94 us`, cv `0.61%` | **WIN `76.717x`** |
+
+Decision: keep the widening. The current-binary, CV-valid rows show the cardinality lever generalizes to every dense
+homogeneous non-Utf8 backing currently exposed by `Column` slices. No 100k ratio is claimed in this entry; prior 100k runs
+on the shared host were CV-rejected, and this increment deliberately stayed on a finishable 10k slice to avoid another
+timeout-with-no-finding turn. Next production step remains a real `DataFrame` storage/view variant so default eager
+`transpose()`/Python `.T` can avoid the public `Column`/`BTreeMap` cardinality wall without changing its API contract.
+
 ### 2026-07-09 cc_fp - to_json parallel body for columns/index/split/values - WIN (2.78x-3.01x, byte-identical)
 
 Ledger-grep before the attempt: no prior rejection of a parallel `to_json` element body. The proven sibling is the

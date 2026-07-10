@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::{collections::BTreeMap, hint::black_box, time::Instant};
 
-use fp_columnar::Column;
+use fp_columnar::{Column, ValidityMask};
 use fp_frame::{DataFrame, Series, to_datetime};
 use fp_index::{DuplicateKeep, Index, IndexLabel, RangeIndex};
 use fp_join::{JoinType, merge_dataframes_on_with};
@@ -89,6 +89,29 @@ fn gen_f64_column(rng: &mut SplitMix64, rows: usize, dtype: &str) -> Vec<f64> {
         .collect()
 }
 
+fn gen_i64_column(rng: &mut SplitMix64, rows: usize) -> Vec<i64> {
+    (0..rows)
+        .map(|_| (rng.next_u64() % 1_000_000) as i64)
+        .collect()
+}
+
+fn gen_bool_column(rng: &mut SplitMix64, rows: usize) -> Vec<bool> {
+    (0..rows).map(|_| (rng.next_u64() & 1) != 0).collect()
+}
+
+fn gen_datetime64_column(rows: usize, column: usize) -> Vec<i64> {
+    let base = 1_609_459_200_000_000_000_i64;
+    (0..rows)
+        .map(|row| base + row as i64 * 1_000_000_000 + column as i64)
+        .collect()
+}
+
+fn gen_timedelta64_column(rows: usize, column: usize) -> Vec<i64> {
+    (0..rows)
+        .map(|row| row as i64 * 1_000_000 + column as i64)
+        .collect()
+}
+
 fn build_frame(rows: usize, cols: usize, dtype: &str) -> (DataFrame, Vec<Vec<f64>>) {
     let mut rng = SplitMix64(0x5151_5151_5151_5151);
     let index = Index::new_known_unique_int64_unit_range(0, rows);
@@ -97,9 +120,43 @@ fn build_frame(rows: usize, cols: usize, dtype: &str) -> (DataFrame, Vec<Vec<f64
     let mut raw: Vec<Vec<f64>> = Vec::with_capacity(cols);
     for c in 0..cols {
         let name = format!("col_{c}");
-        let data = gen_f64_column(&mut rng, rows, dtype);
-        raw.push(data.clone());
-        columns.insert(name.clone(), Column::from_f64_values(data));
+        match dtype {
+            "int64" => {
+                let data = gen_i64_column(&mut rng, rows);
+                raw.push(data.iter().map(|&value| value as f64).collect());
+                columns.insert(name.clone(), Column::from_i64_values_owned(data));
+            }
+            "bool" => {
+                let data = gen_bool_column(&mut rng, rows);
+                raw.push(
+                    data.iter()
+                        .map(|&value| if value { 1.0 } else { 0.0 })
+                        .collect(),
+                );
+                columns.insert(name.clone(), Column::from_bool_values(data));
+            }
+            "datetime64" | "datetime64[ns]" => {
+                let data = gen_datetime64_column(rows, c);
+                raw.push(data.iter().map(|&value| value as f64).collect());
+                columns.insert(name.clone(), Column::from_datetime64_values(data));
+            }
+            "timedelta64" | "timedelta64[ns]" => {
+                let data = gen_timedelta64_column(rows, c);
+                raw.push(data.iter().map(|&value| value as f64).collect());
+                columns.insert(
+                    name.clone(),
+                    Column::from_timedelta64_values_with_validity(
+                        data,
+                        ValidityMask::all_valid(rows),
+                    ),
+                );
+            }
+            _ => {
+                let data = gen_f64_column(&mut rng, rows, dtype);
+                raw.push(data.clone());
+                columns.insert(name.clone(), Column::from_f64_values(data));
+            }
+        }
         column_order.push(name);
     }
     let df = DataFrame::new_with_column_order(index, columns, column_order)
@@ -415,24 +472,24 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         }),
         #[cfg(feature = "lazy-transpose-view")]
         ("dataframe_ops", "df_transpose") => time_us_repeated_total(8192, || {
-            // pandas: df.T. With fp-frame/lazy-transpose-view this builds the
-            // real lazy Float64 transposed view instead of n public Columns.
+            // pandas: df.T. With fp-frame/lazy-transpose-view this takes the
+            // public homogeneous transpose-view path instead of n public Columns.
             let view = df
-                .transpose_f64_view()
+                .transpose_view()
                 .expect("transpose view")
-                .expect("fp-bench Float64 RangeIndex transpose view");
+                .expect("fp-bench homogeneous RangeIndex transpose view");
             let shape = view.shape();
             let first = if shape.0 > 0 && shape.1 > 0 {
-                view.get(0, 0).unwrap_or(0.0)
+                view.get_scalar(0, 0)
             } else {
-                0.0
+                None
             };
             let last = if shape.0 > 0 && shape.1 > 0 {
-                view.get(shape.0 - 1, shape.1 - 1).unwrap_or(0.0)
+                view.get_scalar(shape.0 - 1, shape.1 - 1)
             } else {
-                0.0
+                None
             };
-            black_box((shape, first, last));
+            black_box((shape, view.dtype(), first, last));
         }),
         #[cfg(not(feature = "lazy-transpose-view"))]
         ("dataframe_ops", "df_transpose") => time_us(|| {

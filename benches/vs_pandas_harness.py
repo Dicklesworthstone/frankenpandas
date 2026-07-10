@@ -122,6 +122,18 @@ def generate_test_data(rows: int, cols: int, dtype: str, seed: int = 42) -> pd.D
 
     if dtype == "int64":
         data = {f"col_{i}": rng.integers(0, 1_000_000, size=rows) for i in range(cols)}
+    elif dtype == "bool":
+        data = {f"col_{i}": rng.integers(0, 2, size=rows, dtype=np.int8).astype(bool)
+                for i in range(cols)}
+    elif dtype in ("datetime64", "datetime64[ns]"):
+        base = np.datetime64("2021-01-01T00:00:00", "ns")
+        offsets = np.arange(rows, dtype=np.int64) * 1_000_000_000
+        data = {f"col_{i}": base + (offsets + i).astype("timedelta64[ns]")
+                for i in range(cols)}
+    elif dtype in ("timedelta64", "timedelta64[ns]"):
+        offsets = np.arange(rows, dtype=np.int64) * 1_000_000
+        data = {f"col_{i}": (offsets + i).astype("timedelta64[ns]")
+                for i in range(cols)}
     elif dtype == "float64":
         data = {f"col_{i}": rng.random(rows) * 1_000_000 for i in range(cols)}
     elif dtype == "float64_nan10":
