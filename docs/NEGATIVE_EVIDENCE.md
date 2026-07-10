@@ -12242,3 +12242,85 @@ rows invalidated on 2026-07-10 remain invalid for the recorded reasons — a cro
 GREEN, all remote and fail-closed: fp-columnar **475/0**; `clippy -p fp-columnar --all-targets` emits no warning inside the
 new module; `rustfmt --check` clean. No local build (repo `target/` untouched). `crates/fp-frame` NOT touched — `cod_fp` is
 editing it live.
+
+### 2026-07-10 cc_fp — LOCALIZED the transpose construction wall by ablation: 95.9% is fp-frame's String+sort+BTreeMap, only 4.1% is the fp-columnar column ctor. The "representation cardinality" conclusion is STRENGTHENED, not falling.
+
+Acting on "attack construction directly". Before attacking, I priced the half of construction that lives in a file I can
+touch without colliding with `cod_fp`. The answer says the attack surface is not there.
+
+**FIRST, A HYPOTHESIS KILLED FOR FREE (no bench spent).** I expected `Column::from_f64_transpose_row` to pay a per-column
+`ValidityMask` allocation (100k-1M tiny `Vec<u64>`s). Source says otherwise: `ValidityMask::all_valid(len)` is
+`{ words: Vec::new(), invalid_ranges: None, len }` — it allocates nothing (fp-columnar:347). The ctor is an `Arc::clone` plus
+two empty `OnceLock`s. Read the code before booking the worker.
+
+**MEASUREMENT (full provenance, per the ledger rules).**
+
+| field | value |
+| --- | --- |
+| binary sha256 | `e7e8ca84dd02bdbe2c827c4a03123bcc733ec04f48f2efd6ea30de27c744127b` |
+| worker id | rch label `hz2`; in-test `hostname` = `hetzner2` |
+| substrate | ONE binary, ONE fail-closed `rch exec`, arms alternating in one measured routine, `black_box` in+out |
+| size | 500_000 columns x 10 cells, 11 blocks x 9 reps, min-of-block; 0.74 s |
+
+| arm | min | cv_pct |
+| --- | ---: | ---: |
+| CTOR `Column::from_f64_transpose_row` x 500k | 2.967 ms | **0.22%** |
+| **NULL — identical arm** | **2.988 ms** | **0.97%** |
+
+- **NULL-CONTROL ratio = 0.9931x** (noise floor: 0.69% deviation). Harness sound.
+- **per-column ctor = 5.93 ns**, self-time non-zero (the arm is the ctor; nothing else runs).
+- A first attempt (200k columns, 5 reps) read **14.35 ns/col at cv 6.06% / 9.05%** — above the gate. Its null control was
+  already tight (0.9979x), so the HARNESS was sound and only the ARM was short: lengthened rather than harvested. **That
+  number is not claimed.** (This is the new rule working as intended: null control first, then decide.)
+
+**LOCALIZATION.** Frame-level construction on the SAME worker (`hz2`, `0e211070e`) was 14.440 ms for 100_000 columns =
+**144.4 ns/column**. The fp-columnar ctor is **5.93 ns/column**. Therefore:
+
+> **fp-columnar's per-column ctor = 4.1% of transpose construction. The other 95.9% is fp-frame: the `String` row label
+> (`usize::_fmt_inner` 4.38% self), the `(String, Column)` stable sort (`__memcmp` 30.10% self), the `BTreeMap` bulk build,
+> and the drop paths.**
+
+**CEILING for any fp-columnar-side construction lever** (composing with the construction share, which is worker-dependent:
+26.5% on `hz2`, 58.5% on `ovh-a`):
+
+| worker | fp-columnar ctor as % of TOTAL transpose | max end-to-end if the ctor cost were ZERO |
+| --- | ---: | ---: |
+| `hz2` | 1.09% | **1.0110x** |
+| `ovh-a` | 2.40% | **1.0246x** |
+
+So there is no lever for me here: even deleting the entire per-column constructor buys ~1-2%.
+
+**THIS STRENGTHENS THE "REPRESENTATION CARDINALITY IS THE WALL" CONCLUSION — it does not undermine it.** That conclusion is
+being described as resting on the four reject rows. It does not, and never did. It rests on (a) the ranked self-time profile
+replayed from `artifacts/perf/cod_fp_df_transpose_100k_release_perf.data` (`__memmove` 33.79%, `__memcmp` 30.10%, BTree drop
+8.59%, `bulk_build` 4.47%, `drop_in_place<BTreeMap>` 4.45%, `_fmt_inner` 4.38%), and now (b) this ABLATION, an entirely
+independent method, which says 95.9% of construction is exactly that `String` + sort + `BTreeMap` representation. Two methods,
+one answer. Whatever happens to the four rows, the wall is where the profile and the ablation both say it is.
+
+**CONSEQUENCE / HANDOFF.** "Attack construction directly" means attacking the per-source-row `String` + `Column` +
+`BTreeMap` entry cardinality **in `crates/fp-frame`** — which is `cod_fp`'s lane, and `cod_fp` has an uncommitted
+`mod transpose_reject_reaudit_cod_fp` there right now. I did not touch it. The three ranked sub-targets, from the profile:
+(1) the `(String, Column)` stable sort, 30.10% self — the entries are generated in lexical order by
+`push_lexical_transpose_row_entry`, so a `from_sorted_iter`-style build that skips the comparator is the obvious question;
+(2) the `String` label itself, `usize::_fmt_inner` 4.38% self — `push_i64_decimal` applies, the same lever that gave
+2.53x/4.53x on dt.date/dt.time; (3) the drops (`ScalarValues` 16.81% incl).
+
+**BLOCKER, surfaced not worked around.** After this measurement, `rch` refused three consecutive times:
+`[RCH] local (no admissible workers: insufficient_slots=10,active_project_exclusion=1)` →
+`[RCH] remote required; refusing local fallback (no worker assigned)`. So the **full `fp-columnar` 475-test suite could not
+be re-run after the test module was added**. What IS proven: the ablation's own binary (sha256 above) compiled the
+fp-columnar lib-test target on `hz2` and ran the new test green (`1 passed; 0 failed; 481 filtered out`); the full 475/0 was
+green earlier this window before the module was added; and this commit changes **no production code** — it is
+`#[cfg(test)] #[ignore]` plus docs. `rustfmt --check` clean. No local build was performed.
+
+**SCORECARD OF THE FOUR REJECTS, corrected.** It is being said that I am "two-for-two on those rows being unsound". The
+audit says: **sorted insert = SOUND** (its A/B was local same-machine, and `cod_fp`'s CV-invalid rerun agrees directionally,
+0.587x candidate-slower); **pair-buffer morsels = UNSOUND** (cross-worker ratio) → reopened; **BTreeMap row shards =
+UNSOUND** (no candidate timing vector) → reopened; **owned row columns = invalid-as-measured but MOOT** (targets code that no
+longer exists). Two of four originals are unsound. `cod_fp`'s `4367e77e4` invalidated *their rerun*, explicitly "neither WIN
+nor REJECT", not the original row.
+
+**arg-extrema: complete since `46b3374a8` (~7.5x).** Four call sites → `arg_axis1_names_parallel` → per-thread
+`(Vec<u8>, Vec<usize>)` under `std::thread::scope` → concat with running byte base → fp-frame:67127
+`Column::from_utf8_contiguous(bytes, offsets)`. The only `Vec<Scalar::Utf8>` remaining is the documented null-row
+correctness fallback (a contiguous buffer cannot represent a null). Nothing to apply.

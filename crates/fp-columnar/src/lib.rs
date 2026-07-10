@@ -32870,6 +32870,82 @@ mod ab_transpose_row_typed_ccfp {
         100.0 * var.sqrt() / mean
     }
 
+    /// Localizes the transpose CONSTRUCTION wall (cc_fp). `df.transpose()` construction
+    /// = per-column `Column::from_f64_transpose_row` (fp-columnar) + the `String` label,
+    /// the `(String, Column)` stable sort, and the `BTreeMap` bulk build (fp-frame).
+    /// This prices ONLY the fp-columnar half, so the remainder is attributable to
+    /// fp-frame. Null control included: the identical arm registered twice.
+    #[test]
+    #[ignore = "perf ablation; run with --ignored --nocapture"]
+    fn ab_transpose_row_ctor_share() {
+        // First run gave cv 6.06%/9.05% on a 2.87 ms arm -- above the gate, so the
+        // arm was lengthened rather than the number harvested. Null control was
+        // already tight (0.9979x), so the harness was sound; only the arm was short.
+        const ROWS: usize = 500_000;
+        const COLS: usize = 10;
+        const BLOCKS: usize = 11;
+        const REPS: usize = 9;
+
+        let handle = plan_for(ROWS, COLS);
+        for _ in 0..2 {
+            let h = std::hint::black_box(&handle);
+            for r in 0..ROWS {
+                std::hint::black_box(Column::from_f64_transpose_row(h, std::hint::black_box(r)));
+            }
+        }
+
+        let mut ctor = Vec::with_capacity(BLOCKS);
+        let mut null = Vec::with_capacity(BLOCKS);
+        for _ in 0..BLOCKS {
+            let (mut bc, mut bn) = (f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let h = std::hint::black_box(&handle);
+
+                let t0 = Instant::now();
+                for r in 0..ROWS {
+                    std::hint::black_box(Column::from_f64_transpose_row(
+                        h,
+                        std::hint::black_box(r),
+                    ));
+                }
+                bc = bc.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                // identical arm: the null control
+                let t0 = Instant::now();
+                for r in 0..ROWS {
+                    std::hint::black_box(Column::from_f64_transpose_row(
+                        h,
+                        std::hint::black_box(r),
+                    ));
+                }
+                bn = bn.min(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            ctor.push(bc);
+            null.push(bn);
+        }
+
+        let (c, n) = (min_of(&ctor), min_of(&null));
+        println!("AB transpose per-column ctor share (ONE binary, ONE invocation)");
+        println!("  binary_sha256 = {}", binary_sha256());
+        println!("  worker        = {}", worker_hostname());
+        println!("  columns={ROWS} (each {COLS} cells)");
+        println!(
+            "  CTOR from_f64_transpose_row  min={c:9.3} ms  cv={:5.2}%",
+            cv_of(&ctor)
+        );
+        println!(
+            "  NULL identical arm           min={n:9.3} ms  cv={:5.2}%",
+            cv_of(&null)
+        );
+        println!("  NULL-CONTROL ratio = {:.4}x", c / n);
+        println!("  per-column ctor = {:.2} ns", 1e6 * c / ROWS as f64);
+        println!(
+            "  cv<5% both arms: ctor={} null={}",
+            cv_of(&ctor) < 5.0,
+            cv_of(&null) < 5.0
+        );
+    }
+
     #[test]
     #[ignore = "perf A/B; run with --ignored --nocapture"]
     fn ab_transpose_row_typed() {
