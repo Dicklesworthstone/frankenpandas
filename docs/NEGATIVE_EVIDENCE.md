@@ -12541,3 +12541,94 @@ GREEN, remote and fail-closed: fp-columnar **475 passed / 0 failed** (`hz2`); `r
 was reading it from**. The null control is not a formality you bolt on after the verdict; it is the thing that tells you
 whether a verdict exists. Every REJECT in this ledger written without one should be presumed undecided until proven
 otherwise — starting with two of mine.
+
+### 2026-07-10 cod_fp — `to_dict(index)` row-shards materializing rerun attempt 2 INVALID; worker spread blocks a WIN
+
+Ledger-grep of attempt 1 came first. This retry leaves the ORIG/candidate/parity/timing routines unchanged and adds only a
+profile transport fallback: ordinary `perf` first, then non-interactive privileged `perf` when a worker reports
+`perf_event_paranoid`. The same bounded fail-closed command was used:
+
+`timeout 900s sh -c 'RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR RUSTFLAGS="-C force-frame-pointers=yes" rch exec -- cargo test -p fp-frame --profile release-perf --lib transpose_reject_reaudit_cod_fp::audit_to_dict_index_row_shards_materialized_cod_fp -- --ignored --exact --nocapture --test-threads=1'`
+
+RCH selected **`hz2`**; test hostname **`hetzner2`**; binary SHA-256
+**`a796fe094f0438c08d5b6cbb57ed46280b64fc51b286e06b337f95ececc34592`**. Full eager ORIG/candidate/public-lazy
+materialization parity again passed before timing.
+
+| arm | median | p95 | cv_pct | candidate profile self-time |
+| --- | ---: | ---: | ---: | ---: |
+| ORIG serial eager row map | 34.752951 ms | 46.412647 ms | **10.0682%** | n/a |
+| candidate private BTreeMap row shards + append | 33.619375 ms | 39.304541 ms | **8.6134%** | **UNMEASURED: `perf` absent on `hz2`** |
+
+Raw ORIG ms: `[36.59194375, 41.02779525, 34.27492625, 46.4126465, 35.346216999999996, 42.1755335, 34.29550175, 34.23938125, 33.428641750000004, 34.3097215, 33.60463025000001, 35.03191275, 34.92667, 34.752951249999995, 34.59769575]`.
+
+Raw candidate ms: `[34.473392749999995, 34.8204165, 39.30454075, 34.567808, 31.19025475, 36.652159250000004, 33.6193755, 34.015014750000006, 29.97177075, 30.29963775, 28.078198, 31.590531999999996, 32.424704, 36.50351825, 31.267007749999998]`.
+
+The directional ratio is only **1.033718x** on `hz2`, versus **2.620066x** on `ovh-a` in attempt 1. This attempt is
+**INVALID**, neither WIN nor REJECT: both CVs exceed 5%, and the worker has no `perf` executable, so neither the privileged
+fallback nor the >=0.1% ranked frame table can run. Across the two same-binary attempts the candidate is never slower, but
+the effect spans 1.034x-2.620x and only the large `ovh-a` run passes the timing gate. The old historical reject remains
+withdrawn; no production row-shard code is landed. Concrete blocker/retry condition: RCH must assign a worker with usable
+perf sampling and both arm CVs below 5% in the same invocation. Until then the 2.620066x result remains unclaimed routing
+evidence.
+
+### 2026-07-10 cc_fp — MEASURED CEILING for the pair-shrink lever: boxing the Column out of the 312-byte pair is 2.54x on finalize (decidable, 153.6% vs 8.5% floor). The pair SIZE is the wall.
+
+Acting on "attack that 312-byte pair directly". Both suggested fixes -- borrowed/interned keys, or one columnar block
+instead of per-row Columns -- change `DataFrame` (`cod_fp`'s `fp-frame` lane; the block IS the lazy view, already
+779x-4474x). The one shrink measurable inside `fp-columnar` without touching that file is boxing the `Column` OUT of the
+pair: 312 B -> 32 B of move-traffic, at the cost of one heap alloc per row. This prices whether that trade wins.
+
+**RESULT (decidable, per-arm ADJACENT A/A floor, gate on median vs spread not cv).**
+
+| field | value |
+| --- | --- |
+| binary sha256 | `81c5d6d7e73dcced27898ba5233a59a67a31926d49d9e73048553632589bd481` |
+| worker | `ovh-a` (hostname `fixmydocuments`) |
+| substrate | ONE binary, ONE fail-closed `rch exec`, arms alternating in one routine, `black_box` in+out, 200k x 10, 9 blocks x 3 reps |
+
+| arm | median | cv | A/A null median | A/A floor |
+| --- | ---: | ---: | ---: | ---: |
+| REAL `Vec<(String, Column)>` -> `BTreeMap` | 51.246 ms | 1.56% | 1.0171x | 3.97% |
+| BOXED `Vec<(String, Box<Column>)>` -> `BTreeMap` | 20.204 ms | 2.15% | 1.0505x | 8.47% |
+
+- `size_of::<(String, Column)>() = 312`; `size_of::<(String, Box<Column>)>() = 32`.
+- **effect (real/boxed) = 2.5364x (+153.6%). DECIDABLE: 153.6% >> max A/A floor 8.47%.** ~13x the floor.
+- Both arms construct the full `Column` (`from_f64_transpose_row` is in both), so the ctor cancels: this 2.54x is purely the
+  push + BTreeMap re-home moving a 32-byte pair instead of a 288-byte one, NET of the n added heap allocs.
+
+**CONCLUSION: the pair SIZE is the wall, confirmed by ablation.** The 91% of construction that is `Vec` push + `BTreeMap`
+collect is dominated by moving 288-byte `Column`s, not by the String key, not by the ctor, not by the BTree algorithm
+itself. Shrink what gets moved and finalize drops 2.5x.
+
+**THE TWO CAPTURE PATHS, and where each lives.**
+1. **Box the pair in the transpose intermediate / storage.** This IS the measured lever (2.54x ceiling), but `DataFrame`
+   stores `BTreeMap<String, Column>` by value, so capturing it means the map holds `Box<Column>` (or a small handle) --
+   a `DataFrame` representation change in `crates/fp-frame`, which is `cod_fp`'s live file and overlaps their lazy-view work.
+   HANDOFF, not taken.
+2. **Shrink `Column` itself so the by-value pair is already small.** `Column` is 288 B because `ScalarValues` is a **200-byte,
+   47-variant enum** (widest variants carry two `OnceLock<Vec<_>>` + an `Arc`, plus the join/cycle variants with several
+   `usize`s + `Arc`s). Boxing the widest variants would take `ScalarValues` toward 8-24 B and `Column` toward ~96 B. This is
+   in `fp-columnar` -- MY file -- but it is a **partial capture of the ceiling, and a large risk**:
+
+   | pair size | fraction of the 312-B move-traffic | lever |
+   | ---: | ---: | --- |
+   | 32 B | 10% | box whole Column (the measured 2.54x ceiling) |
+   | ~120 B | 38% | shrink `ScalarValues` 200->8 (box wide variants) |
+   | ~200 B | 64% | modest `ScalarValues` shrink |
+
+   So shrinking `ScalarValues` to ~8 B captures roughly the 32->120 band -- a meaningful but sub-2.54x share -- and it
+   touches a type on **every hot path in the workspace** (475 fp-columnar + 2048 conformance tests, plus every `match` arm on
+   the boxed variants). That is a multi-turn, conformance-gated refactor, NOT a tail-of-hour edit, and I will not rush it
+   under the disk freeze where a botched enum change cannot even be locally checked. **Recorded as the next sized
+   fp-columnar lever, with its risk stated and its ceiling measured; not attempted this window.**
+
+The decidable, shippable result of this window is the CEILING itself: the pair-shrink lever is worth up to 2.54x on 91% of
+construction, so "representation cardinality is the wall" is not just where the bytes are -- it is where a measured 2.5x
+sits. Whoever takes path 1 (cod_fp, in the lazy view) or path 2 (a Column-size epic) now has the number.
+
+GREEN, remote and fail-closed: fp-columnar **475 passed / 0 failed** (`vmi1227854`); `rustfmt --check` clean; no local
+build; `crates/fp-frame` untouched. Ablation is `#[cfg(test)] #[ignore]`, no production code changed.
+
+**arg-extrema** remains complete since `46b3374a8` (~7.5x). The two reopened transpose rejects (pair-buffer morsels,
+BTreeMap row shards) still need adjacent-A/A reruns and are `cod_fp`'s construction lane. My withdrawn label-itoa reject and
+flagged stack reject (previous entry) stand as withdrawn/flagged.

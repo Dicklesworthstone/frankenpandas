@@ -32891,6 +32891,135 @@ mod ab_transpose_row_typed_ccfp {
         100.0 * var.sqrt() / mean
     }
 
+    /// Prices the ONLY pair-shrink lever available inside fp-columnar (cc_fp): the
+    /// 93.6%-of-construction cost is owning + re-homing n 312-byte `(String, Column)`
+    /// pairs, and `Column` is 288 B of that. Both of the obvious representation fixes
+    /// -- borrowed/interned keys, or one columnar block instead of per-row Columns --
+    /// change `DataFrame` (cod_fp's `fp-frame` lane; the block IS the lazy view).
+    /// The one shrink that lives HERE is boxing the `Column` out of the pair, taking
+    /// it 312 B -> 32 B of move-traffic at the cost of ONE heap alloc per row.
+    ///
+    /// This ablation answers, decidably, whether that trade wins: does moving 32-byte
+    /// pairs (plus n allocs) beat moving 312-byte pairs? If yes, shrinking `Column`
+    /// (box its wide `ScalarValues` variants) is worth a conformance-gated attempt;
+    /// if no, the alloc eats the move and the only real lever is cod_fp's block view.
+    /// Per-arm ADJACENT A/A null floor; decide on medians vs spread, not cv.
+    #[test]
+    #[ignore = "perf ablation; run with --ignored --nocapture"]
+    fn ab_transpose_pair_shrink_ceiling() {
+        use std::collections::BTreeMap;
+
+        const ROWS: usize = 200_000;
+        const COLS: usize = 10;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+
+        let handle = plan_for(ROWS, COLS);
+        let mut order: Vec<usize> = (0..ROWS).collect();
+        order.sort_by_key(|r| r.to_string());
+        let order = order;
+
+        // REAL: Vec<(String, Column)> -> BTreeMap<String, Column>  (312-byte pair)
+        let arm_real = |ord: &[usize], h: &Float64TransposeRows| {
+            let mut v: Vec<(String, Column)> = Vec::with_capacity(ord.len());
+            for &r in ord {
+                v.push((r.to_string(), Column::from_f64_transpose_row(h, r)));
+            }
+            let m: BTreeMap<String, Column> = v.into_iter().collect();
+            std::hint::black_box(m);
+        };
+        // BOXED: Vec<(String, Box<Column>)> -> BTreeMap<String, Box<Column>>  (32-byte
+        // pair + one heap alloc per row). Proxy for a 32-B-Column representation.
+        let arm_boxed = |ord: &[usize], h: &Float64TransposeRows| {
+            let mut v: Vec<(String, Box<Column>)> = Vec::with_capacity(ord.len());
+            for &r in ord {
+                v.push((
+                    r.to_string(),
+                    Box::new(Column::from_f64_transpose_row(h, r)),
+                ));
+            }
+            let m: BTreeMap<String, Box<Column>> = v.into_iter().collect();
+            std::hint::black_box(m);
+        };
+
+        for _ in 0..2 {
+            let (o, h) = (std::hint::black_box(&order), std::hint::black_box(&handle));
+            arm_real(o, h);
+            arm_boxed(o, h);
+        }
+
+        let mut real = Vec::with_capacity(BLOCKS);
+        let mut boxed = Vec::with_capacity(BLOCKS);
+        let mut null_real = Vec::with_capacity(BLOCKS);
+        let mut null_boxed = Vec::with_capacity(BLOCKS);
+        for _ in 0..BLOCKS {
+            let (mut br, mut bb) = (f64::INFINITY, f64::INFINITY);
+            let (mut ra, mut rb, mut ba, mut bb2) =
+                (f64::INFINITY, f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let (o, h) = (std::hint::black_box(&order), std::hint::black_box(&handle));
+
+                // adjacent A/A for REAL
+                let t0 = Instant::now();
+                arm_real(o, h);
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let t0 = Instant::now();
+                arm_real(o, h);
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                ra = ra.min(a);
+                rb = rb.min(b);
+                br = br.min(a.min(b));
+
+                // adjacent A/A for BOXED
+                let t0 = Instant::now();
+                arm_boxed(o, h);
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let t0 = Instant::now();
+                arm_boxed(o, h);
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                ba = ba.min(a);
+                bb2 = bb2.min(b);
+                bb = bb.min(a.min(b));
+            }
+            real.push(br);
+            boxed.push(bb);
+            null_real.push(ra / rb);
+            null_boxed.push(ba / bb2);
+        }
+
+        let (rm, bm) = (median_of(&real), median_of(&boxed));
+        let (nr, nb) = (median_of(&null_real), median_of(&null_boxed));
+        let (rlo, rhi) = spread_of(&null_real);
+        let (blo, bhi) = spread_of(&null_boxed);
+        let floor_real = 100.0 * (rhi - 1.0).abs().max((rlo - 1.0).abs());
+        let floor_boxed = 100.0 * (bhi - 1.0).abs().max((blo - 1.0).abs());
+        let effect = 100.0 * (rm / bm - 1.0);
+        println!("AB transpose pair-shrink ceiling (ONE binary, ONE invocation)");
+        println!("  binary_sha256 = {}", binary_sha256());
+        println!("  worker        = {}", worker_hostname());
+        println!(
+            "  size_of (String,Column)={}  (String,Box<Column>)={}",
+            std::mem::size_of::<(String, Column)>(),
+            std::mem::size_of::<(String, Box<Column>)>()
+        );
+        println!(
+            "  REAL  (String,Column)      median={rm:9.3} ms  cv={:5.2}%  A/A null median={nr:.4}x floor={floor_real:.2}%",
+            cv_of(&real)
+        );
+        println!(
+            "  BOXED (String,Box<Column>) median={bm:9.3} ms  cv={:5.2}%  A/A null median={nb:.4}x floor={floor_boxed:.2}%",
+            cv_of(&boxed)
+        );
+        println!("  effect (real/boxed) = {:.4}x  ({effect:+.1}%)", rm / bm);
+        let decidable = effect.abs() > floor_real.max(floor_boxed);
+        println!(
+            "  DECIDABLE: |effect|={:.1}% vs max floor={:.1}% -> {}",
+            effect.abs(),
+            floor_real.max(floor_boxed),
+            decidable
+        );
+    }
+
     /// Decomposes the 95.9% of transpose CONSTRUCTION that does NOT live in the
     /// per-column ctor (cc_fp). `DataFrame::transpose` finalizes by, per source row:
     /// formatting a decimal `String` label, constructing a `Column`, pushing the pair
