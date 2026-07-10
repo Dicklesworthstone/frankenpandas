@@ -1,0 +1,179 @@
+diff --git a/crates/fp-frame/src/lib.rs b/crates/fp-frame/src/lib.rs
+index 25e826d5f..f2cacd7ef 100644
+--- a/crates/fp-frame/src/lib.rs
++++ b/crates/fp-frame/src/lib.rs
+@@ -173739,3 +173739,174 @@ mod test_select_columns_perf_76e1fd {
+         }
+     }
+ }
++
++/// Ablation harness for the last `core::fmt` tax in `DataFrame::stack`'s parallel
++/// label build: the `IndexLabel::Int64 => row_part.push_str(&v.to_string())` arm,
++/// which allocates a `String` and runs `core::fmt` once per ROW (the m-column inner
++/// loop is already hoisted above it).
++///
++/// This does NOT modify `stack()`. It reproduces the label-build closure twice --
++/// ORIG (`to_string`) and CAND (hand-rolled ASCII itoa into the reused `String`) --
++/// and times both alternating inside ONE binary and ONE `rch exec` invocation, per
++/// the substrate rule. It also times the real `df.stack()` so the primitive's SHARE
++/// is measured, not guessed: that share is the attribution figure the ledger-integrity
++/// rule requires before any WIN or REJECT row may be written.
++///
++/// Run: `rch exec -- cargo test -p fp-frame --profile release-perf \
++///        -- --ignored --nocapture ab_stack_label_itoa`
++#[cfg(test)]
++mod ab_stack_label_itoa_ccfp {
++    use std::time::Instant;
++
++    use fp_columnar::Column;
++    use fp_index::{Index, IndexLabel};
++
++    use super::DataFrame;
++
++    /// Bit-identical to `v.to_string()` for every i64, with no heap alloc and no
++    /// `core::fmt`. Digits are ASCII, so `from_utf8` cannot fail.
++    fn push_i64_decimal_str(out: &mut String, v: i64) {
++        let mut n: u64 = if v < 0 {
++            out.push('-');
++            v.unsigned_abs()
++        } else {
++            v as u64
++        };
++        let mut tmp = [0u8; 20];
++        let mut i = 20usize;
++        loop {
++            i -= 1;
++            tmp[i] = b'0' + (n % 10) as u8;
++            n /= 10;
++            if n == 0 {
++                break;
++            }
++        }
++        out.push_str(std::str::from_utf8(&tmp[i..]).expect("ascii digits"));
++    }
++
++    fn build_labels(n: usize) -> Vec<IndexLabel> {
++        (0..n).map(|i| IndexLabel::Int64(i as i64)).collect()
++    }
++
++    fn orig_range(labels: &[IndexLabel], col_names: &[String], lo: usize, hi: usize) -> Vec<u8> {
++        let mut bytes: Vec<u8> = Vec::with_capacity((hi - lo) * col_names.len() * 8);
++        let mut row_part = String::new();
++        for r in lo..hi {
++            row_part.clear();
++            match &labels[r] {
++                IndexLabel::Int64(v) => row_part.push_str(&v.to_string()),
++                _ => unreachable!("int64 labels only"),
++            }
++            for col_name in col_names {
++                bytes.extend_from_slice(row_part.as_bytes());
++                bytes.push(b'|');
++                bytes.extend_from_slice(col_name.as_bytes());
++            }
++        }
++        bytes
++    }
++
++    fn cand_range(labels: &[IndexLabel], col_names: &[String], lo: usize, hi: usize) -> Vec<u8> {
++        let mut bytes: Vec<u8> = Vec::with_capacity((hi - lo) * col_names.len() * 8);
++        let mut row_part = String::new();
++        for r in lo..hi {
++            row_part.clear();
++            match &labels[r] {
++                IndexLabel::Int64(v) => push_i64_decimal_str(&mut row_part, *v),
++                _ => unreachable!("int64 labels only"),
++            }
++            for col_name in col_names {
++                bytes.extend_from_slice(row_part.as_bytes());
++                bytes.push(b'|');
++                bytes.extend_from_slice(col_name.as_bytes());
++            }
++        }
++        bytes
++    }
++
++    fn min_of(xs: &[f64]) -> f64 {
++        xs.iter().copied().fold(f64::INFINITY, f64::min)
++    }
++
++    fn cv_of(xs: &[f64]) -> f64 {
++        let mean = xs.iter().sum::<f64>() / xs.len() as f64;
++        let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / xs.len() as f64;
++        100.0 * var.sqrt() / mean
++    }
++
++    #[test]
++    #[ignore = "perf ablation; run with --ignored --nocapture"]
++    fn ab_stack_label_itoa() {
++        const N: usize = 1_000_000;
++        const M: usize = 10;
++        const BLOCKS: usize = 9;
++
++        let labels = build_labels(N);
++        let col_names: Vec<String> = (0..M).map(|c| format!("col_{c}")).collect();
++
++        // Parity: the two arms must emit identical composite bytes.
++        assert_eq!(
++            orig_range(&labels, &col_names, 0, 5_000),
++            cand_range(&labels, &col_names, 0, 5_000),
++            "CAND itoa diverged from to_string"
++        );
++
++        // Single-worker row range, matching one thread's share of the parallel build.
++        let (lo, hi) = (0usize, 125_000usize);
++        for _ in 0..2 {
++            std::hint::black_box(orig_range(&labels, &col_names, lo, hi));
++            std::hint::black_box(cand_range(&labels, &col_names, lo, hi));
++        }
++        let mut o = Vec::with_capacity(BLOCKS);
++        let mut c = Vec::with_capacity(BLOCKS);
++        for _ in 0..BLOCKS {
++            let t = Instant::now();
++            std::hint::black_box(orig_range(&labels, &col_names, lo, hi));
++            o.push(t.elapsed().as_secs_f64() * 1e3);
++            let t = Instant::now();
++            std::hint::black_box(cand_range(&labels, &col_names, lo, hi));
++            c.push(t.elapsed().as_secs_f64() * 1e3);
++        }
++        let (o_min, c_min) = (min_of(&o), min_of(&c));
++
++        // Denominator: the real op, so the primitive's SHARE is measured not guessed.
++        let cols: Vec<(String, Column)> = (0..M)
++            .map(|ci| {
++                (
++                    col_names[ci].clone(),
++                    Column::from_f64_values((0..N).map(|r| (r * M + ci) as f64).collect()),
++                )
++            })
++            .collect();
++        let df = DataFrame::new(Index::new(labels.clone()), cols.into_iter().collect())
++            .expect("frame");
++        let mut s = Vec::with_capacity(5);
++        for _ in 0..5 {
++            let t = Instant::now();
++            std::hint::black_box(df.stack().expect("stack"));
++            s.push(t.elapsed().as_secs_f64() * 1e3);
++        }
++        let stack_min = min_of(&s);
++
++        // One thread handles ~N/workers rows; scale the measured range delta up.
++        let workers = std::thread::available_parallelism()
++            .map_or(1, std::num::NonZeroUsize::get)
++            .min(16);
++        let rows_per_worker = N.div_ceil(workers) as f64;
++        let scale = rows_per_worker / (hi - lo) as f64;
++        let delta_per_worker_ms = (o_min - c_min) * scale;
++
++        println!("AB stack label itoa (ONE binary, ONE invocation) n={N} m={M} workers={workers}");
++        println!("  ORIG to_string  range[{lo},{hi}) min={o_min:8.4} ms  cv={:5.2}%", cv_of(&o));
++        println!("  CAND itoa       range[{lo},{hi}) min={c_min:8.4} ms  cv={:5.2}%", cv_of(&c));
++        println!("  primitive fp-side ratio = {:.3}x", o_min / c_min);
++        println!("  full df.stack() min = {stack_min:8.3} ms (cv={:5.2}%)", cv_of(&s));
++        println!("  est. per-worker saving = {delta_per_worker_ms:.3} ms");
++        println!(
++            "  ATTRIBUTION: to_string share of df.stack() = {:.2}%  => predicted end-to-end {:.3}x",
++            100.0 * delta_per_worker_ms / stack_min,
++            stack_min / (stack_min - delta_per_worker_ms).max(1e-9)
++        );
++    }
++}

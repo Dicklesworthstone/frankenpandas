@@ -11696,3 +11696,68 @@ parity before timing; alternate AB/BA inside one paired Criterion measurement in
 `RCH_REQUIRE_REMOTE=1 rch exec -- cargo ...` invocation; retain both raw vectors with cv < 5%; and profile that same binary
 so each named candidate sentinel reports strictly non-zero self-time. For `to_dict(index)`, time first-access
 materialization, not lazy wrapper construction. No new ratio may enter this ledger until all of those conditions hold.
+
+### 2026-07-10 cc_fp — SUBSTRATE-v2 RE-AUDIT of my to_flat_index A/B (holds) + rch fail-open finding + stack lever PARKED (unmeasured)
+
+Three corrections arrived after the `to_flat_index` 1.437x landed (`0a02b89e6`). Auditing my own work against each,
+then parking the stack lever rather than writing an unattributed row.
+
+**(1) SUBSTRATE v2a — "criterion group members run sequentially, so registering ORIG and CAND side by side does not
+cancel drift."** ✅ DOES NOT APPLY. I did not use criterion (this repo's `cargo bench` runs the libtest wrapper with 0
+measured benches). The A/B alternates the two arms **inside a single measured routine**, in-block:
+`for block { for rep { t=now; ORIG; o=min(o,..); t=now; CAND; c=min(c,..) } }` — i.e. exactly the "alternate arm per
+iteration" discipline v2 prescribes, not two side-by-side registrations. Ratio stands.
+
+**(2) SUBSTRATE v2b — "`black_box` misuse lets LLVM DCE pure calls, so you benchmark nothing."** ✅ ARMS WERE NOT
+DCE'd, and I can show it rather than assert it:
+- every timed call's **result is consumed** through `std::hint::black_box(...)`;
+- the same test **asserts `orig.labels() == cand.labels()`** before timing, so both arms provably execute;
+- a DCE'd arm reads as ~0 ns. Measured: serial ORIG **1.7593 ms** vs CAND **0.5973 ms**; parallel ORIG **9.3788 ms**
+  vs CAND **6.5274 ms**. Neither is ~0, and the two arms differ 2.945x — a DCE'd pair cannot differ at all;
+- the calls allocate (`Vec`, `Arc::from`) and enter `std::thread::scope`, so they are not the pure-fn shape LLVM
+  eliminates.
+⚠️ RESIDUAL, recorded honestly: I consumed outputs through `black_box` but did **not** feed the INPUT (`&mi`) through
+`black_box`. Loop-invariant hoisting is ruled out by the allocation/thread side effects above, but the disciplined form
+is `black_box(&mi)` on the way in as well. Next A/B in this repo should do both. The ratio is not restated.
+
+**(3) rch FAIL-OPEN — `rch exec` builds LOCALLY when it cannot reserve a remote slot ("Strict remote: off" is the
+default).** ✅ MY RUNS WERE ALL REMOTE, verified from their own trailers, not assumed: the accepted `to_flat_index`
+A/B printed `[RCH] remote ovh-a (82.8s)`; the rejected noisy run printed `[RCH] remote hz2`; the parity/conformance
+runs printed `[RCH] remote vmi1149989`. I also checked `crates/../target` for writes in the last 45 minutes: none. So
+none of my numbers came from a silent local build.
+**MANDATORY FORM from now on** (fails closed, and avoids the `~/.zshrc` `CARGO_TARGET_DIR` export that makes rch
+artifact retrieval return ~0 bytes):
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo <subcmd> ...`
+If rch then errors with no remote slot, that is a BLOCKER: wait/retry or do analysis-only work. Never fall back local.
+
+**DISK DISCLOSURE.** `/data/projects/frankenpandas/.rch-targets-ccfp-utf8par` is **22 GB**, created by me BEFORE the
+freeze (the local `release-perf` `fp-bench` build). I have not deleted it (deletion is forbidden without explicit
+permission). It is reclaimable on request. The 89G→78G drain during my last run was NOT mine: my repo's `./target` has
+no recent writes, and the recently-touched trees were `frankenmermaid/target`, `frankenfs/target`,
+`franken_whisper/target`, `/data/tmp/cargo-target`.
+
+---
+
+**PARKED (unmeasured, NO verdict written): `DataFrame::stack` — replace the per-ROW `IndexLabel::Int64 =>
+row_part.push_str(&v.to_string())` with a hand-rolled ASCII itoa.**
+Patch: `tests/artifacts/perf/cc_fp_stack_label_itoa_ablation.patch` (179 lines, `git apply --check` clean against
+`0e06bbc2d`); it is a `#[cfg(test)]`-only ABLATION harness that measures the primitive's SHARE of `df.stack()` — it
+does not modify `stack()`. Working tree left pristine (fp-frame md5 == HEAD).
+
+Why parked rather than landed or rejected: the harness ran under
+`rch exec -- cargo test -p fp-frame --profile release-perf` and produced **no timing vector** inside the bounded
+window (a full `fp-frame` release-perf compile on a remote worker is slow), so I have **no attribution number**. The
+ledger-integrity rule forbids writing EITHER a WIN or a REJECT without one, and this is exactly the situation that rule
+exists for: my prior for this lever is a small win (the `to_string` is once per ROW, already hoisted out of the
+m-column inner loop, which does 10x more `extend_from_slice` work per row; and the build is already parallel, which
+compressed `to_flat_index` from 2.945x serial to 1.437x). **A prior is not evidence. No row is written.**
+
+Resume: `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p fp-frame --profile release-perf
+-- --ignored --nocapture ab_stack_label_itoa`, with a generous bound. The harness prints
+`ATTRIBUTION: to_string share of df.stack() = N%` — if that share is below ~2%, write the REJECT **with N recorded**;
+otherwise implement the one-line change in `stack()` and re-measure end-to-end. Strengthen `black_box` to also wrap the
+inputs, per v2b.
+
+**arg-extrema: NOTHING TO DO, closed.** `arg_axis1_names_parallel` (fp-frame ~66395) already builds per-thread
+`(bytes, offsets)` into `from_utf8_contiguous`, and its per-row work is `extend_from_slice` of a column NAME — there is
+no `Scalar` materialization and no `core::fmt` to remove. Verified by reading the body, not by trusting a summary.
