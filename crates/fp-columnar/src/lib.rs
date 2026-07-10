@@ -4988,7 +4988,7 @@ fn push_i64_decimal(buf: &mut Vec<u8>, v: i64) {
 60616263646566676869707172737475767778798081828384858687888990919293949596979899";
     let mut n: u64 = if v < 0 {
         buf.push(b'-');
-        (v as i64).unsigned_abs()
+        v.unsigned_abs()
     } else {
         v as u64
     };
@@ -5676,17 +5676,17 @@ fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Col
     // typed `select_nth_unstable` over the raw slice is O(n) vs the generic
     // full sort's O(n·log n) + per-comparison Scalar dispatch. Bit-identical
     // (same comparator + position tie-break, returning the first k in order).
-    if keep == "first" && n >= 1 && n <= NKEEP_BOUNDED_SCAN_MAX_K {
+    if keep == "first" && (1..=NKEEP_BOUNDED_SCAN_MAX_K).contains(&n) {
         if let Some(data) = col.as_i64_slice() {
             if n < data.len() {
                 return Ok(Column::from_i64_values_owned(nkeep_typed_i64(
                     data, n, ascending,
                 )));
             }
-        } else if let Some(data) = col.as_f64_slice() {
-            if n < data.len() {
-                return Ok(Column::from_f64_values(nkeep_typed_f64(data, n, ascending)));
-            }
+        } else if let Some(data) = col.as_f64_slice()
+            && n < data.len()
+        {
+            return Ok(Column::from_f64_values(nkeep_typed_f64(data, n, ascending)));
         }
     }
     // Annotate each value with its original position, then sort
@@ -13151,7 +13151,7 @@ impl Column {
                 let base = w * 64;
                 let upto = 64.min(n - base);
                 if word == 0 {
-                    out.extend(std::iter::repeat(*fv).take(upto));
+                    out.extend(std::iter::repeat_n(*fv, upto));
                 } else {
                     for b in 0..upto {
                         let d = data[base + b];
@@ -17432,7 +17432,7 @@ impl Column {
         // ties first-seen) + take. Int64: i64 cmp + position. Float64: the f64
         // radix key CANONICALIZES ±0.0 to +0.0 and is stable, so its order ==
         // `partial_cmp` (−0.0 == +0.0) + position — exactly `nkeep_typed_f64`.
-        if n >= 1 && n <= NKEEP_BOUNDED_SCAN_MAX_K {
+        if (1..=NKEEP_BOUNDED_SCAN_MAX_K).contains(&n) {
             if let Some(data) = self.as_i64_slice() {
                 if n < data.len() {
                     return Ok(Self::from_i64_values_owned(nkeep_typed_i64(data, n, false)));
@@ -17444,15 +17444,14 @@ impl Column {
             } else if !self.has_nulls()
                 && let Some(data) = self.as_datetime64_slice()
                 && !data.contains(&i64::MIN)
+                && n < data.len()
             {
                 // Datetime64 is i64-ns; with the exact Datetime64 comparator,
                 // sort_values+take == i64 cmp + position. No-NaT (NaT=i64::MIN is
                 // missing → would sort to the end / be excluded) routes here.
-                if n < data.len() {
-                    return Ok(Self::from_datetime64_values(nkeep_typed_i64(
-                        data, n, false,
-                    )));
-                }
+                return Ok(Self::from_datetime64_values(nkeep_typed_i64(
+                    data, n, false,
+                )));
             }
         }
         let sorted = self.sort_values(false)?;
@@ -17465,7 +17464,7 @@ impl Column {
     ///
     /// Matches `pd.Series.nsmallest(n)` with `keep='first'`.
     pub fn nsmallest(&self, n: usize) -> Result<Self, ColumnError> {
-        if n >= 1 && n <= NKEEP_BOUNDED_SCAN_MAX_K {
+        if (1..=NKEEP_BOUNDED_SCAN_MAX_K).contains(&n) {
             if let Some(data) = self.as_i64_slice() {
                 if n < data.len() {
                     return Ok(Self::from_i64_values_owned(nkeep_typed_i64(data, n, true)));
@@ -17477,10 +17476,9 @@ impl Column {
             } else if !self.has_nulls()
                 && let Some(data) = self.as_datetime64_slice()
                 && !data.contains(&i64::MIN)
+                && n < data.len()
             {
-                if n < data.len() {
-                    return Ok(Self::from_datetime64_values(nkeep_typed_i64(data, n, true)));
-                }
+                return Ok(Self::from_datetime64_values(nkeep_typed_i64(data, n, true)));
             }
         }
         let sorted = self.sort_values(true)?;
@@ -17833,20 +17831,20 @@ impl Column {
             // inf−inf = NaN at a VALID slot, which LazyNullableFloat64 keeps as
             // Float64(NaN) rather than the Scalar path's Null — so inf-bearing
             // columns fall to the Scalar path. `as_f64_slice` is already NaN-free.
-            if let Some(data) = self.as_f64_slice() {
-                if data.iter().all(|x| x.is_finite()) {
-                    let mut out = vec![0.0_f64; len];
-                    if periods > 0 {
-                        for i in abs..len {
-                            out[i] = data[i] - data[i - abs];
-                        }
-                    } else {
-                        for i in 0..len - abs {
-                            out[i] = data[i] - data[i + abs];
-                        }
+            if let Some(data) = self.as_f64_slice()
+                && data.iter().all(|x| x.is_finite())
+            {
+                let mut out = vec![0.0_f64; len];
+                if periods > 0 {
+                    for i in abs..len {
+                        out[i] = data[i] - data[i - abs];
                     }
-                    return Ok(Self::from_f64_values_with_validity(out, validity));
+                } else {
+                    for i in 0..len - abs {
+                        out[i] = data[i] - data[i + abs];
+                    }
                 }
+                return Ok(Self::from_f64_values_with_validity(out, validity));
             }
         }
         let mut out: Vec<Scalar> = Vec::with_capacity(len);
@@ -29465,8 +29463,8 @@ mod tests {
                         ),
                     ] {
                         let src = oracle(fwd);
-                        for i in 0..n {
-                            match src[i] {
+                        for (i, slot) in src.iter().enumerate().take(n) {
+                            match *slot {
                                 Some(a) => {
                                     assert_eq!(got_i.values()[i], Scalar::Int64(ivals[a]));
                                     assert_eq!(got_f.values()[i], Scalar::Float64(fvals[a]));
