@@ -8755,6 +8755,26 @@ impl Column {
                 let end = start.checked_add(*len)?;
                 return data.get(*start..end);
             }
+            // A transposed row column already computes a typed `Vec<f64>` inside
+            // its own `data` OnceLock (`plan.materialize_row`); `values()` then
+            // maps that vector into a `Vec<Scalar>` purely to satisfy the
+            // `&[Scalar]` return type. Without this arm `Column.data` is `None`
+            // for the variant, so `as_f64_slice` declined and EVERY consumer of a
+            // transposed frame was forced through that 32-B/elem boxing. Return
+            // the typed vector directly: same values, same order, same length,
+            // and the `Scalar` vector is simply never built.
+            if let ScalarValues::LazyAllValidFloat64TransposeRow {
+                plan,
+                source_row,
+                data,
+                ..
+            } = &self.values
+            {
+                return Some(
+                    data.get_or_init(|| plan.materialize_row(*source_row))
+                        .as_slice(),
+                );
+            }
             if let Some(data) = self.values.chunks_float64_data() {
                 return Some(data);
             }

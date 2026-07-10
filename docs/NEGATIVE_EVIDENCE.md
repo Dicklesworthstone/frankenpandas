@@ -11958,3 +11958,91 @@ df_transpose_materialize`, get the ranked frame table, and only then pick a leve
 **METHOD NOTE.** This is the third time this session that the instrument, not the idea, was the thing that was wrong:
 `str op parallelism` (~1.00x, no self-time recorded — still suspect), the four transpose rejects (2 measured across workers),
 and now `df_transpose` itself (measures a quarter of its op). Before trusting ANY row, ask what the benchmark executes.
+
+### 2026-07-10 cc_fp — WIN: typed `as_f64_slice` for transposed columns (1.216x typed consumer, cv<1%) + **SELF-CORRECTION: my "hides 73.5%" and "40 ns/cell" were worker-inflated**
+
+Two results. The second one retracts part of my own previous entry, so it goes first.
+
+---
+
+**SELF-CORRECTION (retracting numbers I published yesterday in `0e211070e`).**
+
+My previous row said *"`df_transpose` measures 26.5% of the true cost; it HIDES 73.5%"* and estimated the deferred
+materialization at *"~40 ns/cell"*. Both figures came from a single in-invocation A/B pair on worker `hz2`. Re-measured on
+`ovh-a`, in one invocation, with a 3-arm decomposition and **all arms cv < 1%**:
+
+| | construction | full (construction + materialization) | construction share | materialization share |
+| --- | ---: | ---: | ---: | ---: |
+| `hz2` (previous row) | 14.440 ms | 54.582 ms | **26.5%** | **73.5%** |
+| `ovh-a` (this row) | 10.373 ms | 17.746 ms | **58.5%** | **41.5%** |
+
+Same code, same size (100k x 10), both pairs measured inside a single `rch exec` invocation. **The split is NOT
+worker-invariant: construction is a minority on `hz2` and a MAJORITY on `ovh-a`.** And the per-cell cost is
+**7.4 ns/cell** on `ovh-a` (4.2 gather + 3.2 boxing), not the ~40 ns/cell I extrapolated from `hz2`.
+
+**METHODOLOGICAL REFINEMENT — this generalizes substrate v2, and it bit me.** The substrate rule says an A/B must live in one
+binary and one invocation, because absolute times are not worker-invariant. That is necessary but NOT sufficient. What is
+approximately worker-invariant is the ratio of **two implementations of the SAME operation** (ORIG vs CAND: both stress the
+same mix of allocator, cache, branch, bandwidth). What is NOT worker-invariant is the ratio of **two DIFFERENT operations**,
+or of a part to its whole — such as construction vs materialization. Construction here is allocator/BTree/String-bound;
+materialization is memory-bandwidth-bound; `hz2` and `ovh-a` weight those differently by ~2.2x. **A decomposition ratio must
+be reported per-worker, or measured on several workers and reported as a range.** My `to_flat_index` 1.437x and `astype(str)`
+5.00x are ORIG-vs-CAND ratios and are unaffected. My "26.5%" was a decomposition ratio and was over-claimed.
+
+What survives from the previous row, unchanged, because it is a CODE fact and not a timing: `df_transpose` never crosses the
+materialization boundary (it reads `shape()` and drops), so any lever aimed at materialization reads ~0% self-time there.
+That is why `df_transpose_materialize` (`ffcd93014`) had to exist. The *size* of what it hides is 41.5%-73.5% depending on
+the machine — a range, not a number.
+
+---
+
+**WIN (landed): `Column::as_f64_slice` now has an arm for `LazyAllValidFloat64TransposeRow`.**
+
+MECHANISM FROM SOURCE (fp-columnar:4216): `values()` on a transposed column does
+`data.get_or_init(|| plan.materialize_row(*source_row)).iter().copied().map(Scalar::Float64).collect()`. The typed
+`Vec<f64>` is **already built and cached** in the variant's own `data` OnceLock; the `Vec<Scalar>` is then constructed on top
+of it (32 B/elem vs 8) purely to satisfy the `&[Scalar]` return type. `as_f64_slice` had no arm for the variant and
+`Column.data` is `None` for it, so it declined — meaning **no typed fast path anywhere in the codebase could ever fire on a
+transposed frame.** Added the arm: return the cached typed vector directly. Same values, same order, same length; the
+`Scalar` vector is simply never built.
+
+MEASURED (worker `ovh-a`, ONE binary, ONE `rch exec` invocation, 3 arms interleaved inside a single measured routine,
+REPS=3 min-of-block, `black_box` on inputs and results, 100k x 10 = 1M cells, `--release`):
+
+| arm | min (9 blocks) | cv |
+| --- | ---: | ---: |
+| C — `transpose()` only | 10.373 ms | **0.87%** |
+| T — `transpose()` + `as_f64_slice()` on every column | 14.589 ms | **0.62%** |
+| V — `transpose()` + `values()` on every column | 17.746 ms | **0.75%** |
+
+- gather (T − C) = **4.216 ms** = 4.2 ns/cell — `plan.materialize_row`, irreducible without a block layout
+- **Scalar-boxing tax (V − T) = 3.158 ms = 3.2 ns/cell — this is what the lever removes**
+- **typed consumer speedup V/T = 1.216x**, all three arms cv < 1% ✅ keep-gate
+
+PARITY proven in the same run: for every one of the 100k transposed columns the test asserts
+`col.as_f64_slice() == col.values()` element-wise before timing. GREEN on remote workers, fail-closed
+(`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR`): **fp-columnar 475/0**, **fp-conformance 2048/0**, **fp-frame lib
+3133/0**. `rustfmt --check` clean. No local build (repo `target/` untouched).
+
+SCOPE, stated precisely: this does **not** speed up `df.transpose()` itself (arm C is untouched). It removes the boxing tax
+for any consumer that can take a typed slice, and — more importantly — it turns "typed fast path impossible on a transposed
+frame" into "typed fast path available". The 1.216x is the measured value of that on a full-frame scan.
+
+---
+
+**AND THE FOUR REJECTS, ANSWERED WITH THE MATERIALIZING BENCH IN HAND.** Re-running them against
+`df_transpose_materialize` cannot change their verdicts, and here is the non-hand-wavy reason: all four changed code that
+runs during CONSTRUCTION (arm C), which the old bench already executed. A materializing bench adds arms T+V *after* their
+code; it enlarges the denominator and shrinks every construction lever's measured effect. Concretely, on `ovh-a` a lever that
+deleted **100% of construction** would yield only `17.746 / 7.373 = 2.41x` end-to-end, and on `hz2` only
+`54.582 / 40.141 = 1.36x`. **That is the ceiling the user asked me to compute, and it is why the construction levers
+(0.42x, 0.61x, 0.997x) were low-EV even where they were valid.** The two rows I invalidated stay invalid for the reasons
+recorded (a cross-worker ratio; a missing timing vector), not for want of materialization. Both stay REOPENED, and both are
+now known to be chasing a 1.36x-2.41x ceiling.
+
+COORDINATION: `cod_fp` (mail identity `HazyPrairie`) is back and has an in-progress `mod transpose_reject_reaudit_cod_fp` in
+`crates/fp-frame/src/lib.rs` — they are re-auditing the same rejects. **I did not commit `fp-frame`** to avoid co-landing
+their uncommitted work; my A/B harness (`ab_transpose_typed_materialize`) sits in the working tree next to their module and
+should land with, or after, theirs. This commit touches ONLY `crates/fp-columnar/src/lib.rs` + this ledger. Agent-mail could
+not be used to announce it: reads work, but writes are refused by the corruption circuit breaker, and I will not run
+`am doctor repair` on a database shared with live agents.
