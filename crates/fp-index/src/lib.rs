@@ -216,6 +216,42 @@ fn index_label_is_truthy(label: &IndexLabel) -> bool {
     }
 }
 
+/// Hand-rolled decimal itoa straight into a byte buffer, bit-identical to
+/// `v.to_string()` (and therefore to `write!(buf, "{v}")`) for every `i64`.
+/// Mirrored from `fp-columnar`'s proven `push_i64_decimal`; `fp-index` depends
+/// only on `fp-types`, so it cannot reuse that one directly.
+#[inline]
+fn push_i64_decimal(buf: &mut Vec<u8>, v: i64) {
+    const LUT: &[u8; 200] = b"0001020304050607080910111213141516171819\
+20212223242526272829303132333435363738394041424344454647484950515253545556575859\
+60616263646566676869707172737475767778798081828384858687888990919293949596979899";
+    let mut n: u64 = if v < 0 {
+        buf.push(b'-');
+        v.unsigned_abs()
+    } else {
+        v as u64
+    };
+    let mut tmp = [0u8; 20];
+    let mut i = 20usize;
+    while n >= 100 {
+        let r = (n % 100) as usize * 2;
+        n /= 100;
+        i -= 2;
+        tmp[i] = LUT[r];
+        tmp[i + 1] = LUT[r + 1];
+    }
+    if n >= 10 {
+        let r = (n as usize) * 2;
+        i -= 2;
+        tmp[i] = LUT[r];
+        tmp[i + 1] = LUT[r + 1];
+    } else {
+        i -= 1;
+        tmp[i] = b'0' + n as u8;
+    }
+    buf.extend_from_slice(&tmp[i..]);
+}
+
 impl fmt::Display for IndexLabel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -18704,6 +18740,104 @@ impl MultiIndex {
         // / unstack / set_index_multi; CPU-bound per-thread-buffer parallelism scales
         // even on a loaded box (no shared-allocator/bandwidth contention).
         let levels = &self.levels;
+        // The per-level `write!(buf, "{}", level[i])` above was the LAST piece of
+        // `core::fmt` left inside this already-parallel, already-contiguous build:
+        // an `IndexLabel` Display + `Formatter::pad` dispatch per LEVEL per ROW,
+        // and this loop does no other work. Dispatch straight off the variant
+        // instead. BIT-IDENTICAL by construction against `impl Display for
+        // IndexLabel`: `Int64(v) => write!(f, "{v}")` is plain decimal, which is
+        // exactly `push_i64_decimal`; `Utf8(v) => write!(f, "{v}")` is exactly the
+        // string's bytes. Every other variant (Float64 "%.1f"-style ".0" fixup,
+        // Bool "True"/"False", Null, temporal) keeps the verbatim Display path
+        // through a REUSED scratch String, which also drops that variant's per-row
+        // allocation. Same bytes, same offsets, same order.
+        let build = |lo: usize, hi: usize| -> (Vec<u8>, Vec<usize>) {
+            let mut buf: Vec<u8> = Vec::new();
+            let mut offs: Vec<usize> = Vec::with_capacity(hi - lo);
+            let mut scratch = String::new();
+            for i in lo..hi {
+                for (li, level) in levels.iter().enumerate() {
+                    if li > 0 {
+                        buf.extend_from_slice(sep.as_bytes());
+                    }
+                    match &level[i] {
+                        IndexLabel::Int64(v) => push_i64_decimal(&mut buf, *v),
+                        IndexLabel::Utf8(s) => buf.extend_from_slice(s.as_bytes()),
+                        other => {
+                            scratch.clear();
+                            let _ = write!(scratch, "{other}");
+                            buf.extend_from_slice(scratch.as_bytes());
+                        }
+                    }
+                }
+                offs.push(buf.len());
+            }
+            (buf, offs)
+        };
+        const FLATIDX_PAR_MIN_ROWS: usize = 50_000;
+        const FLATIDX_PAR_MIN_PER_WORKER: usize = 16_384;
+        let workers = if n >= FLATIDX_PAR_MIN_ROWS {
+            std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(16)
+                .min(n / FLATIDX_PAR_MIN_PER_WORKER)
+                .max(1)
+        } else {
+            1
+        };
+        let (bytes, offsets): (Vec<u8>, Vec<usize>) = if workers >= 2 {
+            let chunk = n.div_ceil(workers);
+            let build = &build;
+            let parts: Vec<(Vec<u8>, Vec<usize>)> = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(workers);
+                let mut start = 0;
+                while start < n {
+                    let end = (start + chunk).min(n);
+                    handles.push(scope.spawn(move || build(start, end)));
+                    start = end;
+                }
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("to_flat_index thread"))
+                    .collect()
+            });
+            let total: usize = parts.iter().map(|(b, _)| b.len()).sum();
+            let mut bytes = Vec::with_capacity(total);
+            let mut offsets = Vec::with_capacity(n + 1);
+            offsets.push(0);
+            let mut base = 0usize;
+            for (b, offs) in &parts {
+                for &o in offs {
+                    offsets.push(base + o);
+                }
+                base += b.len();
+                bytes.extend_from_slice(b);
+            }
+            (bytes, offsets)
+        } else {
+            let (b, offs) = build(0, n);
+            let mut offsets = Vec::with_capacity(n + 1);
+            offsets.push(0);
+            offsets.extend_from_slice(&offs);
+            (b, offsets)
+        };
+        Index::from_utf8_contiguous(Arc::from(bytes), Arc::from(offsets))
+    }
+
+    /// **Bench-only ORIG reference.** Byte-for-byte the `to_flat_index` body as it
+    /// stood before the `core::fmt` removal (`write!(buf, "{}", level[i])` per level
+    /// per row), including the identical parallel/serial split and gates, so an A/B
+    /// isolates EXACTLY the formatting change and nothing else. Compiled only under
+    /// `cfg(test)`, so the shipped binary is unaffected. Kept in-tree (rather than
+    /// stashed or diffed against another build) because `rch exec` picks its worker
+    /// non-deterministically and the ORIG/CAND ratio is NOT worker-invariant: both
+    /// arms must live in ONE binary and alternate inside ONE invocation.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn to_flat_index_ref_write_fmt(&self, sep: &str) -> Index {
+        use std::fmt::Write as _;
+        let n = self.len();
+        let levels = &self.levels;
         let build = |lo: usize, hi: usize| -> (Vec<u8>, Vec<usize>) {
             let mut buf = String::new();
             let mut offs: Vec<usize> = Vec::with_capacity(hi - lo);
@@ -18742,7 +18876,7 @@ impl MultiIndex {
                 }
                 handles
                     .into_iter()
-                    .map(|h| h.join().expect("to_flat_index thread"))
+                    .map(|h| h.join().expect("to_flat_index ref thread"))
                     .collect()
             });
             let total: usize = parts.iter().map(|(b, _)| b.len()).sum();
@@ -32150,5 +32284,91 @@ mod tests {
             ],
             "factorize uniques"
         );
+    }
+}
+
+/// Single-binary, single-invocation A/B for the `to_flat_index` `core::fmt`
+/// removal (cc_fp). Both arms are compiled into THIS binary and alternate inside
+/// ONE test run, so worker identity and time-varying load cancel: `rch exec` has
+/// no `--worker` flag and picks workers non-deterministically, which makes any
+/// ratio split across two invocations invalid. The run also asserts the two arms
+/// produce identical labels, so parity and perf are proven by the same execution.
+///
+/// Run: `rch exec -- cargo test -p fp-index --profile release-perf \
+///        -- --ignored --nocapture ab_to_flat_index`
+#[cfg(test)]
+mod ab_to_flat_index_ccfp {
+    use std::time::Instant;
+
+    use super::{IndexLabel, MultiIndex};
+
+    fn build_mi(n: usize) -> MultiIndex {
+        // Two levels of the shape wide_to_long / set_index_multi actually produce:
+        // a Utf8 key level and an Int64 level. Both hit `Display` in the ORIG arm.
+        let lvl0: Vec<IndexLabel> = (0..n)
+            .map(|i| IndexLabel::Utf8(format!("r{:06}", i % 100_000)))
+            .collect();
+        let lvl1: Vec<IndexLabel> = (0..n)
+            .map(|i| IndexLabel::Int64((i as i64) % 9_973))
+            .collect();
+        MultiIndex::from_arrays(vec![lvl0, lvl1]).expect("multiindex")
+    }
+
+    fn stats(xs: &[f64]) -> (f64, f64, f64) {
+        let min = xs.iter().copied().fold(f64::INFINITY, f64::min);
+        let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+        let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / xs.len() as f64;
+        (min, mean, 100.0 * var.sqrt() / mean)
+    }
+
+    fn ab_regime(label: &str, n: usize, blocks: usize, reps: usize) -> (f64, f64, f64, f64) {
+        let mi = build_mi(n);
+        // Parity in this same binary: the arms must be bit-identical.
+        assert_eq!(
+            mi.to_flat_index_ref_write_fmt("_").labels(),
+            mi.to_flat_index("_").labels(),
+            "{label}: CAND diverged from the ORIG write! formatter"
+        );
+        for _ in 0..2 {
+            std::hint::black_box(mi.to_flat_index_ref_write_fmt("_"));
+            std::hint::black_box(mi.to_flat_index("_"));
+        }
+        let mut orig_ms: Vec<f64> = Vec::with_capacity(blocks);
+        let mut cand_ms: Vec<f64> = Vec::with_capacity(blocks);
+        for _ in 0..blocks {
+            let mut o = f64::INFINITY;
+            let mut c = f64::INFINITY;
+            for _ in 0..reps {
+                // Alternate ORIG/CAND so drift cancels pairwise.
+                let t = Instant::now();
+                std::hint::black_box(mi.to_flat_index_ref_write_fmt("_"));
+                o = o.min(t.elapsed().as_secs_f64() * 1e3);
+
+                let t = Instant::now();
+                std::hint::black_box(mi.to_flat_index("_"));
+                c = c.min(t.elapsed().as_secs_f64() * 1e3);
+            }
+            orig_ms.push(o);
+            cand_ms.push(c);
+        }
+        let (o_min, _, o_cv) = stats(&orig_ms);
+        let (c_min, _, c_cv) = stats(&cand_ms);
+        println!("[{label}] n={n} blocks={blocks} reps={reps}");
+        println!("  ORIG write!      min={o_min:9.4} ms  cv={o_cv:5.2}%");
+        println!("  CAND variant-fmt min={c_min:9.4} ms  cv={c_cv:5.2}%");
+        println!("  fp-side ratio (min-of-blocks) = {:.3}x", o_min / c_min);
+        println!("  cv<5% both arms: orig={} cand={}", o_cv < 5.0, c_cv < 5.0);
+        (o_min, c_min, o_cv, c_cv)
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_to_flat_index_core_fmt() {
+        println!("AB to_flat_index (ONE binary, ONE rch invocation; arms alternate in-block)");
+        // SERIAL regime: n below FLATIDX_PAR_MIN_ROWS (50_000) so neither arm spawns
+        // threads. Isolates the per-row formatting cost with no scheduler noise.
+        ab_regime("serial", 49_000, 9, 60);
+        // PARALLEL regime: the shipped path at reshape scale.
+        ab_regime("parallel", 1_000_000, 9, 5);
     }
 }

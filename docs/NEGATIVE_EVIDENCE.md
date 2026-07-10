@@ -11468,3 +11468,69 @@ if the profile's top frame is not `IndexLabel::fmt` / `pad` / `core::fmt::write`
 GENERAL LESSON (applies to every agent under the rch-only constraint): a cross-invocation A/B silently swaps the
 machine underneath you. "Same binary" is not sufficient — it must be **same binary AND same invocation**, with both
 arms alternating inside it. An env-var gate is a same-BINARY technique that is NOT a same-INVOCATION technique.
+
+### 2026-07-10 cc_fp — UNPARKED + LANDED: MultiIndex::to_flat_index kill surviving core::fmt — 1.437x fp-side on the shipped parallel path (2.945x serial), cv<5% all arms
+
+Resolves the PARK two entries above. Measured under BOTH new methodology rules simultaneously.
+
+**A/B SUBSTRATE (rch rule).** ORIG is kept as a `#[cfg(test)]` bench-only reference fn
+(`MultiIndex::to_flat_index_ref_write_fmt`, a verbatim copy of the pre-change body incl. the identical
+parallel/serial gates) compiled into the SAME binary as CAND. Both arms alternate inside ONE
+`rch exec -- cargo test -p fp-index --profile release-perf -- --ignored --nocapture ab_to_flat_index`
+invocation, so worker identity and time-varying load cancel. No env gate across invocations, no `git stash`.
+
+Why this matters, observed directly: a first (too-short) run on worker `hz2` measured ORIG at 28.174 ms @1M;
+the accepted run on worker `ovh-a` measured the same ORIG code at 9.379 ms. **Absolute times are NOT
+worker-invariant — a 3x swing — while the in-invocation ratio is.** An A/B split across two `rch exec` calls
+would have produced a garbage number of either sign. Confirms br-r37-c1-839yx.
+
+**DEAD-CODE / EXERCISE CHECK (ledger-integrity rule, evidence/layout 5feb977).** The bench calls
+`mi.to_flat_index("_")` DIRECTLY — there is no auto-selector between the benchmark and the function under
+test, which is the exact failure mode that invalidated four frankenmermaid rejects. Additionally the same
+test asserts `orig.labels() == cand.labels()`, so both arms provably execute and produce the flat index, and
+BOTH branches of the parallelism gate are exercised on purpose: n=49_000 (< `FLATIDX_PAR_MIN_ROWS` = 50_000,
+serial) and n=1_000_000 (parallel). **Attribution is by ABLATION, which is strictly stronger than self-time
+inference: changing ONLY this function's body moved serial time by 66.0% (1 - 0.5973/1.7593).** A samply
+profile of this op could not be captured this turn (bench freeze bans the local `fp-bench` binary), so the
+ablation is the attribution and is recorded as such.
+
+Results (one binary, one invocation, arms alternating in-block; each block = min-of-REPS; cv over block minima):
+
+| regime | ORIG `write!` | CAND variant-dispatch | fp-side | cv (orig / cand) |
+| --- | ---: | ---: | ---: | --- |
+| serial, n=49_000, 9 blocks x 60 reps | 1.7593 ms | 0.5973 ms | **2.945x** | 0.72% / 0.42% |
+| **parallel, n=1_000_000, 9 blocks x 5 reps (SHIPPED PATH)** | 9.3788 ms | 6.5274 ms | **1.437x** | 2.29% / 1.24% |
+
+KEEP-GATE: cv < 5% on all four arms. ✅ LANDED.
+
+**MY PREDICTION WAS HALF WRONG, recorded as such.** The park predicted ">= the dt.date 2.53x". That holds in
+the SERIAL regime (2.945x) but the shipped parallel path yields only **1.437x**: parallelism already spread
+the `core::fmt` cost across workers, so what remains is the concat + `Vec<IndexLabel>` indexing traffic
+(memory-bound), not formatting. The honest headline is therefore 1.437x, not 2.945x. Predicting a frame from a
+sibling op's profile got the MECHANISM right and the MAGNITUDE wrong — which is precisely why the keep-gate
+demands a measurement and why the park refused to land on the prediction.
+
+LEVER: `IndexLabel` variant dispatch replaces `write!(buf, "{}", level[i])` (a Display + `Formatter::pad`
+per LEVEL per ROW). `Int64 => push_i64_decimal` (private hand-rolled itoa mirrored from fp-columnar; fp-index
+depends only on fp-types), `Utf8 => extend_from_slice(bytes)`, all other variants keep the verbatim Display
+path through a REUSED scratch String (which also drops that variant's per-row alloc). BIT-IDENTICAL by
+construction against `impl Display for IndexLabel` (fp-index:219) and asserted in-run by the A/B's parity check.
+
+GREEN (all remote via `rch exec`, worker-invariant pass/fail): fp-index **560/0**, fp-conformance **2048/0**,
+`cargo clippy -p fp-index --all-targets` emits ZERO warnings. `rustfmt --edition 2024 --check` clean (0 diffs).
+`ubs crates/fp-index/src/lib.rs`: **Critical 0** (4042 warning / 817 info = the documented broad whole-file
+inventory), none on the changed hunks.
+
+NOT MEASURED, stated plainly: the end-to-end `wide_to_long` / `stack` / `unstack` / `set_index_multi` ratio, and
+the vs-pandas ratio, both need the local `fp-bench` binary that the disk freeze forbids. This entry claims only
+the function-level ratio. Prior evidence that the function is hot in the real consumer: IronQuail 2026-07-08
+measured ~1.4x fp-side on `wide_to_long` purely from parallelizing THIS function, and names it "the reshape
+MultiIndex floor". Re-measure end-to-end when the freeze lifts.
+
+**AUDIT OF A REJECT ROW I RELIED ON (new ledger-integrity rule).** I wrote no REJECT this session, but I cited
+`2026-06-27 TealOsprey — str op parallelism: ~0-gain — REVERTED` as the regime boundary. Under the new rule that
+row is **UNVERIFIED**: a reported 1.01x/1.07x is exactly the signature of a benchmark that never reaches the
+changed code, and the entry records no self-time attributable to the parallel path. It did NOT gate any decision
+here (my own captured profiles did). **Do not treat it as do-not-retry until someone re-runs it and shows
+non-zero self-time in the parallel `par_map_str_windows` path.** Flagging, not reopening — the bench freeze
+prevents re-measurement this turn.
