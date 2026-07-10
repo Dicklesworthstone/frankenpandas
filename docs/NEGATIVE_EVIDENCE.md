@@ -11534,3 +11534,101 @@ changed code, and the entry records no self-time attributable to the parallel pa
 here (my own captured profiles did). **Do not treat it as do-not-retry until someone re-runs it and shows
 non-zero self-time in the parallel `par_map_str_windows` path.** Flagging, not reopening — the bench freeze
 prevents re-measurement this turn.
+
+### 2026-07-10 cc_fp — LEDGER-INTEGRITY AUDIT of the four transpose/to_dict REJECT rows — 2 INVALID (REOPENED), 1 INVALID-AS-MEASURED but MOOT, 1 VALID (attribution added)
+
+Applying the ledger-integrity rule (frankenmermaid evidence/layout 5feb977) AND the rch substrate rule
+(br-r37-c1-839yx) to the four rejected transpose-family levers. Analysis-only: the disk freeze bans the local
+`fp-bench` binary, so this audit reads the profiles ALREADY CAPTURED in `artifacts/perf/` plus the source, and
+re-measures nothing. Every verdict below cites a number.
+
+**EVIDENCE BASE (captured artifacts, not re-run).**
+`artifacts/perf/cod_fp_df_transpose_100k_release_perf.svg` (current-main `df_transpose` 100k x 10 f64, flamegraph
+⇒ INCLUSIVE %) and `artifacts/perf/cod_fp_l4vzc_df_transpose_100k_proto_profile_report.txt` (perf report ⇒ SELF %,
+**only 70 samples — thin, treat as directional**):
+
+| frame | incl% (svg) | self% (report) |
+| --- | ---: | ---: |
+| `__memmove_avx_unaligned_erms` | 22.09 | **66.47** |
+| `sort::stable::drift::sort<(String, Column)>` | 30.10 | — |
+| `drop_in_place::<ScalarValues>` | 16.81 | 0.00 |
+| `BTreeMap<String,Column>::bulk_build_from_sorted_iter` | 12.93 | 0.19 |
+| `drop_in_place::<BTreeMap<String,Column>>` | — | 9.03 |
+| `transpose::push_lexical_transpose_row_entry` | 8.22 | 6.00 |
+| `__memcmp_avx2_movbe` | — | 2.74 |
+| `drop_in_place::<Column>` | 4.11 | 3.03 |
+| `usize::_fmt_inner` (row-label formatting) | 4.11 | — |
+| **`from_f64_values` / `ValidityMask` / `all_valid`** | **ABSENT (<1%)** | **ABSENT** |
+
+---
+
+**1. `2026-07-09 cod_fp - df.transpose sorted sequential BTree insert - REJECT (0.42x)` → ✅ VALID. Keep as
+do-not-retry. Attribution added.**
+Exercise check PASSES: the lever replaced `BTreeMap::from_iter`/`collect()`, and that construction is demonstrably
+hot — `sort::stable::drift::sort<(String,Column)>` **30.10% incl**, `bulk_build_from_sorted_iter` **12.93% incl**,
+`drop_in_place::<BTreeMap<..>>` **9.03% self**. A 0.42x result is 2.4x SLOWER, which is itself proof of execution
+(dead code yields ~1.00x, never 0.42x). Substrate check PASSES: the comparator was LOCAL ORIG vs LOCAL candidate on
+one machine, and the entry explicitly demotes its rch run to "routing evidence only, not the keep/reject
+comparator" — correct discipline, predating the rule. ⚠️ Caveat now recorded: candidate cv was **18.46%** (> the 5%
+gate); the direction is far outside noise but the magnitude is imprecise.
+
+**2. `2026-07-09 BlackThrush - df.transpose flattened pair-buffer morsels - NO-SHIP (0.61x routing regression)`
+→ ❌ INVALID RATIO. ROW REOPENED.**
+The 0.61x is `68.781982 ms` measured on worker **`hz2`** divided by `111.942506 ms` measured on worker
+**`vmi1149989`** — two `rch exec` invocations on two DIFFERENT workers. The entry names it a "routing ratio" and
+records that "RCH later refused a same-worker ORIG rerun on `vmi1149989` because that worker entered critical
+pressure." Under the substrate rule that number is meaningless. Independent calibration from THIS session: the same
+unchanged `to_flat_index` ORIG code timed **28.174 ms on `hz2`** and **9.379 ms on `ovh-a`** — a **3.00x
+cross-worker swing**, which comfortably swallows a 0.61x. The exercise check PASSES (the focused parity test
+`transpose_f64_parallel_pair_buffer_matches_serial_prefix_blackthrush` passed, so the candidate code ran), so this
+is NOT dead code — it is an invalid comparator. **REOPEN**: re-measure with ORIG as a `#[cfg(test)]` bench-only
+reference fn, both arms alternating in ONE binary and ONE `rch exec` invocation. The "do not retry f64 transpose
+flattened pair buffers" instruction is WITHDRAWN pending that measurement.
+
+**3. `2026-07-09 BlackThrush - df.transpose all-valid owned row columns - NO-SHIP (0.997x)` → ❌ INVALID AS
+MEASURED, but ✅ CONCLUSION SURVIVES on independent evidence; MOOT. Do not reopen.**
+Three findings. (a) SUBSTRATE: ORIG and candidate were two separate `rch exec` invocations; the entry itself shows a
+requested `RCH_WORKER=ovh-a` pin being IGNORED (RCH selected `vmi1152480`), so the candidate's claimed "pinned to
+`vmi1152480`" is unverifiable — the ratio is invalid. (b) DEAD-CODE SIGNATURE: **0.997x is exactly the ~1.00x
+signature the new rule warns about.** (c) ATTRIBUTION: the replaced symbols (`from_f64_values`' NaN scan,
+`ValidityMask`, `Arc::from(Vec)`) appear in **NO frame at or above 1% inclusive** in the current-main flamegraph and
+in **no self-time row** of the perf report. So the lever targeted code with ~0% attributable time and its maximum
+possible win was ~0% — the reject's CONCLUSION ("the tiny f64 row constructor is not the wall") is independently
+correct even though its ratio is not admissible. (d) MOOT: `DataFrame::transpose` no longer calls `from_f64_values`
+for f64 at all — `push_lexical_transpose_row_entry` (fp-frame:57786) now builds rows via
+`Column::from_f64_transpose_row`, cod_fp's shared lazy row plan. The code this lever edited does not exist on main.
+Reopening would be pointless; the row stands as "zero-EV experiment", not as evidence.
+
+**4. `2026-07-08 BlackThrush - to_dict(index) BTreeMap row shards - NO-SHIP` → ❌ INVALID. ROW REOPENED.**
+There is **no candidate timing vector at all**. ORIG ran to completion on `ovh-a` (best `275.992507 ms`); the
+candidate "did not complete its 25-iteration JSON after repeated 30s polls on `vmi1149989`" and was interrupted.
+That is (i) a cross-worker comparison, and (ii) a *non-completion*, not a measurement. Damningly, `vmi1149989` is the
+very worker the sibling pair-buffer entry documents as having "entered critical pressure" the same day — so the
+"wall-clock runaway" is at least as well explained by a sick worker as by a slow lever. Exercise check PASSES
+(`to_dict_index_parallel_matches_serial_prefix_blackthrush` passed, so the shard code ran). **REOPEN**: the
+"do not retry per-worker BTreeMap shards" instruction is WITHDRAWN pending a single-binary/single-invocation A/B.
+
+---
+
+**CROSS-CUTTING FINDING.** `df_transpose` @100k x 10 f64 is recorded in these entries at **15.05 ms** (local),
+**58.88 ms** (local), and **68.78 ms** (`hz2`) — a 4.6x spread. Part is a real keep landing in between (the
+trusted-constructor 2.70x), but the rest is worker/box variance. **Hotness routing ("which op is hottest?") was
+itself decided on cross-worker absolute times in at least two of these entries.** Absolute times across `rch exec`
+invocations are not comparable, for ranking or for ratios. Only in-invocation comparisons are.
+
+**WHAT THE PROFILE ACTUALLY SAYS THE TRANSPOSE WALL IS** (so the reopened levers aim correctly): `__memmove`
+**66.47% self**, plus the `(String, Column)` stable sort **30.10% incl**, the BTree build **12.93% incl**, and the
+drop paths (`ScalarValues` 16.81% incl, `BTreeMap` 9.03% self, `Column` 3.03% self). That is the
+one-String-one-Column-one-BTreeMap-entry-per-source-row representation, exactly as the `l4vzc` lane says. Neither
+reopened lever deletes that cardinality, so both should be expected to be marginal — but "expected marginal" is a
+hypothesis to MEASURE, not a reject to inherit.
+
+**IN-LANE SIDE FINDING (not claimed, ranked for later):** `usize::_fmt_inner` at **4.11% incl** is row-label integer
+formatting inside `push_lexical_transpose_row_entry` (**6.00% self**). That is the same `core::fmt` tax this agent
+removed from `dt.date`/`dt.time` and `to_flat_index`, and `push_i64_decimal` already exists in fp-columnar. Upper
+bound ~4%, so it is a small lever; do not spend a commit on it until the reopened structural levers are settled.
+
+NOTE ON MY OWN ROWS: this agent has written no REJECT this session. The three WIN rows above carry attribution —
+astype(str) grisu ~11.8% self / core::fmt ~5.6% self; dt.date `core::fmt` ~42% self; `to_flat_index` by ABLATION
+(66.0% of serial loop time). The one row I flagged as suspect under this rule remains
+`2026-06-27 TealOsprey — str op parallelism ~0-gain` (1.01x/1.07x, no self-time recorded).
