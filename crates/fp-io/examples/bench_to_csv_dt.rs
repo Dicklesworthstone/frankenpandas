@@ -1,8 +1,9 @@
 //! to_csv over a 1M-row DataFrame with a Datetime64 column. bench_to_csv_dt <n>
+use std::collections::BTreeMap;
+
 use fp_columnar::Column;
 use fp_frame::DataFrame;
 use fp_index::Index;
-use std::collections::BTreeMap;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -23,5 +24,8 @@ fn main() {
             best = e;
         }
     }
-    println!("to_csv datetime n={n}: best={best}ns ({:.2}ms)", best as f64 / 1e6);
+    println!(
+        "to_csv datetime n={n}: best={best}ns ({:.2}ms)",
+        best as f64 / 1e6
+    );
 }

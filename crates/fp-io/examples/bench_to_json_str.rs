@@ -1,14 +1,17 @@
 //! to_json(records) over a frame with a Utf8 column. bench_to_json_str <n>
+use std::collections::BTreeMap;
+
 use fp_columnar::Column;
 use fp_frame::DataFrame;
 use fp_index::Index;
 use fp_io::JsonOrient;
-use std::collections::BTreeMap;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let n: usize = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
-    let ints: Vec<i64> = (0..n as i64).map(|i| (i.wrapping_mul(2_654_435_761)) % 1_000_000).collect();
+    let ints: Vec<i64> = (0..n as i64)
+        .map(|i| (i.wrapping_mul(2_654_435_761)) % 1_000_000)
+        .collect();
     // Contiguous Utf8 backing (what read_csv / string ops produce).
     let mut sbytes: Vec<u8> = Vec::new();
     let mut soff: Vec<usize> = vec![0];
@@ -30,5 +33,8 @@ fn main() {
             best = e;
         }
     }
-    println!("to_json(records) +str n={n}: best={best}ns ({:.2}ms)", best as f64 / 1e6);
+    println!(
+        "to_json(records) +str n={n}: best={best}ns ({:.2}ms)",
+        best as f64 / 1e6
+    );
 }

@@ -1,13 +1,16 @@
 //! to_csv over a mixed {Int64, Float64, Datetime64} frame. bench_to_csv_mixed <n>
+use std::collections::BTreeMap;
+
 use fp_columnar::Column;
 use fp_frame::DataFrame;
 use fp_index::Index;
-use std::collections::BTreeMap;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let n: usize = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
-    let ints: Vec<i64> = (0..n as i64).map(|i| (i.wrapping_mul(2_654_435_761)) % 1_000_000).collect();
+    let ints: Vec<i64> = (0..n as i64)
+        .map(|i| (i.wrapping_mul(2_654_435_761)) % 1_000_000)
+        .collect();
     let floats: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 - 100.0).collect();
     let base = 946_684_800_000_000_000i64;
     let step = 37_000_000_000i64;
@@ -27,5 +30,8 @@ fn main() {
             best = e;
         }
     }
-    println!("to_csv mixed+dt n={n}: best={best}ns ({:.2}ms)", best as f64 / 1e6);
+    println!(
+        "to_csv mixed+dt n={n}: best={best}ns ({:.2}ms)",
+        best as f64 / 1e6
+    );
 }

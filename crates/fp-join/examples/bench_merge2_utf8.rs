@@ -23,28 +23,45 @@ fn main() {
     let card: i64 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
     let it: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(10);
     let how = a.get(4).map(String::as_str).unwrap_or("inner");
-    let key = |i: usize, salt: i64| ((i as i64).wrapping_mul(2654435761).wrapping_add(salt) >> 13) % card;
+    let key =
+        |i: usize, salt: i64| ((i as i64).wrapping_mul(2654435761).wrapping_add(salt) >> 13) % card;
     // left: 1M fact, (k1,k2)
     let lidx = Index::new((0..n as i64).map(IndexLabel::Int64).collect());
     let mut lm = BTreeMap::new();
-    lm.insert("k1".to_string(), contig(n, |i| format!("a{:05}", key(i, 0))));
-    lm.insert("k2".to_string(), contig(n, |i| format!("b{:05}", key(i, 7))));
+    lm.insert(
+        "k1".to_string(),
+        contig(n, |i| format!("a{:05}", key(i, 0))),
+    );
+    lm.insert(
+        "k2".to_string(),
+        contig(n, |i| format!("b{:05}", key(i, 7))),
+    );
     lm.insert(
         "lv".to_string(),
         Column::from_f64_values((0..n).map(|i| i as f64).collect()),
     );
-    let left = DataFrame::new_with_column_order(lidx, lm, vec!["k1".into(), "k2".into(), "lv".into()]).unwrap();
+    let left =
+        DataFrame::new_with_column_order(lidx, lm, vec!["k1".into(), "k2".into(), "lv".into()])
+            .unwrap();
     // right: card*card dim, every (k1,k2) combo once
     let m = (card * card) as usize;
     let ridx = Index::new((0..m as i64).map(IndexLabel::Int64).collect());
     let mut rm = BTreeMap::new();
-    rm.insert("k1".to_string(), contig(m, |i| format!("a{:05}", (i as i64) / card)));
-    rm.insert("k2".to_string(), contig(m, |i| format!("b{:05}", (i as i64) % card)));
+    rm.insert(
+        "k1".to_string(),
+        contig(m, |i| format!("a{:05}", (i as i64) / card)),
+    );
+    rm.insert(
+        "k2".to_string(),
+        contig(m, |i| format!("b{:05}", (i as i64) % card)),
+    );
     rm.insert(
         "rv".to_string(),
         Column::from_f64_values((0..m).map(|i| i as f64 * 2.0).collect()),
     );
-    let right = DataFrame::new_with_column_order(ridx, rm, vec!["k1".into(), "k2".into(), "rv".into()]).unwrap();
+    let right =
+        DataFrame::new_with_column_order(ridx, rm, vec!["k1".into(), "k2".into(), "rv".into()])
+            .unwrap();
     let jt = match how {
         "left" => JoinType::Left,
         "outer" => JoinType::Outer,

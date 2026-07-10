@@ -19,10 +19,16 @@ fn df(keys: &[&str], vname: &str, vals: &[f64]) -> DataFrame {
     let mut cols = BTreeMap::new();
     cols.insert(
         "key".to_string(),
-        Column::from_values(keys.iter().map(|s| Scalar::Utf8((*s).to_string())).collect()).unwrap(),
+        Column::from_values(
+            keys.iter()
+                .map(|s| Scalar::Utf8((*s).to_string()))
+                .collect(),
+        )
+        .unwrap(),
     );
     cols.insert(vname.to_string(), Column::from_f64_values(vals.to_vec()));
-    DataFrame::new_with_column_order(index, cols, vec!["key".to_string(), vname.to_string()]).unwrap()
+    DataFrame::new_with_column_order(index, cols, vec!["key".to_string(), vname.to_string()])
+        .unwrap()
 }
 
 fn col_f64(d: &MergedDataFrame, name: &str) -> Vec<f64> {

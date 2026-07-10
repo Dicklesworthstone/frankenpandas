@@ -1492,11 +1492,15 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
             if is_pandas_default_na(field) {
                 match acc {
                     ColAcc::Int(buf, valid) => {
-                        valid.get_or_insert_with(|| vec![true; buf.len()]).push(false);
+                        valid
+                            .get_or_insert_with(|| vec![true; buf.len()])
+                            .push(false);
                         buf.push(0);
                     }
                     ColAcc::Float(buf, valid) => {
-                        valid.get_or_insert_with(|| vec![true; buf.len()]).push(false);
+                        valid
+                            .get_or_insert_with(|| vec![true; buf.len()])
+                            .push(false);
                         buf.push(0.0);
                     }
                     ColAcc::Fallback => {}
@@ -1569,10 +1573,7 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
         // An empty (0-row) or all-NA numeric column is Null/empty dtype in the
         // Scalar path, not Int64 — route it to the fallback for exact parity.
         let has_value = |buf_len: usize, valid: &Option<Vec<bool>>| -> bool {
-            buf_len > 0
-                && valid
-                    .as_ref()
-                    .map_or(true, |v| v.iter().any(|&b| b))
+            buf_len > 0 && valid.as_ref().map_or(true, |v| v.iter().any(|&b| b))
         };
         let column = match acc {
             // Typed fast paths (all-valid OR nullable): taken when every cell was
@@ -2291,10 +2292,7 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                 let end = (start + chunk).min(n);
                 handles.push(scope.spawn(move || {
                     let mut buf = String::with_capacity(
-                        (end - start)
-                            .saturating_mul(field_count)
-                            .saturating_mul(8)
-                            + 16,
+                        (end - start).saturating_mul(field_count).saturating_mul(8) + 16,
                     );
                     write_range(start, end, &mut buf);
                     buf
@@ -8108,8 +8106,8 @@ fn arrow_validity_mask(arr: &dyn Array) -> Option<fp_columnar::ValidityMask> {
 /// coercion, nullable Utf8, and any uncovered dtype). Bit-identical to that path.
 fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Column> {
     use arrow::array::{
-        Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, UInt16Array,
-        UInt32Array, UInt64Array, UInt8Array,
+        Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, UInt8Array,
+        UInt16Array, UInt32Array, UInt64Array,
     };
     macro_rules! i64_col {
         ($ty:ty) => {{
@@ -8168,7 +8166,9 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
             Some(Column::from_utf8_contiguous(bytes, offsets))
         }
         ArrowDataType::LargeUtf8 if arr.null_count() == 0 => {
-            let t = arr.as_any().downcast_ref::<arrow::array::LargeStringArray>()?;
+            let t = arr
+                .as_any()
+                .downcast_ref::<arrow::array::LargeStringArray>()?;
             let offs = t.value_offsets();
             let len = t.len();
             let start = offs[0] as usize;
@@ -8430,8 +8430,8 @@ pub fn write_parquet_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
 /// Read a DataFrame from in-memory Parquet bytes.
 pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     let b = bytes::Bytes::from(data.to_vec());
-    let builder = ParquetRecordBatchReaderBuilder::try_new(b)
-        .map_err(|e| IoError::Parquet(e.to_string()))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(b).map_err(|e| IoError::Parquet(e.to_string()))?;
     // Read the whole file as ONE record batch instead of the default 1024-row
     // batches: a 1M-row file otherwise yields ~1000 tiny batches, each turned into
     // a DataFrame and then concatenated — the many-batch + concat overhead (not
@@ -14311,14 +14311,21 @@ mod tests {
         let idx = Index::from_range(0, n as i64, 1);
         let aff: Vec<f64> = (0..n).map(|i| i as f64).collect();
         let flt: Vec<f64> = (0..n)
-            .map(|i| ((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11) as f64 / (1u64 << 53) as f64 * 1e6)
+            .map(|i| {
+                ((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11) as f64 / (1u64 << 53) as f64
+                    * 1e6
+            })
             .collect();
         let int: Vec<i64> = (0..n as i64).collect();
         let boo: Vec<bool> = (0..n).map(|i| i % 3 == 0).collect();
         let mut sbytes: Vec<u8> = Vec::new();
         let mut soff: Vec<usize> = vec![0];
         for i in 0..n {
-            let s = if i % 7 == 0 { format!("a,b{i}") } else { format!("x{i}") };
+            let s = if i % 7 == 0 {
+                format!("a,b{i}")
+            } else {
+                format!("x{i}")
+            };
             sbytes.extend_from_slice(s.as_bytes());
             soff.push(sbytes.len());
         }
@@ -14327,7 +14334,10 @@ mod tests {
         cols.insert("flt".to_string(), Column::from_f64_values(flt));
         cols.insert("int".to_string(), Column::from_i64_values(int));
         cols.insert("boo".to_string(), Column::from_bool_values(boo));
-        cols.insert("str".to_string(), Column::from_utf8_contiguous(sbytes, soff));
+        cols.insert(
+            "str".to_string(),
+            Column::from_utf8_contiguous(sbytes, soff),
+        );
         DataFrame::new_with_column_order(
             idx,
             cols,
@@ -17069,7 +17079,10 @@ mod tests {
         let v1 = v0 + 3_661_000_000_000; // 2000-01-01 01:01:01
         let mut columns = BTreeMap::new();
         columns.insert("a".to_string(), Column::from_i64_values(vec![10, 20, 30]));
-        columns.insert("b".to_string(), Column::from_f64_values(vec![1.5, 2.0, 3.5]));
+        columns.insert(
+            "b".to_string(),
+            Column::from_f64_values(vec![1.5, 2.0, 3.5]),
+        );
         columns.insert(
             "t".to_string(),
             Column::from_datetime64_values(vec![v0, v1, Timestamp::NAT]),
@@ -17084,8 +17097,7 @@ mod tests {
             vec!["a".to_string(), "b".to_string(), "t".to_string()],
         )
         .unwrap();
-        let expected =
-            "a,b,t\n10,1.5,2000-01-01 00:00:00\n20,2.0,2000-01-01 01:01:01\n30,3.5,\n";
+        let expected = "a,b,t\n10,1.5,2000-01-01 00:00:00\n20,2.0,2000-01-01 01:01:01\n30,3.5,\n";
         // Typed fast path fires (no datetime fallback) and is byte-identical to
         // the public writer (which routes through it).
         assert_eq!(
@@ -31898,12 +31910,14 @@ mod merge_simple_numeric_csv_chunks_tests {
     /// escaping, and the fall-back surface. (br-frankenpandas-jsonrec)
     #[test]
     fn to_json_records_typed_fast_path_bit_identical_to_serde() {
-        use super::{JsonOrient, write_json_string};
+        use std::collections::BTreeMap;
+
         use fp_columnar::Column;
         use fp_frame::DataFrame;
         use fp_index::Index;
         use fp_types::Scalar;
-        use std::collections::BTreeMap;
+
+        use super::{JsonOrient, write_json_string};
         fn serde_ref(frame: &DataFrame) -> String {
             let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
             let promotions = vec![false; headers.len()];
@@ -31930,7 +31944,10 @@ mod merge_simple_numeric_csv_chunks_tests {
             lines.join("\n")
         }
         fn assert_jsonl_matches(frame: &DataFrame) {
-            assert_eq!(super::write_jsonl_string(frame).expect("jsonl"), jsonl_serde_ref(frame));
+            assert_eq!(
+                super::write_jsonl_string(frame).expect("jsonl"),
+                jsonl_serde_ref(frame)
+            );
         }
         // Columns orient: compare the typed fast path's end-to-end output to the
         // serde-tree output captured by temporarily... there is no separate serde
@@ -32054,11 +32071,33 @@ mod merge_simple_numeric_csv_chunks_tests {
         // Edge-laden Int64 + Float64 + Bool frame; the floats span integer-valued,
         // signed-zero, sub-1e-4 (ryu exponent), huge, tiny, and ±Inf (which the
         // typed path emits as `null`, matching serde's NaN/Inf arm).
-        let ints = vec![0i64, -1, 1, i64::MIN, i64::MAX, -123456789, 999, -7, 42, 1_000_000_000];
-        let floats = vec![
-            0.0, -0.0, 0.5, 100.0, -100.0, 1e20, 1e-20, 1.5e-300, f64::MAX, f64::INFINITY,
+        let ints = vec![
+            0i64,
+            -1,
+            1,
+            i64::MIN,
+            i64::MAX,
+            -123456789,
+            999,
+            -7,
+            42,
+            1_000_000_000,
         ];
-        let bools = vec![true, false, true, true, false, false, true, false, true, false];
+        let floats = vec![
+            0.0,
+            -0.0,
+            0.5,
+            100.0,
+            -100.0,
+            1e20,
+            1e-20,
+            1.5e-300,
+            f64::MAX,
+            f64::INFINITY,
+        ];
+        let bools = vec![
+            true, false, true, true, false, false, true, false, true, false,
+        ];
         let n = ints.len();
         let mut cols: BTreeMap<String, Column> = BTreeMap::new();
         cols.insert("a".to_string(), Column::from_i64_values(ints));
@@ -32104,7 +32143,10 @@ mod merge_simple_numeric_csv_chunks_tests {
 
         // -Inf in isolation.
         let mut c2: BTreeMap<String, Column> = BTreeMap::new();
-        c2.insert("x".to_string(), Column::from_f64_values(vec![f64::NEG_INFINITY, -2.5, 3.0]));
+        c2.insert(
+            "x".to_string(),
+            Column::from_f64_values(vec![f64::NEG_INFINITY, -2.5, 3.0]),
+        );
         let f2 = DataFrame::new(idx(3), c2).expect("frame2");
         assert_eq!(
             write_json_string(&f2, JsonOrient::Records).expect("json2"),
@@ -32174,7 +32216,10 @@ mod merge_simple_numeric_csv_chunks_tests {
             soff.push(sbytes.len());
         }
         let mut c5: BTreeMap<String, Column> = BTreeMap::new();
-        c5.insert("n".to_string(), Column::from_i64_values((0..strs.len() as i64).collect()));
+        c5.insert(
+            "n".to_string(),
+            Column::from_i64_values((0..strs.len() as i64).collect()),
+        );
         c5.insert("s".to_string(), Column::from_utf8_contiguous(sbytes, soff));
         let f5 = DataFrame::new(idx(strs.len()), c5).expect("frame5");
         assert!(super::try_write_json_records_typed(&f5, false).is_some());
@@ -32191,7 +32236,9 @@ mod merge_simple_numeric_csv_chunks_tests {
         // Pseudo-random sweep (LCG, no external rng) over Int64/Float64 values.
         let mut state: u64 = 0x9E3779B97F4A7C15;
         let mut next = || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             state
         };
         let m = 2000usize;
@@ -32202,7 +32249,11 @@ mod merge_simple_numeric_csv_chunks_tests {
             // Mix of magnitudes including integer-valued and tiny.
             let bits = next();
             let f = f64::from_bits(bits);
-            rf.push(if f.is_nan() { (next() % 1000) as f64 * 0.25 } else { f });
+            rf.push(if f.is_nan() {
+                (next() % 1000) as f64 * 0.25
+            } else {
+                f
+            });
         }
         let mut rc: BTreeMap<String, Column> = BTreeMap::new();
         rc.insert("ri".to_string(), Column::from_i64_values(ri));
