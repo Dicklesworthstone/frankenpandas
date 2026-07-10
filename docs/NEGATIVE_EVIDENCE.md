@@ -11358,3 +11358,74 @@ serial, dt.date/dt.time because each field went through `core::fmt`. The contigu
 after it lands, profile the loop again and ask what per-row dispatch survives. Also: BENCH GENERATORS ARE CODE. An i64
 overflow in a bench's data generator can sit undetected for months and silently invalidate cross-engine comparison while
 leaving same-binary A/B perfectly valid.
+
+### 2026-07-10 cc_fp — PARKED (parity proven, perf UNMEASURED): MultiIndex::to_flat_index — kill the surviving core::fmt inside the already-parallel contiguous build
+
+**STATUS: PARKED, NOT LANDED.** Patch saved at `tests/artifacts/perf/cc_fp_to_flat_index_kill_core_fmt.patch`
+(89 lines; `git apply --check` clean against `b2e51f493`). Behaviour parity is ALREADY PROVEN remotely; only the
+measured A/B is missing, and the keep-gate forbids landing a perf change without one. Working tree left pristine
+(`crates/fp-index/src/lib.rs` md5 `9021f4e2086bd525cab54d3ff3df85e8` == HEAD).
+
+BLOCKER (explicit): a disk emergency (/data 96% full, 89-90G free) banned local `cargo build/bench/test`, and
+`rch exec` builds on remote workers WITHOUT syncing artifacts back (`perf-bench-artifact-gotcha`), so no local
+`fp-bench` binary can be produced or run. `rch exec -- cargo test` (pure cargo) DOES work and was used for parity.
+Note: this repo has no PyO3/maturin surface, so the `maturin build` fail-open hole (br-r37-c1-839yx) does not
+apply here; the binding constraint is purely "benches need a local release-perf binary".
+
+FIRST: the survey that was asked for. The three Utf8 producers named as "remaining" are ALREADY DONE, verified by
+READING THE CODE, not just the ledger:
+
+| producer | contiguous? | parallel per-thread bytes+offsets? | surviving per-row `core::fmt`? |
+| --- | --- | --- | --- |
+| arg-extrema (`arg_axis1_names_parallel`, fp-frame ~66395) | yes (`from_utf8_contiguous`) | yes | none — `extend_from_slice` of the column name |
+| `stack` label build (fp-frame ~65847) | yes | yes | one `v.to_string()` per ROW, hoisted out of the m-column loop (minor residual) |
+| `MultiIndex::to_flat_index` (fp-index 18683) | yes | yes | **`write!(buf, "{}", level[i])` per LEVEL per ROW — not hoisted** |
+
+Also checked: the other six `to_flat_index` impls (fp-index 1986/7689/8931/10743/11995/14266) are trivial
+`clone()` / `to_index()` — not Utf8 producers at all. So re-applying the parallel-contiguous pattern to these
+three would be re-doing shipped work (BlackThrush 2026-07-09 arg-extrema 7.5x; IronQuail 2026-07-07 stack 1.33x;
+IronQuail 2026-07-08 to_flat_index ~1.4x).
+
+THE ACTUAL REMAINING LEVER is the one my dt.date/dt.time entry above predicts: `to_flat_index`'s inner loop is
+`IndexLabel` **Display + `Formatter::pad` dispatch per level per row**, and that loop does NO other work (no civil
+conversion, no float formatting — just format-and-append). Replace it with variant dispatch:
+`Int64 => push_i64_decimal` (hand-rolled itoa), `Utf8 => extend_from_slice(bytes)`, everything else keeps the
+verbatim Display path through a REUSED scratch String (which also drops that variant's per-row alloc).
+BIT-IDENTICAL by construction against `impl Display for IndexLabel` (fp-index:219): `Int64(v) => write!(f,"{v}")`
+is plain decimal == `push_i64_decimal`; `Utf8(v) => write!(f,"{v}")` is exactly the string's bytes. `fp-index`
+depends only on `fp-types`, so the patch carries a private copy of fp-columnar's proven `push_i64_decimal`.
+
+PARITY PROVEN (patch applied, run REMOTELY via `rch exec` on worker `vmi1149989`, then reverse-applied with
+`git apply -R` to leave the tree pristine): **fp-index 560/0**, **fp-conformance 2048/0**.
+
+RANKED FRAME — **PREDICTED, NOT MEASURED.** Stated as a prediction so nobody mistakes it for evidence. The direct
+evidence is the `dt_date` profile I captured this session (samply, symbolicated), where the SAME construct —
+`write!` of fixed-shape integers into a contiguous buffer — accounted for **~42% of loop self-time**
+(`Formatter::pad_integral` 12.53%, `MaybeUninit<u8>::write` 7.72%, `Adapter<Vec<u8>>::write_str` 6.81%,
+`i64 as Display::fmt` 4.27%, `u64::_fmt_inner` 3.54%, `core::fmt::write` 2.54%, `Argument::fmt` 1.91%,
+`pad_integral::write_prefix` 1.91%, `write_char` 1.63%) in a loop that ALSO paid a 14.90% civil conversion.
+`to_flat_index` has no such compute to dilute the fmt share, so the expected fmt fraction is HIGHER and the
+predicted fp-side win is >= the dt.date 2.53x. Killing `write!` there also removes `use std::fmt::Write`.
+Baseline already on record (do not re-measure to get it): IronQuail 2026-07-08 put `to_flat_index` at ~1.4x
+fp-side on `wide_to_long`, and calls it "the reshape MultiIndex floor hit by wide_to_long / stack / unstack /
+set_index_multi". fp-bench workload `wide_to_long` exists and is the A/B vehicle.
+
+RESUME STEPS when the disk freeze lifts (in order):
+1. `git apply tests/artifacts/perf/cc_fp_to_flat_index_kill_core_fmt.patch`
+2. Profile `fp-bench --category dataframe_ops --workload wide_to_long --size 1M` and CONFIRM the ranked frame is
+   `IndexLabel::fmt` / `pad` / `core::fmt::write` before keeping. If it is not, this park is a REJECT — say so.
+3. Interleaved same-binary A/B (temporary env gate, removed before commit), >= 9 blocks, min-of-block-minima,
+   with an untouched control op; require cv < 5% on both arms.
+4. Head-to-head vs pandas 2.2.3 via `benches/vs_pandas_harness.py`, cv-gated, bounded timeout.
+5. Re-run `rch exec -- cargo test -p fp-index -p fp-conformance` (already green on this exact patch).
+6. Land or REJECT with numbers. Do not land on the prediction alone.
+
+SECOND PARK (not attempted, ranked below the above): `stack`'s per-row `v.to_string()` for `IndexLabel::Int64`
+(fp-frame ~65888). Same `push_i64_decimal` fix, but the alloc is once per ROW (already hoisted out of the
+m-column inner loop), so the expected win is small — do the `to_flat_index` one first and re-profile `df_stack`
+afterwards rather than assuming.
+
+DECLINED THIS TURN: cod_fp's lazy-transpose lane, offered while cod is usage-walled. It is a feature-gated
+view whose whole value is a perf claim (`--features lazy-transpose-view`), so under a bench freeze it is exactly
+the work that cannot be finished, and cod has uncommitted hunks in `fp-frame` around 49369/57000. Taking it would
+risk a merge collision for zero shippable output. Staying in lane.
