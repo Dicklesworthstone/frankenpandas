@@ -13606,3 +13606,42 @@ fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. No local build. 
 duplicated/drop_duplicates 2.076x, isin 1.844x, replace 2.667x.** SEVEN wins. `replace` extended the pattern beyond pure
 cardinality into value-mapping and found a second (algorithmic) gap. NEXT: re-profile a FRESH area — the common
 `&self.values`-materializing Utf8 consumers are now covered.
+
+### 2026-07-10 cc_fp — WIN: Datetime64/Timedelta64 `duplicated`/`drop_duplicates` route through the i64 dedup — 3.440x fp-side, bit-identical (fresh TEMPORAL area; biggest win of the session)
+
+Pivoted off the (exhausted) Utf8 vein back to the TEMPORAL-typed-fast-path vein. `duplicated_keep` had typed fast paths for
+Int64 (dense/wide) and Float64 and (my earlier) contiguous-Utf8, but Datetime64/Timedelta64 — which are i64-ns-backed yet fail
+the `as_i64_slice()` `dtype==Int64` gate — fell to the generic `FxHashSet<Key>` loop that materializes `Vec<Scalar::Datetime64>`
+and keys each row by `Key::Datetime64(ns)`. Added a temporal branch (mirror of the Int64 arm, same routing as `unique`/
+`value_counts`): for an all-valid, no-NaT column, run the raw ns through the SAME i64 helpers (`i64_direct_address_range` dense /
+`duplicated_first_i64_wide` / `duplicated_flags_typed`). The Bool output is **dtype-independent — no re-tag**. Also speeds
+`drop_duplicates` on time series (= `duplicated_keep` + filter).
+
+Why this is the BIGGEST win of the session (3.44x, vs the Utf8 duplicated's 2.08x): the temporal route not only skips the
+materialization but lands on the wide-i64 **open-addressing** dedup, which beats the generic's `FxHashSet<Key>` (bigger Key-enum
+key + SipHash-class miss behavior) — two compounding effects. Timestamps span a wide ns range so `i64_direct_address_range`
+returns None and the open-addressing `duplicated_first_i64_wide` path runs (the realistic case).
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG generic vs CAND fast interleaved, per-arm adjacent A/A null
+control; 2M Datetime64 rows, 50k distinct 1-second-spaced ns; ORIG forces the REAL generic path via one planted NaT the CAND
+no-NaT gate skips — so this is the ACTUAL pre-lever cost, NOT a conservative replica):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `3efc18efd06a34c16d024a2b720ff3069dfa94acac07fc11c7d6035e5fb860ea` |
+| worker | `fixmydocuments` |
+| ORIG generic `Key::Datetime64` flags | 391.429 ms (cv 0.24%) |
+| CAND raw-i64 ns dedup flags | 113.781 ms (cv 0.58%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0042x -> 0.42% floor** |
+| **fp-side ratio (min-of-blocks)** | **3.440x (+244.0%) — DECIDABLE (244% is ~580x the 0.42% floor)** |
+
+BIT-IDENTICAL: the A/B parity block asserts (1) keep="first" flags equal an independent first-seen reference over the raw ns
+(ground truth for the generic `Key` path) AND (2) all three policies (`first`/`last`/`false`) equal the conformance-verified
+Int64-column `duplicated_keep` on the same ns. GREEN remote fail-closed: fp-columnar lib **475/0**, fp-conformance **2048/0**;
+rustfmt clean; clippy clean in-hunk. No local build. `crates/fp-frame` untouched.
+
+**TEMPORAL-TYPED-FAST-PATH VEIN (cc_fp): argsort 8.36x, min/max 35.4x, sum/mean 27.0x, value_counts 15.2x, unique 2.12x,
+duplicated/drop_duplicates 3.44x.** The `as_i64_slice()` gate excludes i64-backed Datetime64/Timedelta64, so every op with an
+Int64 fast path is a temporal-sibling candidate. STILL OPEN in this vein: `nunique` (falls to `nannunique` — same gap, count
+output, trivially bit-identical), `mode`, `isin` for temporal. NEXT could be temporal `nunique` (cleanest) or a pivot to
+groupby/io.
