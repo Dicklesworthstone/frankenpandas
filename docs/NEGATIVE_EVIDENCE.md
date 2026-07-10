@@ -13794,3 +13794,35 @@ untouched. Ships transparently through `nunique` (Int64 wide + Datetime64/Timede
 purpose-built open-addressing table (my own earlier khash-floor lever) was STILL LLC-bound at high card, and radix-partitioning it
 is a genuine cache-structural win. Sibling candidates: radix-partition the wide `value_counts`/`mode` tallies (harder —
 `value_counts` needs first-seen order + count-sort, so partitioning must preserve or re-derive order).
+
+### 2026-07-10 cc_fp — WIN: `quantile` typed &[f64] select bypasses Scalar materialization — 2.058x fp-side, bit-identical (completes the order-statistics typed-select family with `median`)
+
+Direct sibling of the `median` lever (`bafe9faef`, 2.066x). `Column::quantile` had NO typed path — it called
+`nanquantile(&self.values, q)`, which materializes `Vec<Scalar>` then `collect_finite`'s per-Scalar `to_f64`. Added a Float64
+fast path: `as_f64_slice()` → `data.to_vec()` → the SAME q-range guard, `n==1` shortcut, `select_nth_unstable_by(lo, ..)`, and
+lo/hi linear interpolation. `select_nth_unstable_by` is deterministic and `collect_finite` (drops only MISSING, keeps NaN/inf)
+equals `data.to_vec()` for an all-valid buffer, so the result is bit-identical.
+
+CONSIDERED-AND-REJECTED the structural sibling `value_counts`/`unique` radix this turn: at HIGH cardinality
+`value_counts(sort=True)` degenerates to "all values, first-seen order" (every count 1 → all tie → stable-sort keeps first-seen),
+so it is dominated by producing FIRST-SEEN order — which radix-partitioning fundamentally reorders and can only recover with an
+O(D log D) first-seen-index sort that eats the radix gain. `mode` radix IS clean (sorted output, order-independent) but low real
+value (mode is usually low-card categorical, where the gate won't fire). So the clean high-value move was `quantile`.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG `nanquantile(col.values.as_slice(), q)` vs CAND
+`quantile(q)` interleaved, per-arm A/A null control; 4M finite f64, q=0.25):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `373147fd28d88eda68d450f446e5d795daae1a4f2100cc5745e14b7e5fd90bba` |
+| worker | `hetzner2` |
+| ORIG `nanquantile(Vec<Scalar>)` | 690.715 ms (cv 0.75%) |
+| CAND typed `&[f64]` select | 335.634 ms (cv 0.72%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0049x -> 0.49% floor** |
+| **fp-side ratio (min-of-blocks)** | **2.058x (+105.8%) — DECIDABLE (105.8% is ~216x the 0.49% floor)** |
+
+BIT-IDENTICAL: the A/B parity block asserts equality vs the exact Scalar `nanquantile` across q ∈ {0, 0.25, 0.5, 0.75, 0.9, 1.0,
+-0.1, 1.5} (interpolating + boundary + out-of-range), the n==1 shortcut, and the empty column. GREEN remote fail-closed:
+fp-columnar lib **475/0**, fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. `crates/fp-frame` untouched.
+Order-statistics typed-select family (`median` 2.066x + `quantile` 2.058x) now COMPLETE; `percentile`/`nanquantile`-alias route
+through `quantile` so they inherit it. Remaining typed micro-opts: Int64 median/quantile, Bool any/all/sum.
