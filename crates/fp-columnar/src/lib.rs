@@ -32904,6 +32904,114 @@ mod ab_transpose_row_typed_ccfp {
     /// (box its wide `ScalarValues` variants) is worth a conformance-gated attempt;
     /// if no, the alloc eats the move and the only real lever is cod_fp's block view.
     /// Per-arm ADJACENT A/A null floor; decide on medians vs spread, not cv.
+    /// Times a heavily-autovectorizable f64 sum (xmm 2-wide under SSE2, ymm 4-wide
+    /// under AVX2) so the SAME source, built two ways, shows the ISA gap's cost.
+    /// Prints the compiled-in avx2 flag + sha256 + worker so a baseline-vs-v3 pair
+    /// pinned to ONE worker is a valid ratio. blocks x reps, min-of-block, spread.
+    #[test]
+    #[ignore = "diagnostic; run with --ignored --nocapture"]
+    fn isa_sum_kernel_ccfp() {
+        use std::process::Command;
+        const N: usize = 20_000_000;
+        const BLOCKS: usize = 11;
+        const REPS: usize = 5;
+        let data: Vec<f64> = (0..N).map(|i| (i as f64).mul_add(1.0000001, 0.5)).collect();
+
+        let mut ms = Vec::with_capacity(BLOCKS);
+        let mut nullr = Vec::with_capacity(BLOCKS);
+        for _ in 0..BLOCKS {
+            let (mut a, mut b) = (f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let d = std::hint::black_box(&data[..]);
+                let t0 = std::time::Instant::now();
+                let s: f64 = d.iter().copied().sum();
+                std::hint::black_box(s);
+                a = a.min(t0.elapsed().as_secs_f64() * 1e3);
+                let d = std::hint::black_box(&data[..]);
+                let t0 = std::time::Instant::now();
+                let s: f64 = d.iter().copied().sum();
+                std::hint::black_box(s);
+                b = b.min(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            ms.push(a.min(b));
+            nullr.push(a / b);
+        }
+        let med = median_of(&ms);
+        let (lo, hi) = spread_of(&nullr);
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().expect("exe"))
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map_or_else(|| "?".to_owned(), |s| s.trim().to_owned());
+        println!("=== ISA SUM KERNEL ===");
+        println!(
+            "  compiled avx2 = {}  fma = {}",
+            cfg!(target_feature = "avx2"),
+            cfg!(target_feature = "fma")
+        );
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  N={N} sum(f64) median={med:.4} ms  cv={:.2}%  A/A null spread=[{lo:.4}x,{hi:.4}x]",
+            cv_of(&ms)
+        );
+        println!("  throughput = {:.2} Gelem/s", N as f64 / (med / 1e3) / 1e9);
+    }
+
+    /// ISA-baseline probe (cc_fp): prints what the CURRENT BINARY was COMPILED for
+    /// (`cfg!(target_feature=...)`) vs what the RUNTIME worker CPU actually supports
+    /// (`is_x86_feature_detected!`). A gap (compiled SSE2, worker AVX2) means a whole
+    /// class of hot loops is leaving 256-bit width on the table. Both macros are safe.
+    #[test]
+    #[ignore = "diagnostic; run with --ignored --nocapture"]
+    fn isa_baseline_probe_ccfp() {
+        macro_rules! ct {
+            ($f:literal) => {
+                (cfg!(target_feature = $f), $f)
+            };
+        }
+        let compiled = [
+            ct!("sse2"),
+            ct!("sse4.1"),
+            ct!("avx"),
+            ct!("avx2"),
+            ct!("fma"),
+            ct!("avx512f"),
+        ];
+        println!("=== ISA BASELINE PROBE ===");
+        println!("arch = {}", std::env::consts::ARCH);
+        println!("--- COMPILED (this binary's target-feature) ---");
+        for (on, name) in compiled {
+            println!("  {name:8} compiled_in={on}");
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            println!("--- RUNTIME (worker CPU) ---");
+            for name in ["sse2", "sse4.1", "avx", "avx2", "fma", "avx512f"] {
+                let has = match name {
+                    "sse2" => is_x86_feature_detected!("sse2"),
+                    "sse4.1" => is_x86_feature_detected!("sse4.1"),
+                    "avx" => is_x86_feature_detected!("avx"),
+                    "avx2" => is_x86_feature_detected!("avx2"),
+                    "fma" => is_x86_feature_detected!("fma"),
+                    "avx512f" => is_x86_feature_detected!("avx512f"),
+                    _ => false,
+                };
+                println!("  {name:8} runtime_has={has}");
+            }
+            let gap = !cfg!(target_feature = "avx2") && is_x86_feature_detected!("avx2");
+            println!("--- VERDICT ---");
+            println!("  AVX2 ISA GAP (compiled SSE2 baseline, worker has AVX2) = {gap}");
+        }
+    }
+
     #[test]
     #[ignore = "perf ablation; run with --ignored --nocapture"]
     fn ab_transpose_pair_shrink_ceiling() {

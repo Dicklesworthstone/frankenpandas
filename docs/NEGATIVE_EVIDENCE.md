@@ -12658,3 +12658,75 @@ build; `crates/fp-frame` untouched. Ablation is `#[cfg(test)] #[ignore]`, no pro
 **arg-extrema** remains complete since `46b3374a8` (~7.5x). The two reopened transpose rejects (pair-buffer morsels,
 BTreeMap row shards) still need adjacent-A/A reruns and are `cod_fp`'s construction lane. My withdrawn label-itoa reject and
 flagged stack reject (previous entry) stand as withdrawn/flagged.
+
+### 2026-07-10 cc_fp — ISA-BASELINE GAP CONFIRMED (code fact): build emits SSE2, workers are AVX2+FMA. Fix is DOUBLY BLOCKED from measurement via rch (drops build flags AND has no worker pin). Surfaced as a repo-owned decision.
+
+Fleet-wide check (frankenscipy + frankenredis found the same defect). Answered with CODE FACTS, not timings, so the answer is
+immune to the cross-worker build variance this ledger has documented for a year (rows 86, 87, 90, 92).
+
+**WHAT THE BUILD EMITS vs WHAT THE WORKERS HAVE** — measured by a permanent `#[cfg(test)] #[ignore]` probe
+(`fp_columnar::isa_baseline_probe_ccfp`) that prints `cfg!(target_feature=..)` (compile target) beside
+`is_x86_feature_detected!(..)` (runtime worker CPU). Worker `hz1` (`hetzner1`), release profile:
+
+| feature | COMPILED into binary | worker RUNTIME has |
+| --- | --- | --- |
+| sse2 | **true** | true |
+| sse4.1 | **false** | true |
+| avx | **false** | true |
+| avx2 | **false** | **true** |
+| fma | **false** | **true** |
+| avx512f | false | false |
+
+> **AVX2 ISA GAP (compiled SSE2 baseline, worker has AVX2) = TRUE.** Confirmed. The build is generic x86-64 (SSE2); every
+> worker is AVX2+FMA. `.cargo/config.toml` is "intentionally empty" (the `jawxr` +fma,+avx2 experiment was reverted), so this
+> is the default baseline. This is the same defect frankenredis (BITCOUNT 3.045-3.188x) and frankenscipy (dense-linalg wall)
+> found, and it recontextualizes this ledger's whole math-unary family (floor 0.089x, sqrt 0.085x, log 0.20x — all lowering
+> to libm libcalls / scalar `sqrtsd` for want of `vroundpd`/`vsqrtpd`/SVML; row at line ~5235) and the i64-max ~1.7x gap
+> (line ~788) as ISA-baseline gaps, NOT algorithmic ones. numpy runtime-dispatches AVX regardless of compile target, which is
+> why it wins these.
+
+**THE FIX CANNOT BE MEASURED THROUGH THE MANDATORY rch RECIPE — doubly blocked, both newly confirmed this session:**
+
+1. **rch does NOT forward build flags to the remote compiler.** The `isa_sum_kernel_ccfp` probe prints its own
+   `cfg!(target_feature="avx2")`. Built three ways, all produced **avx2=false** binaries (distinct sha256 each, so each DID
+   rebuild):
+   - default: `compiled avx2=false`, sum(20M f64) 27.32 ms on `vmi1264463` (sha `5ccd9ea0…`)
+   - `RUSTFLAGS="-Ctarget-cpu=x86-64-v3"`: **still avx2=false**, 19.14 ms on `hz1` (sha `cae95925…`)
+   - `CARGO_ENCODED_RUSTFLAGS="-Ctarget-feature=+avx2,+fma"`: **still avx2=false**, 16.67 ms on `hz2` (sha `e5f2a774…`)
+   `x86-64-v3` mandates avx2, so `avx2=false` proves the flag never reached rustc on the worker. (The 27/19/17 ms spread is
+   pure cross-worker memory bandwidth on IDENTICAL SSE2 code — the sum of 160 MB is bandwidth-bound, not a flag effect — a
+   live reproduction of the "2.6x swing on identical source" methodology blocker at line 92.)
+2. **rch has NO worker pin.** `RCH_WORKER=hz1` was ignored (selected `vmi1264463`), matching the substrate-v2 note. So even
+   if a flagged binary built, a baseline-vs-v3 A/B could not be pinned to one worker, and cross-worker absolute ms is invalid
+   for a ratio.
+
+Together: a valid same-worker compile-flag A/B is **impossible via `rch exec`**. This is precisely why the 2026-07-04
+`+sse4.1,+avx` probe (line 90) was NO-SHIP ("no remote same-worker A/B obtainable").
+
+**THE ONLY WAY TO APPLY THE FLAG is `.cargo/config.toml` `[build] rustflags`**, which travels with the project sync and IS
+honored on the worker. I did NOT do this, and it should NOT be done unilaterally on `main`:
+- It is a GLOBAL build-policy change: every concurrent agent's build codegen changes mid-flight. `cod_fp` is running marginal
+  transpose A/Bs right now; silently switching their codegen to AVX2 would corrupt their measurements without their knowledge
+  (the exact hazard of rows 86/87/92).
+- The resulting binary is NON-PORTABLE: `+avx2` code SIGILLs on any non-AVX2 machine (a published crate, a non-AVX2 CI box).
+- AGENTS.md RULE and the line-90 note both say the valid path is "a repo-owned config/target-feature experiment in a
+  disposable branch with remote conformance", not an agent edit to main.
+
+**RECOMMENDATION (repo-owner decision, out of a single agent's scope):** on a disposable branch, set
+`.cargo/config.toml [build] rustflags = ["-Ctarget-cpu=x86-64-v3"]`, run the full conformance suite remotely (watch the 3
+known `acosh`/`arccosh` 1-ULP goldens — FMA contraction will flip them; they need tolerance-based or regenerated goldens,
+row 92), and re-baseline the math-unary + elementwise-bandwidth families. If the crate must stay portable, the alternative
+is runtime feature dispatch — but that needs `#[target_feature(enable="avx2")]` = `unsafe`, which the workspace
+`#![forbid(unsafe_code)]` denies (the `i64_max_avx2` revert, line ~792). So the real choice is: **(a) accept non-portability
+for an AVX2-only deployment via the config flag, or (b) relax `forbid(unsafe_code)` for a narrow audited SIMD-dispatch
+module, or (c) accept the ISA ceiling on the math-unary/bandwidth families permanently.** That is a project-identity call.
+
+SHIPPED THIS WINDOW: two permanent diagnostics — `isa_baseline_probe_ccfp` (compiled-vs-runtime ISA, any agent can run it to
+re-confirm the gap on any worker) and `isa_sum_kernel_ccfp` (a bandwidth/ISA sanity kernel). Both `#[cfg(test)] #[ignore]`,
+no production code. GREEN remote fail-closed: fp-columnar **475/0** (`vmi1149989`), rustfmt clean, no local build,
+`crates/fp-frame` untouched.
+
+**LESSON.** Many "we are Nx slower than numpy/pandas" rows in this ledger are partly a COMPILE-TARGET gap, not an algorithm
+gap, and no amount of source-level kernel work can close them while the build is SSE2 on AVX2 hardware. This is orthogonal to
+and higher-leverage than per-op levers — but on THIS repo it is gated behind a `forbid(unsafe_code)` + portability +
+multi-agent-safety decision that only the repo owner can make. Confirmed, sized, surfaced; not unilaterally actioned.
