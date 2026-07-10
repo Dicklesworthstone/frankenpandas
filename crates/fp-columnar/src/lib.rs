@@ -2216,7 +2216,13 @@ enum ScalarValues {
         strictly_increasing: OnceLock<bool>,
         fixed_width: OnceLock<Option<usize>>,
         lower_hex_sequence: OnceLock<Option<Utf8LowerHexSequence>>,
-        factorize_default: OnceLock<Utf8FactorizeDefaultWitness>,
+        // Boxed: this cold factorize cache is the single widest field (56 B) of the
+        // widest `ScalarValues` variant, so it alone sizes the whole enum. Boxing it
+        // (56 B -> 16 B) shrinks `ScalarValues`/`Column` for every column in the
+        // workspace, and the deref it adds falls ONLY on the cold factorize path
+        // (`utf8_default_factorize_columns`), never on the hot byte-access path
+        // (`bytes`/`offsets`), so the contiguous-Utf8 wins are untouched.
+        factorize_default: OnceLock<Box<Utf8FactorizeDefaultWitness>>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Lazy fixed-width lowercase-hex Utf8 sequence
@@ -9083,7 +9089,7 @@ impl Column {
                 factorize_default,
                 ..
             } => factorize_default
-                .get_or_init(|| build_utf8_factorize_default_witness(bytes, offsets)),
+                .get_or_init(|| Box::new(build_utf8_factorize_default_witness(bytes, offsets))),
             _ => return None,
         };
 
@@ -32963,6 +32969,39 @@ mod ab_transpose_row_typed_ccfp {
             cv_of(&ms)
         );
         println!("  throughput = {:.2} Gelem/s", N as f64 / (med / 1e3) / 1e9);
+    }
+
+    /// Size breakdown of the widest ScalarValues variant (cc_fp): finds the single
+    /// biggest field so a surgical box of ONE cold cache can shrink the 288-byte
+    /// Column without the whole 47-variant epic.
+    #[test]
+    #[ignore = "diagnostic; run with --ignored --nocapture"]
+    fn scalarvalues_size_breakdown_ccfp() {
+        use std::sync::OnceLock;
+        macro_rules! sz {
+            ($t:ty) => {
+                println!("  {:>4} B  {}", std::mem::size_of::<$t>(), stringify!($t));
+            };
+        }
+        println!("=== ScalarValues size breakdown ===");
+        sz!(super::ScalarValues);
+        sz!(Column);
+        println!("--- LazyContiguousUtf8 fields (the widest variant) ---");
+        sz!(std::sync::Arc<[u8]>);
+        sz!(OnceLock<bool>);
+        sz!(OnceLock<Option<usize>>);
+        sz!(OnceLock<Option<super::Utf8LowerHexSequence>>);
+        sz!(super::Utf8FactorizeDefaultWitness);
+        sz!(OnceLock<super::Utf8FactorizeDefaultWitness>);
+        sz!(OnceLock<Box<super::Utf8FactorizeDefaultWitness>>);
+        sz!(OnceLock<Vec<fp_types::Scalar>>);
+        println!("--- sum if factorize_default were boxed ---");
+        let cur = std::mem::size_of::<OnceLock<super::Utf8FactorizeDefaultWitness>>();
+        let boxed = std::mem::size_of::<OnceLock<Box<super::Utf8FactorizeDefaultWitness>>>();
+        println!(
+            "  factorize_default field: {cur} B -> {boxed} B  (saves {} B)",
+            cur - boxed
+        );
     }
 
     /// ISA-baseline probe (cc_fp): prints what the CURRENT BINARY was COMPILED for

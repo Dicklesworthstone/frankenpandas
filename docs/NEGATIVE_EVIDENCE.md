@@ -12953,3 +12953,50 @@ carries 120+ bytes of padding for a Utf8 variant it never uses.
 intern-String ineffective, single-block is cod_fp's), and the fourth (shrink `ScalarValues`) is precisely sized as an epic,
 not a tail-of-hour edit. No code changed; `crates/fp-frame` untouched (cod_fp live); no build. This is a map, so the next
 session — or the repo owner — spends effort on the one lever that survives scrutiny, with its numbers already attached.
+
+### 2026-07-10 cc_fp — SHIPPED first increment of the ScalarValues shrink epic: box the widest field (cold factorize cache). Column 288->248 B, bit-identical, workspace-wide. Pair 312->272 B.
+
+The "shrink ScalarValues" epic (prior entry) was sized as multi-turn and risky. Broke it into the FIRST shippable increment the
+ask requested: the single biggest contributor to the 312-byte `(String, Column)` pair, shrunk via ONE field, no epic.
+
+**FINDING (measured, not guessed): the single widest field.** `ScalarValues` is 200 B, sized entirely by its widest variant
+`LazyContiguousUtf8`. A size probe (`scalarvalues_size_breakdown_ccfp`, permanent) measured that variant's fields:
+`bytes` Arc 16, `offsets` Arc 16, `strictly_increasing` 8, `fixed_width` 24, `lower_hex_sequence` 40,
+**`factorize_default: OnceLock<Utf8FactorizeDefaultWitness>` = 56 (the biggest)**, `values` 32. The witness is 3 fat
+pointers (48 B); its OnceLock is 56 B. It is a COLD cache — only `Column::utf8_default_factorize_columns` ever populates or
+reads it (grep: 1 construction + 1 access site); the HOT byte-access path reads `bytes`/`offsets` and never touches it.
+
+**THE INCREMENT: box that one field.** `factorize_default: OnceLock<Box<Utf8FactorizeDefaultWitness>>` (56 B -> 16 B). Two
+lines: the field type, and `get_or_init(|| Box::new(build_witness(..)))`; the reader `witness.codes` auto-derefs through the
+`Box`. Measured effect on the whole enum (`scalarvalues_size_breakdown_ccfp`, worker `hz1`):
+
+> **`ScalarValues` 200 B -> 160 B, `Column` 288 B -> 248 B, `(String, Column)` pair 312 B -> 272 B.**
+
+`LazyContiguousUtf8` was the SOLE widest variant, so shrinking it 40 B shrank the enum 40 B — every `Column` in the workspace
+is now 40 B smaller.
+
+**BIT-IDENTICAL — boxing a cache changes no value.** GREEN remote fail-closed: fp-columnar **475/0**, fp-conformance
+**2048/0**, fp-frame lib **3133/0** (fp-frame is the biggest `Column` consumer). `rustfmt --check` clean; clippy
+`-p fp-columnar --all-targets` has 8 pre-existing warnings, all outside the changed hunks (2219 / 9092 / 32974+). No local build.
+
+**PERF — bounded-positive, directional evidence.** The pair-move (Vec push + BTreeMap collect) is 91% of transpose
+construction and is by-value move traffic; a 40 B-smaller pair moves 40/312 = 12.8% fewer bytes through the (already-AVX
+glibc) memmove. The pair-shrink harness (`ab_transpose_pair_shrink_ceiling`, binary sha256
+`8317bd35064cd4ba069c50fb9d97449e3973a0ad47ec4b740a4b57ae4aced23f`, worker `vmi1149989`) now measures REAL(272 B)/BOXED(32 B)
+= **1.8247x** (cv 4.13%/4.66%, A/A null floor 9.78%, DECIDABLE at 82.5%), DOWN from **2.5364x** when the pair was 312 B
+(`bf3d4fb77`, worker `ovh-a`): the smaller REAL pair sits measurably closer to the fully-boxed ideal. That is DIRECTIONAL
+(cross-worker, so not a precise same-worker delta), but it confirms the mechanism — and a bit-identical size reduction can
+only reduce move traffic, never increase it. The one place that could regress, the cold factorize path, gained O(1) (one Box
+alloc on first call + one deref) against an O(n) witness build — negligible by construction.
+
+**RISK CONTAINED — this is why the field, not the variant, was the right cut.** Boxing the whole `LazyContiguousUtf8` payload
+(21 sites, on the hot Utf8-access path) was the epic's blast radius. Boxing only its cold `factorize_default` field touches 1
+construction + 1 read, both off the hot path, so the astype 25.77x / dt.date / to_flat_index Utf8 wins are provably
+untouched (they never read `factorize_default`).
+
+**FOLLOW-UPS (same pattern, ranked): (1)** `lower_hex_sequence: OnceLock<Option<Utf8LowerHexSequence>>` = 40 B, next-biggest
+cold cache in the same variant — box it for another ~24 B; **(2)** re-run the size probe to find the NEW widest variant after
+this lands and box its widest cold field. Each increment is bit-identical, cold-path-only, and shrinks every `Column`. The
+full epic (box the hot payloads) remains gated on measuring Utf8-access regression; these cold-cache increments are not.
+
+`crates/fp-frame` untouched — `cod_fp` is editing it live.
