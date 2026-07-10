@@ -12874,6 +12874,34 @@ Raw candidate ms:
 calls `column_names()` and then this real `column(name)` observer, so it exercises the slot while still pricing all output
 name Strings.
 
+### 2026-07-10 cod_fp — `df_transpose_materialize` vs pandas 2.2.3 BLOCKED: RCH did not retrieve the current fp-bench binary
+
+The production WIN was committed and pushed first (`431294fa6`). The prescribed head-to-head sibling was then prepared
+with the exact fail-closed remote build recipe:
+
+`timeout 900s sh -c 'RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo build -p fp-bench --profile release-perf --features lazy-transpose-view'`
+
+The build succeeded on **`hz2`** in 2m37s, including `fp-frame`, `fp-io`, `fp-join`, and `fp-bench`. RCH then reported only
+**3,282 bytes** from the project-root artifact pass and **535 bytes / 2 files** from the rewritten custom target directory.
+The executable itself did not arrive. Local verification after RCH returned:
+
+- `target/release-perf/fp-bench` still resolves to the pre-existing 39,197,928-byte binary dated
+  `2026-07-10 01:11:21 -0400`, hours before this build;
+- that stale binary's SHA-256 is `cf41560180140b2fd38d338b3324fdd5a0c6479c964ac49f6635a9ed77c44a10`;
+- no `fp-bench` file newer than the 17:05 remote-build start exists under the checkout;
+- local `python3` does carry the required oracle, pandas **2.2.3**.
+
+Therefore the pandas harness was **not run**: doing so would silently benchmark a stale FrankenPandas binary that predates
+the landed slot store. This is the same RCH binary-retrieval defect already independently recorded in frankenSQLite on
+2026-07-10 (`cargo build` succeeds, custom-target retrieval returns only ~507 bytes, executable absent). It persists even
+with the mandatory `env -u CARGO_TARGET_DIR`; no local Cargo fallback or maturin build was attempted.
+
+Concrete retry condition: RCH must retrieve a HEAD-current `release-perf/fp-bench` executable whose timestamp and SHA can
+be recorded. Then run bounded
+`python3 benches/vs_pandas_harness.py --category dataframe_ops --workloads df_transpose_materialize --sizes 100k --dtypes float64`
+against pandas 2.2.3 and ledger both CVs plus the ratio. Until that substrate condition holds, the external ratio is
+**BLOCKED/UNMEASURED**, not a REJECT and not evidence against the 24,228.67x same-binary internal WIN.
+
 ### 2026-07-10 cc_fp — DEAD-END MAP for the "attack the 312-byte pair" levers, with a reason per idea. The one real lever (shrink ScalarValues) is a sized epic, surfaced not rushed.
 
 Two orthogonal levers were requested: (A) take the transcendental AVX2 win, (B) attack the 312-byte pair via intern-String or
