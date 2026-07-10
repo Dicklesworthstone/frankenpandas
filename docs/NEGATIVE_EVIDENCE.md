@@ -11180,3 +11180,21 @@ thread-caching (mimalloc `mi_theap_*` here), which is why this won where `to_dic
 allocator contention. NEXT in this vein (untried, same shape, ranked): `dt_date` 68.8ms and `dt_time` 58.3ms — both serial
 Utf8 builds that ALSO pay a `format!` String per row, and both are ~1.9x slower than `dt_strftime` (37.0ms) which formats the
 identical `YYYY-MM-DD` bytes with hand-rolled digit writers; fix the per-row `format!` first, then parallelize.
+
+### 2026-07-10 cod_fp - public transpose eager-ORIG batch-8192 all-dtype baseline - REJECT (Int64 >300 s)
+
+Ledger-grep preceded this attempt. It did not retry the rejected transpose compute/map-construction families; it was the
+honest eager-ORIG half of the new public-path A/B, using detached `6167c4522` with only the benchmark call changed from the
+direct view shortcut to the real `DataFrame::transpose()`. Both engines used the existing `TRANSPOSE_BATCH = 8192`, the
+finishable 10k x 10 shape, pandas 2.2.3, `taskset -c 2`, and an explicit outer `timeout 1500s`; the harness additionally
+bounds each fp subprocess at 300 seconds.
+
+Float64 completed and reported **0.04x pandas**, proving this binary exercised eager public transpose rather than the lazy
+view shortcut. The following Int64 row produced no timing vector: its release-perf fp subprocess hit the harness's exact
+**300 s** bound while executing 8,192 transposes per sample. The all-dtype harness aborted before writing an artifact, so
+there is no CV-valid ORIG vector and no candidate/public-path speedup claim from this attempt.
+
+Decision: **REJECT this benchmark configuration, not the representation lever.** Retry condition is a symmetric smaller
+batch applied to both the fp benchmark and pandas harness so batch totals remain comparable, with the same 10k x 10 data,
+same local worker/core, release-perf binaries, pandas 2.2.3, and cv <= 5% gate. Do not retry batch 8,192 for the eager
+all-dtype public path.
