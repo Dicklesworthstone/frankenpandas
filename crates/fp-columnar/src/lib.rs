@@ -14185,6 +14185,32 @@ impl Column {
     /// Matches `pd.Series.median()` via fp-types::nanmedian.
     #[must_use]
     pub fn median(&self) -> Scalar {
+        // Typed Float64 fast path: order statistics straight over the contiguous
+        // f64 buffer instead of materializing `Vec<Scalar>` then `collect_finite`'s
+        // per-Scalar `to_f64`. `as_f64_slice` yields an all-valid buffer, so
+        // `collect_finite` (which drops only MISSING, keeping every `to_f64`-able
+        // value including NaN/inf) copies exactly these values in this order —
+        // `data.to_vec()`. Same O(n) `select_nth_unstable_by(mid, partial_cmp)` and
+        // odd/even midpoint rule; `select_nth_unstable_by` is deterministic, so
+        // identical input yields the identical `nums[mid-1]`/`nums[mid]` the
+        // Scalar path produced. Empty ⇒ `Null(NaN)`, exactly as `nanmedian`.
+        if let Some(data) = self.as_f64_slice() {
+            if data.is_empty() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mut nums: Vec<f64> = data.to_vec();
+            let n = nums.len();
+            let mid = n / 2;
+            let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+            let (left, mid_ref, _right) = nums.select_nth_unstable_by(mid, cmp);
+            let mid_val = *mid_ref;
+            return if n.is_multiple_of(2) {
+                let lower = left.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                Scalar::Float64((lower + mid_val) / 2.0)
+            } else {
+                Scalar::Float64(mid_val)
+            };
+        }
         nanmedian(&self.values)
     }
 
@@ -36721,6 +36747,134 @@ mod ab_temporal_mode_ccfp {
         );
         println!(
             "  CAND raw-i64 ns mode + re-tag      min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ab_f64_median_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, Scalar, nanmedian};
+
+    /// Seeded (splitmix64) finite f64 values in [0, 1e6).
+    fn f64s(n: usize) -> Vec<f64> {
+        let mut s: u64 = 0x9B1D_2E4C_75A0_31F7;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                (z >> 11) as f64 / (1u64 << 53) as f64 * 1.0e6
+            })
+            .collect()
+    }
+    /// Exact pre-lever path: materialize the Scalars then `nanmedian`.
+    fn orig_median(col: &Column) -> Scalar {
+        nanmedian(col.values.as_slice())
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_f64_median() {
+        const N: usize = 4_000_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let src = f64s(N);
+        let mk_col = || Column::from_f64_values(src.clone());
+
+        // Parity: fast path == the exact Scalar `nanmedian` path (odd AND even n),
+        // plus the empty column.
+        {
+            let a = orig_median(&mk_col());
+            let b = mk_col().median();
+            assert_eq!(a, b, "median diverged (even n)");
+            let odd: Vec<f64> = src[..N - 1].to_vec();
+            let ao = nanmedian(Column::from_f64_values(odd.clone()).values.as_slice());
+            let bo = Column::from_f64_values(odd).median();
+            assert_eq!(ao, bo, "median diverged (odd n)");
+            let ae = nanmedian(Column::from_f64_values(Vec::new()).values.as_slice());
+            let be = Column::from_f64_values(Vec::new()).median();
+            assert_eq!(ae, be, "empty median diverged");
+        }
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_median(&mk_col()));
+            std::hint::black_box(mk_col().median());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_median(std::hint::black_box(&co)));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).median());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).median());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB f64 median (ONE binary, ONE invocation) N={N}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG nanmedian(Vec<Scalar>) min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND typed &[f64] select    min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

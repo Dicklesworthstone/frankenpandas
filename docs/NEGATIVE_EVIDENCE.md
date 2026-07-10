@@ -13719,3 +13719,41 @@ duplicated) is now COMPLETE for temporal, mirroring the Utf8 family. ONLY `isin`
 reuse). The routing-reuse micro-opt vein (Utf8 byte-span + temporal i64-route) is now essentially EXHAUSTED across the common
 cardinality/dedup/membership/map surface. NEXT genuine lever = a new primitive (temporal isin FxHashSet, or SIMD/radix in
 groupby/join — the latter in cod's crates, needs coordination) or FRONTIER + HOLD.
+
+### 2026-07-10 cc_fp — WIN: `median` typed &[f64] select bypasses Scalar materialization — 2.066x fp-side, bit-identical (order-statistics primitive; NOT the hoped-for structural swing)
+
+Pivoted OFF cardinality/temporal to the order-statistics family. `Column::median` had NO typed path — it called
+`nanmedian(&self.values)`, which materializes `Vec<Scalar>` (48 MB @ 2M f64) then `collect_finite` (per-Scalar `to_f64`). Added a
+Float64 fast path: `as_f64_slice()` → `data.to_vec()` → the SAME `select_nth_unstable_by(mid, partial_cmp)` + odd/even midpoint
+rule. `select_nth_unstable_by` is deterministic, so identical input ⇒ identical `nums[mid-1]`/`nums[mid]`.
+
+KEY correctness finding: `collect_finite` is a MISNOMER — `filter(!is_missing).filter_map(to_f64().ok())` KEEPS NaN/inf and drops
+only MISSING (Null). So for an all-valid Float64 column it equals `data.to_vec()` (all values, in order) — the fast path must NOT
+finite-filter, or it would diverge on a column containing a NaN value. Bit-identical confirmed for even/odd/empty.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG `nanmedian(col.values.as_slice())` vs CAND `median()`
+interleaved, per-arm adjacent A/A null control; 4M finite f64):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `8961a28b0ef51232b1438ce3e6ad062128c450c97f5961a006e5d6d231dc1612` |
+| worker | `hetzner1` |
+| ORIG `nanmedian(Vec<Scalar>)` | 853.904 ms (cv 0.33%) |
+| CAND typed `&[f64]` select | 413.337 ms (cv 0.25%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0018x -> 0.18% floor** |
+| **fp-side ratio (min-of-blocks)** | **2.066x (+106.6%) — DECIDABLE (106.6% is ~590x the 0.18% floor)** |
+
+⚠️ HONEST FRAMING: this is a **materialization-bypass micro-opt on a NEW op** (order statistics), NOT the from-scratch structural
+primitive (SIMD group-by / radix-partition join / vectorized-hash aggregation) the lane asked for. `nanmedian` already selects
+over `f64` (via `collect_finite`) with the O(n) `select_nth`, so the entire 2.07x is the removed `Vec<Scalar>` materialization +
+`to_f64` dispatch. Clean cv. BIT-IDENTICAL (even/odd/empty asserted). GREEN remote fail-closed: fp-columnar lib **475/0**,
+fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. `crates/fp-frame` untouched.
+
+**STRUCTURAL-FRONTIER SURVEY (why no bigger swing landed in fp-columnar this turn):** profiled the algorithmic candidates —
+`sort_values`/`argsort` i64/f64/temporal are ALREADY LSD-radix (`radix_sort_i64_values`/`radix_argsort_*`); `median`/`quantile`
+are ALREADY O(n) `select_nth`; groupby-dense/rank-radix/GEMM-blocking are done. The genuine from-scratch structural primitives
+the lane names (SIMD group-by, radix-partition join, vectorized-hash aggregation) live in **cod's `fp-join`/groupby crates**,
+which cc_fp does not own (`#![forbid(unsafe_code)]` also blocks explicit SIMD intrinsics — only autovectorization). Within
+fp-columnar the remaining levers are typed materialization-bypasses (median done; `quantile`, Int64-median, Bool
+any/all/sum over the `Arc<[bool]>` backing, temporal `isin`). RECOMMENDATION: the next big structural swing needs the fp-join/
+groupby walls down (coordinate with cod) — otherwise fp-columnar is in micro-opt-harvest mode.
