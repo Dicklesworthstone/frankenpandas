@@ -13419,3 +13419,40 @@ per-ROW `Vec<Scalar::Utf8>` `String` materialization by dedup/tally over `as_utf
 `from_utf8_contiguous`. Same tax, same fix, per-row saving so cardinality-independent. Other `&self.values`-iterating
 contiguous-Utf8 consumers (set ops via `unique`, `nunique`, `factorize`, `mode`) are candidates — but check each for an existing
 fixed-width/packed fast path before re-applying (some already escaped `Scalar` materialization).
+
+### 2026-07-10 cc_fp — WIN: contiguous-Utf8 `nunique` counts distinct byte spans — 1.486x fp-side, bit-identical (third vein win; `factorize` already covered, checked)
+
+Third Utf8-materialization-bypass win, the highest ratio of the vein. `nunique_with_dropna` had typed paths for Int64 (dense +
+`count_distinct_i64_wide`) but a contiguous-Utf8 column fell to `nannunique(&self.values)`, which forces `as_slice()` to
+**materialize a `Vec<Scalar::Utf8>` — one heap `String` per row** — then keys each by `&str` into an FxHashSet. Added a fast
+path: for an all-valid contiguous-Utf8 backing, count distinct byte spans via `FxHashSet<&[u8]>` (byte-equality == `&str`-equality
+for valid UTF-8), return `Scalar::Int64(seen.len())` — **zero per-row `String` alloc, no output column** (pure count, the
+cleanest lever of the vein). `as_utf8_contiguous` matches only all-valid, so there are no missing values: `nannunique` skips
+missing (none) and the `!dropna` branch adds a bucket only when a missing value exists (none) — so the count is identical for
+BOTH `dropna` values, matching the single fast-path return.
+
+PROFILE-FIRST TRIAGE (checked all four vein candidates before picking): `factorize` ALREADY has a contiguous-Utf8 fast path
+(`utf8_default_factorize_columns` for the default `!sort && use_na_sentinel`) — NOT re-done. `mode` DOES still materialize
+(`for v in &self.values` → `Key::Utf8`) — a valid future lever, deferred (nunique is higher-traffic and cleaner). `set ops`
+route through `unique` (already shipped). Picked `nunique` as the highest-value clean target.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG reference fn vs CAND `nunique()` interleaved, per-arm
+adjacent A/A null control; 2M rows, 50k distinct; ORIG = a bench-only fn replaying `nannunique`'s cost — `col.values.as_slice()`
+materialize + `FxHashSet<&str>` distinct count — CONSERVATIVE: omits the per-elem `is_missing()` and `ScalarKey` enum wrap):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `b86afb76328284784adce34bef5e8eecb6ef8fa84521c9ee6e24fd0b078f7b51` |
+| worker | `fixmydocuments` |
+| ORIG `nannunique` `Scalar::Utf8` count | 393.725 ms (cv 0.87%) |
+| CAND contiguous `&[u8]` count | 264.910 ms (cv 0.56%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0057x -> 0.57% floor** |
+| **fp-side ratio (min-of-blocks)** | **1.486x (+48.6%) — DECIDABLE (48.6% is ~85x the 0.57% floor)** |
+
+BIT-IDENTICAL: the A/B parity block asserts the fast-path count equals the generic reference AND equals `DISTINCT` AND equals
+`nunique_with_dropna(false)` (both dropna values agree for all-valid). GREEN remote fail-closed: fp-columnar lib **475/0**,
+fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. No local build. `crates/fp-frame` untouched.
+
+**UTF8-MATERIALIZATION-BYPASS VEIN (cc_fp, all bit-identical): `unique` 1.457x, `value_counts` 1.430x, `nunique` 1.486x.** All
+remove the per-ROW `Vec<Scalar::Utf8>` `String` materialization by dedup/tally/count over `as_utf8_contiguous` byte spans. Only
+`mode` remains un-done in this family (still a candidate); `factorize` was already covered.
