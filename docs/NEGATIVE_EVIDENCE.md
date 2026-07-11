@@ -14681,3 +14681,34 @@ excluding cod's groupby/join/io) is exhausted. The one remaining fp-columnar STR
 at high cardinality — is byte-identity-hard: at high card nearly every value ties at count 1, so the stable first-seen tie order
 dominates the sorted output, and radix partitioning scrambles first-seen order (recovering it needs a per-value min-index pass that
 defeats the cache-locality the radix win depends on). Needs an explicit design decision before a real attempt.
+
+
+### 2026-07-11 cc_fp — REJECT (median gate fails): radix-partition wide-i64 `value_counts` tally — 0.66x LOSS; counting-sort pivot within noise
+
+Authorized follow-up to design+ship the radix `value_counts` lever. PROFILE-FIRST (bv --robot-triage + this ledger): the wide
+high-card i64 path is `Series::value_counts` → `value_counts_i64_wide` → `oa_value_counts_i64` (single open-addressing
+`(i64,u32)` table, ~4n/3 slots) + a stable descending count sort. At N=8M / 99.01% distinct (7.92M distinct, 39.6k values with
+count>1) the whole op is **~500 ms**, and it is **~93% the tally** (single ~192 MB table = one LLC miss per element, ~58 ns/elem —
+the known khash floor; pandas khash ~15-20 ns) and only ~7% the sort. So the tally, not the sort, is the cost.
+
+ATTEMPT 1 — RADIX TALLY (mirror of the shipped `count_distinct_i64_radix` e84d6255a): scatter (value, original-index) into P=256
+partitions, per-partition open-addr tally tracking count AND min first-index, then ONE `(count desc, first_idx asc)` sort. Parity
+EXACT (byte-identical to the single-table first-seen + stable-desc order). But **0.661x — a 33.9% LOSS**: value_counts (unlike
+count_distinct, which has no output and no sort) must materialize + sort 7.92M pairs, and the (value,index) scatter (96 MB) plus
+random-access updates to the shared 7.92M-entry `out` exceed the tally cache-locality gain. Radix helps only when the tally is the
+WHOLE cost (distinct-count); with a large materialized+sorted output it is net-negative.
+
+ATTEMPT 2 — STABLE COUNTING SORT by count (O(D+maxc), replaces the O(D log D) comparison sort; byte-identical because a stable
+counting sort preserves first-seen order within each equal-count bucket). Parity EXACT. But the sort is only ~7% of the op, so the
+best case is ~7%: measured **+6.8% (decidable) then +2.3% (NOT decidable) on re-run — within the ~2.9% A/A null floor**. Not a
+reliable median win.
+
+DECISION: SURFACE. No production change (both attempts lived only in the A/B example). Gate on median FAILED. The dominant cost
+(the LLC-bound single-table tally) resists byte-identical speedup: radix's scatter overhead beats its locality gain here, and the
+sort (the only other component) is too small to matter. RETRY-CONDITION: a genuinely cache-resident i64 tally that also emits
+first-seen order (khash-class) — a hard structural primitive, the same "khash floor" the ledger has repeatedly hit; or accept a
+non-first-seen tie order (parity/golden change, outside byte-identical). A/B harness: `crates/fp-columnar/examples/ab_vc_i64_radix.rs`.
+
+**LANE STATUS: frontier+hold confirmed** — searchsorted + Int64-reductions shipped and closed; radix value_counts (the last
+recorded fp-columnar structural vein) is a measured loss; the big structural swings (SIMD group-by / radix join / khash-class
+tally) are cod's crates. No clean measurable byte-identical cc-lane lever remains without a design/parity decision.
