@@ -14348,3 +14348,39 @@ present-mid-exact / just-below / just-above / present-last / after-last needles,
 on BOTH paths. GREEN remote fail-closed: fp-columnar lib **485/0**, fp-conformance all-green (main suite **1596/0**, searchsorted
 oracle `_left`/`_right`/`_exact_match`/`_integers`/`_strings` all pass, tokio supply-chain policy passed this run); rustfmt clean;
 clippy `-D warnings` clean. `crates/fp-frame` and cod's groupby/join untouched.
+
+
+### 2026-07-11 cc_fp — WIN: `searchsorted_values` gains a Timedelta64 `partition_point` typed path — 20.7x median, bit-identical
+
+Closes the searchsorted_values typed-path family: it already had Int64/Float64/Datetime64/Utf8 arms, but a sorted
+**Timedelta64** column fell to the per-needle generic `searchsorted_position`, materializing the whole
+`Vec<Scalar::Timedelta64>` (24 B/elem, ~96 MB at 4M) to serve `k` searches (the SUB-LINEAR-TAKE pathology). The lever mirrors the
+Datetime64 arm verbatim: guard `!self.has_nulls() && as_timedelta64_slice()==Some && !data.contains(&i64::MIN)` and all needles
+`Scalar::Timedelta64(v) with v != i64::MIN`, then `partition_point(|&v| v < nv)` (left) / `(|&v| v <= nv)` (right) over the raw
+`&[i64]` ns — zero allocation.
+
+**BIT-IDENTITY:** `compare_scalars_na_last` has an EXACT `(Timedelta64(a), Timedelta64(b)) => a.cmp(b)` arm (raw i64, no lossy
+`to_f64`), so partition_point over the ns == the generic binary search — same first-`>=` (left) / first-`>` (right) index. NaT is
+`Timedelta::NAT == i64::MIN`: a NaT datum (`!data.contains(&i64::MIN)`) or a NaT needle (`v != i64::MIN` guard) EXCLUDES the column
+/ batch from the typed path, so it falls through to the generic loop — which errors `ValueIsMissing` on the NaT needle exactly as
+the per-needle path does (a NaT needle `is_missing()` since `*v == Timedelta::NAT`). `!self.has_nulls()` is required because
+`as_timedelta64_slice()` does not itself gate validity (it exposes the raw backing), mirroring the Datetime64 arm.
+
+**MEASURED (substrate-v2, one binary / one rch invocation, interleaved ORIG/CAND, per-arm A/A null control, min-of-9-blocks,
+median gate; N=4,000,000, needles=1,000, worker vmi1293453):**
+
+| arm | min ms | cv |
+| --- | --- | --- |
+| ORIG generic `Vec<Scalar>` bsearch | 27.708 | 8.56% |
+| CAND `partition_point &[i64]` | 1.339 | 8.60% |
+
+fp-side ratio ORIG/CAND = **20.691x** (+1969.1%); NULL-CONTROL (CAND A/A) median 1.0958x, floor 9.58% — **DECIDABLE** (effect
+≈205x the floor). (Lower ratio than the Float64 arm's 57.9x is the CAND arm's worker-dependent timing — 1.339 ms here vs 0.541 ms
+on vmi1149989 — not a weaker bypass; both ORIG arms pay the same ~96 MB materialization.)
+
+Parity test `ab_td64_searchsorted_parity` asserts typed == per-needle-generic for BOTH sides across before-first / present-first /
+present-mid / present-last / after-last needles, plus empty needles, plus that a NaT needle errors on BOTH paths. GREEN remote
+fail-closed: fp-columnar lib **486/0**, fp-conformance all-green (main suite **1596/0**, searchsorted oracle
+`_left`/`_right`/`_exact_match`/`_integers`/`_strings` all pass, tokio supply-chain policy passed); rustfmt clean; clippy
+`-D warnings` clean. `crates/fp-frame` and cod's groupby/join untouched. The searchsorted_values typed-path family is now CLOSED
+(Int64 · Float64 · Datetime64 · Timedelta64 · Utf8).

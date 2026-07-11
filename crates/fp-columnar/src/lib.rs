@@ -17411,6 +17411,37 @@ impl Column {
                 .collect();
             return Ok(Self::from_i64_values_owned(out));
         }
+        // Timedelta64 analogue: all-valid no-NaT sorted ns + all-(non-NaT)-Timedelta64
+        // needles → partition_point over the raw ns. `compare_scalars_na_last` has an
+        // EXACT `Timedelta64(a).cmp(b)` arm, so this is bit-identical to the generic
+        // binary search. NaT (i64::MIN) in self or a needle falls through (NaT is
+        // missing → generic errors/handles), exactly mirroring the Datetime64 arm.
+        if (side == "left" || side == "right")
+            && !self.has_nulls()
+            && let Some(data) = self.as_timedelta64_slice()
+            && !data.contains(&i64::MIN)
+            && needles
+                .iter()
+                .all(|n| matches!(n, Scalar::Timedelta64(v) if *v != i64::MIN))
+        {
+            let left = side == "left";
+            let out: Vec<i64> = needles
+                .iter()
+                .map(|n| {
+                    let nv = match n {
+                        Scalar::Timedelta64(v) => *v,
+                        _ => unreachable!("guarded all-Timedelta64 above"),
+                    };
+                    let pos = if left {
+                        data.partition_point(|&v| v < nv)
+                    } else {
+                        data.partition_point(|&v| v <= nv)
+                    };
+                    pos as i64
+                })
+                .collect();
+            return Ok(Self::from_i64_values_owned(out));
+        }
         // Contiguous-Utf8 analogue: an all-valid (sorted) Utf8 column with all-Utf8
         // needles binary-searches over the byte spans directly, instead of
         // `searchsorted_position` accessing `&self.values[mid]` -- which forces
@@ -39171,6 +39202,202 @@ mod ab_f64_searchsorted_ccfp {
         );
         println!(
             "  CAND partition_point &[f64]      min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ab_td64_searchsorted_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, DType, Scalar, ValidityMask};
+
+    /// SORTED all-valid Timedelta64 column `[0, 1, ..., n-1]` ns (no NaT, the
+    /// searchsorted precondition) with the `LazyAllValidTimedelta64Vec` backing
+    /// that `as_timedelta64_slice()` returns.
+    fn sorted_td64(n: usize) -> Column {
+        let data: Vec<i64> = (0..n as i64).collect();
+        Column::from_timedelta64_values_with_validity(data, ValidityMask::all_valid(n))
+    }
+    /// Faithful replica of the pre-lever generic path: per-needle
+    /// `searchsorted_position` (accesses `&self.values[mid]`, forcing the whole
+    /// `Vec<Scalar::Timedelta64>` via `as_slice`'s `get_or_init`), then an Int64
+    /// position column.
+    fn orig_ss(col: &Column, needles: &[Scalar], side: &str) -> Column {
+        let positions: Vec<Scalar> = needles
+            .iter()
+            .map(|needle| col.searchsorted_position(needle, side, None))
+            .map(|r| r.map(|p| Scalar::Int64(p as i64)))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("searchsorted");
+        Column::new(DType::Int64, positions).expect("int64 col")
+    }
+    /// Non-panicking sibling of `orig_ss`: propagates the first per-needle error
+    /// (used to assert the generic path errors on a NaT/missing needle).
+    fn orig_ss_result(
+        col: &Column,
+        needles: &[Scalar],
+        side: &str,
+    ) -> Result<(), super::ColumnError> {
+        for needle in needles {
+            col.searchsorted_position(needle, side, None)?;
+        }
+        Ok(())
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    fn ab_td64_searchsorted_parity() {
+        // Typed partition_point == generic searchsorted_position for BOTH sides
+        // across before-first / present-first / present-mid / present-last /
+        // after-last needles, plus empty needles.
+        let col = || sorted_td64(10_000);
+        let needles: Vec<Scalar> = [-1_i64, 0, 5000, 9999, 10_000]
+            .iter()
+            .map(|v| Scalar::Timedelta64(*v))
+            .collect();
+        for side in ["left", "right"] {
+            assert_eq!(
+                orig_ss(&col(), &needles, side).values.as_slice(),
+                col()
+                    .searchsorted_values(&needles, side)
+                    .expect("ss")
+                    .values
+                    .as_slice(),
+                "td64 searchsorted diverged side={side}"
+            );
+        }
+        // A NaT (i64::MIN) needle is MISSING (Timedelta::NAT): the typed guard
+        // EXCLUDES it, so the batch falls through to the generic comparator, which
+        // errors ValueIsMissing -- exactly as the per-needle generic does.
+        let with_nat = vec![Scalar::Timedelta64(5000), Scalar::Timedelta64(i64::MIN)];
+        for side in ["left", "right"] {
+            assert!(
+                col().searchsorted_values(&with_nat, side).is_err(),
+                "td64 searchsorted must error on NaT needle side={side}"
+            );
+            assert!(
+                orig_ss_result(&col(), &with_nat, side).is_err(),
+                "generic must also error on NaT needle side={side}"
+            );
+        }
+        let empty: Vec<Scalar> = Vec::new();
+        assert_eq!(
+            orig_ss(&col(), &empty, "left").values.as_slice(),
+            col()
+                .searchsorted_values(&empty, "left")
+                .expect("ss")
+                .values
+                .as_slice(),
+            "td64 searchsorted empty-needles diverged"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_td64_searchsorted() {
+        const N: usize = 4_000_000;
+        const NEEDLES: usize = 1_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let mk_col = || sorted_td64(N);
+        let needles: Vec<Scalar> = (0..NEEDLES)
+            .map(|j| Scalar::Timedelta64((j * (N / NEEDLES)) as i64))
+            .collect();
+
+        // Parity guard inside the perf run too.
+        assert_eq!(
+            orig_ss(&mk_col(), &needles, "left").values.as_slice(),
+            mk_col()
+                .searchsorted_values(&needles, "left")
+                .unwrap()
+                .values
+                .as_slice(),
+            "td64 searchsorted diverged (perf)"
+        );
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_ss(&mk_col(), &needles, "left"));
+            std::hint::black_box(mk_col().searchsorted_values(&needles, "left").unwrap());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_ss(std::hint::black_box(&co), &needles, "left"));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(
+                    std::hint::black_box(&c1)
+                        .searchsorted_values(&needles, "left")
+                        .unwrap(),
+                );
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(
+                    std::hint::black_box(&c2)
+                        .searchsorted_values(&needles, "left")
+                        .unwrap(),
+                );
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB td64 searchsorted (ONE binary, ONE invocation) N={N} needles={NEEDLES}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG generic Vec<Scalar> bsearch min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND partition_point &[i64]      min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(
