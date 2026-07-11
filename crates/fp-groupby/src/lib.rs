@@ -2491,6 +2491,17 @@ pub fn groupby_agg(
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
     }
 
+    // Bounded Int64 keys should reach the direct-address CSR median before the
+    // generic numeric-key hash path. Both paths use the same numeric median
+    // selection, but the dense path avoids per-row hashing and per-group Vecs.
+    if matches!(func, AggFunc::Median)
+        && let Some((out_index, out_values)) =
+            try_groupby_median_dense_int64(key_vals, val_vals, options.dropna, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
+    }
+
     // Generic string/object-key median needs sortable values, but it can store
     // numeric f64 values directly instead of cloning Scalar values and then
     // allocating a second collect_finite vector inside nanmedian.
@@ -2577,15 +2588,6 @@ pub fn groupby_agg(
     if matches!(func, AggFunc::Nunique) {
         let (out_index, out_values) =
             try_groupby_nunique_borrowed_sets(key_vals, val_vals, options.dropna, options.sort);
-        let out_column = Column::from_values(out_values)?;
-        return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
-    }
-
-    // Dense CSR group-and-sort median for bounded Int64 keys + numeric values.
-    if matches!(func, AggFunc::Median)
-        && let Some((out_index, out_values)) =
-            try_groupby_median_dense_int64(key_vals, val_vals, options.dropna, options.sort)
-    {
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
     }
@@ -3273,6 +3275,7 @@ mod tests {
     use super::{
         GroupByExecutionOptions, GroupByOptions, groupby_nunique, groupby_prod, groupby_size,
         groupby_sum, groupby_sum_with_options, groupby_sum_with_trace,
+        try_groupby_median_dense_int64, try_groupby_median_numeric_vectors,
         try_groupby_sum_dense_int64_values,
     };
 
@@ -4223,6 +4226,46 @@ mod tests {
                     "median val {ctx} i={i}: {g} vs {}",
                     exp_median[i]
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn dense_median_dispatch_matches_generic_bits() {
+        let keys = vec![
+            Scalar::Int64(2),
+            Scalar::Int64(-1),
+            Scalar::Int64(2),
+            Scalar::Int64(-1),
+            Scalar::Int64(0),
+            Scalar::Int64(0),
+            Scalar::Int64(3),
+        ];
+        let values = vec![
+            Scalar::Float64(9.0),
+            Scalar::Float64(-0.0),
+            Scalar::Float64(1.0),
+            Scalar::Float64(0.0),
+            Scalar::Float64(4.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::Null),
+        ];
+
+        for sort in [false, true] {
+            let dense = try_groupby_median_dense_int64(&keys, &values, true, sort)
+                .expect("bounded Int64 keys take the dense path");
+            let generic = try_groupby_median_numeric_vectors(&keys, &values, true, sort)
+                .expect("numeric values take the generic path");
+
+            assert_eq!(dense.0, generic.0);
+            assert_eq!(dense.1.len(), generic.1.len());
+            for (dense_value, generic_value) in dense.1.iter().zip(&generic.1) {
+                match (dense_value, generic_value) {
+                    (Scalar::Float64(dense), Scalar::Float64(generic)) => {
+                        assert_eq!(dense.to_bits(), generic.to_bits());
+                    }
+                    _ => assert_eq!(dense_value, generic_value),
+                }
             }
         }
     }

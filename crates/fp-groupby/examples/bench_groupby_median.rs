@@ -1,3 +1,5 @@
+#![cfg_attr(test, feature(test))]
+
 //! Bench + golden harness for the dense-Int64 groupby median fast path
 //! (`try_groupby_median_dense_int64`).
 //!
@@ -16,6 +18,9 @@ use fp_groupby::{AggFunc, GroupByOptions, groupby_agg};
 use fp_index::IndexLabel;
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
+
+#[cfg(test)]
+extern crate test;
 
 /// Deterministic splitmix64 so the harness needs no rand dependency and is
 /// reproducible across before/after builds.
@@ -46,6 +51,29 @@ fn build_data(n: usize, num_groups: i64) -> (Series, Series) {
     let key_series = Series::from_values("key", idx.clone(), keys).expect("keys");
     let val_series = Series::from_values("value", idx, vals).expect("vals");
     (key_series, val_series)
+}
+
+/// `cargo bench` entry point. The unstable libtest bencher reports the median
+/// sample time, which makes this the decision surface for dispatch changes.
+#[cfg(test)]
+#[bench]
+fn dense_int64_median_dispatch(b: &mut test::Bencher) {
+    let (keys, vals) = build_data(2_000_000, 200);
+    let policy = RuntimePolicy::strict();
+
+    b.iter(|| {
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_agg(
+            &keys,
+            &vals,
+            AggFunc::Median,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .expect("median");
+        test::black_box(out);
+    });
 }
 
 fn main() {

@@ -13826,3 +13826,42 @@ BIT-IDENTICAL: the A/B parity block asserts equality vs the exact Scalar `nanqua
 fp-columnar lib **475/0**, fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. `crates/fp-frame` untouched.
 Order-statistics typed-select family (`median` 2.066x + `quantile` 2.058x) now COMPLETE; `percentile`/`nanquantile`-alias route
 through `quantile` so they inherit it. Remaining typed micro-opts: Int64 median/quantile, Bool any/all/sum.
+
+### 2026-07-10 cod_fp — WIN: bounded-Int64 `fp-groupby` median restores dense-CSR dispatch precedence — 1.465x median, bit-identical
+
+`groupby_agg(..., Median, ...)` already had a dense direct-address CSR implementation for bounded all-valid Int64 keys, but
+the later generic numeric-median helper was dispatched first and accepted the same input. That made the dense path unreachable
+for its intended workload. The one production lever moves the existing dense admission ahead of the generic hash/vector
+fallback; the algorithms and every fallback are unchanged.
+
+PROFILE FIRST (`vmi1149989`, 2M Float64 values / 200 scrambled Int64 groups): baseline `perf record` attributed **34.66%**
+to `HashMap::rustc_entry`, **34.43%** to `try_groupby_median_numeric_vectors`, and **8.75%** to `Scalar::to_f64`. After the
+dispatch reorder those frames disappear; **72.24%** is in the intended `try_groupby_median_dense_int64` helper and 9.17% in
+its order-statistic partition. Opportunity score: impact 5 x confidence 5 / effort 1 = **25**.
+
+MEDIAN GATE (same worker, exact fail-closed build prefix
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench`, libtest median entry
+`dense_int64_median_dispatch`):
+
+| run | baseline generic dispatch | candidate dense dispatch | ratio |
+| --- | ---: | ---: | ---: |
+| primary remote cargo-bench | 36.637 ms | 25.016 ms | **1.465x (+46.5%, 31.7% latency reduction)** |
+| independent perf-instrumented rerun | 35.654 ms | 28.144 ms | **1.267x (+26.7%, 21.1% latency reduction)** |
+
+The worker was noisy (libtest spread was wide), so the verdict is based on the requested median and the independent same-worker
+confirmation, not the fastest sample. Both comparisons clear a 20% win, and the post-change profile proves the intended path
+switch rather than a timing-only effect.
+
+BIT-IDENTICAL: `dense_median_dispatch_matches_generic_bits` compares the dense and prior generic helpers directly for sorted and
+first-seen output order, null/all-missing groups, even/odd groups, and signed zero using exact Float64 bits. The seeded
+1,000-case sorted-middle oracle and all focused median tests remain green (**8/0**); the full `fp-groupby` crate is green
+(**101/0**). Ordering is preserved; tie-breaking and floating-point operands/order are identical; RNG is N/A. Wide/non-Int64
+keys, `dropna=false` null-key cases, Timedelta64, and non-numeric values still fall through to the same generic paths.
+
+REMOTE GATES: full `fp-conformance` is green (**2048/0**, 16 ignored), including 419 property tests; workspace
+`cargo check --workspace --all-targets` is green; owned crate clippy
+`cargo clippy -p fp-groupby --all-targets --no-deps -- -D warnings` is green; touched-file rustfmt is green; UBS exits 0 and
+`git diff --check` is clean. The earlier whole-workspace clippy/fmt invocation exposed the concurrent peer-owned
+`fp-frame`/example backlog, with no finding in either touched groupby file. No local Cargo command or fallback was used. Risk
+note: dispatch precedence only; no compatibility, threat, recovery, or security surface changed. Bead:
+`br-frankenpandas-41c95`.
