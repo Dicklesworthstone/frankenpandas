@@ -14063,3 +14063,30 @@ quantile 3.698x.** `percentile`/`nanquantile`/`nanpercentile` route through `qua
 typed micro-opts: Int64 `var`/`std`/`skew`/`kurt`/`prod`/`sem` (all still generic `nan*` for non-Float64). The bigger structural
 swings (SIMD group-by, radix join) remain in cod's fp-groupby/fp-join crates — coordinate.
 
+### 2026-07-11 HazyPrairie — SURFACE: dense-Int64 groupby Var/Std mean-hoist blocked at remote profile gate
+
+Lane selection excluded cc-owned columnar/string work and the just-landed bounded-Int64 median dispatch. The next narrow
+`fp-groupby` candidate is `try_groupby_agg_dense_int64(..., Var | Std, ...)`: its second pass currently recomputes the
+bit-identical expression `sum[bucket] / non_missing[bucket] as f64` for every non-missing row. The proposed one-lever change
+would compute that same division once per populated bucket and reuse the resulting mean during the unchanged row-order
+`sum_sq += (x - mean).powi(2)` pass. No reciprocal multiply, Welford rewrite, or arithmetic-order change is admissible.
+Provisional opportunity score: impact 4 x confidence 5 / effort 1 = **20**, pending fresh attribution.
+
+A permanent libtest median row, `dense_int64_var_second_pass`, now covers 2M finite Float64 values across 200 scrambled dense
+Int64 groups. The exact fail-closed command
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench -p fp-groupby --example bench_groupby_median dense_int64_var_second_pass -- --exact`
+ran remotely on `vmi1227854` and established a baseline median of **23.9336206 ms/iter** (wide spread: +/- 8.8908502 ms).
+This is routing evidence only, not a keep/reject comparison.
+
+Profile attempts stayed fail-closed. Direct remote `perf` and `cargo flamegraph` wrappers were rejected by RCH as
+non-compilation commands (`RCH-E301`); no local fallback ran. A temporary env-gated phase-timer build ran remotely after the
+scheduler ignored the requested worker pin, but RCH did not forward the profiling env var, so it emitted no attribution and
+its cross-worker timing is intentionally unscored. Retrying the same remote `cargo bench` with
+`RCH_ENV_ALLOWLIST=FP_GROUPBY_VAR_PROFILE` then hit the requested terminal condition:
+`no admissible workers: insufficient_slots=8,hard_preflight=2`; remote-required mode refused local fallback.
+
+**SURFACED, NOT REJECTED:** no production optimization was applied, and `crates/fp-groupby/src/lib.rs` remains identical to
+`origin/main`. Resume only when RCH admits a remote slot: collect phase attribution, run a one-binary/interleaved median A/B
+because worker pinning is currently ignored, then require exact Float64-bit parity for Var and Std across sorted/first-seen
+order, missing values, singleton/all-missing groups, and signed zero. Bead: `br-frankenpandas-moyq8`. Agent Mail reservations
+were also unavailable because its database reported a malformed index; Git/ledger truth was used without disturbing peer dirt.

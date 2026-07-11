@@ -76,6 +76,28 @@ fn dense_int64_median_dispatch(b: &mut test::Bencher) {
     });
 }
 
+/// Median-gated decision surface for the dense two-pass variance kernel.
+#[cfg(test)]
+#[bench]
+fn dense_int64_var_second_pass(b: &mut test::Bencher) {
+    let (keys, vals) = build_data(2_000_000, 200);
+    let policy = RuntimePolicy::strict();
+
+    b.iter(|| {
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_agg(
+            &keys,
+            &vals,
+            AggFunc::Var,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .expect("var");
+        test::black_box(out);
+    });
+}
+
 fn main() {
     let mode = std::env::args()
         .nth(1)
