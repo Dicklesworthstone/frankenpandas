@@ -14384,3 +14384,28 @@ fail-closed: fp-columnar lib **486/0**, fp-conformance all-green (main suite **1
 `_left`/`_right`/`_exact_match`/`_integers`/`_strings` all pass, tokio supply-chain policy passed); rustfmt clean; clippy
 `-D warnings` clean. `crates/fp-frame` and cod's groupby/join untouched. The searchsorted_values typed-path family is now CLOSED
 (Int64 · Float64 · Datetime64 · Timedelta64 · Utf8).
+
+### 2026-07-11 HazyPrairie — SURFACE: `read_json(records)` median baseline blocked at strict-remote RCH admission
+
+Lane routing excluded cc-owned columnar/string work, the already-blocked strict-remote join profile bead, the closed dense
+groupby-median family, the separately surfaced groupby Var/Std A/B, and rolling families whose remaining credible levers are
+wide-window data-structure changes or exact-golden-locked arithmetic. The open `fp-io` target was
+`br-frankenpandas-92n1x`: re-profile the post-`63ff811a5` parallel `read_json(records)` path at 1M rows x 10 Float64 columns,
+then take at most one output-identical lever and gate it on the median.
+
+A temporary libtest median row was added only to prepare the existing `bench_readjson` example. Its first and only fail-closed
+invocation used the required prefix exactly:
+
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench -p fp-io --example bench_readjson json_read_records_1m_x10 -- --exact --nocapture`
+
+RCH stopped before compilation with `no admissible workers: insufficient_slots=7,hard_preflight=2`, then reported
+`remote required; refusing local fallback (no worker assigned)`. Per the user-defined `rch degraded=SURFACE` terminal rule,
+there was no retry and no local Cargo command. The temporary benchmark hunk was removed; `fp-io` production and benchmark files
+are byte-identical to `origin/main`. No baseline, profile attribution, candidate, output-parity result, or performance verdict is
+claimed.
+
+**SURFACED, NOT REJECTED:** resume only after strict remote admission succeeds. First collect median phase attribution for record
+boundary scanning, parallel parsing, serial per-column chunk merge, typed column construction, and final frame assembly. Only
+then score and implement one lever, using a one-binary interleaved A/B plus an adjacent A/A median floor and exact frame equality.
+Agent Mail reservation writes were also unavailable because its malformed SQLite index opened the corruption circuit breaker;
+Git, the isolated `origin/main` worktree, and the Bead were used without disturbing shared-tree peer work.
