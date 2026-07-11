@@ -14712,3 +14712,33 @@ non-first-seen tie order (parity/golden change, outside byte-identical). A/B har
 **LANE STATUS: frontier+hold confirmed** — searchsorted + Int64-reductions shipped and closed; radix value_counts (the last
 recorded fp-columnar structural vein) is a measured loss; the big structural swings (SIMD group-by / radix join / khash-class
 tally) are cod's crates. No clean measurable byte-identical cc-lane lever remains without a design/parity decision.
+
+
+### 2026-07-11 cc_fp — SURFACE (authorized normalization is NOT parity-preserving): int64.shift() typed-backing changes observable repr
+
+Follow-up to the int64.shift() byte-identity block, now MEASURED with the tradeoff, under an explicit "normalize only if it stays
+parity-preserving; if it changes ANY observable output, surface not ship" authorization.
+
+FACTS: (1) `Scalar::Display` is NOT missing-kind-lenient — `Null(NullKind::NaN)` renders **"NaN"**, `Null(NullKind::Null)` renders
+**"None"**. (2) pandas `int64.shift()` → float64 renders missing as **"NaN"**; fp's current output (nullable Int64 with `Null(NaN)`)
+also renders "NaN", so the `Null(NaN)` is LOAD-BEARING for repr parity. (3) The only typed Int64 backing
+(`from_i64_values_with_validity`) materializes missing as `Null(Null)` → "None". (4) `Scalar::semantic_eq` treats all Null kinds as
+equal (`(Null(_),Null(_))=>true`), so CONFORMANCE would still pass — but repr/`Display`/derived-`PartialEq` change, which is
+user-observable and DIVERGES from pandas ("None" vs "NaN").
+
+MEASURED (fp-columnar example `ab_shift_i64_norm.rs`, N=4M, FRESH lazy Int64 column per rep, min-of-12, worker vmi1149989):
+| variant | missing | ms | speedup | parity |
+| --- | --- | ---: | ---: | --- |
+| ORIG generic (`col.values()` + Vec<Scalar> Null(NaN) + from_values) | "NaN" | 197.632 | 1.00x | current, matches pandas repr |
+| DIRECT (build the SAME Vec<Scalar> [Null(NaN),Int64..] off `as_i64_slice`, skip source materialize) | "NaN" | 166.746 | **1.185x** | BYTE-IDENTICAL (DIRECT.values()==ORIG.values() asserted) |
+| TYPED (`from_i64_values_with_validity`) | **"None"** | 13.249 | **14.917x** | changes observable repr (asserted TYPED!=ORIG) |
+
+DECISION: SURFACE. The 14.9x TYPED normalization changes observable output ("NaN"->"None", a pandas repr-parity regression), so it
+is NOT shippable under the byte-identical/parity-preserving constraint (conformance passes only because semantic_eq is
+missing-lenient; repr is not). The ONLY parity-preserving option is DIRECT = **1.185x** (and only on an UNCACHED source; a cached
+`values()` makes it ~1.0x since from_values dominates both) — marginal, situational. No production change; A/B example only.
+
+RETRY-CONDITION for the 14.9x: a deliberate PARITY change with golden regen — either accept `Null(NaN)`->`Null(Null)` for int64
+shift missing (repr "NaN"->"None"), OR (better, pandas-exact) make int64.shift() return **Float64** [NaN,..] like pandas (missing
+stays "NaN", present "1"->"1.0", dtype Int64->Float64). Both are observable-output changes needing conformance/golden regen — a
+human parity decision, outside "byte-identical".
