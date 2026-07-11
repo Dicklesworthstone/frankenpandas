@@ -14386,7 +14386,7 @@ impl Column {
     /// Matches `pd.Series.median()` via fp-types::nanmedian.
     /// Median over an all-valid `f64` buffer already extracted from the column:
     /// empty ⇒ `Null(NaN)`, else O(n) `select_nth_unstable_by(mid, partial_cmp)`
-    /// + odd/even midpoint (for even `n` the lower-middle is the MAX of the left
+    /// then an odd/even midpoint (for even `n` the lower-middle is the MAX of the left
     /// partition). Shared by the Float64 and Int64 typed fast paths so both run
     /// the SAME computation `nanmedian`'s numeric arm performs after
     /// `collect_finite`; `select_nth_unstable_by` is deterministic, so identical
@@ -15907,6 +15907,28 @@ impl Column {
     /// first position seen.
     #[must_use]
     pub fn argmin(&self) -> Option<usize> {
+        // Typed Timedelta64 fast path: `nanargmin` compares Timedelta by EXACT i64
+        // ns (its dedicated `is_timedelta_input` arm), so scan the raw `&[i64]`
+        // instead of materializing a `Vec<Scalar::Timedelta64>`. Gate all-valid +
+        // no-NaT (`nanargmin` SKIPS missing; for an all-valid column the original-
+        // array index equals the slice index, and the `i64::MIN` NaT sentinel is
+        // reserved so it never appears — the belt-and-suspenders `!contains` keeps
+        // a malformed column on the exact `nanargmin` path). Strict `<` keeps the
+        // FIRST position on a tie, exactly as `nanargmin`. Empty ⇒ `None`.
+        if self.validity.all()
+            && let Some(data) = self.as_timedelta64_slice()
+            && !data.contains(&i64::MIN)
+        {
+            let mut best: Option<(usize, i64)> = None;
+            for (i, &ns) in data.iter().enumerate() {
+                match best {
+                    None => best = Some((i, ns)),
+                    Some((_, cur)) if ns < cur => best = Some((i, ns)),
+                    _ => {}
+                }
+            }
+            return best.map(|(i, _)| i);
+        }
         nanargmin(&self.values)
     }
 
@@ -15923,6 +15945,24 @@ impl Column {
     /// Matches `pd.Series.argmax()`.
     #[must_use]
     pub fn argmax(&self) -> Option<usize> {
+        // Typed Timedelta64 fast path (symmetric to `argmin`): scan the raw `&[i64]`
+        // ns and track the max via strict `>` (keeps the FIRST position on a tie
+        // exactly as `nanargmax`) instead of materializing `Vec<Scalar::Timedelta64>`.
+        // All-valid + no-NaT gate; empty ⇒ `None`.
+        if self.validity.all()
+            && let Some(data) = self.as_timedelta64_slice()
+            && !data.contains(&i64::MIN)
+        {
+            let mut best: Option<(usize, i64)> = None;
+            for (i, &ns) in data.iter().enumerate() {
+                match best {
+                    None => best = Some((i, ns)),
+                    Some((_, cur)) if ns > cur => best = Some((i, ns)),
+                    _ => {}
+                }
+            }
+            return best.map(|(i, _)| i);
+        }
         nanargmax(&self.values)
     }
 
@@ -16203,7 +16243,7 @@ impl Column {
     /// Linear-interpolated quantile at `q` over an all-valid `f64` buffer already
     /// extracted from the column: q-range guard (`Null(NaN)` outside `[0,1]`),
     /// empty ⇒ `Null(NaN)`, `n==1` shortcut, then `select_nth_unstable_by(lo, ..)`
-    /// + lo/hi linear interpolation (the `hi`-th order statistic is the MIN of the
+    /// plus lo/hi linear interpolation (the `hi`-th order statistic is the MIN of the
     /// right partition). Shared by the Float64 and Int64 typed fast paths so both
     /// run the SAME computation `nanquantile`'s numeric arm performs after
     /// `collect_finite`; `select_nth_unstable_by` is deterministic.
@@ -38416,6 +38456,180 @@ mod ab_utf8_minmax_ccfp {
         );
         println!(
             "  CAND byte-span min             min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ab_td_argminmax_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, ValidityMask, nanargmax, nanargmin};
+
+    /// Seeded (splitmix64) non-negative i64 ns in `[0, span)` (never `i64::MIN`),
+    /// so ties exist to exercise the first-on-tie rule.
+    fn ns_values(n: usize, span: i64) -> Vec<i64> {
+        let mut s: u64 = 0x0F0F_1E2D_3C4B_5A69;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                ((z >> 1) as i64) % span
+            })
+            .collect()
+    }
+    fn td_col(ns: Vec<i64>) -> Column {
+        let len = ns.len();
+        Column::from_timedelta64_values_with_validity(ns, ValidityMask::all_valid(len))
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    fn ab_td_argminmax_parity() {
+        // Typed i64 argmin/argmax == the exact Scalar nanargmin/nanargmax across a
+        // populated column (with ties → first-on-tie), a single element, and empty
+        // (→ None), for BOTH ops.
+        let c = td_col(ns_values(10_000, 500));
+        assert_eq!(
+            nanargmin(c.values.as_slice()),
+            c.argmin(),
+            "td argmin diverged"
+        );
+        assert_eq!(
+            nanargmax(c.values.as_slice()),
+            c.argmax(),
+            "td argmax diverged"
+        );
+        // Explicit ties: min (10) and max (99) each appear twice; first wins.
+        let ties = td_col(vec![50, 10, 99, 10, 99, 30]);
+        assert_eq!(
+            nanargmin(ties.values.as_slice()),
+            ties.argmin(),
+            "td argmin ties"
+        );
+        assert_eq!(
+            nanargmax(ties.values.as_slice()),
+            ties.argmax(),
+            "td argmax ties"
+        );
+        let single = td_col(vec![7]);
+        assert_eq!(
+            nanargmin(single.values.as_slice()),
+            single.argmin(),
+            "td argmin single"
+        );
+        assert_eq!(
+            nanargmax(single.values.as_slice()),
+            single.argmax(),
+            "td argmax single"
+        );
+        let empty = td_col(Vec::new());
+        assert_eq!(
+            nanargmin(empty.values.as_slice()),
+            empty.argmin(),
+            "td argmin empty"
+        );
+        assert_eq!(
+            nanargmax(empty.values.as_slice()),
+            empty.argmax(),
+            "td argmax empty"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_td_argmin() {
+        const N: usize = 8_000_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let ns = ns_values(N, 1_000_000);
+        let mk_col = || td_col(ns.clone());
+        let orig_argmin = |c: &Column| nanargmin(c.values.as_slice());
+
+        // Parity guard inside the perf run too.
+        assert_eq!(
+            orig_argmin(&mk_col()),
+            mk_col().argmin(),
+            "td argmin diverged (perf)"
+        );
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_argmin(&mk_col()));
+            std::hint::black_box(mk_col().argmin());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_argmin(std::hint::black_box(&co)));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).argmin());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).argmin());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB td argmin (ONE binary, ONE invocation) N={N}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG nanargmin(Vec<Scalar>) min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND typed &[i64] scan      min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

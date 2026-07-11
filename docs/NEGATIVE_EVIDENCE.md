@@ -14156,3 +14156,42 @@ inherits the win. GREEN remote fail-closed: fp-columnar lib **480/0**, fp-confor
 mode/duplicated/isin/replace) was harvested, but the EXTREME reductions (`min`/`max`) were a second, un-harvested algorithmic gap —
 and the biggest one, because reductions fully materialize with no early exit. Sibling candidates worth checking: any other
 `&self.values`-iterating Utf8 consumer that fully scans (e.g. a Utf8 `argmin`/`argmax`, sort-key extraction).
+
+### 2026-07-11 cc_fp — WIN: Timedelta64 `argmin`/`argmax` typed &[i64] scan bypasses Scalar materialization — 14.78x fp-side, bit-identical (temporal analog of the min/max byte-span win)
+
+`Column::argmin`/`argmax` had NO typed fast path — they always called `nanargmin`/`nanargmax(&self.values)`, materializing a
+`Vec<Scalar::Timedelta64>` (~24 B/elem, ~192 MB @ 8M). `nanargmin`/`nanargmax` compare Timedelta by EXACT i64 ns (their dedicated
+`is_timedelta_input` arm), so added a typed Timedelta64 branch to both: `as_timedelta64_slice()` → scan the raw `&[i64]` ns,
+tracking the arg-extreme index.
+
+BIT-IDENTICAL: the typed scan uses the SAME exact i64 compare `nanargmin`/`nanargmax`'s Timedelta arm uses, and strict `<`/`>`
+keeps the FIRST position on a tie exactly as they do. Gate all-valid + no-NaT: `nanargmin` SKIPS missing, so for an all-valid
+column the original-array index (what `nanargmin` returns) equals the slice index; the `i64::MIN` NaT sentinel is reserved (a
+valid Timedelta is never `i64::MIN`), and the belt-and-suspenders `!data.contains(&i64::MIN)` keeps any malformed column on the
+exact `nanargmin` path. Empty ⇒ `None`, unchanged. Parity asserted vs the exact Scalar `nanargmin`/`nanargmax` on a populated
+column, explicit min/max ties (first wins), a single element, and empty — for BOTH ops.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG `nanargmin(col.values.as_slice())` vs CAND `argmin()`
+interleaved, per-arm A/A null control; 8M all-valid Timedelta64 ns in `[0, 1e6)`):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `f5671a378c99cfbf063bd3139755be5455efbd1d9072675ae7cd347986ce2882` |
+| worker | `vmi1167313` |
+| ORIG `nanargmin(Vec<Scalar>)` | 206.928 ms (cv 8.72%) |
+| CAND typed `&[i64]` scan | 14.002 ms (cv 4.04%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0294x -> 2.94% floor** |
+| **fp-side ratio (min-of-blocks)** | **14.779x (+1377.9%) — DECIDABLE (1378% is ~469x the 2.94% floor)** |
+
+14.8x (far bigger than the ~2-4x a plain Int64-materialization bypass gives) because the ORIG stacks THREE costs the typed scan
+removes: the ~192 MB `Vec<Scalar::Timedelta64>` materialization, `is_timedelta_input`'s extra full pass over that Vec, and the
+per-`Scalar` argmin scan — vs one contiguous `&[i64]` pass. `argmin`/`argmax` are symmetric, so `argmax` inherits the win. GREEN
+remote fail-closed: fp-columnar lib **481/0**, fp-conformance **2048/0**; rustfmt clean; clippy `-D warnings` clean.
+`crates/fp-frame` untouched.
+
+SCOPE — only Timedelta64 typed here (the clean, in-lane temporal case). NOT touched: (1) Datetime64 argmin — `nanargmax` compares
+Datetime via `to_f64` (LOSSY for ns > 2^53, i.e. all real timestamps), so a typed i64 compare would be a *fix* (change output),
+not output-identical — deliberately left on the generic path. (2) Utf8 argmin — `nanargmin` has NO Utf8 arm (`to_f64` errors →
+every Utf8 value skipped → returns `None`); making it work would be a correctness change, and Series `idxmin` on Utf8 is already
+handled in fp-frame (br-7db78). (3) f64/i64 argmin still materialize (numeric, out of the string/temporal lane) — a clean ~2-4x
+sibling for later (f64: skip-NaN + f64 compare; i64: f64 compare over the raw slice to match `nanargmin`'s lossy `to_f64`).
