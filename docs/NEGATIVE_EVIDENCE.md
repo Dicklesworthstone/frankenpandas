@@ -14090,3 +14090,32 @@ its cross-worker timing is intentionally unscored. Retrying the same remote `car
 because worker pinning is currently ignored, then require exact Float64-bit parity for Var and Std across sorted/first-seen
 order, missing values, singleton/all-missing groups, and signed zero. Bead: `br-frankenpandas-moyq8`. Agent Mail reservations
 were also unavailable because its database reported a malformed index; Git/ledger truth was used without disturbing peer dirt.
+
+### 2026-07-11 HazyPrairie — SURFACE follow-up: Var/Std pass-2 profile landed; one-binary median A/B blocked by RCH admission
+
+Resumed `br-frankenpandas-moyq8` on the unchanged 2M-row / 200-group `dense_int64_var_second_pass` libtest benchmark. The exact
+fail-closed remote command ran on `vmi1293453` and established a fresh baseline median of **20.5276914 ms/iter**
+(+/- 5.0383985 ms). A second remote `cargo bench` with temporary env-gated phase timers succeeded on the same worker and reported
+a **21.1262566 ms/iter** libtest median (+/- 6.6793888 ms).
+
+PROFILE FIRST (eight timed calls; medians): pass 1, including bucket setup and row-order sums/counts, was **11.718 ms**; pass 2,
+including the per-row `sum[bucket] / non_missing[bucket] as f64` division and squared-deviation fold, was **7.288 ms**; sorted
+output emission was **0.010 ms**. Against the **19.122 ms** phase-total median, the second pass is **38.11%** of self-time.
+This confirms the candidate is a real top-two frame rather than a source-inspection guess. Opportunity score remains
+impact 4 x confidence 5 / effort 1 = **20**.
+
+The single proposed lever was implemented only behind a temporary A/B switch: for Var/Std, reuse the completed `sum` bucket
+array as the mean workspace by dividing each populated bucket once, then load `sum[bucket]` during the unchanged second-pass
+row order. The reference arm retained the old division per row. This uses the identical division operands and result bits; it
+does not multiply by a reciprocal, change `powi(2)`, reassociate `sum_sq`, affect `Mean`, or alter any fallback.
+
+The required one-binary, alternating AB/BA median harness (25 pairs, exact output-bit assertion, plus a 13-pair A/A null floor)
+was ready, but its first and only fail-closed invocation hit the user-defined terminal condition before compilation:
+`no admissible workers: insufficient_slots=7,hard_preflight=2,active_project_exclusion=1`. RCH refused local fallback. Per the
+remote-only rule there was no retry, and no candidate timing is claimed.
+
+**SURFACED, NOT REJECTED:** all temporary timers, the A/B switch, and the candidate were removed. Both groupby files are again
+byte-identical to `origin/main`; no production or benchmark change remains. Resume by recreating the documented one-binary A/B
+and gate on per-arm median plus an effect larger than the adjacent A/A floor, then prove Var and Std exact bits across sorted and
+first-seen order, missing/singleton/all-missing groups, cancellation, infinities, and signed zero. Agent Mail reservation writes
+still fail on its malformed SQLite index, so the clean hunk was coordinated through the Bead and Git/ledger truth.
