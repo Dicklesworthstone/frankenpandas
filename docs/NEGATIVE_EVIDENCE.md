@@ -14556,3 +14556,36 @@ gather work, `br-frankenpandas-wvlfh` is an older cod-b RangeIndex/index-owned c
 `br-frankenpandas-nsyti` requires the golden-breaking `powf` arithmetic change rather than output-identical behavior. The
 current ledger therefore has no honest candidate to build or benchmark. This is a frontier+hold closeout, not a performance
 claim: no Cargo command was run, and no local Cargo fallback occurred.
+
+### 2026-07-11 cc_fp — WIN: `Column::std` Int64 routes through the typed var (sqrt) instead of nanstd — 10.9x median, bit-identical
+
+Sibling of the `var` lever (`41cd4f76d`). `std`'s fast-path gate was `self.as_f64_slice().is_some()` (Float64 only) → Int64 fell
+to `nanstd(&self.values, ddof)`, which for a non-Timedelta column is literally `match nanvar(values, ddof) { Float64(v) =>
+Float64(v.sqrt()), other => other }` — so it paid nanvar's DOUBLE materialization (`Vec<Scalar::Int64>` ~96 MB +
+`collect_finite`'s second `Vec<f64>` ~32 MB) plus enum dispatch. The lever widens the gate to
+`as_f64_slice().is_some() || as_i64_slice().is_some()`, so Int64 reuses the now-typed `self.var(ddof)` (zero-alloc two-pass off
+the raw `&[i64]`) then `.sqrt()`.
+
+**BIT-IDENTITY:** nanstd's numeric arm IS `nanvar(..).sqrt()`, and the typed `var` is bit-identical to `nanvar` for all-valid
+Int64 (proven in the var lever: `as_i64_slice` gates dtype==Int64 && all-valid, `collect_finite` reduces to `[v as f64]`
+same-order), so the SAME `var` bits are `sqrt`'d → identical Float64 bits. The `n<=ddof` case: `var` returns `Null(NaN)`, matched
+by the `other => other` arm exactly as nanstd's `match` does. Timedelta64 (as_f64_slice/as_i64_slice both None → dtype-preserving
+nanstd arm) and nullable Int64 (as_i64_slice None) still fall through untouched.
+
+**MEASURED (substrate-v2, one binary / one rch invocation, interleaved ORIG/CAND, per-arm A/A null control, min-of-9-blocks,
+median gate; N=4,000,000, ddof=1, worker vmi1264463):**
+
+| arm | min ms | cv |
+| --- | --- | --- |
+| ORIG nanstd `Vec<Scalar>`+`collect_finite` | 105.060 | 7.11% |
+| CAND typed `sqrt(var)` `&[i64]` | 9.623 | 7.59% |
+
+fp-side ratio ORIG/CAND = **10.918x** (+991.8%); NULL-CONTROL (CAND A/A) median 1.0315x, floor 3.15% — **DECIDABLE** (effect
+≈315x the floor). Same ~11x as `var` (std = var + a scalar sqrt), confirming the double-materialization prediction for the sibling
+reductions. ORIG replica is the exact pre-lever call `nanstd(col.values.as_slice(), ddof)`.
+
+Parity test `ab_i64_std_parity` asserts typed == nanstd bits for ddof 0/1 across n in {0,1,2,3,1000,4096} (incl. the n<=ddof
+Null(NaN) boundary and a single element) plus a signed large-magnitude column. GREEN remote fail-closed: fp-columnar lib
+**488/0**, fp-conformance all-green (main suite **1596/0**, tokio supply-chain policy passed); rustfmt clean; clippy `-D warnings`
+clean. `crates/fp-frame` and cod's groupby/join untouched. Remaining sibling reductions: Int64 `skew`, `kurt` (collect_finite +
+moment math), `sem` (NO typed path at all).
