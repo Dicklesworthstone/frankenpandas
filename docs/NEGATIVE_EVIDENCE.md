@@ -14238,3 +14238,38 @@ touches NO dependencies), so it is provably unrelated to this change. `crates/fp
 REFUTES last turn's "string/temporal clean frontier empty" — sub-linear-work Utf8 consumers (searchsorted) are a distinct,
 un-harvested sub-vein. Siblings worth checking with the SAME lens (sub-linear work forcing O(N) materialization): Utf8 `get_indexer`
 / label-lookup binary searches, any `iloc`/`take` over a contiguous-Utf8 that materializes to index a few rows.
+
+### 2026-07-11 cc_fp — WIN: contiguous-Utf8 `nlargest`/`nsmallest` gather only the top-k spans, not the whole sorted column — 6.5x fp-side, bit-identical
+
+`Column::nlargest`/`nsmallest` had typed partial-select paths for Int64/Float64/Datetime64 but Utf8 fell to `sort_values(dir)` then
+`sorted.values[..take].to_vec()`. For Utf8, `sort_values` computes a byte-span MSD-radix permutation (fast) but then GATHERS ALL N
+rows via `self.values[perm[i]].clone()` — materializing the whole `Vec<Scalar::Utf8>` AND cloning it (~2N heap `String` allocs) —
+only to keep the first `k`. Added a contiguous-Utf8 branch that reuses the SAME `utf8_msd_argsort(&strs, dir)` permutation but
+gathers ONLY the first `k` spans into a contiguous column.
+
+BIT-IDENTICAL: `utf8_msd_argsort(&strs, false/true)` is the exact permutation `sort_values(false/true)` uses (stable MSD byte
+radix; byte order == `&str` order for valid UTF-8, so ties keep first-seen order), so `perm[..take]` indexes the same top-`k`
+strings in the same order; gathering their spans yields the same `Scalar::Utf8` sequence as `sort_values(dir).values[..take]`.
+`as_all_valid_str_vec` returns borrowed `&str` views (no String alloc). Parity asserted vs the generic sort+take for both
+`nlargest` and `nsmallest` across n < len / n == len / n > len / n == 1, over a heavy-duplicate column (stable tie order); the
+conformance `nlargest`/`nsmallest` oracle tests pass unchanged.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG `sort_values(false)`+take vs CAND `nlargest(k)` interleaved,
+per-arm A/A null control; 4M rows, 100k distinct, k=100):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `bd813405549c68f9c4cd11cad3ddc6f6bd0a259522730392a4e5e9d239d11e27` |
+| worker | `vmi1149989` |
+| ORIG `sort_values`+take (2N String) | 2007.264 ms (cv 7.00%) |
+| CAND perm + gather k spans | 307.626 ms (cv 5.58%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0457x -> 4.57% floor** |
+| **fp-side ratio (min-of-blocks)** | **6.525x (+552.5%) — DECIDABLE (552% is ~120x the 4.57% floor)** |
+
+6.5x because `sort_values`' full-column gather (`self.values[i].clone()`, ~2N String allocs) was ~85% of the 2007 ms; the
+`utf8_msd_argsort` itself is only the ~307 ms CAND cost. Another instance of the sub-linear-take sub-vein (like `searchsorted`):
+`nlargest` keeps only k ≪ N rows, yet the generic path materialized + cloned all N. `nlargest`/`nsmallest` are symmetric. NOTE:
+still does the full O(N·MSD) sort (not a bounded partial-select like the Int64/f64 typed paths) — a further algorithmic lever
+remains (byte-span top-k select), but bit-identity with the stable sort's tie order makes that harder. GREEN remote fail-closed:
+fp-columnar lib **483/0**, fp-conformance **2048/0** (clean run — the recurring tokio supply-chain artifact passed); rustfmt clean;
+clippy `-D warnings` clean. `crates/fp-frame` untouched.

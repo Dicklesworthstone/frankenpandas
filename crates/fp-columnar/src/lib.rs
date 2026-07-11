@@ -17976,6 +17976,26 @@ impl Column {
                 )));
             }
         }
+        // Contiguous-Utf8: reuse sort_values' EXACT stable MSD permutation but
+        // gather ONLY the first `n` rows, avoiding sort_values' full 2N-String
+        // materialize+clone of every row (`self.values[i].clone()`). Bit-identical:
+        // `utf8_msd_argsort(&strs, false)` is the same permutation sort_values(false)
+        // uses, so `perm[..take]` indexes the same `n` largest strings in the same
+        // order; gathering their spans yields the same `Scalar::Utf8` sequence as
+        // `sort_values(false).values[..take]`.
+        if let Some(strs) = self.as_all_valid_str_vec() {
+            let perm = utf8_msd_argsort(&strs, false);
+            let take = n.min(perm.len());
+            let total: usize = perm[..take].iter().map(|&i| strs[i].len()).sum();
+            let mut new_bytes = Vec::with_capacity(total);
+            let mut new_offsets = Vec::with_capacity(take + 1);
+            new_offsets.push(0);
+            for &i in &perm[..take] {
+                new_bytes.extend_from_slice(strs[i].as_bytes());
+                new_offsets.push(new_bytes.len());
+            }
+            return Ok(Self::from_utf8_contiguous(new_bytes, new_offsets));
+        }
         let sorted = self.sort_values(false)?;
         let take = n.min(sorted.values.len());
         let values: Vec<Scalar> = sorted.values[..take].to_vec();
@@ -18002,6 +18022,21 @@ impl Column {
             {
                 return Ok(Self::from_datetime64_values(nkeep_typed_i64(data, n, true)));
             }
+        }
+        // Contiguous-Utf8 (symmetric to `nlargest`): reuse sort_values(true)'s
+        // ascending MSD permutation, gather only the first `n` spans.
+        if let Some(strs) = self.as_all_valid_str_vec() {
+            let perm = utf8_msd_argsort(&strs, true);
+            let take = n.min(perm.len());
+            let total: usize = perm[..take].iter().map(|&i| strs[i].len()).sum();
+            let mut new_bytes = Vec::with_capacity(total);
+            let mut new_offsets = Vec::with_capacity(take + 1);
+            new_offsets.push(0);
+            for &i in &perm[..take] {
+                new_bytes.extend_from_slice(strs[i].as_bytes());
+                new_offsets.push(new_bytes.len());
+            }
+            return Ok(Self::from_utf8_contiguous(new_bytes, new_offsets));
         }
         let sorted = self.sort_values(true)?;
         let take = n.min(sorted.values.len());
@@ -38860,6 +38895,165 @@ mod ab_utf8_searchsorted_ccfp {
         );
         println!(
             "  CAND byte-span bsearch           min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ab_utf8_nlargest_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, DType, Scalar};
+
+    /// Seeded (splitmix64) contiguous-Utf8: `n` rows from `distinct` fixed-width
+    /// `"val_{:07}"` labels (duplicates ⇒ exercises stable first-seen tie order).
+    fn mk(n: usize, distinct: usize) -> (Vec<u8>, Vec<usize>) {
+        let mut s: u64 = 0x51ED_2701_9AB3_44CF;
+        let mut bytes: Vec<u8> = Vec::with_capacity(n * 11);
+        let mut offsets: Vec<usize> = Vec::with_capacity(n + 1);
+        offsets.push(0);
+        for _ in 0..n {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let key = (z as usize) % distinct;
+            bytes.extend_from_slice(b"val_");
+            let mut buf = [0u8; 7];
+            let mut k = key;
+            for slot in buf.iter_mut().rev() {
+                *slot = b'0' + (k % 10) as u8;
+                k /= 10;
+            }
+            bytes.extend_from_slice(&buf);
+            offsets.push(bytes.len());
+        }
+        (bytes, offsets)
+    }
+    /// Faithful replica of the pre-lever fallback: full sort_values then take n.
+    fn orig_nlargest(col: &Column, n: usize) -> Column {
+        let sorted = col.sort_values(false).expect("sort");
+        let take = n.min(sorted.values.as_slice().len());
+        let values: Vec<Scalar> = sorted.values.as_slice()[..take].to_vec();
+        Column::new(DType::Utf8, values).expect("new")
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    fn ab_utf8_nlargest_parity() {
+        // Typed span-gather == generic sort_values+take across n < len / n == len /
+        // n > len / n == 1, for BOTH nlargest and nsmallest, over a column with
+        // heavy duplicates (stable first-seen tie order).
+        let (b, o) = mk(5_000, 200);
+        let col = || Column::from_utf8_contiguous(b.clone(), o.clone());
+        for &n in &[1usize, 10, 137, 5_000, 6_000] {
+            assert_eq!(
+                orig_nlargest(&col(), n).values.as_slice(),
+                col().nlargest(n).expect("nlargest").values.as_slice(),
+                "utf8 nlargest diverged n={n}"
+            );
+            let sm_orig = col().sort_values(true).unwrap();
+            let take = n.min(sm_orig.values.as_slice().len());
+            assert_eq!(
+                &sm_orig.values.as_slice()[..take],
+                col().nsmallest(n).expect("nsmallest").values.as_slice(),
+                "utf8 nsmallest diverged n={n}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_utf8_nlargest() {
+        const N: usize = 4_000_000;
+        const DISTINCT: usize = 100_000;
+        const K: usize = 100;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let (bytes, offsets) = mk(N, DISTINCT);
+        let mk_col = || Column::from_utf8_contiguous(bytes.clone(), offsets.clone());
+
+        assert_eq!(
+            orig_nlargest(&mk_col(), K).values.as_slice(),
+            mk_col().nlargest(K).unwrap().values.as_slice(),
+            "utf8 nlargest diverged (perf)"
+        );
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_nlargest(&mk_col(), K));
+            std::hint::black_box(mk_col().nlargest(K).unwrap());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_nlargest(std::hint::black_box(&co), K));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).nlargest(K).unwrap());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).nlargest(K).unwrap());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB utf8 nlargest (ONE binary, ONE invocation) N={N} distinct={DISTINCT} k={K}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG sort_values+take (2N Str) min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND perm + gather k spans     min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(
