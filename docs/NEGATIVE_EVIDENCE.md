@@ -14026,3 +14026,40 @@ Order-statistics typed-select family now covers Float64 median/quantile + Int64 
 `as_i64_slice`→f64 helper-extraction pattern against `nanquantile`). Remaining fp-columnar typed micro-opts after that: Int64
 var/std/skew/kurt/prod/sem (all still generic `nan*` for non-Float64).
 
+### 2026-07-11 cc_fp — WIN: Int64 `quantile` typed &[i64]→f64 select bypasses Scalar materialization — 3.698x fp-side, bit-identical (completes the order-statistics typed-select family for Float64 + Int64)
+
+Direct sibling of Int64 `median` (`21fc34374`, 4.134x). `Column::quantile` had a Float64 typed path but Int64 fell to
+`nanquantile(&self.values, q)` — materializing a `Vec<Scalar::Int64>` (~24 B/elem) then `collect_finite`'s per-Scalar enum
+`to_f64`. Extracted the Float64 path's core into `quantile_from_f64_vec(Vec<f64>, q)` (q-range guard, empty/`n==1` shortcuts,
+`select_nth_unstable_by(lo, ..)` + lo/hi linear interpolation) and added an Int64 branch: `as_i64_slice()` →
+`data.iter().map(|&v| v as f64).collect()` → the SAME helper.
+
+BIT-IDENTICAL: `nanquantile`'s numeric arm is the q-guard then `collect_finite(v as f64)` then the identical select/interpolate.
+For an all-valid Int64 column `collect_finite` = `data.iter().map(|&v| v as f64)` in order; `v as f64` is exact for |v| < 2^53 and
+IDENTICALLY lossy above it on both sides, so the interpolated order statistics agree. Timedelta64/Datetime64 are excluded
+(`as_i64_slice` gates `dtype == Int64`), so `nanquantile`'s dtype-preserving Timedelta64 arm (checked BEFORE the numeric arm)
+still runs for those. Parity asserted vs the exact Scalar `nanquantile` across q ∈ {0, 0.25, 0.5, 0.75, 0.9, 1.0, -0.1, 1.5}
+(interpolating + boundary + out-of-range) over even/odd/empty/n==1 sizes AND a large-magnitude (> 2^53) case.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG `nanquantile(col.values.as_slice(), q)` vs CAND
+`quantile(q)` interleaved, per-arm A/A null control; 4M all-valid i64, q=0.25):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `5769c4cb015b9a8b327bf0af360173c362ec193c99afb5f762d8989855e6140a` |
+| worker | `vmi1227854` (noisy) |
+| ORIG `nanquantile(Vec<Scalar>)` | 60.352 ms (cv 12.18%) |
+| CAND typed `&[i64]`→f64 select | 16.319 ms (cv 12.96%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0506x -> 5.06% floor** |
+| **fp-side ratio (min-of-blocks)** | **3.698x (+269.8%) — DECIDABLE (270% is ~53x the 5.06% floor)** |
+
+⚠️ HONEST — noisy worker (`vmi1227854`, cv ~12%, A/A floor 5.06%); the min-of-blocks ratio clears the floor by ~53x so the WIN is
+robust, but the precise magnitude carries the worker's noise. Consistent with Int64 `median` (4.134x) — slightly lower because
+quantile's interpolation does marginally more work. GREEN remote fail-closed: fp-columnar lib **479/0**, fp-conformance
+**2048/0**; rustfmt clean; clippy `-D warnings` clean. `crates/fp-frame` untouched.
+
+**ORDER-STATISTICS TYPED-SELECT FAMILY NOW COMPLETE (cc_fp): Float64 median 2.066x + quantile 2.058x, Int64 median 4.134x +
+quantile 3.698x.** `percentile`/`nanquantile`/`nanpercentile` route through `quantile` so they inherit it. Remaining fp-columnar
+typed micro-opts: Int64 `var`/`std`/`skew`/`kurt`/`prod`/`sem` (all still generic `nan*` for non-Float64). The bigger structural
+swings (SIMD group-by, radix join) remain in cod's fp-groupby/fp-join crates — coordinate.
+

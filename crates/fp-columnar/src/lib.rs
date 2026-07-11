@@ -16157,6 +16157,38 @@ impl Column {
     /// Matches `pd.Series.quantile(q, interpolation='linear')`.
     /// Missing values are skipped (skipna=True). Returns
     /// `Null(NaN)` for empty columns or `q` outside `[0.0, 1.0]`.
+    /// Linear-interpolated quantile at `q` over an all-valid `f64` buffer already
+    /// extracted from the column: q-range guard (`Null(NaN)` outside `[0,1]`),
+    /// empty ⇒ `Null(NaN)`, `n==1` shortcut, then `select_nth_unstable_by(lo, ..)`
+    /// + lo/hi linear interpolation (the `hi`-th order statistic is the MIN of the
+    /// right partition). Shared by the Float64 and Int64 typed fast paths so both
+    /// run the SAME computation `nanquantile`'s numeric arm performs after
+    /// `collect_finite`; `select_nth_unstable_by` is deterministic.
+    fn quantile_from_f64_vec(mut nums: Vec<f64>, q: f64) -> Scalar {
+        if !(0.0..=1.0).contains(&q) {
+            return Scalar::Null(NullKind::NaN);
+        }
+        if nums.is_empty() {
+            return Scalar::Null(NullKind::NaN);
+        }
+        let n = nums.len();
+        if n == 1 {
+            return Scalar::Float64(nums[0]);
+        }
+        let pos = q * (n - 1) as f64;
+        let lo = pos.floor() as usize;
+        let hi = pos.ceil() as usize;
+        let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+        let (_left, lo_ref, right) = nums.select_nth_unstable_by(lo, cmp);
+        let lo_val = *lo_ref;
+        if lo == hi {
+            return Scalar::Float64(lo_val);
+        }
+        let hi_val = right.iter().copied().fold(f64::INFINITY, f64::min);
+        let weight = pos - lo as f64;
+        Scalar::Float64(lo_val + (hi_val - lo_val) * weight)
+    }
+
     #[must_use]
     pub fn quantile(&self, q: f64) -> Scalar {
         // Typed Float64 fast path (sibling of `median`): linear-interpolated order
@@ -16164,34 +16196,18 @@ impl Column {
         // materializing `Vec<Scalar>` then `collect_finite`'s per-Scalar `to_f64`.
         // `as_f64_slice` is all-valid, so `collect_finite` (drops only MISSING,
         // keeps every `to_f64`-able value incl. NaN/inf) equals `data.to_vec()`.
-        // Same q-range guard, `n==1` shortcut, `select_nth_unstable_by(lo, ..)`,
-        // and lo/hi linear interpolation as `nanquantile`'s numeric arm;
-        // `select_nth_unstable_by` is deterministic, so identical input yields the
-        // identical `nums[lo]`/`min(right)` the Scalar path produced.
         if let Some(data) = self.as_f64_slice() {
-            if !(0.0..=1.0).contains(&q) {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let mut nums: Vec<f64> = data.to_vec();
-            if nums.is_empty() {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let n = nums.len();
-            if n == 1 {
-                return Scalar::Float64(nums[0]);
-            }
-            let pos = q * (n - 1) as f64;
-            let lo = pos.floor() as usize;
-            let hi = pos.ceil() as usize;
-            let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
-            let (_left, lo_ref, right) = nums.select_nth_unstable_by(lo, cmp);
-            let lo_val = *lo_ref;
-            if lo == hi {
-                return Scalar::Float64(lo_val);
-            }
-            let hi_val = right.iter().copied().fold(f64::INFINITY, f64::min);
-            let weight = pos - lo as f64;
-            return Scalar::Float64(lo_val + (hi_val - lo_val) * weight);
+            return Self::quantile_from_f64_vec(data.to_vec(), q);
+        }
+        // Typed Int64 fast path (sibling of Int64 `median`): `nanquantile`'s
+        // numeric arm maps each Scalar::Int64 through `collect_finite`'s `to_f64`
+        // (`v as f64`, exact for |v| < 2^53 and identically lossy above it) then
+        // runs the SAME select/interpolate. An all-valid i64 buffer converted the
+        // same way is bit-identical. Datetime64/Timedelta64 are excluded
+        // (`as_i64_slice` gates dtype==Int64) so `nanquantile`'s dtype-preserving
+        // Timedelta64 arm still runs for those.
+        if let Some(data) = self.as_i64_slice() {
+            return Self::quantile_from_f64_vec(data.iter().map(|&v| v as f64).collect(), q);
         }
         nanquantile(&self.values, q)
     }
@@ -38048,6 +38064,155 @@ mod ab_i64_median_ccfp {
         println!("  worker        = {host}");
         println!(
             "  ORIG nanmedian(Vec<Scalar>) min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND typed &[i64]->f64 select min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ab_i64_quantile_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, Scalar, nanquantile};
+
+    /// Seeded (splitmix64) non-negative i64 spread.
+    fn i64s(n: usize) -> Vec<i64> {
+        let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x2545_F491_4F6C_DD1D);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                (z >> 1) as i64
+            })
+            .collect()
+    }
+    fn orig_q(col: &Column, q: f64) -> Scalar {
+        nanquantile(col.values.as_slice(), q)
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    fn ab_i64_quantile_parity() {
+        let qs = [0.0, 0.25, 0.5, 0.75, 0.9, 1.0, -0.1, 1.5];
+        // Typed i64 path == the exact Scalar nanquantile across interpolating +
+        // boundary + out-of-range q, over even/odd/empty/n==1 sizes.
+        for n in [0usize, 1, 2, 3, 4, 5, 999, 1000, 4097] {
+            let c = Column::from_i64_values(i64s(n));
+            for &q in &qs {
+                assert_eq!(
+                    orig_q(&c, q),
+                    c.quantile(q),
+                    "i64 quantile diverged n={n} q={q}"
+                );
+            }
+        }
+        // Large-magnitude (> 2^53) confirms identically-lossy i64->f64 on both
+        // sides, so the interpolated order statistics agree.
+        let big = vec![
+            i64::MAX,
+            i64::MAX - 1,
+            1 << 60,
+            (1 << 60) + 1,
+            -(1 << 60),
+            0,
+            -5,
+        ];
+        let c = Column::from_i64_values(big);
+        for &q in &qs {
+            assert_eq!(
+                orig_q(&c, q),
+                c.quantile(q),
+                "i64 quantile diverged (large-magnitude) q={q}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_i64_quantile() {
+        const N: usize = 4_000_000;
+        const Q: f64 = 0.25;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let src = i64s(N);
+        let mk_col = || Column::from_i64_values(src.clone());
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_q(&mk_col(), Q));
+            std::hint::black_box(mk_col().quantile(Q));
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_q(std::hint::black_box(&co), Q));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).quantile(Q));
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).quantile(Q));
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB i64 quantile (ONE binary, ONE invocation) N={N} q={Q}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG nanquantile(Vec<Scalar>) min={o:8.3} ms  cv={:.2}%",
             cv_of(&orig)
         );
         println!(
