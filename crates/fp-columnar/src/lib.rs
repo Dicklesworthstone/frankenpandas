@@ -15286,6 +15286,23 @@ impl Column {
             let sum_sq: f64 = data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>();
             return Scalar::Float64(sum_sq / (n - ddof) as f64);
         }
+        // Int64 analogue: an all-valid Int64 column runs the SAME two-pass over
+        // `v as f64` straight off the raw `&[i64]`, skipping nanvar's
+        // `Vec<Scalar::Int64>` materialization AND its per-Scalar `to_f64` in
+        // `collect_finite`. Bit-identical: `as_i64_slice` gates dtype==Int64 &&
+        // all-valid, so `collect_finite` (drop-missing + `to_f64`) reduces to
+        // `[v as f64]` in the same order, and `n == nums.len()` (no missing) so the
+        // `n <= ddof -> Null(NaN)` guard matches. dtype==Int64 gate keeps
+        // Timedelta64's dtype-preserving nanvar arm untouched.
+        if let Some(data) = self.as_i64_slice() {
+            let n = data.len();
+            if n <= ddof {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean: f64 = data.iter().map(|&v| v as f64).sum::<f64>() / n as f64;
+            let sum_sq: f64 = data.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>();
+            return Scalar::Float64(sum_sq / (n - ddof) as f64);
+        }
         nanvar(&self.values, ddof)
     }
 
@@ -39398,6 +39415,149 @@ mod ab_td64_searchsorted_ccfp {
         );
         println!(
             "  CAND partition_point &[i64]      min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ab_i64_var_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, Scalar, nanvar};
+
+    /// All-valid Int64 column `[0, 1, ..., n-1]` (the `as_i64_slice` typed path).
+    fn mk_col(n: usize) -> Column {
+        Column::from_i64_values_owned((0..n as i64).collect())
+    }
+    /// Bit key for a var result: Float64 by its bits; Null (n<=ddof) as a sentinel.
+    fn var_bits(s: &Scalar) -> u64 {
+        match s {
+            Scalar::Float64(v) => v.to_bits(),
+            Scalar::Null(_) => u64::MAX,
+            other => panic!("unexpected var result: {other:?}"),
+        }
+    }
+    /// The pre-lever path: nanvar over the materialized `Vec<Scalar::Int64>`.
+    fn orig_var(col: &Column, ddof: usize) -> Scalar {
+        nanvar(col.values.as_slice(), ddof)
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    fn ab_i64_var_parity() {
+        // Typed i64 two-pass == nanvar (materialized) for ddof 0 and 1, across a
+        // few shapes incl. the n<=ddof Null(NaN) boundary and a single element.
+        for n in [0usize, 1, 2, 3, 1000, 4096] {
+            let col = mk_col(n);
+            for ddof in [0usize, 1] {
+                assert_eq!(
+                    var_bits(&orig_var(&col, ddof)),
+                    var_bits(&col.var(ddof)),
+                    "i64 var diverged n={n} ddof={ddof}"
+                );
+            }
+        }
+        // Negative + large-magnitude values (exercise `v as f64` sign/precision).
+        let data: Vec<i64> = (0..5000).map(|i| (i as i64 - 2500) * 100_003).collect();
+        let col = Column::from_i64_values_owned(data);
+        for ddof in [0usize, 1] {
+            assert_eq!(
+                var_bits(&orig_var(&col, ddof)),
+                var_bits(&col.var(ddof)),
+                "i64 var diverged (signed) ddof={ddof}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_i64_var() {
+        const N: usize = 4_000_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        const DDOF: usize = 1;
+
+        // Parity guard inside the perf run too.
+        assert_eq!(
+            var_bits(&orig_var(&mk_col(N), DDOF)),
+            var_bits(&mk_col(N).var(DDOF)),
+            "i64 var diverged (perf)"
+        );
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_var(&mk_col(N), DDOF));
+            std::hint::black_box(mk_col(N).var(DDOF));
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col(N);
+                let t0 = Instant::now();
+                std::hint::black_box(orig_var(std::hint::black_box(&co), DDOF));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col(N);
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).var(DDOF));
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col(N);
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).var(DDOF));
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB i64 var (ONE binary, ONE invocation) N={N} ddof={DDOF}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG nanvar Vec<Scalar>+collect_finite min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND typed two-pass &[i64]             min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

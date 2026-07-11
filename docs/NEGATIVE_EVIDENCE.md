@@ -14470,3 +14470,38 @@ Both build/benchmark invocations used the required fail-closed prefix
 `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench`; no local Cargo command ran. Agent Mail reservation
 bootstrap again failed because its SQLite image is malformed, so the isolated current-main worktree, Git, and
 `br-frankenpandas-bviik` remain the coordination truth.
+
+### 2026-07-11 cc_fp — WIN: `Column::var` Int64 typed two-pass bypasses nanvar's double materialization — 11.4x median, bit-identical
+
+`Column::var` had an all-valid Float64 typed two-pass but Int64 fell to the generic `nanvar(&self.values, ddof)`, which (a)
+materializes the whole `Vec<Scalar::Int64>` (24 B/elem, ~96 MB at 4M) via `as_slice`'s `get_or_init`, then (b) runs
+`collect_finite` — a per-Scalar `is_missing()` + `to_f64()` pass that builds a SECOND buffer `Vec<f64>` (~32 MB) — before the
+two-pass. The lever adds an Int64 arm that runs the identical two-pass over `v as f64` straight off `as_i64_slice()`'s raw
+`&[i64]`: `mean = Σ(v as f64)/n`, `sum_sq = Σ(v as f64 - mean)²`, `Float64(sum_sq/(n-ddof))` — zero allocation.
+
+**BIT-IDENTITY:** `as_i64_slice()` gates `dtype==Int64 && validity.all()`, so `collect_finite` (drop-missing then `to_f64`) reduces
+to exactly `[v as f64]` in the same order (`Scalar::Int64(v).to_f64() == v as f64`, and no element is dropped because all-valid),
+and `n == data.len() == nums.len()` so the `n <= ddof -> Null(NaN)` guard matches. The two-pass is the SAME `Iterator::sum::<f64>()`
+formula in the SAME order, so the f64 result bits are identical. The `dtype==Int64` gate leaves nanvar's Timedelta64
+dtype-preserving arm (`collect_timedelta_ns_f64` -> `float_ns_to_timedelta`) untouched, and nullable Int64 (validity not all) still
+falls through to nanvar.
+
+**MEASURED (substrate-v2, one binary / one rch invocation, interleaved ORIG/CAND, per-arm A/A null control, min-of-9-blocks,
+median gate; N=4,000,000, ddof=1, worker vmi1264463):**
+
+| arm | min ms | cv |
+| --- | --- | --- |
+| ORIG nanvar `Vec<Scalar>`+`collect_finite` | 127.932 | 5.29% |
+| CAND typed two-pass `&[i64]` | 11.261 | 4.20% |
+
+fp-side ratio ORIG/CAND = **11.361x** (+1036.1%); NULL-CONTROL (CAND A/A) median 1.0119x, floor 1.19% — **DECIDABLE** (effect
+≈870x the floor). Larger than a plain materialization-bypass (~2-4x) because the Int64 nanvar path stacks TWO buffers (Scalar vec +
+collect_finite f64 vec) plus per-element enum dispatch, all removed at once. ORIG replica is the exact pre-lever call
+`nanvar(col.values.as_slice(), ddof)` — not a conservative stand-in.
+
+Parity test `ab_i64_var_parity` asserts typed == nanvar bits for ddof 0/1 across n in {0,1,2,3,1000,4096} (incl. the n<=ddof
+Null(NaN) boundary and a single element) plus a signed large-magnitude column. GREEN remote fail-closed: fp-columnar lib
+**487/0**, fp-conformance all-green (main suite **1596/0**, tokio supply-chain policy passed); rustfmt clean; clippy `-D warnings`
+clean. `crates/fp-frame` and cod's groupby/join untouched. Sibling reductions still open: Int64 `std` (its
+`as_f64_slice().is_some()` gate misses Int64 -> nanstd), `skew`, `kurt`, `sem`, `prod` (prod is Int64-output — different, overflow
+semantics) — each likely ~11x too (same double-materialization pathology).
