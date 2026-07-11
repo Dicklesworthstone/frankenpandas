@@ -14832,6 +14832,13 @@ impl Column {
     /// returns false (pandas convention).
     #[must_use]
     pub fn any(&self) -> Scalar {
+        // Typed Bool reduction: `as_bool_slice()` is Some only for an all-valid
+        // Bool column, so `nanany` (which merely skips missing) reduces to a
+        // plain `.any()` over the raw `&[bool]` -- early-exit preserved, no
+        // `Vec<Scalar>` materialization or per-Scalar dispatch. Bit-identical.
+        if let Some(data) = self.as_bool_slice() {
+            return Scalar::Bool(data.iter().any(|&b| b));
+        }
         nanany(&self.values)
     }
 
@@ -14841,6 +14848,11 @@ impl Column {
     /// returns true.
     #[must_use]
     pub fn all(&self) -> Scalar {
+        // Symmetric to `any`: for an all-valid Bool column `nanall` reduces to a
+        // plain `.all()` over the raw `&[bool]`. Bit-identical, early-exit kept.
+        if let Some(data) = self.as_bool_slice() {
+            return Scalar::Bool(data.iter().all(|&b| b));
+        }
         nanall(&self.values)
     }
 
@@ -37505,6 +37517,138 @@ mod ab_bool_sum_ccfp {
         );
         println!(
             "  CAND typed &[bool] count min={c:8.3} ms  cv={:.2}%",
+            cv_of(&cand)
+        );
+        println!(
+            "  NULL-CONTROL (CAND A/A) median={nullmed:.4}x  floor={:.2}%",
+            100.0 * (nullmed - 1.0)
+        );
+        println!(
+            "  fp-side ratio (ORIG/CAND) = {:.3}x  ({:+.1}%)  DECIDABLE={}",
+            o / c,
+            100.0 * (o / c - 1.0),
+            100.0 * (o / c - 1.0) > 100.0 * (nullmed - 1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ab_bool_anyall_ccfp {
+    use std::{process::Command, time::Instant};
+
+    use super::{Column, Scalar, nanall, nanany};
+
+    /// Seeded (splitmix64) bools, ~50% true.
+    fn bools(n: usize) -> Vec<bool> {
+        let mut s: u64 = 0x6D5F_11C3_A780_2E9B;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                z & 1 == 0
+            })
+            .collect()
+    }
+    fn min_of(xs: &[f64]) -> f64 {
+        xs.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+    fn cv_of(xs: &[f64]) -> f64 {
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        100.0 * (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64).sqrt() / m
+    }
+
+    #[test]
+    fn ab_bool_anyall_parity() {
+        // Fast path == the exact Scalar nan* path across regimes, for both
+        // any and all. as_bool_slice is Some only for an all-valid column, so
+        // the typed .any()/.all() over &[bool] is exactly nanany/nanall.
+        let mixed = Column::from_bool_values(bools(10_000));
+        assert_eq!(nanany(mixed.values.as_slice()), mixed.any(), "any mixed");
+        assert_eq!(nanall(mixed.values.as_slice()), mixed.all(), "all mixed");
+        for &b in &[true, false] {
+            let c = Column::from_bool_values(vec![b; 1000]);
+            assert_eq!(nanany(c.values.as_slice()), c.any(), "any all-{b}");
+            assert_eq!(nanall(c.values.as_slice()), c.all(), "all all-{b}");
+        }
+        let empty = Column::from_bool_values(Vec::new());
+        assert_eq!(nanany(empty.values.as_slice()), empty.any(), "any empty");
+        assert_eq!(nanall(empty.values.as_slice()), empty.all(), "all empty");
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn ab_bool_all_alltrue() {
+        // Worst-case (no early exit) regime: `all` over an all-true column must
+        // scan every element -- the realistic "does this predicate hold for
+        // every row" validation case. `any` over an all-false column is
+        // symmetric. Mixed data early-exits on BOTH paths (no change, no
+        // regression), so it is not the interesting measurement.
+        const N: usize = 8_000_000;
+        const BLOCKS: usize = 9;
+        const REPS: usize = 3;
+        let mk_col = || Column::from_bool_values(vec![true; N]);
+        let orig_all = |c: &Column| nanall(c.values.as_slice());
+
+        for _ in 0..2 {
+            std::hint::black_box(orig_all(&mk_col()));
+            std::hint::black_box(mk_col().all());
+        }
+
+        let (mut orig, mut cand, mut null) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..BLOCKS {
+            let (mut bo, mut bc, mut bn) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            for _ in 0..REPS {
+                let co = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(orig_all(std::hint::black_box(&co)));
+                bo = bo.min(t0.elapsed().as_secs_f64() * 1e3);
+
+                let c1 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c1).all());
+                let a = t0.elapsed().as_secs_f64() * 1e3;
+                let c2 = mk_col();
+                let t0 = Instant::now();
+                std::hint::black_box(std::hint::black_box(&c2).all());
+                let b = t0.elapsed().as_secs_f64() * 1e3;
+                bc = bc.min(a.min(b));
+                bn = bn.min(a.max(b) / a.min(b).max(1e-9));
+            }
+            orig.push(bo);
+            cand.push(bc);
+            null.push(bn);
+        }
+        let (o, c) = (min_of(&orig), min_of(&cand));
+        let sha = Command::new("sha256sum")
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default();
+        let host = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|x| String::from_utf8(x.stdout).ok())
+            .map_or_else(|| "?".into(), |s| s.trim().to_owned());
+        let nullmed = median_of(&null);
+        println!("AB bool all (all-true, no early exit; ONE binary, ONE invocation) N={N}");
+        println!("  binary_sha256 = {sha}");
+        println!("  worker        = {host}");
+        println!(
+            "  ORIG nanall(Vec<Scalar>) min={o:8.3} ms  cv={:.2}%",
+            cv_of(&orig)
+        );
+        println!(
+            "  CAND typed &[bool] all   min={c:8.3} ms  cv={:.2}%",
             cv_of(&cand)
         );
         println!(

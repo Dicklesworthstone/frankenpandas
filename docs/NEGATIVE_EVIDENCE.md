@@ -13896,3 +13896,45 @@ CAND cv is high (8.88%) because the fast path is so fast (~48 ms) that fixed tim
 the exact Scalar `nansum` on mixed, all-true, all-false, and empty. GREEN remote fail-closed: fp-columnar lib **475/0**,
 fp-conformance **2048/0**; rustfmt clean; clippy clean in-hunk. `crates/fp-frame` untouched. SIBLINGS still open: `any`/`all`
 (typed `&[bool]` any/all with early-exit — Bool output, trivially bit-identical) — the same `as_bool_slice` bypass.
+
+### 2026-07-10 cc_fp — WIN: Bool `any`/`all` typed &[bool] reduction bypasses Scalar materialization — 50.3x fp-side in the no-early-exit regime, bit-identical (completes the Bool typed-reduction family with `sum`)
+
+Direct sibling of the Bool `sum` lever (`ac225e438`, 5.496x), the last open item in the Bool typed-reduction vein. `Column::any`/
+`Column::all` had NO typed path — they called `nanany`/`nanall`(&self.values), which coerces `self.values` to `&[Scalar]`,
+materializing a `Vec<Scalar>` (~24 B/elem ⇒ ~192 MB @ 8M) then per-Scalar `is_missing()` + match dispatch. Added a Bool fast
+path to both: `as_bool_slice()` → `data.iter().any(|&b| b)` / `.all(|&b| b)` over the raw `Arc<[bool]>`.
+
+BIT-IDENTICAL: `as_bool_slice()` is `Some` only for an ALL-VALID Bool column (`validity.all()`), so `nanany`/`nanall` — which
+merely *skip* missing values — reduce to a plain `.any()`/`.all()` over the bools; the early-exit semantics are preserved
+(`Iterator::any`/`all` short-circuit exactly as the generic loops do). Parity asserted vs the exact Scalar `nanany`/`nanall` on
+mixed, all-true, all-false, and empty for BOTH ops.
+
+⚠️ HONEST FRAMING — WHERE the win lives: `any`/`all` SHORT-CIRCUIT, so on mixed data both paths exit on the first true/false
+(≈2 elements) and there is NO measurable difference (and NO regression — the typed path also short-circuits). The win is
+concentrated in the **no-early-exit** regime — `all` over an all-true column ("does this predicate hold for every row" — a
+validation idiom) and `any` over an all-false column ("does this rare condition ever occur") — where BOTH paths must scan every
+element. There the ORIG pays the full `Vec<Scalar>` materialization while the CAND is an autovectorized `memchr`-style scan of a
+24× smaller buffer. So this is a WORKLOAD-GATED win, measured in its worst case; typical mixed data is unaffected.
+
+MEASURED (substrate v2: ONE binary, ONE fail-closed `rch exec`, ORIG `nanall(col.values.as_slice())` vs CAND `all()`
+interleaved, per-arm A/A null control; 8M all-true bools — the full-scan regime):
+
+| field | value |
+| --- | --- |
+| binary sha256 | `e0b52d9e6b6d855035502bd8718a4d4d10591023a2af4077cea7063ef9d3d798` |
+| worker | `hetzner2` |
+| ORIG `nanall(Vec<Scalar>)` | 110.514 ms (cv 0.96%) |
+| CAND typed `&[bool]` all | 2.196 ms (cv 0.21%) |
+| **NULL-CONTROL (CAND A/A) median** | **1.0052x -> 0.52% floor** |
+| **fp-side ratio (min-of-blocks)** | **50.321x (+4932.1%) — DECIDABLE (4932% is ~9500x the 0.52% floor)** |
+
+50x (bigger than `sum`'s 5.5x) because `all` over all-true does the ~192 MB materialization then a full non-short-circuiting scan,
+while the typed `.all()` compiles to a SIMD "find first false" over the 8 MB `Arc<[bool]>` (~2 ms). `any`/`all` are symmetric, so
+`any` over all-false inherits the same win. GREEN remote fail-closed: fp-columnar lib **476/0**, fp-conformance **2048/0**;
+rustfmt clean; clippy clean in-hunk. `crates/fp-frame` untouched.
+
+**BOOL TYPED-REDUCTION FAMILY NOW COMPLETE (cc_fp): sum 5.496x, any/all 50.3x (no-early-exit regime).** The `as_bool_slice`
+materialization-bypass surface is exhausted for reductions. Remaining fp-columnar typed micro-opts: Int64 median/quantile.
+Remaining NEW-primitive lever: temporal `isin` (needs an `FxHashSet<i64>` over needle ns — the i64 isin fast path is
+dense-bitset-only, so wide-range Int64 AND Datetime64/Timedelta64 needles fall to the generic Scalar path).
+
