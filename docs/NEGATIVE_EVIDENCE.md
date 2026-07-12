@@ -14829,3 +14829,37 @@ Cargo command. The candidate hunk was removed manually; `crates/fp-join/src/lib.
 **RETRY-CONDITION:** this remains a measured positive, not a performance reject. Resume only when strict RCH can admit the full
 `fp-join`, conformance, check, clippy, and fmt sequence. Reapply only the dtype-presence plan gate, retain the recorded
 same-binary median as long as the `fp-join` source blob is unchanged, and never substitute local Cargo.
+
+### 2026-07-12 MagentaOak — WIN: nullable Int64 `compare_scalar` typed validity path — 72.390x FP-side, exact i64 semantics
+
+Negative-ledger-first routing excluded the closed comparison-output SIMD/AVX policy family, nullable shift normalization, and
+the already-landed nullable column-v-column comparison arms. The remaining sibling gap was
+`Column::compare_scalar(nullable Int64, Int64 scalar)`: all-valid Int64 and nullable Float64 had typed paths, but nullable Int64
+still materialized the input as `Vec<Scalar>`, dispatched through `scalar_compare` per cell, allocated a second
+`Vec<Scalar>` for the Bool output, and rebuilt that output into a typed nullable column.
+
+One lever (`br-frankenpandas-k5xf3`) adds an exact-i64 typed arm over `as_i64_slice_with_validity`, hoists the comparison op out
+of the loop, and carries the unchanged validity mask into `from_bool_values_with_validity`. Int64-vs-Float64 deliberately keeps
+the generic f64-promotion path. The focused reference test covers all six comparisons, null propagation, `i64::MIN/MAX`, and
+adjacent values above 2^53, where an accidental f64 promotion would change the answer.
+
+Strict-remote same-worker A/B on `vmi1149989` used the existing `bench_cmp_f64` example extended with a 5,000,000-row nullable
+Int64 scalar mode, nine iterations, and a temporary runtime old-path switch removed before validation:
+
+| arm | per iteration |
+| --- | ---: |
+| reference generic `Vec<Scalar>` path | 241.533 ms |
+| candidate typed i64 + validity path | 3.337 ms |
+
+Reference/candidate = **72.390x** (+7,138.99%). Both arms produced the same length checksum; an earlier digest-observing
+same-worker pair also produced the identical tri-state digest and still measured a conservative **2.927x** after output
+materialization dominated the candidate. The refined timer black-boxes the output construction instead of forcing public
+`values()` materialization, matching the optimized boundary.
+
+Validation: exact focused parity test **1/1 green** remotely on `vmi1293453`; `cargo check --workspace --all-targets` green
+remotely on `vmi1264463`; focused `cargo clippy -p fp-columnar --lib -- -D warnings` green remotely on `vmi1149989`; workspace
+fmt and `git diff --check` green; full `fp-conformance --lib` **1596/1596 green** remotely on `vmi1227854` with `-j 2` to fit the
+available strict-remote slot. Workspace all-target clippy reached only pre-existing untouched warnings (two unused imports in
+far-away `fp-columnar` test modules and two `question_mark` suggestions in `fp-frame`). Bounded UBS reproduced the broad existing
+whole-file inventory while its fmt, clippy, check, and test-build subchecks were green; it emitted no focused finding on the
+touched comparison arm or benchmark mode.

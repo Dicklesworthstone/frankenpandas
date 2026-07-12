@@ -13279,6 +13279,31 @@ impl Column {
             ));
         }
 
+        // Nullable Int64 sibling: keep comparisons exact over the raw i64 buffer
+        // and carry the source validity into the Bool result. The all-valid arm
+        // above already handles dense Int64; without this nullable arm we fell
+        // through to `values()` and allocated one 32-byte Scalar per input and
+        // output cell. This deliberately accepts only an Int64 scalar because
+        // mixed Int64/Float64 comparison uses scalar_compare's f64-promotion
+        // semantics. Masked slots' computed bools are never observed.
+        if let Some((data, validity)) = self.as_i64_slice_with_validity()
+            && let Scalar::Int64(s) = scalar
+        {
+            let s = *s;
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => data.iter().map(|&v| v > s).collect(),
+                ComparisonOp::Lt => data.iter().map(|&v| v < s).collect(),
+                ComparisonOp::Eq => data.iter().map(|&v| v == s).collect(),
+                ComparisonOp::Ne => data.iter().map(|&v| v != s).collect(),
+                ComparisonOp::Ge => data.iter().map(|&v| v >= s).collect(),
+                ComparisonOp::Le => data.iter().map(|&v| v <= s).collect(),
+            };
+            return Ok(Self::from_bool_values_with_validity(
+                bools,
+                validity.clone(),
+            ));
+        }
+
         let values = self
             .values
             .iter()
@@ -25434,6 +25459,48 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(got.values(), expected.as_slice(), "i64 op {op:?}");
+            }
+        }
+
+        #[test]
+        fn compare_scalar_nullable_i64_matches_exact_scalar_reference_k5xf3() {
+            let values = vec![
+                Scalar::Int64(i64::MIN),
+                Scalar::Int64(-1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(0),
+                Scalar::Int64(9_007_199_254_740_992),
+                Scalar::Int64(9_007_199_254_740_993),
+                Scalar::Int64(i64::MAX),
+            ];
+            let column = Column::new(DType::Int64, values.clone()).expect("nullable Int64");
+            assert!(
+                column.as_i64_slice_with_validity().is_some(),
+                "fixture must exercise the typed nullable backing"
+            );
+            let probe = Scalar::Int64(9_007_199_254_740_992);
+            for op in [
+                ComparisonOp::Gt,
+                ComparisonOp::Lt,
+                ComparisonOp::Eq,
+                ComparisonOp::Ne,
+                ComparisonOp::Ge,
+                ComparisonOp::Le,
+            ] {
+                let got = column
+                    .compare_scalar(&probe, op)
+                    .expect("nullable Int64 scalar comparison");
+                let expected: Vec<Scalar> = values
+                    .iter()
+                    .map(|value| {
+                        if value.is_missing() {
+                            Scalar::Null(NullKind::Null)
+                        } else {
+                            Scalar::Bool(scalar_compare(value, &probe, op).expect("reference"))
+                        }
+                    })
+                    .collect();
+                assert_eq!(got.values(), expected, "nullable Int64 op {op:?}");
             }
         }
 
