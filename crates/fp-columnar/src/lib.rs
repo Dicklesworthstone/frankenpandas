@@ -9989,6 +9989,60 @@ impl Column {
             return Self::from_i64_values_with_validity(gathered, ValidityMask::from_words(words, n));
         }
 
+        // Nullable temporal / Bool siblings of the LazyNullableInt64 gather above.
+        // Datetime64 & Timedelta64 store i64 ns (invalid ⇒ Null(NaT) ==
+        // missing_for_dtype), Bool stores raw bits (invalid ⇒ Null(Null)). Each is
+        // variant-gated to the canonical lazy backing (keeping Eager NullKind columns
+        // on the generic gather below) and is byte-identical to the Scalar clone:
+        // present ⇒ the datum Scalar the lazy variant emits; missing ⇒ that variant's
+        // invalid emission (== missing_for_dtype); is_missing(values[pos]) ==
+        // !validity.get(pos), so the mask matches.
+        if let ScalarValues::LazyNullableDatetime64 { data, .. } = &self.values {
+            let src = data.as_slice();
+            let mut gathered = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, &pos) in positions.iter().enumerate() {
+                gathered.push(src[pos]);
+                if self.validity.get(pos) {
+                    words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                }
+            }
+            return Self::from_datetime64_values_with_validity(
+                gathered,
+                ValidityMask::from_words(words, n),
+            );
+        }
+        if let ScalarValues::LazyNullableTimedelta64 { data, .. } = &self.values {
+            let src = data.as_slice();
+            let mut gathered = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, &pos) in positions.iter().enumerate() {
+                gathered.push(src[pos]);
+                if self.validity.get(pos) {
+                    words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                }
+            }
+            return Self::from_timedelta64_values_with_validity(
+                gathered,
+                ValidityMask::from_words(words, n),
+            );
+        }
+        if let ScalarValues::LazyNullableBool { data, .. } = &self.values {
+            let src = data.as_slice();
+            let mut gathered = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, &pos) in positions.iter().enumerate() {
+                gathered.push(src[pos]);
+                if self.validity.get(pos) {
+                    words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                }
+            }
+            return Self::from_bool_values_with_validity(
+                gathered,
+                ValidityMask::from_words(words, n),
+            );
+        }
+
         let mut values = Vec::with_capacity(n);
         let mut words = vec![0_u64; n.div_ceil(64)];
         for (out_idx, &pos) in positions.iter().enumerate() {
@@ -22933,6 +22987,58 @@ mod tests {
                 "validity must follow gathered position {pos}",
             );
         }
+    }
+
+    #[test]
+    fn take_positions_nullable_temporal_bool_typed_gather_matches_reference_cf() {
+        // Datetime64/Timedelta64/Bool nullable gathers (variant-gated siblings of
+        // the Int64 gather). Present ⇒ the datum Scalar; missing ⇒ Null(NaT) for the
+        // temporal dtypes, Null(Null) for Bool; order follows positions.
+        let mut v = ValidityMask::all_valid(4);
+        v.set(1, false);
+        let positions = [3usize, 1, 2, 0, 1];
+
+        let dt = Column::from_datetime64_values_with_validity(vec![100, 0, 300, 400], v.clone());
+        let dtr = dt.take_positions(&positions);
+        assert_eq!(dtr.dtype(), DType::Datetime64);
+        assert_eq!(
+            dtr.values(),
+            &[
+                Scalar::Datetime64(400),
+                Scalar::Null(NullKind::NaT),
+                Scalar::Datetime64(300),
+                Scalar::Datetime64(100),
+                Scalar::Null(NullKind::NaT),
+            ]
+        );
+
+        let td = Column::from_timedelta64_values_with_validity(vec![10, 0, 30, 40], v.clone());
+        let tdr = td.take_positions(&positions);
+        assert_eq!(tdr.dtype(), DType::Timedelta64);
+        assert_eq!(
+            tdr.values(),
+            &[
+                Scalar::Timedelta64(40),
+                Scalar::Null(NullKind::NaT),
+                Scalar::Timedelta64(30),
+                Scalar::Timedelta64(10),
+                Scalar::Null(NullKind::NaT),
+            ]
+        );
+
+        let b = Column::from_bool_values_with_validity(vec![true, false, false, true], v.clone());
+        let br = b.take_positions(&positions);
+        assert_eq!(br.dtype(), DType::Bool);
+        assert_eq!(
+            br.values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::Null),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::Null),
+            ]
+        );
     }
 
     #[test]
