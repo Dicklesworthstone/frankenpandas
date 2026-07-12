@@ -11483,6 +11483,39 @@ impl Column {
                     };
                     return Some(Ok(Self::from_f64_values_owned(result)));
                 }
+                // Typed MIXED / int-promoted fast path: the both-Float64 borrow above
+                // declined because a side is Int64 (Int64 op Float64, or Int64 / Int64
+                // which promotes to Float64). Build an f64 view per side — an all-valid
+                // Float64 borrows its `&[f64]`, an all-valid Int64 maps `v as f64` once —
+                // and apply the SAME kernel, instead of materializing BOTH columns via
+                // `from_scalars` below. Bit-identical to the both-Float64 arm on the same
+                // values: an all-valid column has no present NaN (fp clears the validity
+                // bit for any NaN; Int64 has none), so `to_f64(Int64(v)) == v as f64` and
+                // the result is `from_f64_values(apply(l, r))`. A NaN-bearing Float64 or a
+                // nullable/other-dtype column declines the view and keeps the `from_scalars`
+                // path below (its nan-aware validity handling). A local `fn` (not a closure)
+                // so elision ties the `Cow<'_>` output lifetime to the `&Column` argument.
+                fn f64_view(col: &Column) -> Option<std::borrow::Cow<'_, [f64]>> {
+                    if let Some(d) = col.as_f64_slice() {
+                        Some(std::borrow::Cow::Borrowed(d))
+                    } else {
+                        col.as_i64_slice()
+                            .map(|d| std::borrow::Cow::Owned(d.iter().map(|&v| v as f64).collect()))
+                    }
+                }
+                if let (Some(lv), Some(rv)) = (f64_view(self), f64_view(right)) {
+                    let (l, r) = (lv.as_ref(), rv.as_ref());
+                    let apply = binary_f64_apply(op);
+                    let result: Vec<f64> = if matches!(
+                        op,
+                        ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv
+                    ) {
+                        par_map_vec_f64(l.len(), |i| apply(l[i], r[i]))
+                    } else {
+                        l.iter().zip(r).map(|(&a, &b)| apply(a, b)).collect()
+                    };
+                    return Some(Ok(Self::from_f64_values_owned(result)));
+                }
                 let left_data = ColumnData::from_scalars(&self.values, DType::Float64);
                 let right_data = ColumnData::from_scalars(&right.values, DType::Float64);
                 let (ColumnData::Float64(l), ColumnData::Float64(r)) = (&left_data, &right_data)
