@@ -11575,6 +11575,34 @@ impl Column {
                         vectorized_binary_i64(l, r, &self.validity, &right.validity, op)?;
                     return Some(Ok(Self::from_i64_values_owned(result_data)));
                 }
+                // Nullable-input fast path (sibling of the all-valid branch above,
+                // and of compare_scalar's nullable-Int64 arm): at least one side is
+                // a nullable Int64 column, so the `as_i64_slice` borrow declined and
+                // we would otherwise materialize BOTH inputs via `from_scalars`
+                // (forcing each LazyNullableInt64 to build a 32-byte-per-cell
+                // Vec<Scalar>) plus a trailing Vec<Scalar> for the nullable result.
+                // Read the raw &[i64] buffers + validity directly and feed the SAME
+                // `vectorized_binary_i64` kernel. Bit-identical to the from_scalars
+                // arm below: identical kernel over the same buffers and the same
+                // {self,right}.validity (as_i64_slice_with_validity returns
+                // &self.validity), so identical (result_data, result_validity);
+                // `from_i64_values_with_validity` reproduces that arm's output
+                // exactly (all-valid ⇒ from_i64_values_owned; otherwise
+                // LazyNullableInt64 emits Int64(v) at valid slots and
+                // Null(Null) == missing_for_dtype(Int64) at invalid slots). A zero
+                // divisor / Div / Pow still yields None from the kernel → caller
+                // promotes to Float64, identical to before.
+                if let (Some((l, lv)), Some((r, rv))) = (
+                    self.as_i64_slice_with_validity(),
+                    right.as_i64_slice_with_validity(),
+                ) {
+                    let (result_data, result_validity) =
+                        vectorized_binary_i64(l, r, lv, rv, op)?;
+                    return Some(Ok(Self::from_i64_values_with_validity(
+                        result_data,
+                        result_validity,
+                    )));
+                }
                 let left_data = ColumnData::from_scalars(&self.values, DType::Int64);
                 let right_data = ColumnData::from_scalars(&right.values, DType::Int64);
                 let (ColumnData::Int64(l), ColumnData::Int64(r)) = (&left_data, &right_data) else {
@@ -24607,6 +24635,59 @@ mod tests {
         assert_eq!(
             left.pow(&right).expect("pow"),
             left.binary_numeric(&right, ArithmeticOp::Pow).expect("pow")
+        );
+    }
+
+    #[test]
+    fn nullable_i64_two_col_arith_matches_scalar_reference_cf() {
+        // Nullable Int64 × Int64 elementwise arithmetic routes through the typed
+        // `as_i64_slice_with_validity` fast path in `try_vectorized_binary` and
+        // must stay bit-identical to a hand reference: both-valid ⇒ wrapping op;
+        // either operand missing ⇒ Null(Null). i64::MAX + 1 exercises wrapping.
+        let build = |vals: &[Option<i64>]| {
+            let data: Vec<i64> = vals.iter().map(|v| v.unwrap_or(0)).collect();
+            let mut validity = ValidityMask::all_valid(vals.len());
+            for (i, v) in vals.iter().enumerate() {
+                if v.is_none() {
+                    validity.set(i, false);
+                }
+            }
+            Column::from_i64_values_with_validity(data, validity)
+        };
+        let lv = [Some(5_i64), Some(-3), None, Some(i64::MAX), Some(0), None, Some(7)];
+        let rv = [Some(2_i64), None, Some(9), Some(1), Some(-8), None, Some(-7)];
+        let left = build(&lv);
+        let right = build(&rv);
+        assert!(
+            left.as_i64_slice_with_validity().is_some()
+                && right.as_i64_slice_with_validity().is_some(),
+            "fixture must exercise the typed nullable backing"
+        );
+
+        let reference = |op: fn(i64, i64) -> i64| -> Vec<Scalar> {
+            lv.iter()
+                .zip(rv.iter())
+                .map(|(a, b)| match (a, b) {
+                    (Some(x), Some(y)) => Scalar::Int64(op(*x, *y)),
+                    _ => Scalar::Null(NullKind::Null),
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            left.add(&right).expect("add").values(),
+            reference(|a, b| a.wrapping_add(b)),
+            "nullable Int64 add"
+        );
+        assert_eq!(
+            left.sub(&right).expect("sub").values(),
+            reference(|a, b| a.wrapping_sub(b)),
+            "nullable Int64 sub"
+        );
+        assert_eq!(
+            left.mul(&right).expect("mul").values(),
+            reference(|a, b| a.wrapping_mul(b)),
+            "nullable Int64 mul"
         );
     }
 
