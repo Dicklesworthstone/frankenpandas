@@ -11516,24 +11516,41 @@ impl Column {
                     };
                     return Some(Ok(Self::from_f64_values_owned(result)));
                 }
-                // Nullable-input fast path: skip the two `from_scalars` copies (each
-                // reads the cached Vec<Scalar> and rewrites a Vec<f64>) by borrowing
-                // both raw &[f64] buffers directly. Byte-identical to the from_scalars
-                // arm below: `as_f64_slice_with_validity`'s buffer equals what
-                // `from_scalars(&values, Float64)` builds (present ⇒ datum, missing ⇒
-                // 0.0 sentinel), `nan_aware_validity` is computed from the unchanged
-                // columns, and the kernel + output construction are identical. Only
-                // fires when BOTH sides expose a Float64-with-validity backing; any
-                // other shape (mixed dtype, exotic backing) declines and keeps the
-                // from_scalars path.
-                if let (Some((l, _)), Some((r, _))) = (
-                    self.as_f64_slice_with_validity(),
-                    right.as_f64_slice_with_validity(),
-                ) {
-                    let left_nan_aware = self.nan_aware_validity();
-                    let right_nan_aware = right.nan_aware_validity();
+                // Nullable / mixed-nullable f64-output fast path: generalizes the
+                // all-valid `f64_view` above to the NULLABLE case (which it declines,
+                // so a nullable Float64 OR any nullable Int64×Float64 / Int64×Int64-Div
+                // pair fell to the from_scalars materialization below). Each operand
+                // yields an f64 view + nan-aware validity: a Float64 borrows its raw
+                // &[f64] and folds present-NaN into the mask (== nan_aware_validity);
+                // an Int64 maps `v as f64` (no NaN) and carries its validity as-is
+                // (== nan_aware_validity for an int column, but WITHOUT the
+                // Scalar-materialize scan the generic path's nan_aware_validity pays on
+                // a non-Float64 backing). Byte-identical to the from_scalars arm: the
+                // views equal from_scalars(&values, Float64) (present ⇒ datum / v as
+                // f64, missing ⇒ 0.0 sentinel), the masks equal the two
+                // nan_aware_validity calls, and the kernel + output builder are the
+                // same. Local `fn` (not a closure) so elision ties the Cow lifetime to
+                // `col`.
+                fn f64_view_naw(
+                    col: &Column,
+                ) -> Option<(std::borrow::Cow<'_, [f64]>, ValidityMask)> {
+                    if let Some((d, _)) = col.as_f64_slice_with_validity() {
+                        Some((std::borrow::Cow::Borrowed(d), col.nan_aware_validity()))
+                    } else if let Some((d, v)) = col.as_i64_slice_with_validity() {
+                        Some((
+                            std::borrow::Cow::Owned(d.iter().map(|&x| x as f64).collect()),
+                            v.clone(),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                if let (Some((lv, lnaw)), Some((rv, rnaw))) =
+                    (f64_view_naw(self), f64_view_naw(right))
+                {
+                    let (l, r) = (lv.as_ref(), rv.as_ref());
                     let (result_data, result_validity) =
-                        vectorized_binary_f64(l, r, &left_nan_aware, &right_nan_aware, op);
+                        vectorized_binary_f64(l, r, &lnaw, &rnaw, op);
                     if result_validity.all() {
                         return Some(Ok(Self::from_f64_values_owned(result_data)));
                     }
@@ -24765,6 +24782,61 @@ mod tests {
             o => panic!("div[4]={o:?}"),
         }
         assert!(matches!(dv[5], Scalar::Null(_)), "div[5] null (both null)");
+    }
+
+    #[test]
+    fn nullable_mixed_i64_f64_arith_matches_reference_cf() {
+        // Mixed nullable Int64 × nullable Float64 (→ Float64) routes through the
+        // generalized f64_view_naw arm (Int64 mapped `v as f64`, Float64 borrowed).
+        // Both-valid ⇒ Float64(op(x as f64, y)); either missing ⇒ Null(NaN). Finite
+        // inputs ⇒ no op-NaN ⇒ clean assert_eq vs a hand reference.
+        let ldata = [Some(5_i64), Some(-3), None, Some(7), Some(0), None];
+        let rdata = [Some(2.0_f64), None, Some(9.5), Some(4.0), Some(-1.5), None];
+        let build_i64 = |vals: &[Option<i64>]| {
+            let data: Vec<i64> = vals.iter().map(|v| v.unwrap_or(0)).collect();
+            let mut validity = ValidityMask::all_valid(vals.len());
+            for (i, v) in vals.iter().enumerate() {
+                if v.is_none() {
+                    validity.set(i, false);
+                }
+            }
+            Column::from_i64_values_with_validity(data, validity)
+        };
+        let build_f64 = |vals: &[Option<f64>]| {
+            let data: Vec<f64> = vals.iter().map(|v| v.unwrap_or(0.0)).collect();
+            let mut validity = ValidityMask::all_valid(vals.len());
+            for (i, v) in vals.iter().enumerate() {
+                if v.is_none() {
+                    validity.set(i, false);
+                }
+            }
+            Column::from_f64_values_with_validity(data, validity)
+        };
+        let left = build_i64(&ldata);
+        let right = build_f64(&rdata);
+        assert!(
+            left.as_i64_slice_with_validity().is_some()
+                && right.as_f64_slice_with_validity().is_some(),
+            "fixture must exercise the mixed typed backings"
+        );
+
+        let reference = |op: fn(f64, f64) -> f64| -> Vec<Scalar> {
+            ldata
+                .iter()
+                .zip(rdata.iter())
+                .map(|(a, b)| match (a, b) {
+                    (Some(x), Some(y)) => Scalar::Float64(op(*x as f64, *y)),
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect()
+        };
+        // Int64 (left) op Float64 (right).
+        assert_eq!(left.add(&right).expect("add").values(), reference(|a, b| a + b), "i64+f64");
+        assert_eq!(left.sub(&right).expect("sub").values(), reference(|a, b| a - b), "i64-f64");
+        assert_eq!(left.mul(&right).expect("mul").values(), reference(|a, b| a * b), "i64*f64");
+        // Float64 (left) op Int64 (right): exercises the reverse view combo.
+        assert_eq!(right.add(&left).expect("radd").values(), reference(|a, b| b + a), "f64+i64");
+        assert_eq!(right.sub(&left).expect("rsub").values(), reference(|a, b| b - a), "f64-i64");
     }
 
     #[test]
