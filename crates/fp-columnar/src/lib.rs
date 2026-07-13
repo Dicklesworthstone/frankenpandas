@@ -17952,6 +17952,58 @@ impl Column {
         Self::new(target, out)
     }
 
+    /// Shared linear-interpolation fill used by the typed Float64/Int64 fast paths.
+    /// `present(i)` returns the present value at index `i` (None ⇒ missing), matching
+    /// the generic path's `!is_missing() → to_f64() → !is_nan()` filter. Interior gaps
+    /// between the first and last present are linearly interpolated; trailing nulls are
+    /// forward-filled with the last present value; leading nulls stay missing. Output
+    /// is a nullable Float64 column (leading nulls ⇒ Null(NaN)).
+    fn interpolate_linear_from_present(len: usize, present: impl Fn(usize) -> Option<f64>) -> Self {
+        let mut out = vec![0.0_f64; len];
+        let mut valid = vec![false; len];
+        for (i, slot) in out.iter_mut().enumerate() {
+            if let Some(v) = present(i) {
+                *slot = v;
+                valid[i] = true;
+            }
+        }
+        let first = valid.iter().position(|&b| b);
+        let last = valid.iter().rposition(|&b| b);
+        if let (Some(start), Some(end)) = (first, last) {
+            let mut i = start;
+            while i < end {
+                if valid[i] {
+                    i += 1;
+                    continue;
+                }
+                let gap_start = i;
+                while i < end && !valid[i] {
+                    i += 1;
+                }
+                let before = out[gap_start - 1];
+                let after = out[i];
+                let span = (i - gap_start + 1) as f64;
+                for (k, j) in (gap_start..i).enumerate() {
+                    let step = (k + 1) as f64;
+                    out[j] = before + (after - before) * (step / span);
+                    valid[j] = true;
+                }
+            }
+            let last_valid = out[end];
+            for j in (end + 1)..len {
+                out[j] = last_valid;
+                valid[j] = true;
+            }
+        }
+        let mut vmask = ValidityMask::all_valid(len);
+        for (j, &ok) in valid.iter().enumerate() {
+            if !ok {
+                vmask.set(j, false);
+            }
+        }
+        Self::from_f64_values_with_validity(out, vmask)
+    }
+
     /// Linearly interpolate missing numeric values.
     ///
     /// Matches `pd.Series.interpolate(method='linear')` with the
@@ -17962,58 +18014,26 @@ impl Column {
     /// columns return a type error. Result dtype is always Float64.
     pub fn interpolate_linear(&self) -> Result<Self, ColumnError> {
         let len = self.values.len();
-        // Typed Float64 fast path: source the present values from the contiguous
+        // Typed Float64/Int64 fast path: source the present values from the contiguous
         // buffer + validity (no per-element Scalar/ to_f64 materialization), run the
-        // identical interior-gap + trailing-ffill fill into an f64 buffer, and MOVE
-        // it out with a validity mask (leading nulls stay missing). Bit-identical to
-        // the Scalar path below: a filled/present slot → Float64(value), a remaining
-        // (leading) null → Null(NaN); the fill arithmetic is the same.
+        // identical interior-gap + trailing-ffill fill into an f64 buffer, and MOVE it
+        // out with a validity mask (leading nulls stay missing). Bit-identical to the
+        // Scalar path below: present == validity-set AND non-NaN (Float64) / validity-
+        // set (Int64, `v as f64` == the generic to_f64), a filled/present slot →
+        // Float64(value), a remaining (leading) null → Null(NaN); same fill arithmetic.
         if self.dtype == DType::Float64
             && let Some((data, validity)) = self.as_f64_slice_with_validity()
         {
-            let mut out = vec![0.0_f64; len];
-            let mut valid = vec![false; len];
-            for i in 0..len {
-                if validity.get(i) && !data[i].is_nan() {
-                    out[i] = data[i];
-                    valid[i] = true;
-                }
-            }
-            let first = valid.iter().position(|&b| b);
-            let last = valid.iter().rposition(|&b| b);
-            if let (Some(start), Some(end)) = (first, last) {
-                let mut i = start;
-                while i < end {
-                    if valid[i] {
-                        i += 1;
-                        continue;
-                    }
-                    let gap_start = i;
-                    while i < end && !valid[i] {
-                        i += 1;
-                    }
-                    let before = out[gap_start - 1];
-                    let after = out[i];
-                    let span = (i - gap_start + 1) as f64;
-                    for (k, j) in (gap_start..i).enumerate() {
-                        let step = (k + 1) as f64;
-                        out[j] = before + (after - before) * (step / span);
-                        valid[j] = true;
-                    }
-                }
-                let last_valid = out[end];
-                for j in (end + 1)..len {
-                    out[j] = last_valid;
-                    valid[j] = true;
-                }
-            }
-            let mut vmask = ValidityMask::all_valid(len);
-            for (j, &ok) in valid.iter().enumerate() {
-                if !ok {
-                    vmask.set(j, false);
-                }
-            }
-            return Ok(Self::from_f64_values_with_validity(out, vmask));
+            return Ok(Self::interpolate_linear_from_present(len, |i| {
+                (validity.get(i) && !data[i].is_nan()).then_some(data[i])
+            }));
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            return Ok(Self::interpolate_linear_from_present(len, |i| {
+                validity.get(i).then_some(data[i] as f64)
+            }));
         }
         // Convert to f64 once; missing → None.
         let mut floats: Vec<Option<f64>> = Vec::with_capacity(len);
@@ -32761,6 +32781,122 @@ mod tests {
                         assert!(
                             bit_eq(&col.quantile(q), &fp_types::nanquantile(&vals, q)),
                             "quantile trial {trial} q {q}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn interpolate_linear_typed_match_scalar_reference() {
+            // The typed Int64 arm (new) + the refactored Float64 arm must produce
+            // output BIT-EXACT to the generic Scalar path (to_f64 walk). Reference
+            // replicates that path over the materialized values(). Exercises interior
+            // gaps, leading nulls (stay null), trailing nulls (ffill), all-missing,
+            // single-valid; Float64 also carries valid-bit-set NaN (treated as missing).
+            let mut state: u64 = 0x1017_E4B0_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            // Exact replica of the generic Scalar interpolation path.
+            fn ref_interp(vals: &[Scalar]) -> Vec<Scalar> {
+                let len = vals.len();
+                let mut floats: Vec<Option<f64>> = Vec::with_capacity(len);
+                for v in vals {
+                    if v.is_missing() {
+                        floats.push(None);
+                        continue;
+                    }
+                    match v.to_f64() {
+                        Ok(x) if !x.is_nan() => floats.push(Some(x)),
+                        Ok(_) => floats.push(None),
+                        Err(_) => floats.push(None),
+                    }
+                }
+                let first = floats.iter().position(Option::is_some);
+                let last = floats.iter().rposition(Option::is_some);
+                if let (Some(start), Some(end)) = (first, last) {
+                    let mut i = start;
+                    while i < end {
+                        if floats[i].is_some() {
+                            i += 1;
+                            continue;
+                        }
+                        let gap_start = i;
+                        while i < end && floats[i].is_none() {
+                            i += 1;
+                        }
+                        let before = floats[gap_start - 1].unwrap();
+                        let after = floats[i].unwrap();
+                        let span = (i - gap_start + 1) as f64;
+                        for (k, j) in (gap_start..i).enumerate() {
+                            let step = (k + 1) as f64;
+                            floats[j] = Some(before + (after - before) * (step / span));
+                        }
+                    }
+                    let last_valid = floats[end].unwrap();
+                    for slot in floats.iter_mut().skip(end + 1) {
+                        *slot = Some(last_valid);
+                    }
+                }
+                floats
+                    .into_iter()
+                    .map(|opt| match opt {
+                        Some(x) => Scalar::Float64(x),
+                        None => Scalar::Null(NullKind::NaN),
+                    })
+                    .collect()
+            }
+            for trial in 0..400 {
+                let n = (next() % 200) as usize;
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 5 {
+                            0 => {
+                                vf.set(i, false);
+                                0.0
+                            }
+                            1 => f64::NAN, // valid-bit-set NaN ⇒ treated as missing
+                            _ => ((r % 400) as f64 - 200.0) * 0.5,
+                        }
+                    })
+                    .collect();
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 3 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 400) as i64 - 200
+                    })
+                    .collect();
+                let f_all = Column::from_f64_values_owned(fdata.clone());
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                for col in [&f_all, &f_null, &i_all, &i_null] {
+                    let vals = col.values().to_vec();
+                    let got = col.interpolate_linear().unwrap();
+                    let got_vals = got.values();
+                    let want = ref_interp(&vals);
+                    assert_eq!(got_vals.len(), want.len(), "interp len trial {trial}");
+                    for (k, (g, w)) in got_vals.iter().zip(want.iter()).enumerate() {
+                        assert!(
+                            bit_eq(g, w),
+                            "interp trial {trial} n {n} idx {k}: {g:?} != {w:?}"
                         );
                     }
                 }
