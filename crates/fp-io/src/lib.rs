@@ -7061,6 +7061,12 @@ enum JCol<'a> {
     /// serializes as `null` — so a string column WITH nulls no longer forces the
     /// whole frame onto the serde tree.
     UN(&'a [u8], &'a [usize], &'a fp_columnar::ValidityMask),
+    /// NULLABLE Float64: `(data, validity)`. A present, finite row serializes via
+    /// serde's `write_f64`; a missing row (validity-clear) OR a non-finite datum
+    /// (NaN/±inf) serializes as `null` — matching `scalar_to_json` and the F arm.
+    FN(&'a [f64], &'a fp_columnar::ValidityMask),
+    /// NULLABLE Int64: `(data, validity)`. Present → decimal; missing → `null`.
+    IN(&'a [i64], &'a fp_columnar::ValidityMask),
 }
 
 /// Append `s` as a JSON string literal, byte-identical to `serde_json` (which
@@ -7126,6 +7132,12 @@ fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<
             // rows serialize as `null` — so one null-bearing string column no longer
             // forces the whole frame onto the serde tree.
             (offsets.len() == n + 1).then_some(JCol::UN(bytes, offsets, column.validity()))?
+        } else if let Some((s, validity)) = column.as_f64_slice_with_validity() {
+            // Nullable Float64: present+finite → number, missing/non-finite → null.
+            (s.len() == n).then_some(JCol::FN(s, validity))?
+        } else if let Some((s, validity)) = column.as_i64_slice_with_validity() {
+            // Nullable Int64: present → integer, missing → null.
+            (s.len() == n).then_some(JCol::IN(s, validity))?
         } else {
             return None;
         };
@@ -7179,6 +7191,27 @@ fn append_typed_json_value(out: &mut String, col: &JCol<'_>, r: usize, fbytes: &
             if validity.get(r) {
                 let field = &bytes[offsets[r]..offsets[r + 1]];
                 append_json_string(out, std::str::from_utf8(field).unwrap_or(""));
+            } else {
+                out.push_str("null");
+            }
+        }
+        // Nullable Float64: a present finite row renders like JCol::F (serde's
+        // write_f64); a missing row (validity-clear) OR a non-finite datum
+        // (NaN/±inf — no JSON representation, matching scalar_to_json) renders `null`.
+        JCol::FN(s, validity) => {
+            let v = s[r];
+            if validity.get(r) && v.is_finite() {
+                fbytes.clear();
+                let _ = CompactFormatter.write_f64(fbytes, v);
+                out.push_str(std::str::from_utf8(fbytes).unwrap_or("null"));
+            } else {
+                out.push_str("null");
+            }
+        }
+        // Nullable Int64: present ⇒ decimal (== JCol::I); missing ⇒ `null`.
+        JCol::IN(s, validity) => {
+            if validity.get(r) {
+                append_i64_decimal(out, s[r]);
             } else {
                 out.push_str("null");
             }
@@ -18157,6 +18190,81 @@ mod tests {
             assert_eq!(
                 fast, general,
                 "fast nullable-Utf8 JSON ({orient:?}) must byte-match the serde tree"
+            );
+        }
+    }
+
+    #[test]
+    fn test_write_json_nullable_numeric_fast_matches_serde() {
+        // Nullable Float64 (JCol::FN) and Int64 (JCol::IN) columns take the typed JSON
+        // fast writer. Output must be BYTE-IDENTICAL to the serde tree (which the same
+        // frame falls to when an EAGER Utf8 column forces it off the fast path). Covers:
+        // validity-clear missing (→ null), valid-bit NaN (→ null), ±inf (→ null), whole
+        // numbers, negatives, 1e20, i64::MIN/MAX; Records + Columns orients.
+        let n = 9usize;
+        let fdata: Vec<f64> = vec![
+            1.0,
+            -2.5,
+            0.0,
+            f64::NAN,
+            1e20,
+            f64::INFINITY,
+            3.14159,
+            f64::NEG_INFINITY,
+            42.0,
+        ];
+        let mut fv = fp_columnar::ValidityMask::all_valid(n);
+        fv.set(2, false); // validity-clear (data 0.0 → null)
+        // slot 3 valid-bit NaN, slots 5/7 valid ±inf → all render null.
+
+        let idata: Vec<i64> = vec![0, i64::MIN, i64::MAX, -1, 1000, 0, -999999, 7, 123456789];
+        let mut iv = fp_columnar::ValidityMask::all_valid(n);
+        iv.set(0, false);
+        iv.set(5, false);
+
+        let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h", "z"];
+        let mut nb: Vec<u8> = Vec::new();
+        let mut no: Vec<usize> = vec![0];
+        for s in &names {
+            nb.extend_from_slice(s.as_bytes());
+            no.push(nb.len());
+        }
+        let eager_names: Vec<Scalar> =
+            names.iter().map(|s| Scalar::Utf8((*s).to_string())).collect();
+
+        let mk = |name_col: Column| -> DataFrame {
+            let mut cols = std::collections::BTreeMap::new();
+            cols.insert(
+                "f".to_string(),
+                Column::from_f64_values_with_validity(fdata.clone(), fv.clone()),
+            );
+            cols.insert(
+                "i".to_string(),
+                Column::from_i64_values_with_validity(idata.clone(), iv.clone()),
+            );
+            cols.insert("name".to_string(), name_col);
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, n),
+                cols,
+                vec!["f".to_string(), "i".to_string(), "name".to_string()],
+            )
+            .unwrap()
+        };
+        let frame_fast = mk(Column::from_utf8_contiguous(nb, no));
+        let frame_general = mk(Column::from_values(eager_names).unwrap());
+
+        let ctl = frame_general.column("name").unwrap();
+        assert!(
+            ctl.as_utf8_contiguous().is_none() && ctl.as_nullable_utf8_contiguous().is_none(),
+            "control name column must force the serde tree"
+        );
+
+        for orient in [JsonOrient::Records, JsonOrient::Columns] {
+            let fast = write_json_string(&frame_fast, orient).expect("fast json");
+            let general = write_json_string(&frame_general, orient).expect("general json");
+            assert_eq!(
+                fast, general,
+                "fast nullable-numeric JSON ({orient:?}) must byte-match the serde tree"
             );
         }
     }
