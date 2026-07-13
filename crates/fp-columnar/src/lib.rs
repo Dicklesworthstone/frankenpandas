@@ -18438,6 +18438,80 @@ impl Column {
         // validating on the first passing needle raises the exact same error the
         // pre-lever's first `searchsorted_position` raised (empty needles never
         // validate, exactly as before, since the loop body never runs).
+        // Typed fast paths (sorter analogue of the no-sorter `searchsorted_values`):
+        // an all-valid Int64/Float64 column with all-matching needles binary-searches
+        // over `data[sorter[mid]]` typed, instead of `searchsorted_binary_core`
+        // materializing the whole `Vec<Scalar>` (via `self.values`) and running
+        // `compare_scalars_na_last` per step for every one of `k` needles. Gated on
+        // NON-EMPTY needles so the empty case keeps the original behaviour (no sorter
+        // validation, returns empty). Bit-identical: the sorter defines the sorted
+        // view, all values are present (so `compare_scalars_na_last` == typed cmp),
+        // and the go-right rule is identical (mid < needle for "left", mid <= needle
+        // for "right"). Float64 excludes NaN needles (NaN sorts last, not via `<`).
+        if !needles.is_empty() && (side == "left" || side == "right") {
+            if let Some(data) = self.as_i64_slice()
+                && needles.iter().all(|n| matches!(n, Scalar::Int64(_)))
+            {
+                let sorter = self
+                    .validate_searchsorted_sorter(Some(sorter))?
+                    .expect("Some(sorter) validates to Some");
+                let left = side == "left";
+                let out: Vec<i64> = needles
+                    .iter()
+                    .map(|n| {
+                        let nv = match n {
+                            Scalar::Int64(v) => *v,
+                            _ => unreachable!("guarded all-Int64"),
+                        };
+                        let (mut lo, mut hi) = (0usize, sorter.len());
+                        while lo < hi {
+                            let mid = lo + (hi - lo) / 2;
+                            let mv = data[sorter[mid]];
+                            let go_right = if left { mv < nv } else { mv <= nv };
+                            if go_right {
+                                lo = mid + 1;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                        lo as i64
+                    })
+                    .collect();
+                return Ok(Self::from_i64_values_owned(out));
+            }
+            if let Some(data) = self.as_f64_slice()
+                && needles
+                    .iter()
+                    .all(|n| matches!(n, Scalar::Float64(v) if !v.is_nan()))
+            {
+                let sorter = self
+                    .validate_searchsorted_sorter(Some(sorter))?
+                    .expect("Some(sorter) validates to Some");
+                let left = side == "left";
+                let out: Vec<i64> = needles
+                    .iter()
+                    .map(|n| {
+                        let nv = match n {
+                            Scalar::Float64(v) => *v,
+                            _ => unreachable!("guarded all-non-NaN-Float64"),
+                        };
+                        let (mut lo, mut hi) = (0usize, sorter.len());
+                        while lo < hi {
+                            let mid = lo + (hi - lo) / 2;
+                            let mv = data[sorter[mid]];
+                            let go_right = if left { mv < nv } else { mv <= nv };
+                            if go_right {
+                                lo = mid + 1;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                        lo as i64
+                    })
+                    .collect();
+                return Ok(Self::from_i64_values_owned(out));
+            }
+        }
         let mut positions: Vec<Scalar> = Vec::with_capacity(needles.len());
         let mut validated: Option<Option<&[usize]>> = None;
         for needle in needles {
@@ -35222,6 +35296,90 @@ mod tests {
                 positions.values(),
                 &[Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(4)]
             );
+        }
+
+        #[test]
+        fn searchsorted_values_with_sorter_typed_matches_count_reference() {
+            // The typed Int64/Float64 sorter fast path (partition over data[sorter[
+            // mid]]) must equal a count-based reference: for a needle nv over the
+            // sorted view, left = #(v < nv), right = #(v <= nv). Unsorted all-valid
+            // columns via from_i64_values_owned/from_f64_values (⇒ as_*_slice ⇒ the
+            // typed path fires), argsort sorter, ties + out-of-range needles.
+            let mut state: u64 = 0x5EAF_C0DE_1234_9999;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..80 {
+                let n = (next() % 300) as usize + 1;
+                let idata: Vec<i64> = (0..n).map(|_| (next() % 21) as i64 - 10).collect();
+                let fdata: Vec<f64> = idata.iter().map(|&x| x as f64 * 0.5).collect();
+                let icol = Column::from_i64_values_owned(idata.clone());
+                let fcol = Column::from_f64_values(fdata.clone());
+                let isorter = icol.argsort();
+                let fsorter = fcol.argsort();
+                // sorted views
+                let iview: Vec<i64> = isorter.iter().map(|&i| idata[i]).collect();
+                let fview: Vec<f64> = fsorter.iter().map(|&i| fdata[i]).collect();
+                let needles_i: Vec<Scalar> =
+                    (-12..=12).map(Scalar::Int64).collect();
+                let needles_f: Vec<Scalar> =
+                    (-12..=12).map(|k| Scalar::Float64(k as f64 * 0.5)).collect();
+                for side in ["left", "right"] {
+                    let left = side == "left";
+                    let iwant: Vec<i64> = needles_i
+                        .iter()
+                        .map(|n| {
+                            let nv = match n {
+                                Scalar::Int64(v) => *v,
+                                _ => unreachable!(),
+                            };
+                            iview
+                                .iter()
+                                .filter(|&&v| if left { v < nv } else { v <= nv })
+                                .count() as i64
+                        })
+                        .collect();
+                    let igot: Vec<i64> = icol
+                        .searchsorted_values_with_sorter(&needles_i, side, &isorter)
+                        .expect("iss")
+                        .values()
+                        .iter()
+                        .map(|v| match v {
+                            Scalar::Int64(x) => *x,
+                            o => panic!("{o:?}"),
+                        })
+                        .collect();
+                    assert_eq!(igot, iwant, "i64 trial {trial} side={side}");
+
+                    let fwant: Vec<i64> = needles_f
+                        .iter()
+                        .map(|n| {
+                            let nv = match n {
+                                Scalar::Float64(v) => *v,
+                                _ => unreachable!(),
+                            };
+                            fview
+                                .iter()
+                                .filter(|&&v| if left { v < nv } else { v <= nv })
+                                .count() as i64
+                        })
+                        .collect();
+                    let fgot: Vec<i64> = fcol
+                        .searchsorted_values_with_sorter(&needles_f, side, &fsorter)
+                        .expect("fss")
+                        .values()
+                        .iter()
+                        .map(|v| match v {
+                            Scalar::Int64(x) => *x,
+                            o => panic!("{o:?}"),
+                        })
+                        .collect();
+                    assert_eq!(fgot, fwant, "f64 trial {trial} side={side}");
+                }
+            }
         }
 
         #[test]
