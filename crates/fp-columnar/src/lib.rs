@@ -6261,12 +6261,14 @@ fn mode_i64_wide(data: &[i64]) -> Vec<i64> {
 /// generic `FxHashMap<FloatBits, (count, &Scalar)>` path.
 fn mode_f64_wide(data: &[f64]) -> Vec<f64> {
     const EMPTY: i64 = i64::MIN;
-    let cap = data
-        .len()
-        .saturating_add(data.len() / 2)
-        .checked_next_power_of_two()
-        .unwrap_or(0);
-    if cap == 0 || data.len() > u32::MAX as usize {
+    const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
+    let n = data.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    // n > u32::MAX ⇒ a single value could appear more than u32 times → keep the
+    // u64-count FxHashMap fallback.
+    if n > u32::MAX as usize {
         let mut counts: FxHashMap<u64, (u64, f64)> = FxHashMap::default();
         for &f in data {
             let kb = (if f == 0.0 { 0.0 } else { f }).to_bits();
@@ -6280,18 +6282,67 @@ fn mode_f64_wide(data: &[f64]) -> Vec<f64> {
         winners.sort_by(|a, b| a.total_cmp(b));
         return winners;
     }
-    let mask = cap - 1;
+    // GROWABLE open-addressing + FIBONACCI hashing (use the HIGH product bits).
+    // Two independent bugs made the old fixed-cap `& mask` table ~45x slower than
+    // FxHashMap at ~2000 distinct / 5M rows (float-of-integer data is common):
+    //   (1) cap ≈ 1.5·n is a huge SPARSE table for few-distinct data → a cache miss
+    //       per probe into a multi-MB array. Fix: grow from small (doubling at load
+    //       0.7) so the table sizes to the ACTUAL distinct count and stays cache-
+    //       resident for few-distinct data, still ending at the SAME dense table for
+    //       high-card data (its fast domain) — nothing regresses there.
+    //   (2) `(kb·GOLDEN) & mask` keeps the LOW product bits, but float-of-integer
+    //       keys vary in the HIGH bits of `to_bits()` (mantissa of large-exponent
+    //       floats), and `(v<<42)·GOLDEN` has zero low bits → a whole exponent group
+    //       collapses into ONE bucket → probe chains of ~1000. Fix: Fibonacci hash
+    //       `(kb·GOLDEN) >> (64 - log2 cap)` takes the HIGH bits (provably good
+    //       spread even when the key varies in high bits).
+    // Bit-identical output (hashing only moves probe positions): same keys, counts,
+    // first-seen originals, ascending total_cmp winners. `EMPTY = i64::MIN` = -0.0
+    // bits, which normalization maps to +0.0 (key 0), so no real key hits the empty.
+    // >= 2 so `shift = 64 - log2(cap)` is <= 63 (a 64-bit `>>` shift is invalid).
+    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
     let mut cnt = vec![0u32; cap];
     let mut first = vec![0.0f64; cap];
+    let mut filled = 0usize;
     for &f in data {
+        // Grow (rehash into a 2x table) before load would exceed 0.7. `filled` only
+        // rises on a fresh key, so the live table never passes that load factor.
+        if filled * 10 >= cap * 7 {
+            let ncap = cap * 2;
+            let nshift = 64 - ncap.trailing_zeros();
+            let nmask = ncap - 1;
+            let mut nkeys = vec![EMPTY; ncap];
+            let mut ncnt = vec![0u32; ncap];
+            let mut nfirst = vec![0.0f64; ncap];
+            for p in 0..cap {
+                if keys[p] != EMPTY {
+                    let mut q =
+                        ((keys[p] as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
+                    while nkeys[q] != EMPTY {
+                        q = (q + 1) & nmask;
+                    }
+                    nkeys[q] = keys[p];
+                    ncnt[q] = cnt[p];
+                    nfirst[q] = first[p];
+                }
+            }
+            keys = nkeys;
+            cnt = ncnt;
+            first = nfirst;
+            cap = ncap;
+            shift = nshift;
+        }
+        let mask = cap - 1;
         let kb = (if f == 0.0 { 0.0 } else { f }).to_bits() as i64;
-        let mut p = ((kb as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        let mut p = ((kb as u64).wrapping_mul(GOLDEN) >> shift) as usize;
         loop {
             if keys[p] == EMPTY {
                 keys[p] = kb;
                 cnt[p] = 1;
                 first[p] = f;
+                filled += 1;
                 break;
             }
             if keys[p] == kb {
@@ -30951,6 +31002,69 @@ mod tests {
                 assert_eq!(
                     got.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
                     expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                );
+            }
+        }
+
+        #[test]
+        fn mode_f64_growable_fibonacci_float_of_integer_matches_reference() {
+            // Regression for the mode_f64_wide fix: float-of-integer keys span many
+            // exponents (their variation is in the HIGH to_bits() bits), which the
+            // old low-bit `& mask` hash collapsed into per-exponent buckets (probe
+            // chains), and n large enough (> 1024 distinct) forces the growable
+            // table to rehash. Winners must stay bit-identical to a HashMap
+            // reference. Engineered ties: every value duplicated, one boosted.
+            use std::collections::HashMap;
+            let mut state: u64 = 0x0F1E_2D3C_4B5A_6978;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..40 {
+                // ~2500 distinct integer values as f64 (exponents 2^0..2^11), each
+                // appearing several times, over ~12k rows ⇒ multiple table grows.
+                let distinct = 2000 + (next() % 800) as i64;
+                let n = 12_000usize;
+                let boosted = (next() % distinct as u64) as i64;
+                let data: Vec<f64> = (0..n)
+                    .map(|i| {
+                        // Bias toward `boosted` so there is a clear unique winner.
+                        let v = if i % 9 == 0 {
+                            boosted
+                        } else {
+                            (next() % distinct as u64) as i64
+                        };
+                        v as f64
+                    })
+                    .collect();
+                let mut counts: HashMap<u64, (u64, f64)> = HashMap::new();
+                for &f in &data {
+                    let kb = (if f == 0.0 { 0.0 } else { f }).to_bits();
+                    counts.entry(kb).and_modify(|e| e.0 += 1).or_insert((1, f));
+                }
+                let max_c = counts.values().map(|(c, _)| *c).max().unwrap();
+                let mut expected: Vec<f64> = counts
+                    .values()
+                    .filter_map(|&(c, f)| (c == max_c).then_some(f))
+                    .collect();
+                expected.sort_by(|a, b| a.total_cmp(b));
+                let col = Column::from_f64_values(data);
+                let got: Vec<f64> = col
+                    .mode()
+                    .expect("mode")
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Float64(x) => *x,
+                        o => panic!("not float: {o:?}"),
+                    })
+                    .collect();
+                assert_eq!(
+                    got.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    "trial {trial}"
                 );
             }
         }
