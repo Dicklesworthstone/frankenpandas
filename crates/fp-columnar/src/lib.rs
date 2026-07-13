@@ -24720,6 +24720,45 @@ impl Column {
             return Ok(Self::from_utf8_contiguous(out_bytes, out_offsets));
         }
 
+        // Nullable contiguous-Utf8 fast path (COLD cache): the all-valid arm above gates
+        // on `as_utf8_contiguous` (validity.all()), so a `LazyNullableUtf8` column — a
+        // string column WITH missing rows — fell to the generic `Key` loop below, which
+        // materializes a `Vec<Scalar::Utf8>` (one heap `String` per row). FP's `unique`
+        // DROPS missing (the generic loop's `is_missing ⇒ continue` / `Null ⇒ continue`),
+        // so dedup ONLY the PRESENT byte spans (validity-set) in first-seen order and
+        // rebuild ONE contiguous output — every distinct value is a present string, so the
+        // output is all-valid exactly like the generic path's (which never pushes a null).
+        // Bit-identical to the generic arm: same present-only first-seen distinct set
+        // (byte-eq == `Key::Utf8` eq), same order, and `from_utf8_contiguous` yields the
+        // same `Scalar::Utf8` sequence. Gated on a COLD `values` cache: the win is skipping
+        // the materialization on a fresh column (the usual `df[col].unique()` shape); a
+        // warm/already-materialized column defers to the generic `Key` loop over the cached
+        // Scalar Vec — no regression from the per-row `validity.get`.
+        if let ScalarValues::LazyNullableUtf8 {
+            bytes,
+            offsets,
+            validity,
+            values,
+        } = &self.values
+            && values.get().is_none()
+        {
+            let mut seen: FxHashSet<&[u8]> = FxHashSet::default();
+            let mut out_bytes: Vec<u8> = Vec::new();
+            let mut out_offsets: Vec<usize> = Vec::new();
+            out_offsets.push(0);
+            for (idx, w) in offsets.windows(2).enumerate() {
+                if !validity.get(idx) {
+                    continue; // unique drops missing (matches the generic loop)
+                }
+                let span = &bytes[w[0]..w[1]];
+                if seen.insert(span) {
+                    out_bytes.extend_from_slice(span);
+                    out_offsets.push(out_bytes.len());
+                }
+            }
+            return Ok(Self::from_utf8_contiguous(out_bytes, out_offsets));
+        }
+
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {
             Bool(bool),
@@ -30769,6 +30808,62 @@ mod tests {
             let u = col.unique().expect("unique");
             assert_eq!(u.len(), 1);
             assert_eq!(u.values()[0], Scalar::Int64(1));
+        }
+
+        #[test]
+        fn unique_nullable_utf8_typed_matches_generic() {
+            // The typed nullable-Utf8 unique arm (cold cache) must be BIT-EXACT to the
+            // generic Key path: FP drops nulls, keeps distinct present values in first-seen
+            // order. A/B on identical LazyNullableUtf8 data: `col_cold` (fresh, cold cache)
+            // exercises the typed arm; `col_warm` has its Scalar cache pre-materialized so
+            // the cold-cache gate defers it to the generic path. Seeded short strings over
+            // {a,b,c,d} + varied null densities (incl. all-null ⇒ empty).
+            let mut state: u64 = 0x0417_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..150 {
+                let n = (next() % 250) as usize;
+                let null_mode = next() % 3; // 0=none, 2=all-null, else ~25%
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                for i in 0..n {
+                    let is_null = match null_mode {
+                        0 => false,
+                        2 => true,
+                        _ => next() % 4 == 0,
+                    };
+                    if is_null {
+                        validity.set(i, false);
+                    } else {
+                        let len = (next() % 4) as usize;
+                        let s: String = (0..len)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                    }
+                    offsets.push(bytes.len());
+                }
+                let col_cold = Column::from_utf8_values_with_validity(
+                    bytes.clone(),
+                    offsets.clone(),
+                    validity.clone(),
+                );
+                let col_warm =
+                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let _ = col_warm.values(); // warm cache ⇒ generic path (oracle)
+                let cold = col_cold.unique().expect("cold unique");
+                let warm = col_warm.unique().expect("warm unique");
+                assert_eq!(
+                    cold.values(),
+                    warm.values(),
+                    "trial {trial} null_mode={null_mode}"
+                );
+            }
         }
     }
 
