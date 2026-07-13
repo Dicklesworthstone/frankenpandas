@@ -18866,6 +18866,48 @@ impl Column {
             };
             return Some(radix_argsort_u64(&keys));
         }
+        // Nullable / NaT-bearing Datetime64 & Timedelta64: na-last radix (the
+        // all-valid no-NAT arm above bailed). Both store i64 ns sorting as i64, and
+        // both use i64::MIN as the NaT sentinel — is_missing(Datetime64/Timedelta64
+        // (v)) == (v == i64::MIN) — so a slot is na-last iff validity-clear OR its
+        // datum is the NaT sentinel (mirroring the Float64 `!is_nan` split). Present
+        // slots sort by i64_radix_key (ns order, reversed for descending); missing/
+        // NaT indices append in original order. Bit-identical to the stable Scalar
+        // na-last comparator. The buffer accessor also reaches the LazyNullable*
+        // backing (as_datetime64_slice only exposes the all-valid backings).
+        let temporal_ns: Option<&[i64]> = match self.dtype {
+            DType::Datetime64 => self.as_datetime64_slice().or_else(|| match &self.values {
+                ScalarValues::LazyNullableDatetime64 { data, .. } => Some(data.as_slice()),
+                _ => None,
+            }),
+            DType::Timedelta64 => self.as_timedelta64_slice().or_else(|| match &self.values {
+                ScalarValues::LazyNullableTimedelta64 { data, .. } => Some(data.as_slice()),
+                _ => None,
+            }),
+            _ => None,
+        };
+        if let Some(data) = temporal_ns {
+            let n = data.len();
+            let mut present_keys: Vec<u64> = Vec::with_capacity(n);
+            let mut present_idx: Vec<usize> = Vec::with_capacity(n);
+            let mut missing_idx: Vec<usize> = Vec::new();
+            for i in 0..n {
+                if self.validity.get(i) && data[i] != i64::MIN {
+                    let key = i64_radix_key(data[i]);
+                    present_keys.push(if ascending { key } else { !key });
+                    present_idx.push(i);
+                } else {
+                    missing_idx.push(i);
+                }
+            }
+            let perm = radix_argsort_u64(&present_keys);
+            let mut out = Vec::with_capacity(n);
+            for &p in &perm {
+                out.push(present_idx[p]);
+            }
+            out.extend(missing_idx);
+            return Some(out);
+        }
         None
     }
 
@@ -28663,6 +28705,58 @@ mod tests {
                         want,
                         "trial {trial} asc={ascending}"
                     );
+                }
+            }
+        }
+
+        #[test]
+        fn nullable_temporal_sort_na_last_radix_matches_scalar_reference_cf() {
+            // Nullable / NaT-bearing Datetime64 & Timedelta64 na-last radix
+            // permutation must be BIT-IDENTICAL to the stable compare_scalars_na_last
+            // comparator, both orders. na-last iff validity-clear OR datum == i64::MIN
+            // (NaT sentinel). Mixes Null-missing (validity false) and present-NaT
+            // (i64::MIN at a valid slot) plus ns ties.
+            let mut state: u64 = 0x0F1E_2D3C_4B5A_6978;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let n = (next() % 300) as usize + 1;
+                let mut validity = ValidityMask::all_valid(n);
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 11 {
+                            0 => {
+                                validity.set(i, false);
+                                12_345 // Null-missing (validity false)
+                            }
+                            1 => i64::MIN, // present-NaT (validity true, sentinel)
+                            _ => 1_600_000_000_000i64 + ((r % 17) as i64) * 1_000,
+                        }
+                    })
+                    .collect();
+                for dt64 in [true, false] {
+                    let col = if dt64 {
+                        Column::from_datetime64_values_with_validity(data.clone(), validity.clone())
+                    } else {
+                        Column::from_timedelta64_values_with_validity(data.clone(), validity.clone())
+                    };
+                    let vals = col.values();
+                    for ascending in [true, false] {
+                        let mut want: Vec<usize> = (0..vals.len()).collect();
+                        want.sort_by(|&a, &b| {
+                            crate::compare_scalars_na_last(&vals[a], &vals[b], ascending)
+                        });
+                        assert_eq!(
+                            col.argsort_with(ascending),
+                            want,
+                            "dt64={dt64} trial {trial} asc={ascending}"
+                        );
+                    }
                 }
             }
         }
