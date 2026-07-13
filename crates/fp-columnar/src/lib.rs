@@ -19489,6 +19489,58 @@ impl Column {
             return Ok(Self::from_utf8_contiguous(out_bytes, out_offsets));
         }
 
+        // Nullable sibling of the arm above: a `LazyNullableUtf8` column (a string column
+        // WITH missing rows) with all-Utf8 targets AND replacements. The generic loop
+        // materializes a `Vec<Scalar::Utf8>` AND does an O(k) per-row linear `semantic_eq`
+        // scan over targets (O(N·k)). Build the same first-match-wins `&[u8] -> &[u8]` map
+        // (O(1) probe) and emit each PRESENT row's mapped-or-original span into ONE
+        // contiguous buffer, carrying the source validity so MISSING rows stay missing.
+        // Bit-identical: all targets are Utf8 (never missing), so a missing value matches
+        // no target ⇒ the generic keeps it (`v.clone()` of a missing ⇒ Null) — mirrored
+        // here by the carried validity bit; all replacements are Utf8 (never null), so a
+        // present row's output is a present string ⇒ output validity == input validity,
+        // and `infer_dtype` of the (Utf8 | Null) generic output is Utf8. No cold-cache gate
+        // — the O(N) map + contiguous build beats the O(N·k) scan + per-row String clones
+        // even warm.
+        if self.dtype == DType::Utf8
+            && to_replace.iter().all(|s| matches!(s, Scalar::Utf8(_)))
+            && replacement.iter().all(|s| matches!(s, Scalar::Utf8(_)))
+            && let ScalarValues::LazyNullableUtf8 {
+                bytes,
+                offsets,
+                validity,
+                ..
+            } = &self.values
+        {
+            let mut map: FxHashMap<&[u8], &[u8]> = FxHashMap::default();
+            for (t, r) in to_replace.iter().zip(replacement.iter()) {
+                if let (Scalar::Utf8(ts), Scalar::Utf8(rs)) = (t, r) {
+                    map.entry(ts.as_bytes()).or_insert(rs.as_bytes());
+                }
+            }
+            let n = offsets.len().saturating_sub(1);
+            let mut out_bytes: Vec<u8> = Vec::with_capacity(bytes.len());
+            let mut out_offsets: Vec<usize> = Vec::with_capacity(n + 1);
+            out_offsets.push(0);
+            for (i, w) in offsets.windows(2).enumerate() {
+                let span = &bytes[w[0]..w[1]];
+                // A missing row's span is empty and is masked out by the carried validity;
+                // only present rows consult the replacement map.
+                let emit = if validity.get(i) {
+                    map.get(span).copied().unwrap_or(span)
+                } else {
+                    span
+                };
+                out_bytes.extend_from_slice(emit);
+                out_offsets.push(out_bytes.len());
+            }
+            return Ok(Self::from_utf8_values_with_validity(
+                out_bytes,
+                out_offsets,
+                validity.clone(),
+            ));
+        }
+
         let out: Vec<Scalar> = self
             .values
             .iter()
@@ -40254,6 +40306,73 @@ mod tests {
             assert_eq!(out.values()[1], Scalar::Int64(20));
             assert_eq!(out.values()[2], Scalar::Int64(30));
             assert_eq!(out.values()[3], Scalar::Int64(20));
+        }
+
+        #[test]
+        fn replace_nullable_utf8_typed_matches_generic() {
+            // The typed nullable-Utf8 replace arm (LazyNullableUtf8 + all-Utf8
+            // targets/replacements) must be BIT-EXACT to the generic clone+scan path.
+            // A/B: col_typed (LazyNullableUtf8) hits the typed arm; col_eager (from_values,
+            // Eager) hits the generic path. Seeded short strings over {a,b,c,d} + ~25%
+            // nulls; targets incl. a duplicate (first-match-wins), an empty-string target,
+            // and a target that maps to empty. Missing rows must stay Null.
+            let mut state: u64 = 0x2E91_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let to_replace = vec![
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("bb".to_string()),
+                Scalar::Utf8("a".to_string()), // dup ⇒ first-match-wins (X, not Z)
+                Scalar::Utf8(String::new()),   // empty-string target
+                Scalar::Utf8("cd".to_string()),
+            ];
+            let replacement = vec![
+                Scalar::Utf8("X".to_string()),
+                Scalar::Utf8("Y".to_string()),
+                Scalar::Utf8("Z".to_string()),
+                Scalar::Utf8("EMPTY".to_string()),
+                Scalar::Utf8(String::new()), // maps to empty
+            ];
+            for trial in 0..120 {
+                let n = (next() % 250) as usize;
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                let mut eager: Vec<Scalar> = Vec::with_capacity(n);
+                for i in 0..n {
+                    if next() % 4 == 0 {
+                        validity.set(i, false);
+                        eager.push(Scalar::Null(NullKind::Null));
+                    } else {
+                        let len = (next() % 4) as usize; // 0..3 ⇒ incl empty string
+                        let s: String = (0..len)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                        eager.push(Scalar::Utf8(s));
+                    }
+                    offsets.push(bytes.len());
+                }
+                let col_typed = Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let col_eager = Column::new(DType::Utf8, eager).expect("eager utf8");
+                if col_typed.as_nullable_utf8_contiguous().is_some() {
+                    assert!(
+                        col_eager.as_nullable_utf8_contiguous().is_none(),
+                        "eager fixture must be on the generic replace path"
+                    );
+                }
+                let a = col_typed
+                    .replace_values(&to_replace, &replacement)
+                    .expect("typed replace");
+                let b = col_eager
+                    .replace_values(&to_replace, &replacement)
+                    .expect("eager replace");
+                assert_eq!(a.values(), b.values(), "trial {trial}");
+            }
         }
 
         #[test]
