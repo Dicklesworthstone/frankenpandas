@@ -23524,6 +23524,27 @@ impl Column {
             ));
         }
 
+        // Nullable Int64 fast path (sibling of the nullable Float64 arm): the all-valid
+        // `as_i64_slice` above bails on ANY missing, so a nullable Int64 column fell to
+        // the per-element `values()` Scalar loop below. clip's output is always Float64
+        // and PRESERVES missingness (clamp of a present `v as f64` is finite/inf, never
+        // NaN — bounds are NaN-filtered — and a missing slot stays missing), so OUTPUT
+        // validity == INPUT validity: clamp EVERY slot over the raw &[i64] in parallel
+        // and reuse the input mask via `from_f64_values_with_validity`. Bit-identical to
+        // the loop: present ⇒ same lower-then-upper clamp on `data[i] as f64` (== the
+        // generic `to_f64`); missing ⇒ `Null(NaN)` either way — the loop pushes the
+        // input's `Null(Null)` which `Self::new(Float64,…)` normalizes to `Null(NaN)`,
+        // exactly what the nullable-Float64 backing renders for a cleared bit.
+        if self.dtype == DType::Int64
+            && let Some((data, _)) = self.as_i64_slice_with_validity()
+        {
+            let out = par_map_vec_f64(data.len(), |i| clamp(data[i] as f64));
+            return Ok(Self::from_f64_values_with_validity(
+                out,
+                self.validity.clone(),
+            ));
+        }
+
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -32782,6 +32803,103 @@ mod tests {
                             bit_eq(&col.quantile(q), &fp_types::nanquantile(&vals, q)),
                             "quantile trial {trial} q {q}"
                         );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn clip_nullable_int64_typed_match_scalar_reference() {
+            // The typed nullable Int64 clip arm (new) must produce output BIT-EXACT to
+            // the generic Scalar loop + Self::new normalization. clip output is always
+            // Float64: present ⇒ Float64(clamp(v as f64)); missing ⇒ Null(NaN) (the loop
+            // pushes the input Null(Null) which Self::new normalizes to Null(NaN)).
+            // Also checks nullable Float64 (existing arm) and all-valid.
+            let mut state: u64 = 0xC117_9A00_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            // Replica of the generic loop + Self::new's Float64 null normalization.
+            fn ref_clip(vals: &[Scalar], lo: Option<f64>, hi: Option<f64>) -> Vec<Scalar> {
+                let lo = lo.filter(|v| !v.is_nan());
+                let hi = hi.filter(|v| !v.is_nan());
+                vals.iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            return Scalar::Null(NullKind::NaN);
+                        }
+                        let mut x = v.to_f64().unwrap();
+                        if let Some(l) = lo
+                            && x < l
+                        {
+                            x = l;
+                        }
+                        if let Some(h) = hi
+                            && x > h
+                        {
+                            x = h;
+                        }
+                        Scalar::Float64(x)
+                    })
+                    .collect()
+            }
+            let bounds = [
+                (Some(-50.0), Some(50.0)),
+                (Some(0.0), None),
+                (None, Some(10.0)),
+                (None, None),
+                (Some(100.0), Some(-100.0)),
+            ];
+            for trial in 0..300 {
+                let n = (next() % 200) as usize;
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 400) as i64 - 200
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vf.set(i, false);
+                            0.0
+                        } else {
+                            (r % 400) as f64 - 200.0
+                        }
+                    })
+                    .collect();
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                for col in [&i_all, &i_null, &f_null] {
+                    let vals = col.values().to_vec();
+                    for &(lo, hi) in &bounds {
+                        let got = col.clip(lo, hi).unwrap();
+                        let want = ref_clip(&vals, lo, hi);
+                        let gv = got.values();
+                        assert_eq!(gv.len(), want.len(), "clip len trial {trial}");
+                        for (k, (g, w)) in gv.iter().zip(want.iter()).enumerate() {
+                            assert!(
+                                bit_eq(g, w),
+                                "clip trial {trial} n {n} idx {k} lo {lo:?} hi {hi:?}: {g:?} != {w:?}"
+                            );
+                        }
                     }
                 }
             }
