@@ -18433,6 +18433,25 @@ impl Column {
                 right: other.values.len(),
             });
         }
+        // Typed pairwise fast path (sibling of weighted_mean/cov/corr): when BOTH
+        // columns are Float64/Int64 (all-valid or nullable) fold sum += av*bv straight
+        // off the raw slices via get_present, skipping the Vec<Scalar> materialization
+        // of BOTH columns + per-Scalar is_missing/to_f64. Bit-identical: get_present ==
+        // dot's effective present filter — `!is_missing` (drops null AND the NaN that
+        // the redundant `av.is_nan()||bv.is_nan()` also drops) with to_f64 Ok, KEEPING
+        // ±inf — so the same pairwise-present products accumulate in the same 0..n
+        // order. Both typed ⇒ to_f64 never errors, so the `?` Err path is unreachable
+        // here; the generic loop below still handles mixed/non-numeric dtypes.
+        if let (Some(sx), Some(sy)) = (self.typed_numeric_values(), other.typed_numeric_values()) {
+            let n = sx.len().min(sy.len());
+            let mut sum = 0.0_f64;
+            for i in 0..n {
+                if let (Some(av), Some(bv)) = (sx.get_present(i), sy.get_present(i)) {
+                    sum += av * bv;
+                }
+            }
+            return Ok(sum);
+        }
         let mut sum = 0.0_f64;
         for (a, b) in self.values.iter().zip(other.values.iter()) {
             if a.is_missing() || b.is_missing() {
@@ -32697,6 +32716,88 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+
+        #[test]
+        fn dot_typed_pairwise_match_scalar_reference() {
+            // The typed pairwise dot fast path must be BIT-EXACT to the Scalar loop it
+            // replaces (!is_missing + to_f64 Ok + skip-NaN, same 0..n order). Reference
+            // computed off the MATERIALIZED values() = the exact old code. MIXED dtypes
+            // (i64xf64 + swap), all-valid + nullable at DIFFERENT positions, ±inf (kept)
+            // and NaN (dropped) in both.
+            let mut state: u64 = 0xD07C_0FFE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            // Exact replica of the pre-typed generic loop (typed inputs never Err).
+            fn ref_dot(v: &[Scalar], w: &[Scalar]) -> f64 {
+                let mut sum = 0.0_f64;
+                for (a, b) in v.iter().zip(w.iter()) {
+                    if a.is_missing() || b.is_missing() {
+                        continue;
+                    }
+                    let av = a.to_f64().unwrap();
+                    let bv = b.to_f64().unwrap();
+                    if av.is_nan() || bv.is_nan() {
+                        continue;
+                    }
+                    sum += av * bv;
+                }
+                sum
+            }
+            let mk_f64 = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let data: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 8 {
+                            0 => {
+                                vf.set(i, false);
+                                0.0
+                            }
+                            1 => f64::NAN,
+                            2 => f64::INFINITY,
+                            3 => f64::NEG_INFINITY,
+                            _ => ((r % 400) as f64 - 200.0) * 0.25,
+                        }
+                    })
+                    .collect();
+                Column::from_f64_values_with_validity(data, vf)
+            };
+            let mk_i64 = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 6 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 400) as i64 - 200
+                    })
+                    .collect();
+                Column::from_i64_values_with_validity(data, vi)
+            };
+            for trial in 0..300 {
+                let n = (next() % 200) as usize;
+                let (vcol, wcol) = match trial % 4 {
+                    0 => (mk_i64(n, &mut next), mk_f64(n, &mut next)),
+                    1 => (mk_f64(n, &mut next), mk_i64(n, &mut next)),
+                    2 => (mk_f64(n, &mut next), mk_f64(n, &mut next)),
+                    _ => (mk_i64(n, &mut next), mk_i64(n, &mut next)),
+                };
+                let vv = vcol.values().to_vec();
+                let wv = wcol.values().to_vec();
+                let got = vcol.dot(&wcol).unwrap();
+                let want = ref_dot(&vv, &wv);
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "dot trial {trial} n {n}: {got} != {want}"
+                );
             }
         }
 
