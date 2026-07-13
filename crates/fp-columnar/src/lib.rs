@@ -22198,6 +22198,22 @@ impl Column {
                     f64::NAN
                 }
             })
+        } else if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            // Nullable Int64 INPUT (sibling of the nullable Float64 arm): the all-valid
+            // `as_i64_slice` above bails on any missing, so nullable Int64 sqrt/exp/log
+            // fell to the per-element Scalar loop. Invalid slot ⇒ NaN, which the
+            // validity scan below marks missing — bit-identical to those ops' Scalar
+            // arm (`missing ⇒ Float64(NaN)`); valid slot ⇒ f(v as f64) (== the Scalar
+            // arm's f(x as f64)), itself NaN for e.g. sqrt(negative) ⇒ also missing.
+            par_map_vec_f64(len, |i| {
+                if validity.get(i) {
+                    f(data[i] as f64)
+                } else {
+                    f64::NAN
+                }
+            })
         } else {
             return None;
         };
@@ -32803,6 +32819,80 @@ mod tests {
                             bit_eq(&col.quantile(q), &fp_types::nanquantile(&vals, q)),
                             "quantile trial {trial} q {q}"
                         );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn unary_float_nullable_int64_match_scalar_reference() {
+            // The new nullable Int64 arm in typed_float_unary_nullable_owned_par must
+            // make sqrt/exp/log on a nullable Int64 column BIT-EXACT to their Scalar
+            // path (missing ⇒ Float64(NaN)⇒missing; present ⇒ f(x as f64), itself NaN
+            // ⇒ missing). Covers negatives (sqrt/log ⇒ NaN⇒missing) + gaps + all-valid.
+            let mut state: u64 = 0x59A2_10AF_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            // Replica of the Scalar path + Self::new for an Int64 column.
+            fn ref_op(vals: &[Scalar], f: impl Fn(f64) -> f64) -> Column {
+                let out: Vec<Scalar> = vals
+                    .iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            Scalar::Float64(f64::NAN)
+                        } else {
+                            match v {
+                                Scalar::Int64(x) => Scalar::Float64(f(*x as f64)),
+                                Scalar::Float64(x) => Scalar::Float64(f(*x)),
+                                _ => unreachable!(),
+                            }
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Float64, out).unwrap()
+            }
+            for trial in 0..300 {
+                let n = (next() % 200) as usize;
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 400) as i64 - 150 // includes negatives (sqrt/log ⇒ NaN)
+                    })
+                    .collect();
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                for col in [&i_all, &i_null] {
+                    let vals = col.values().to_vec();
+                    let cases: [(&str, Column, Column); 3] = [
+                        ("sqrt", col.sqrt().unwrap(), ref_op(&vals, f64::sqrt)),
+                        ("exp", col.exp().unwrap(), ref_op(&vals, f64::exp)),
+                        ("log", col.log().unwrap(), ref_op(&vals, f64::ln)),
+                    ];
+                    for (name, got, want) in cases {
+                        let gv = got.values();
+                        let wv = want.values();
+                        assert_eq!(gv.len(), wv.len(), "{name} len trial {trial}");
+                        for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                            assert!(
+                                bit_eq(g, w),
+                                "{name} trial {trial} n {n} idx {k}: {g:?} != {w:?}"
+                            );
+                        }
                     }
                 }
             }
