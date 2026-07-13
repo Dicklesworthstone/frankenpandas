@@ -6991,6 +6991,11 @@ enum JCol<'a> {
     /// All-valid contiguous Utf8: `(bytes, offsets)`, row r =
     /// `bytes[offsets[r]..offsets[r+1]]`, serialized as a JSON string.
     U(&'a [u8], &'a [usize]),
+    /// NULLABLE contiguous Utf8: `(bytes, offsets, validity)`. A present row
+    /// (validity.get(r)) serializes its span as a JSON string; a missing row
+    /// serializes as `null` — so a string column WITH nulls no longer forces the
+    /// whole frame onto the serde tree.
+    UN(&'a [u8], &'a [usize], &'a fp_columnar::ValidityMask),
 }
 
 /// Append `s` as a JSON string literal, byte-identical to `serde_json` (which
@@ -7051,6 +7056,11 @@ fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<
             // as_utf8_contiguous already requires validity.all(), so every row
             // is a present `Scalar::Utf8` → JSON string (never null).
             (offsets.len() == n + 1).then_some(JCol::U(bytes, offsets))?
+        } else if let Some((bytes, offsets)) = column.as_nullable_utf8_contiguous() {
+            // Nullable contiguous Utf8: present rows serialize their span, missing
+            // rows serialize as `null` — so one null-bearing string column no longer
+            // forces the whole frame onto the serde tree.
+            (offsets.len() == n + 1).then_some(JCol::UN(bytes, offsets, column.validity()))?
         } else {
             return None;
         };
@@ -7097,6 +7107,16 @@ fn append_typed_json_value(out: &mut String, col: &JCol<'_>, r: usize, fbytes: &
             let field = &bytes[offsets[r]..offsets[r + 1]];
             // SAFETY-FREE: contiguous Utf8 backing is valid UTF-8.
             append_json_string(out, std::str::from_utf8(field).unwrap_or(""));
+        }
+        // Nullable Utf8: a present row renders its span like JCol::U; a missing row
+        // renders `null` — matching the serde-tree fallback's `Scalar::Null` → null.
+        JCol::UN(bytes, offsets, validity) => {
+            if validity.get(r) {
+                let field = &bytes[offsets[r]..offsets[r + 1]];
+                append_json_string(out, std::str::from_utf8(field).unwrap_or(""));
+            } else {
+                out.push_str("null");
+            }
         }
     }
 }
@@ -18009,6 +18029,71 @@ mod tests {
                 None => Scalar::Null(fp_types::NullKind::Null),
             })
             .collect()
+    }
+
+    #[test]
+    fn test_write_json_nullable_utf8_fast_matches_serde() {
+        // A nullable contiguous-Utf8 column (LazyNullableUtf8) now takes the typed JSON
+        // fast writer (JCol::UN). It must produce BYTE-IDENTICAL output to the serde-tree
+        // fallback, which an EAGER Utf8 column with the same data falls to. Covers
+        // present/missing (→ null), empty strings, and JSON escape triggers (quote,
+        // backslash, control byte) across Records + Columns orients.
+        let rows: Vec<Option<&str>> = vec![
+            Some("Alice"),
+            None,
+            Some("a\"b"),      // embedded quote ⇒ JSON-escaped
+            Some("back\\sl"),  // backslash ⇒ escaped
+            Some(""),          // present empty string
+            None,
+            Some("tab\tnl\n"), // control bytes ⇒ escaped
+            Some("héllo"),     // multi-byte UTF-8 (passes through)
+            Some("plain"),
+        ];
+        let n = rows.len();
+
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut offsets: Vec<usize> = vec![0];
+        let mut validity = fp_columnar::ValidityMask::all_valid(n);
+        for (i, r) in rows.iter().enumerate() {
+            if let Some(s) = r {
+                bytes.extend_from_slice(s.as_bytes());
+            } else {
+                validity.set(i, false);
+            }
+            offsets.push(bytes.len());
+        }
+
+        let mk = |name_col: Column| -> DataFrame {
+            let mut cols = std::collections::BTreeMap::new();
+            cols.insert(
+                "id".to_string(),
+                Column::from_i64_values_owned((0..n as i64).collect()),
+            );
+            cols.insert("name".to_string(), name_col);
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, n),
+                cols,
+                vec!["id".to_string(), "name".to_string()],
+            )
+            .unwrap()
+        };
+        let frame_fast = mk(Column::from_utf8_values_with_validity(bytes, offsets, validity));
+        let frame_general = mk(Column::from_values(eager_clone(&rows)).unwrap());
+
+        let ctl = frame_general.column("name").unwrap();
+        assert!(
+            ctl.as_utf8_contiguous().is_none() && ctl.as_nullable_utf8_contiguous().is_none(),
+            "control name column must be on the serde tree"
+        );
+
+        for orient in [JsonOrient::Records, JsonOrient::Columns] {
+            let fast = write_json_string(&frame_fast, orient).expect("fast json");
+            let general = write_json_string(&frame_general, orient).expect("general json");
+            assert_eq!(
+                fast, general,
+                "fast nullable-Utf8 JSON ({orient:?}) must byte-match the serde tree"
+            );
+        }
     }
 
     #[test]
