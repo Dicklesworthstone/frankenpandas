@@ -5864,6 +5864,67 @@ fn cum_extrema_nullable_i64(
     (out, out_valid)
 }
 
+/// Typed nullable cumulative accumulator (cumsum/cumprod) over an f64 slice +
+/// validity, reproducing `nancumsum`/`nancumprod` WITHOUT materializing the
+/// `Vec<Scalar>`. `running` is SEEDED (0.0 for sum, 1.0 for product) — not the
+/// first value — and a present slot (validity-set AND non-NaN, exactly the
+/// `Ok(x) if !x.is_nan()` gate) folds it in (`+=`/`*=`) and emits `running`; a
+/// missing slot emits `Null(NaN)` and leaves `running` unchanged. Output Float64
+/// with missing slots invalid — byte-identical to the generic path.
+fn cum_accum_nullable_f64(
+    data: &[f64],
+    validity: &ValidityMask,
+    seed: f64,
+    is_prod: bool,
+) -> (Vec<f64>, ValidityMask) {
+    let n = data.len();
+    let mut out = vec![0.0_f64; n];
+    let mut out_valid = ValidityMask::all_valid(n);
+    let mut running = seed;
+    for i in 0..n {
+        let x = data[i];
+        if validity.get(i) && !x.is_nan() {
+            if is_prod {
+                running *= x;
+            } else {
+                running += x;
+            }
+            out[i] = running;
+        } else {
+            out_valid.set(i, false);
+        }
+    }
+    (out, out_valid)
+}
+
+/// Int64 sibling of [`cum_accum_nullable_f64`]: present iff validity-set, folds
+/// `data[i] as f64` (matching nancumsum/nancumprod's `to_f64` on `Int64(v)`).
+fn cum_accum_nullable_i64(
+    data: &[i64],
+    validity: &ValidityMask,
+    seed: f64,
+    is_prod: bool,
+) -> (Vec<f64>, ValidityMask) {
+    let n = data.len();
+    let mut out = vec![0.0_f64; n];
+    let mut out_valid = ValidityMask::all_valid(n);
+    let mut running = seed;
+    for i in 0..n {
+        if validity.get(i) {
+            let x = data[i] as f64;
+            if is_prod {
+                running *= x;
+            } else {
+                running += x;
+            }
+            out[i] = running;
+        } else {
+            out_valid.set(i, false);
+        }
+    }
+    (out, out_valid)
+}
+
 fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Column, ColumnError> {
     if !matches!(keep, "first" | "last" | "all") {
         return Err(ColumnError::Type(TypeError::NonNumericValue {
@@ -14609,6 +14670,22 @@ impl Column {
                 .collect();
             return Ok(Self::from_f64_values_owned(out));
         }
+        // Nullable Int64/Float64: the all-valid arms above bailed on the missing
+        // bit, so these fell to nancumsum over the materialized Vec<Scalar>. Fold
+        // the raw slice + validity typed (running seeded 0.0, present ⇒ += x, emit;
+        // missing/NaN ⇒ Null(NaN), running unchanged). Bit-identical to nancumsum.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let (out, out_valid) = cum_accum_nullable_f64(data, validity, 0.0, false);
+            return Ok(Self::from_f64_values_with_validity(out, out_valid));
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let (out, out_valid) = cum_accum_nullable_i64(data, validity, 0.0, false);
+            return Ok(Self::from_f64_values_with_validity(out, out_valid));
+        }
         let out = nancumsum(&self.values);
         Self::new(DType::Float64, out)
     }
@@ -14630,6 +14707,20 @@ impl Column {
         // NB: no typed i64 fast path — an i64 product can overflow the f64 to
         // ±inf→NaN, where from_f64_values (NaN→missing) diverges from nancumprod's
         // Scalar::Float64(NaN); kept on the exact nancumprod path for bit-identity.
+        // Nullable Int64/Float64 (seed 1.0, product): typed fold, skipping the
+        // Scalar materialization. Bit-identical to nancumprod.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let (out, out_valid) = cum_accum_nullable_f64(data, validity, 1.0, true);
+            return Ok(Self::from_f64_values_with_validity(out, out_valid));
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let (out, out_valid) = cum_accum_nullable_i64(data, validity, 1.0, true);
+            return Ok(Self::from_f64_values_with_validity(out, out_valid));
+        }
         let out = nancumprod(&self.values);
         Self::new(DType::Float64, out)
     }
@@ -28311,6 +28402,84 @@ mod tests {
                         col.cummin().expect("cummin").values(),
                         reference(&vals, false).as_slice(),
                         "{tag} cummin trial {trial}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn cumsum_cumprod_nullable_typed_matches_nancum_reference() {
+            // Nullable Int64/Float64 cumsum/cumprod typed paths must be BYTE-
+            // IDENTICAL to nancumsum/nancumprod (running seeded 0.0/1.0, folded over
+            // present values, Null(NaN) at missing). Null-missing only. Product uses
+            // a NARROW value range near ±1 so the running product stays finite (no
+            // inf → NaN divergence between paths). Deterministic LCG.
+            fn reference(vals: &[Scalar], seed: f64, is_prod: bool) -> Vec<Scalar> {
+                let mut running = seed;
+                vals.iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            return Scalar::Null(fp_types::NullKind::NaN);
+                        }
+                        match v.to_f64() {
+                            Ok(x) if !x.is_nan() => {
+                                if is_prod {
+                                    running *= x;
+                                } else {
+                                    running += x;
+                                }
+                                Scalar::Float64(running)
+                            }
+                            _ => Scalar::Null(fp_types::NullKind::NaN),
+                        }
+                    })
+                    .collect()
+            }
+            let mut state: u64 = 0x5023_9ABC_1234_DEF0;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..150 {
+                let n = (next() % 300) as usize + 1;
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let mut vf = crate::ValidityMask::all_valid(n);
+                // Small integer magnitudes so cumsum stays exact and cumprod finite.
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 3) as i64 - 1 // {-1, 0, 1}
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vf.set(i, false);
+                            0.0
+                        } else {
+                            0.5 + (r % 3) as f64 * 0.5 // {0.5, 1.0, 1.5}
+                        }
+                    })
+                    .collect();
+                let icol = Column::from_i64_values_with_validity(idata, vi);
+                let fcol = Column::from_f64_values_with_validity(fdata, vf);
+                for (col, tag) in [(&icol, "i64"), (&fcol, "f64")] {
+                    let vals = col.values().to_vec();
+                    assert_eq!(
+                        col.cumsum().expect("cumsum").values(),
+                        reference(&vals, 0.0, false).as_slice(),
+                        "{tag} cumsum trial {trial}"
+                    );
+                    assert_eq!(
+                        col.cumprod().expect("cumprod").values(),
+                        reference(&vals, 1.0, true).as_slice(),
+                        "{tag} cumprod trial {trial}"
                     );
                 }
             }
