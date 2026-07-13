@@ -15647,6 +15647,37 @@ impl Column {
                 return Scalar::Utf8(s.to_owned());
             }
         }
+        // Nullable Float64/Int64 (sibling of nullable `median`/`quantile`): fold the
+        // minimum over the PRESENT values straight off the raw slice + validity,
+        // skipping `nanmin`'s Scalar-Vec materialization + per-Scalar is_missing/
+        // enum-match. Bit-identical to nanmin's numeric arms: present == not-missing
+        // (validity-set AND non-NaN for Float64 — nanmin's is_missing treats a
+        // valid-bit-set NaN as missing; validity bit for Int64), strict `<` keeps the
+        // FIRST occurrence on a tie (so -0.0/0.0 order matches), all-missing/empty ⇒
+        // Null(NaN). The dtype gates leave nanmin's Timedelta64/Datetime64 arms
+        // (nullable temporal) untouched.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let mut m: Option<f64> = None;
+            for (i, &x) in data.iter().enumerate() {
+                if validity.get(i) && !x.is_nan() && m.is_none_or(|cur| x < cur) {
+                    m = Some(x);
+                }
+            }
+            return m.map_or(Scalar::Null(NullKind::NaN), Scalar::Float64);
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let mut m: Option<i64> = None;
+            for (i, &x) in data.iter().enumerate() {
+                if validity.get(i) && m.is_none_or(|cur| x < cur) {
+                    m = Some(x);
+                }
+            }
+            return m.map_or(Scalar::Null(NullKind::NaN), Scalar::Int64);
+        }
         nanmin(&self.values)
     }
 
@@ -15727,6 +15758,35 @@ impl Column {
                 let s = std::str::from_utf8(best).expect("contiguous-Utf8 spans are valid UTF-8");
                 return Scalar::Utf8(s.to_owned());
             }
+        }
+        // Nullable Float64/Int64 (symmetric to `min`): fold the maximum over the
+        // PRESENT values straight off the raw slice + validity, skipping nanmax's
+        // Scalar-Vec materialization + per-Scalar is_missing/enum-match. Bit-identical
+        // to nanmax's numeric arms: present == not-missing (validity-set AND non-NaN
+        // for Float64; validity bit for Int64), strict `>` keeps the FIRST occurrence
+        // on a tie, all-missing/empty ⇒ Null(NaN). dtype gates leave nanmax's
+        // temporal arms untouched.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let mut m: Option<f64> = None;
+            for (i, &x) in data.iter().enumerate() {
+                if validity.get(i) && !x.is_nan() && m.is_none_or(|cur| x > cur) {
+                    m = Some(x);
+                }
+            }
+            return m.map_or(Scalar::Null(NullKind::NaN), Scalar::Float64);
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let mut m: Option<i64> = None;
+            for (i, &x) in data.iter().enumerate() {
+                if validity.get(i) && m.is_none_or(|cur| x > cur) {
+                    m = Some(x);
+                }
+            }
+            return m.map_or(Scalar::Null(NullKind::NaN), Scalar::Int64);
         }
         nanmax(&self.values)
     }
@@ -32586,6 +32646,72 @@ mod tests {
                             "quantile trial {trial} q {q}"
                         );
                     }
+                }
+            }
+        }
+
+        #[test]
+        fn minmax_nullable_typed_match_nan_reference() {
+            // Typed nullable Int64/Float64 min/max (fold present ⇒ dtype-preserved
+            // Scalar) must be BIT-EXACT to nanmin/nanmax. Float64 carries valid-bit-set
+            // NaN (skipped, exactly nanmin's is_missing-drops-NaN) plus -0.0/0.0 pairs
+            // (tie keeps FIRST via strict </>). all-missing/empty ⇒ Null(NaN).
+            let mut state: u64 = 0x1234_F00D_CAFE_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Int64(x), Scalar::Int64(y)) => x == y,
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            for trial in 0..300 {
+                let n = (next() % 250) as usize;
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 500) as i64 - 250
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 6 {
+                            0 => {
+                                vf.set(i, false);
+                                0.0
+                            }
+                            1 => f64::NAN, // valid-bit-set NaN: skipped by both paths
+                            2 => 0.0,      // tie fodder for -0.0/0.0 first-on-tie check
+                            3 => -0.0,
+                            _ => (r % 500) as f64 - 250.0,
+                        }
+                    })
+                    .collect();
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                for col in [&i_all, &i_null, &f_null] {
+                    let vals = col.values().to_vec();
+                    assert!(
+                        bit_eq(&col.min(), &fp_types::nanmin(&vals)),
+                        "min trial {trial}"
+                    );
+                    assert!(
+                        bit_eq(&col.max(), &fp_types::nanmax(&vals)),
+                        "max trial {trial}"
+                    );
                 }
             }
         }
