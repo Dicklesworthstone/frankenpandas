@@ -14327,6 +14327,49 @@ impl Column {
             return Ok(Self::from_bool_values_with_validity(bools, lv.and_mask(rv)));
         }
 
+        // Typed Utf8 fast path (all-valid AND nullable, either side): both operands are
+        // contiguous-Utf8 (an all-valid `LazyContiguousUtf8`/hex backing, or a
+        // `LazyNullableUtf8`). The generic loop below materializes BOTH `Vec<Scalar::Utf8>`
+        // (a heap `String` per row × two columns) just to feed `scalar_compare`, whose
+        // Utf8 arm is `a <op> b` on the two `String`s == byte-lexicographic `str::cmp`.
+        // Compare each row's raw `&[u8]` spans directly and combine the validity with
+        // `and_mask` (present iff BOTH present == the generic `!(l.is_missing() ||
+        // r.is_missing())`). Bit-identical: `&[u8]` order == `String` order for valid
+        // UTF-8 (same lever as the typed Utf8 `searchsorted` / `compare_scalar`), a
+        // present pair ⇒ `Bool(lrow <op> rrow)`, an either-missing slot ⇒ the invalid bit
+        // == `Null(NullKind::Null)` (its empty-span bool is never observed). A local `fn`
+        // (not a closure) ties the borrowed spans/validity lifetimes to the `&Column`.
+        fn utf8_spans(col: &Column) -> Option<(&[u8], &[usize], &ValidityMask)> {
+            if col.dtype != DType::Utf8 {
+                return None;
+            }
+            if let ScalarValues::LazyNullableUtf8 {
+                bytes,
+                offsets,
+                validity,
+                ..
+            } = &col.values
+            {
+                return Some((bytes, offsets, validity));
+            }
+            let (bytes, offsets) = col.as_utf8_contiguous()?;
+            Some((bytes, offsets, &col.validity))
+        }
+        if let (Some((lb, lo, lv)), Some((rb, ro, rv))) = (utf8_spans(self), utf8_spans(right)) {
+            let n = lo.len() - 1;
+            let lrow = |i: usize| &lb[lo[i]..lo[i + 1]];
+            let rrow = |i: usize| &rb[ro[i]..ro[i + 1]];
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => (0..n).map(|i| lrow(i) > rrow(i)).collect(),
+                ComparisonOp::Lt => (0..n).map(|i| lrow(i) < rrow(i)).collect(),
+                ComparisonOp::Eq => (0..n).map(|i| lrow(i) == rrow(i)).collect(),
+                ComparisonOp::Ne => (0..n).map(|i| lrow(i) != rrow(i)).collect(),
+                ComparisonOp::Ge => (0..n).map(|i| lrow(i) >= rrow(i)).collect(),
+                ComparisonOp::Le => (0..n).map(|i| lrow(i) <= rrow(i)).collect(),
+            };
+            return Ok(Self::from_bool_values_with_validity(bools, lv.and_mask(rv)));
+        }
+
         let values = self
             .values
             .iter()
@@ -28723,6 +28766,84 @@ mod tests {
                             got.values(),
                             expected,
                             "trial {trial} needle {needle_str:?} op {op:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn binary_comparison_utf8_col_vs_col_matches_scalar_reference() {
+            // The typed Utf8 arm in binary_comparison (two contiguous-Utf8 columns, any mix
+            // of all-valid / nullable) must be BIT-EXACT to the generic path: both present
+            // ⇒ Bool(lrow <op> rrow), either missing ⇒ Null(Null). Covers the 4 combos
+            // (all-valid, nullable)² with seeded short strings over {a,b,c,d}, ~25% nulls.
+            let mut state: u64 = 0xC01C_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            // Build a contiguous-Utf8 column of `n` rows; `nullable` ⇒ ~25% missing.
+            let mut build =
+                |n: usize, nullable: bool, next: &mut dyn FnMut() -> u64| -> (Column, Vec<Option<String>>) {
+                    let mut validity = crate::ValidityMask::all_valid(n);
+                    let mut opt: Vec<Option<String>> = Vec::with_capacity(n);
+                    let mut bytes: Vec<u8> = Vec::new();
+                    let mut offsets: Vec<usize> = vec![0];
+                    for i in 0..n {
+                        if nullable && next() % 4 == 0 {
+                            validity.set(i, false);
+                            opt.push(None);
+                        } else {
+                            let len = (next() % 6) as usize;
+                            let s: String = (0..len)
+                                .map(|_| (b'a' + (next() % 4) as u8) as char)
+                                .collect();
+                            bytes.extend_from_slice(s.as_bytes());
+                            opt.push(Some(s));
+                        }
+                        offsets.push(bytes.len());
+                    }
+                    (
+                        Column::from_utf8_values_with_validity(bytes, offsets, validity),
+                        opt,
+                    )
+                };
+            for trial in 0..150 {
+                let n = (next() % 200) as usize;
+                for (ln, rn) in [(false, false), (true, false), (false, true), (true, true)] {
+                    let (lcol, lopt) = build(n, ln, &mut next);
+                    let (rcol, ropt) = build(n, rn, &mut next);
+                    for op in [
+                        ComparisonOp::Gt,
+                        ComparisonOp::Lt,
+                        ComparisonOp::Eq,
+                        ComparisonOp::Ne,
+                        ComparisonOp::Ge,
+                        ComparisonOp::Le,
+                    ] {
+                        let got = lcol.binary_comparison(&rcol, op).expect("utf8 col compare");
+                        let expected: Vec<Scalar> = lopt
+                            .iter()
+                            .zip(&ropt)
+                            .map(|(l, r)| match (l, r) {
+                                (Some(a), Some(b)) => Scalar::Bool(
+                                    scalar_compare(
+                                        &Scalar::Utf8(a.clone()),
+                                        &Scalar::Utf8(b.clone()),
+                                        op,
+                                    )
+                                    .expect("reference"),
+                                ),
+                                _ => Scalar::Null(NullKind::Null),
+                            })
+                            .collect();
+                        assert_eq!(
+                            got.values(),
+                            expected,
+                            "trial {trial} ln={ln} rn={rn} op {op:?}"
                         );
                     }
                 }
