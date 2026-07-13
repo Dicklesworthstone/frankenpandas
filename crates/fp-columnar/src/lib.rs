@@ -18744,6 +18744,56 @@ impl Column {
             return Ok(Self::from_utf8_contiguous(out_bytes, out_offsets));
         }
 
+        // Nullable contiguous-Utf8 fast path (COLD cache): the all-valid arm above gates
+        // on `as_utf8_contiguous` (validity.all()), so a `LazyNullableUtf8` column — a
+        // string column WITH missing rows — fell to the generic `Key`-tally below, which
+        // materializes a `Vec<Scalar::Utf8>` (one heap `String` per row). mode DROPS nulls
+        // (`key_of` is `None` on missing), so tally ONLY the present byte spans
+        // (validity-set) via `FxHashMap<&[u8], usize>`, collect the max-count winners, sort
+        // ascending, and rebuild a contiguous output — the winners are all present strings,
+        // so the output is all-valid exactly like the generic path's. Bit-identical: same
+        // present-only tally (byte-eq == `Key::Utf8` eq), same max-count winner set, and
+        // `<[u8]>::sort_unstable` == `compare_scalars_na_last(.., true)` for distinct Utf8
+        // winners (str::cmp is byte-lexicographic; distinct HashMap keys ⇒ no ties). An
+        // all-missing / empty column ⇒ empty counts ⇒ empty same-dtype column, matching.
+        // Unlike the Int64/Float64 nullable mode below (their generic path reads raw
+        // slices, nothing to bypass), the Utf8 generic path pays the String
+        // materialization, so this wins on a cold column. Gated on a COLD `values` cache: a
+        // warm/already-materialized column defers to the generic `Key` tally — no
+        // regression from the per-row `validity.get`.
+        if let ScalarValues::LazyNullableUtf8 {
+            bytes,
+            offsets,
+            validity,
+            values,
+        } = &self.values
+            && values.get().is_none()
+        {
+            let mut counts: FxHashMap<&[u8], usize> = FxHashMap::default();
+            for (idx, w) in offsets.windows(2).enumerate() {
+                if validity.get(idx) {
+                    *counts.entry(&bytes[w[0]..w[1]]).or_insert(0) += 1;
+                }
+            }
+            if counts.is_empty() {
+                return Self::new(self.dtype, Vec::new());
+            }
+            let max_count = counts.values().copied().max().unwrap_or(0);
+            let mut winners: Vec<&[u8]> = counts
+                .iter()
+                .filter_map(|(span, c)| if *c == max_count { Some(*span) } else { None })
+                .collect();
+            winners.sort_unstable();
+            let mut out_bytes: Vec<u8> = Vec::new();
+            let mut out_offsets: Vec<usize> = Vec::with_capacity(winners.len() + 1);
+            out_offsets.push(0);
+            for span in &winners {
+                out_bytes.extend_from_slice(span);
+                out_offsets.push(out_bytes.len());
+            }
+            return Ok(Self::from_utf8_contiguous(out_bytes, out_offsets));
+        }
+
         // NEGATIVE LEDGER (do not re-attempt without a new idea): rerouting a
         // nullable Int64/Float64 mode through the typed present-subset tally does
         // NOT beat the generic FxHashMap<Key> path here.
@@ -36754,6 +36804,62 @@ mod tests {
             let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
             let m = col.mode().expect("mode");
             assert!(m.is_empty());
+        }
+
+        #[test]
+        fn mode_nullable_utf8_typed_matches_generic() {
+            // The typed nullable-Utf8 mode arm (cold cache) must be BIT-EXACT to the
+            // generic Key path: drops nulls, returns max-count winners sorted ascending.
+            // A/B on identical LazyNullableUtf8 data: `col_cold` (fresh, cold cache)
+            // exercises the typed arm; `col_warm` has its Scalar cache pre-materialized so
+            // the cold-cache gate defers it to the generic path. Tiny alphabet {a,b,c} +
+            // short lengths ⇒ frequent multi-winner ties; some trials all-null (empty mode).
+            let mut state: u64 = 0x30DE_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..150 {
+                let n = (next() % 120) as usize;
+                let null_mode = next() % 3; // 0=none, 2=all-null, else ~25%
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                for i in 0..n {
+                    let is_null = match null_mode {
+                        0 => false,
+                        2 => true,
+                        _ => next() % 4 == 0,
+                    };
+                    if is_null {
+                        validity.set(i, false);
+                    } else {
+                        let len = (next() % 3) as usize; // 0..2 ⇒ tiny domain, many ties
+                        let s: String = (0..len)
+                            .map(|_| (b'a' + (next() % 3) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                    }
+                    offsets.push(bytes.len());
+                }
+                let col_cold = Column::from_utf8_values_with_validity(
+                    bytes.clone(),
+                    offsets.clone(),
+                    validity.clone(),
+                );
+                let col_warm =
+                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let _ = col_warm.values(); // warm cache ⇒ generic path (oracle)
+                let cold = col_cold.mode().expect("cold mode");
+                let warm = col_warm.mode().expect("warm mode");
+                assert_eq!(
+                    cold.values(),
+                    warm.values(),
+                    "trial {trial} null_mode={null_mode}"
+                );
+            }
         }
 
         #[test]
