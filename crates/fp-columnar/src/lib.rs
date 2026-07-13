@@ -17912,6 +17912,39 @@ impl Column {
                 nullable_rank_values(data, &perm, present_count, len, method);
             return Ok(Self::from_f64_values_with_validity(ranks, out_valid));
         }
+        // Temporal Datetime64/Timedelta64 (all-valid no-NaT, or nullable/NaT): rank
+        // had NO typed path — as_i64_slice/as_f64_slice both decline these dtypes,
+        // so every temporal column ranked via the generic O(n log n) Scalar
+        // comparator. Both store i64 ns ordering as i64, and typed_radix_perm has a
+        // temporal na-last arm. Because rank's OUTPUT is always Float64, there is no
+        // NaT-materialization subtlety (unlike a temporal sort_values): a slot is
+        // present iff validity-set AND datum != i64::MIN (the NaT sentinel;
+        // is_missing(Datetime64/Timedelta64(v)) == (v == i64::MIN)) — the same split
+        // the generic non_missing filter AND typed_radix_perm use — so the present
+        // prefix + typed i64 `==` tie-walk are bit-identical to the comparator rank.
+        if matches!(self.dtype, DType::Datetime64 | DType::Timedelta64) {
+            let ns: Option<&[i64]> = match self.dtype {
+                DType::Datetime64 => self.as_datetime64_slice().or_else(|| match &self.values {
+                    ScalarValues::LazyNullableDatetime64 { data, .. } => Some(data.as_slice()),
+                    _ => None,
+                }),
+                DType::Timedelta64 => self.as_timedelta64_slice().or_else(|| match &self.values {
+                    ScalarValues::LazyNullableTimedelta64 { data, .. } => Some(data.as_slice()),
+                    _ => None,
+                }),
+                _ => None,
+            };
+            if let Some(data) = ns
+                && let Some(perm) = self.typed_radix_perm(ascending)
+            {
+                let present_count = (0..len)
+                    .filter(|&i| self.validity.get(i) && data[i] != i64::MIN)
+                    .count();
+                let (ranks, out_valid) =
+                    nullable_rank_values(data, &perm, present_count, len, method);
+                return Ok(Self::from_f64_values_with_validity(ranks, out_valid));
+            }
+        }
 
         let mut non_missing: Vec<(usize, &Scalar)> = Vec::with_capacity(len);
         for (i, v) in self.values.iter().enumerate() {
@@ -34139,6 +34172,69 @@ mod tests {
                 let icol = Column::from_i64_values_with_validity(idata, vi);
                 let fcol = Column::from_f64_values_with_validity(fdata, vf);
                 for (col, tag) in [(&icol, "i64"), (&fcol, "f64")] {
+                    let vals = col.values().to_vec();
+                    for method in methods {
+                        for ascending in [true, false] {
+                            assert_eq!(
+                                col.rank(method, ascending).expect("rank").values(),
+                                rank_reference(&vals, method, ascending).as_slice(),
+                                "{tag} trial {trial} method={method} asc={ascending}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn rank_temporal_datetime_timedelta_matches_generic_reference() {
+            // rank on Datetime64/Timedelta64 (all-valid, nullable, AND present-NaT
+            // = i64::MIN at a valid slot) now routes through typed_radix_perm + the
+            // typed tie-walk. The Float64 output (present ranks + Null tail) must
+            // stay bit-identical to the generic comparator path across every method
+            // and direction. NaT slots (validity-false OR datum i64::MIN) join the
+            // na-last group and rank to Null(NaN), like a missing value.
+            let methods = ["average", "min", "max", "first", "dense"];
+            let mut state: u64 = 0xDA7E_7104_4242_1001;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..160 {
+                let len = (next() % 240) as usize + 1;
+                let mut vd = crate::ValidityMask::all_valid(len);
+                let mut vt = crate::ValidityMask::all_valid(len);
+                let ddata: Vec<i64> = (0..len)
+                    .map(|i| {
+                        let r = next();
+                        match r % 6 {
+                            0 => {
+                                vd.set(i, false); // validity-false missing
+                                77
+                            }
+                            1 => i64::MIN, // present-NaT at a valid slot
+                            _ => (r % 7) as i64 * 1_000, // ns, narrow range ⇒ ties
+                        }
+                    })
+                    .collect();
+                let tdata: Vec<i64> = (0..len)
+                    .map(|i| {
+                        let r = next();
+                        match r % 6 {
+                            0 => {
+                                vt.set(i, false);
+                                88
+                            }
+                            1 => i64::MIN,
+                            _ => (r % 7) as i64 * 500,
+                        }
+                    })
+                    .collect();
+                let dcol = Column::from_datetime64_values_with_validity(ddata, vd);
+                let tcol = Column::from_timedelta64_values_with_validity(tdata, vt);
+                for (col, tag) in [(&dcol, "dt64"), (&tcol, "td64")] {
                     let vals = col.values().to_vec();
                     for method in methods {
                         for ascending in [true, false] {
