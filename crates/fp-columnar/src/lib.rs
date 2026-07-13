@@ -22093,6 +22093,39 @@ impl Column {
                 data.iter().map(|&x| f(x as f64)).collect(),
             ));
         }
+        // Nullable Float64/Int64 INPUT: the all-valid accessors above bail on ANY
+        // missing, so the bandwidth-bound ops routing here (rint/sinc/radians/degrees/
+        // reciprocal) fell to their per-element Scalar loop + Column::new. Map an
+        // invalid slot to NaN and each present value through `f` (which may itself
+        // yield NaN); `from_f64_values_owned` re-derives the output validity from NaN —
+        // bit-identical to those ops' Scalar arm: missing ⇒ Float64(NaN) ⇒ missing (via
+        // Self::new), present ⇒ f(v as f64) (a NaN result ⇒ missing). Same output ctor
+        // as the all-valid arms above; kept serial (these maps are cheap, so the math
+        // does not dominate — cf. the parallel `typed_float_unary_par`).
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            return Some(Self::from_f64_values_owned(
+                (0..data.len())
+                    .map(|i| if validity.get(i) { f(data[i]) } else { f64::NAN })
+                    .collect(),
+            ));
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            return Some(Self::from_f64_values_owned(
+                (0..data.len())
+                    .map(|i| {
+                        if validity.get(i) {
+                            f(data[i] as f64)
+                        } else {
+                            f64::NAN
+                        }
+                    })
+                    .collect(),
+            ));
+        }
         None
     }
 
@@ -32845,6 +32878,90 @@ mod tests {
                             "quantile trial {trial} q {q}"
                         );
                     }
+                }
+            }
+        }
+
+        #[test]
+        fn typed_float_unary_serial_nullable_match_scalar_reference() {
+            // The new nullable Float64/Int64 arms in typed_float_unary (serial) must
+            // make the ops routing through it (rint/sinc/radians/degrees/reciprocal)
+            // BIT-EXACT to their Scalar path on nullable input. Representative: rint,
+            // radians, degrees, reciprocal (inf on 0, not NaN). Covers valid-bit-set
+            // NaN (Float64), zero (reciprocal ⇒ ±inf, still valid), gaps.
+            let mut state: u64 = 0x3EC1_9AFE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            fn ref_op(vals: &[Scalar], f: impl Fn(f64) -> f64) -> Column {
+                let out: Vec<Scalar> = vals
+                    .iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            Scalar::Float64(f64::NAN)
+                        } else {
+                            match v {
+                                Scalar::Int64(x) => Scalar::Float64(f(*x as f64)),
+                                Scalar::Float64(x) => Scalar::Float64(f(*x)),
+                                _ => unreachable!(),
+                            }
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Float64, out).unwrap()
+            }
+            let check = |got: &Column, want: &Column, name: &str, trial: usize| {
+                let gv = got.values();
+                let wv = want.values();
+                assert_eq!(gv.len(), wv.len(), "{name} len trial {trial}");
+                for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                    assert!(bit_eq(g, w), "{name} trial {trial} idx {k}: {g:?} != {w:?}");
+                }
+            };
+            for trial in 0..250 {
+                let n = (next() % 200) as usize;
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 300) as i64 - 100 // includes 0 (reciprocal ⇒ inf) + negatives
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 5 {
+                            0 => {
+                                vf.set(i, false);
+                                0.0
+                            }
+                            1 => f64::NAN,
+                            _ => (r % 300) as f64 - 100.0,
+                        }
+                    })
+                    .collect();
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                for col in [&i_null, &f_null] {
+                    let vals = col.values().to_vec();
+                    check(&col.rint().unwrap(), &ref_op(&vals, f64::round_ties_even), "rint", trial);
+                    check(&col.radians().unwrap(), &ref_op(&vals, f64::to_radians), "radians", trial);
+                    check(&col.degrees().unwrap(), &ref_op(&vals, f64::to_degrees), "degrees", trial);
+                    check(&col.reciprocal().unwrap(), &ref_op(&vals, |x| 1.0 / x), "reciprocal", trial);
                 }
             }
         }
