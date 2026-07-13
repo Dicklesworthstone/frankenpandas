@@ -22566,6 +22566,35 @@ impl Column {
             // i64→f64 is always finite and floor/ceil/trunc keep it finite.
             return Some(Self::from_f64_all_valid_with_finite_opt(out, Some(true)));
         }
+        // Nullable Float64/Int64 INPUT (Float64-output ops floor/ceil/trunc): the all-
+        // valid arms above bail on ANY missing, so nullable input fell to the per-
+        // element Scalar loop. Invalid slot ⇒ NaN; a present slot ⇒ f(v) which is
+        // finite (f preserves finiteness) UNLESS the input datum was itself NaN, and
+        // f(NaN)=NaN for floor/ceil/trunc — so from_f64_values (which re-derives
+        // validity from NaN) marks both the absent slots AND a valid-bit-set-NaN datum
+        // missing, exactly as the Scalar loop's is_missing does. Bit-identical: present
+        // Float64 ⇒ Float64(f(x)); present Int64 ⇒ Float64(f(x as f64)) (== x as f64,
+        // integral); missing ⇒ Null(NaN). Cannot carry the all-finite witness (the
+        // output has NaN at missing slots), so this scans — still far cheaper than the
+        // Vec<Scalar> Scalar loop.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            return Some(Self::from_f64_values(
+                (0..data.len())
+                    .map(|i| if validity.get(i) { f(data[i]) } else { f64::NAN })
+                    .collect(),
+            ));
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            return Some(Self::from_f64_values(
+                (0..data.len())
+                    .map(|i| if validity.get(i) { f(data[i] as f64) } else { f64::NAN })
+                    .collect(),
+            ));
+        }
         None
     }
 
@@ -33171,6 +33200,92 @@ mod tests {
                             bit_eq(&col.quantile(q), &fp_types::nanquantile(&vals, q)),
                             "quantile trial {trial} q {q}"
                         );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn floor_ceil_trunc_nullable_typed_match_scalar_reference() {
+            // The new nullable Float64/Int64 arms in typed_float_unary_finite_preserving
+            // must make floor/ceil/trunc BIT-EXACT to their Scalar path on nullable
+            // input (missing/valid-bit-set-NaN ⇒ NaN⇒missing; present ⇒ f). Covers
+            // fractional values, negatives, ±inf, x==0.5/-0.5 (ties differ per op).
+            let mut state: u64 = 0xF100_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            // Replica of floor/ceil/trunc's Scalar path (always Float64 output).
+            fn ref_op(vals: &[Scalar], f: impl Fn(f64) -> f64) -> Column {
+                let out: Vec<Scalar> = vals
+                    .iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            Scalar::Float64(f64::NAN)
+                        } else {
+                            match v {
+                                Scalar::Int64(x) => Scalar::Float64(*x as f64),
+                                Scalar::Float64(x) => Scalar::Float64(f(*x)),
+                                _ => unreachable!(),
+                            }
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Float64, out).unwrap()
+            }
+            for trial in 0..300 {
+                let n = (next() % 200) as usize;
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 8 {
+                            0 => {
+                                vf.set(i, false);
+                                0.0
+                            }
+                            1 => f64::NAN,
+                            2 => f64::INFINITY,
+                            3 => f64::NEG_INFINITY,
+                            _ => ((r % 4000) as f64 - 2000.0) * 0.013, // fractional, +/-
+                        }
+                    })
+                    .collect();
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 5 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 400) as i64 - 200
+                    })
+                    .collect();
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                for col in [&f_null, &i_null] {
+                    let vals = col.values().to_vec();
+                    for (name, got, want) in [
+                        ("floor", col.floor().unwrap(), ref_op(&vals, f64::floor)),
+                        ("ceil", col.ceil().unwrap(), ref_op(&vals, f64::ceil)),
+                        ("trunc", col.trunc().unwrap(), ref_op(&vals, f64::trunc)),
+                    ] {
+                        let gv = got.values();
+                        let wv = want.values();
+                        assert_eq!(gv.len(), wv.len(), "{name} len trial {trial}");
+                        for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                            assert!(bit_eq(g, w), "{name} trial {trial} idx {k}: {g:?} != {w:?}");
+                        }
                     }
                 }
             }
