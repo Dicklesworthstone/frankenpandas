@@ -4610,6 +4610,31 @@ impl Index {
                 "searchsorted: needle cannot be missing".to_owned(),
             ));
         }
+        if let Some(range) = self.labels.int64_affine_range()
+            && let IndexLabel::Int64(needle) = value
+        {
+            if range.len == 0 {
+                return Ok(0);
+            }
+            if range.len == 1 {
+                let go_right = range.start < *needle || (range.start == *needle && side == "right");
+                return Ok(usize::from(go_right));
+            }
+            if range.step > 0 {
+                if *needle < range.start {
+                    return Ok(0);
+                }
+                let delta = i128::from(*needle) - i128::from(range.start);
+                let step = i128::from(range.step);
+                let mut position = delta / step;
+                if side == "right" || delta % step != 0 {
+                    position += 1;
+                }
+                return Ok(usize::try_from(position)
+                    .unwrap_or(range.len)
+                    .min(range.len));
+            }
+        }
         if self.labels.has_lazy_int64_backing()
             && let IndexLabel::Int64(needle) = value
             && let Some(values) = self.labels.int64_view()
@@ -23539,7 +23564,7 @@ mod tests {
     #[test]
     fn int64_affine_lookup_fast_paths_match_materialized_q70pn() {
         // Differential harness (br-frankenpandas-q70pn): affine Int64 lookup fast
-        // paths (searchsorted arithmetic ymhb6, asof 1851g/4jr8s, affine get_loc/
+        // paths (searchsorted arithmetic lngwv, asof 1851g/4jr8s, affine get_loc/
         // position) must agree with the materialized binary-search/linear fallback
         // for every query. Deterministic seeded LCG — no rand crate, no mocks.
         let mut state: u64 = 0x2545_f491_4f6c_dd1d;
@@ -23604,6 +23629,50 @@ mod tests {
                 "get_indexer iter={iter} targ={targ_vals:?}"
             );
         }
+    }
+
+    #[test]
+    fn affine_index_searchsorted_avoids_materialization_lngwv() {
+        let affine = Index::new_known_unique_int64_affine_range(1, 2, 4).unwrap();
+        for (needle, left, right) in [(0, 0, 0), (1, 0, 1), (2, 1, 1), (7, 3, 4), (8, 4, 4)] {
+            let needle = IndexLabel::Int64(needle);
+            assert_eq!(affine.searchsorted(&needle, "left").unwrap(), left);
+            assert_eq!(affine.searchsorted(&needle, "right").unwrap(), right);
+        }
+        assert!(
+            affine.cached_int64_label_values().is_none(),
+            "affine searchsorted should not materialize the raw i64 view"
+        );
+
+        let extreme = Index::new_known_unique_int64_affine_range(i64::MIN, i64::MAX, 2).unwrap();
+        for (needle, left, right) in [
+            (i64::MIN, 0, 1),
+            (i64::MIN + 1, 1, 1),
+            (-1, 1, 2),
+            (i64::MAX, 2, 2),
+        ] {
+            let needle = IndexLabel::Int64(needle);
+            assert_eq!(extreme.searchsorted(&needle, "left").unwrap(), left);
+            assert_eq!(extreme.searchsorted(&needle, "right").unwrap(), right);
+        }
+        assert!(extreme.cached_int64_label_values().is_none());
+
+        let singleton = Index::new_known_unique_int64_affine_range(7, i64::MIN, 1).unwrap();
+        for (needle, left, right) in [(6, 0, 0), (7, 0, 1), (8, 1, 1)] {
+            let needle = IndexLabel::Int64(needle);
+            assert_eq!(singleton.searchsorted(&needle, "left").unwrap(), left);
+            assert_eq!(singleton.searchsorted(&needle, "right").unwrap(), right);
+        }
+        assert!(singleton.cached_int64_label_values().is_none());
+
+        let empty = Index::new_known_unique_int64_affine_range(0, 0, 0).unwrap();
+        assert_eq!(
+            empty
+                .searchsorted(&IndexLabel::Int64(i64::MAX), "right")
+                .unwrap(),
+            0
+        );
+        assert!(empty.cached_int64_label_values().is_none());
     }
 
     #[test]

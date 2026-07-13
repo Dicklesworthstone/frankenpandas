@@ -15090,3 +15090,40 @@ Validation: strict-remote workspace `cargo check --workspace --all-targets` is g
 under fail-closed RCH slot pressure, and the unchanged retry completed remotely; no local Cargo command ran. The mandatory
 static-only UBS scan completed with **0 critical** findings; its warnings are the broad existing whole-file inventory, with
 no focused finding on the affine predecessor arm or benchmark extension.
+
+### 2026-07-12 MagentaOak — WIN: affine `Index::searchsorted` closed-form insertion — 33.18x FP-side
+
+Negative-ledger-first routing excluded the already-landed closed-form `RangeIndex::searchsorted` family. The distinct
+affine Int64 `Index::searchsorted` path still called `int64_view()` on first use, allocating the entire raw `Vec<i64>`,
+then binary-searched that materialization for every probe. The earlier `ymhb6` change avoided `IndexLabel` materialization
+but did not remove this raw-i64 allocation; no affine `Index::searchsorted` keep or rejection existed.
+
+One lever (`br-frankenpandas-lngwv`) dispatches ascending affine Int64 indexes through the existing
+`Int64AffineLabels` witness. Empty and singleton inputs are handled directly; positive-step ranges compute the left/right
+insertion point with widened `i128` subtraction, quotient, and remainder, then clamp to the index length. Descending,
+non-affine, and non-Int64 inputs retain the former path unchanged. For `start + step * i`, exact matches advance only for
+`side="right"`, while gaps advance for both sides, preserving ordering and tie behavior without floating-point work.
+
+Strict remote-only same-worker A/B on `vmi1149989` used a fresh 1,000,000-label affine Index per timed sample, 4,096
+deterministic mixed below/in/above-range probes, both left and right sides, nine measured samples, and `release-perf`:
+
+| arm | best latency |
+| --- | ---: |
+| reference raw-i64 materialization + binary search | 1,670,277 ns |
+| candidate affine closed form | 50,345 ns |
+
+Reference/candidate = **33.1766x** (**96.9858% latency reduction**). The output digest was identical for both arms; strict
+RCH selected `vmi1149989` for the baseline and honored the explicit candidate pin.
+
+Correctness: the focused strict-remote proof is **1/1 green** and asserts that the raw-i64 cache remains uninitialized while
+covering below-first, exact, gap, above-last, empty, singleton, and extreme-`i64` subtraction. The existing deterministic
+2,000-range affine-vs-materialized lookup oracle remains green inside the full `fp-index` suite, which is **527 passed / 0
+failed / 1 ignored**. Full `fp-conformance --lib` is **1596/1596 green**.
+
+Validation: strict-remote workspace `cargo check --workspace --all-targets` is green on `vmi1149989` with only the two
+pre-existing unused `Scalar` imports in untouched `fp-columnar` tests; focused `fp-index --all-targets` clippy is
+warning-clean on `vmi1153651`; pinned rustfmt and `git diff --check` are green. Default-parallel full-suite admissions were
+refused under fail-closed RCH slot pressure and completed remotely with `-j 1`; one conformance dispatch observed a peer
+manifest commit mid-sync and was invalid, while the converged retry passed. No local Cargo command ran. The mandatory
+static-only UBS scan completed with **0 critical** findings; its warnings are the broad existing whole-file inventory, with
+no focused finding on the affine insertion arm or benchmark extension.

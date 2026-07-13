@@ -3,6 +3,7 @@
 //! Run:
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 overlap
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 200 searchsorted
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 9 affine_index_searchsorted
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 putmask_where
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_append_repeat
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 index_drop_labels
@@ -473,6 +474,30 @@ fn main() {
         });
         println!(
             "range_searchsorted n={n} probes={probe_count} searchsorted_ns={searchsorted_ns} sink={sink}"
+        );
+        return;
+    }
+    if scenario == "affine_index_searchsorted" {
+        let probes = searchsorted_probes(n);
+        let probe_count = probes.len();
+        let (searchsorted_ns, sink) = best_ns(iters, || {
+            let index = Index::new_known_unique_int64_affine_range(0, 2, n)
+                .expect("valid affine search index");
+            let mut acc = 0usize;
+            for &probe in &probes {
+                let label = IndexLabel::Int64(probe);
+                let left = index
+                    .searchsorted(&label, "left")
+                    .expect("left searchsorted");
+                let right = index
+                    .searchsorted(&label, "right")
+                    .expect("right searchsorted");
+                acc = acc.wrapping_add(left).rotate_left(1) ^ right;
+            }
+            acc
+        });
+        println!(
+            "affine_index_searchsorted n={n} probes={probe_count} searchsorted_ns={searchsorted_ns} sink={sink}"
         );
         return;
     }
