@@ -24650,6 +24650,23 @@ impl Column {
                 right: other.len(),
             });
         }
+        // Typed pairwise fast path: both columns Float64/Int64 (all-valid or nullable).
+        // Both-present ⇒ (af−bf).abs() <= atol + rtol*bf.abs(); either-missing ⇒ false.
+        // Output is an ALL-VALID Bool column (isclose maps missing→Bool(false), not
+        // Null). Bit-identical to the Scalar loop: get_present == !is_missing (validity
+        // -set AND non-NaN for Float64, KEEPING ±inf — matching to_f64 which keeps ±inf
+        // and is_missing which drops NaN; validity-set for Int64), and the closeness
+        // arithmetic + comparison is the same. Covers mixed i64×f64.
+        if let (Some(sa), Some(sb)) = (self.typed_numeric_values(), other.typed_numeric_values()) {
+            let n = sa.len().min(sb.len());
+            let bools: Vec<bool> = (0..n)
+                .map(|i| match (sa.get_present(i), sb.get_present(i)) {
+                    (Some(af), Some(bf)) => (af - bf).abs() <= atol + rtol * bf.abs(),
+                    _ => false,
+                })
+                .collect();
+            return Ok(Self::from_bool_values(bools));
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
             if a.is_missing() || b.is_missing() {
@@ -33084,6 +33101,97 @@ mod tests {
                             "quantile trial {trial} q {q}"
                         );
                     }
+                }
+            }
+        }
+
+        #[test]
+        fn isclose_nullable_typed_match_scalar_reference() {
+            // The typed pairwise isclose arm must be BIT-EXACT to the generic Scalar
+            // loop (either-missing ⇒ Bool(false); else (af-bf).abs() <= atol+rtol*|bf|).
+            // Reference off the MATERIALIZED values(). MIXED dtypes, nullable at
+            // DIFFERENT positions, ±inf (kept ⇒ inf comparisons ⇒ false), valid-bit-set
+            // NaN (⇒ missing ⇒ false), across several (rtol, atol).
+            let mut state: u64 = 0xC105_E1DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Bool(x), Scalar::Bool(y)) => x == y,
+                    _ => false,
+                }
+            };
+            fn ref_isclose(a: &[Scalar], b: &[Scalar], rtol: f64, atol: f64) -> Column {
+                let out: Vec<Scalar> = a
+                    .iter()
+                    .zip(b.iter())
+                    .map(|(x, y)| {
+                        if x.is_missing() || y.is_missing() {
+                            Scalar::Bool(false)
+                        } else {
+                            let af = x.to_f64().unwrap();
+                            let bf = y.to_f64().unwrap();
+                            Scalar::Bool((af - bf).abs() <= atol + rtol * bf.abs())
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Bool, out).unwrap()
+            }
+            let mk_f64 = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let data: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 8 {
+                            0 => {
+                                vf.set(i, false);
+                                0.0
+                            }
+                            1 => f64::NAN,
+                            2 => f64::INFINITY,
+                            3 => f64::NEG_INFINITY,
+                            _ => ((r % 400) as f64 - 200.0) * 0.25,
+                        }
+                    })
+                    .collect();
+                Column::from_f64_values_with_validity(data, vf)
+            };
+            let mk_i64 = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 5 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 400) as i64 - 200
+                    })
+                    .collect();
+                Column::from_i64_values_with_validity(data, vi)
+            };
+            let tols = [(1e-5f64, 1e-8f64), (0.0, 0.0), (1e9, 1e9), (0.1, 1.0)];
+            for trial in 0..300 {
+                let n = (next() % 200) as usize;
+                let (a, b) = match trial % 4 {
+                    0 => (mk_i64(n, &mut next), mk_f64(n, &mut next)),
+                    1 => (mk_f64(n, &mut next), mk_i64(n, &mut next)),
+                    2 => (mk_f64(n, &mut next), mk_f64(n, &mut next)),
+                    _ => (mk_i64(n, &mut next), mk_i64(n, &mut next)),
+                };
+                let av = a.values().to_vec();
+                let bv = b.values().to_vec();
+                let (rtol, atol) = tols[trial % tols.len()];
+                let got = a.isclose(&b, rtol, atol).unwrap();
+                let want = ref_isclose(&av, &bv, rtol, atol);
+                let gv = got.values();
+                let wv = want.values();
+                assert_eq!(gv.len(), wv.len(), "isclose len trial {trial}");
+                for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                    assert!(bit_eq(g, w), "isclose trial {trial} idx {k}: {g:?} != {w:?}");
                 }
             }
         }
