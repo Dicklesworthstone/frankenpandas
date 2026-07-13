@@ -13660,6 +13660,21 @@ impl Column {
         if let Some(out) = self.typed_bool_unary(|value| !value) {
             return Ok(out);
         }
+        // Typed Int64 (all-valid + nullable): `!x` over the raw &[i64], dtype-preserving
+        // with NO NaN, so it preserves missingness exactly (output validity == input
+        // validity — a masked slot's `!garbage` is hidden). Bit-identical to the Scalar
+        // loop: present ⇒ Int64(!x); missing ⇒ Null(Null) == missing_for_dtype(Int64) ==
+        // from_i64_values_with_validity's cleared bit == the loop's v.clone() of an
+        // Int64-missing slot. Mirror of the abs/neg nullable-Int64 arms.
+        if let Some(data) = self.as_i64_slice() {
+            return Ok(Self::from_i64_values_owned(data.iter().map(|&x| !x).collect()));
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, _)) = self.as_i64_slice_with_validity()
+        {
+            let out: Vec<i64> = data.iter().map(|&x| !x).collect();
+            return Ok(Self::from_i64_values_with_validity(out, self.validity.clone()));
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
             if v.is_missing() {
@@ -33156,6 +33171,74 @@ mod tests {
                             bit_eq(&col.quantile(q), &fp_types::nanquantile(&vals, q)),
                             "quantile trial {trial} q {q}"
                         );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn bitwise_not_int64_typed_match_scalar_reference() {
+            // The typed Int64 arms (all-valid + nullable) for bitwise_not must be
+            // BIT-EXACT to the Scalar loop: present ⇒ Int64(!x); missing ⇒ Null(Null).
+            // Covers negatives, i64::MIN/MAX, gaps.
+            let mut state: u64 = 0xB17_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Int64(x), Scalar::Int64(y)) => x == y,
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            fn ref_not(vals: &[Scalar]) -> Column {
+                let out: Vec<Scalar> = vals
+                    .iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            Scalar::Null(NullKind::Null)
+                        } else {
+                            match v {
+                                Scalar::Int64(x) => Scalar::Int64(!x),
+                                _ => unreachable!(),
+                            }
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Int64, out).unwrap()
+            }
+            for trial in 0..300 {
+                let n = (next() % 250) as usize;
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        match r % 11 {
+                            0 => i64::MIN,
+                            1 => i64::MAX,
+                            2 => 0,
+                            _ => (r as i64).wrapping_sub(i64::MAX / 2),
+                        }
+                    })
+                    .collect();
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                for col in [&i_all, &i_null] {
+                    let vals = col.values().to_vec();
+                    let got = col.bitwise_not().unwrap();
+                    let want = ref_not(&vals);
+                    let gv = got.values();
+                    let wv = want.values();
+                    assert_eq!(gv.len(), wv.len(), "not len trial {trial}");
+                    for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                        assert!(bit_eq(g, w), "not trial {trial} idx {k}: {g:?} != {w:?}");
                     }
                 }
             }
