@@ -10806,6 +10806,44 @@ impl Column {
             );
         }
 
+        // Nullable contiguous-Utf8 sibling of the typed nullable gathers above: a
+        // `LazyNullableUtf8` column (a string column WITH missing rows — the shape a
+        // frame-level `sort_values`/`iloc`/filter/reindex/join gathers per string column)
+        // otherwise fell to the generic per-row `self.values[pos].clone()` gather below,
+        // which forces the source into a `Vec<Scalar::Utf8>` (one heap `String` per row)
+        // AND clones a `String` per OUTPUT row. Gather the selected byte spans into ONE
+        // fresh contiguous buffer + offsets, carrying the validity bit per output slot —
+        // no per-row `String` alloc on input or output. Byte-identical to the Scalar-clone
+        // gather: a present source row (validity-set) materializes `Scalar::Utf8(span)` and
+        // a missing row (validity-clear, empty span) materializes `Null(Null) ==
+        // missing_for_dtype(Utf8)` — exactly what `LazyNullableUtf8` emits and what
+        // `from_utf8_values_with_validity` rebuilds — and the output validity word is set
+        // iff `validity.get(pos)`, matching the generic `!value.is_missing()`.
+        if let ScalarValues::LazyNullableUtf8 {
+            bytes,
+            offsets,
+            validity,
+            ..
+        } = &self.values
+        {
+            let mut new_bytes: Vec<u8> = Vec::new();
+            let mut new_offsets: Vec<usize> = Vec::with_capacity(n + 1);
+            new_offsets.push(0);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, &pos) in positions.iter().enumerate() {
+                new_bytes.extend_from_slice(&bytes[offsets[pos]..offsets[pos + 1]]);
+                new_offsets.push(new_bytes.len());
+                if validity.get(pos) {
+                    words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                }
+            }
+            return Self::from_utf8_values_with_validity(
+                new_bytes,
+                new_offsets,
+                ValidityMask::from_words(words, n),
+            );
+        }
+
         let mut values = Vec::with_capacity(n);
         let mut words = vec![0_u64; n.div_ceil(64)];
         for (out_idx, &pos) in positions.iter().enumerate() {
@@ -25941,6 +25979,55 @@ mod tests {
                 col.validity().get(pos),
                 "validity must follow gathered position {pos}",
             );
+        }
+    }
+
+    #[test]
+    fn take_positions_nullable_utf8_typed_gather_matches_reference() {
+        // The typed nullable-Utf8 gather (LazyNullableUtf8) must be BIT-EXACT to the
+        // Scalar-clone reference for arbitrary position vectors (permutation, subset,
+        // repeats, out-of-order): present source ⇒ Scalar::Utf8(span), missing ⇒
+        // Null(Null), order follows positions, validity follows the gathered position.
+        // Independent oracle = clone over col.values() (the generic gather algorithm).
+        let mut state: u64 = 0x7A4E_C0DE_1234_9E37;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..150 {
+            let n = (next() % 200) as usize + 1;
+            let mut validity = ValidityMask::all_valid(n);
+            let mut bytes: Vec<u8> = Vec::new();
+            let mut offsets: Vec<usize> = vec![0];
+            for i in 0..n {
+                if next() % 4 == 0 {
+                    validity.set(i, false);
+                } else {
+                    let len = (next() % 5) as usize;
+                    let s: String = (0..len)
+                        .map(|_| (b'a' + (next() % 4) as u8) as char)
+                        .collect();
+                    bytes.extend_from_slice(s.as_bytes());
+                }
+                offsets.push(bytes.len());
+            }
+            let col = Column::from_utf8_values_with_validity(bytes, offsets, validity);
+            let vals = col.values().to_vec();
+            // Random positions with repeats + out-of-order (m in 0..2n).
+            let m = (next() % (2 * n as u64)) as usize;
+            let positions: Vec<usize> = (0..m).map(|_| (next() as usize) % n).collect();
+            let want: Vec<Scalar> = positions.iter().map(|&p| vals[p].clone()).collect();
+            let taken = col.take_positions(&positions);
+            assert_eq!(taken.values(), want.as_slice(), "trial {trial}");
+            for (out_idx, &pos) in positions.iter().enumerate() {
+                assert_eq!(
+                    taken.validity().get(out_idx),
+                    col.validity().get(pos),
+                    "trial {trial} validity at {out_idx} must follow position {pos}",
+                );
+            }
         }
     }
 
