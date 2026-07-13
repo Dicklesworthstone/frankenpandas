@@ -19646,6 +19646,49 @@ impl Column {
             }
         }
 
+        // Typed Utf8 rank (contiguous all-valid + nullable `LazyNullableUtf8`): rank had
+        // NO Utf8 typed path — the generic O(n log n) `compare_scalars_na_last` Scalar
+        // sort below first materializes the whole `Vec<Scalar::Utf8>` (a heap `String`
+        // per row). Rank over the raw `&[u8]` row spans instead: sort the PRESENT rows
+        // with the stable MSD byte radix (`utf8_msd_argsort_bytes`, the same permutation
+        // `argsort`/`sort_values` use — byte order == `String::cmp` == the Utf8 arm of
+        // `compare_scalars_na_last` for valid UTF-8), place missing rows in the na-last
+        // suffix, and walk that permutation with `nullable_rank_values` (tie groups by
+        // byte-span `==`, `T = &[u8]`). Bit-identical to the generic path: identical
+        // present-row sorted order + stable within-tie order ("first"), the SAME rank
+        // formulas (`nullable_rank_values` mirrors the Scalar walk below), and missing ⇒
+        // `Null(NaN)` (cleared validity bit over a 0.0 datum). Output is always Float64.
+        // Non-contiguous (Eager) Utf8 keeps the generic path.
+        if let Some((bytes, offsets)) = self.as_utf8_contiguous() {
+            // `as_utf8_contiguous` gates on `validity.all()` ⇒ every row present.
+            let spans: Vec<&[u8]> = offsets.windows(2).map(|w| &bytes[w[0]..w[1]]).collect();
+            let perm = utf8_msd_argsort_bytes(&spans, ascending);
+            let (ranks, _valid) = nullable_rank_values(&spans, &perm, len, len, method);
+            return Ok(Self::from_f64_values(ranks));
+        }
+        if let ScalarValues::LazyNullableUtf8 {
+            bytes,
+            offsets,
+            validity,
+            ..
+        } = &self.values
+        {
+            let spans: Vec<&[u8]> = offsets.windows(2).map(|w| &bytes[w[0]..w[1]]).collect();
+            let present_idx: Vec<usize> = (0..len).filter(|&i| validity.get(i)).collect();
+            let present_count = present_idx.len();
+            // Radix-sort ONLY the present spans (perm over 0..present_count), then map
+            // back to original row indices; missing rows follow in the na-last suffix.
+            // Stable ⇒ equal spans keep ascending original-index order (== the generic
+            // stable sort's original order), so "first" ranks match.
+            let present_spans: Vec<&[u8]> = present_idx.iter().map(|&i| spans[i]).collect();
+            let sub = utf8_msd_argsort_bytes(&present_spans, ascending);
+            let mut perm: Vec<usize> = sub.iter().map(|&p| present_idx[p]).collect();
+            perm.extend((0..len).filter(|&i| !validity.get(i)));
+            let (ranks, out_valid) =
+                nullable_rank_values(&spans, &perm, present_count, len, method);
+            return Ok(Self::from_f64_values_with_validity(ranks, out_valid));
+        }
+
         let mut non_missing: Vec<(usize, &Scalar)> = Vec::with_capacity(len);
         for (i, v) in self.values.iter().enumerate() {
             if !v.is_missing() {
@@ -39537,6 +39580,110 @@ mod tests {
             assert_eq!(r.values()[1], Scalar::Float64(2.5));
             assert_eq!(r.values()[2], Scalar::Float64(2.5));
             assert_eq!(r.values()[3], Scalar::Float64(4.0));
+        }
+
+        #[test]
+        fn rank_utf8_typed_matches_scalar_reference() {
+            // The typed Utf8 rank arms (all-valid contiguous + nullable LazyNullableUtf8)
+            // must be BIT-EXACT to the generic compare_scalars_na_last path for every
+            // method × direction. Oracle replicates the generic algorithm directly over a
+            // Vec<Scalar> (independent of the typed nullable_rank_values walk). Seeded
+            // short strings over {a,b,c,d} (ties + varied lengths), ~25% nulls in the
+            // nullable variant.
+            fn ref_rank(vals: &[Scalar], method: &str, ascending: bool) -> Vec<Scalar> {
+                let len = vals.len();
+                let mut non_missing: Vec<(usize, &Scalar)> = Vec::new();
+                for (i, v) in vals.iter().enumerate() {
+                    if !v.is_missing() {
+                        non_missing.push((i, v));
+                    }
+                }
+                non_missing
+                    .sort_by(|a, b| crate::compare_scalars_na_last(a.1, b.1, ascending));
+                let mut ranks = vec![Scalar::Null(NullKind::NaN); len];
+                let n = non_missing.len();
+                let mut cursor = 0usize;
+                let mut dense_rank = 0f64;
+                while cursor < n {
+                    let mut end = cursor + 1;
+                    while end < n
+                        && crate::compare_scalars_na_last(
+                            non_missing[cursor].1,
+                            non_missing[end].1,
+                            ascending,
+                        )
+                        .is_eq()
+                    {
+                        end += 1;
+                    }
+                    let start_rank = cursor as f64 + 1.0;
+                    let end_rank = end as f64;
+                    dense_rank += 1.0;
+                    for (group_idx, entry) in non_missing.iter().enumerate().take(end).skip(cursor)
+                    {
+                        let value = match method {
+                            "average" => (start_rank + end_rank) / 2.0,
+                            "min" => start_rank,
+                            "max" => end_rank,
+                            "first" => group_idx as f64 + 1.0,
+                            "dense" => dense_rank,
+                            _ => unreachable!(),
+                        };
+                        ranks[entry.0] = Scalar::Float64(value);
+                    }
+                    cursor = end;
+                }
+                ranks
+            }
+            let mut state: u64 = 0x9A17_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..120 {
+                let n = (next() % 200) as usize;
+                for nullable in [false, true] {
+                    let mut validity = crate::ValidityMask::all_valid(n);
+                    let mut scalars: Vec<Scalar> = Vec::with_capacity(n);
+                    let mut bytes: Vec<u8> = Vec::new();
+                    let mut offsets: Vec<usize> = vec![0];
+                    for i in 0..n {
+                        if nullable && next() % 4 == 0 {
+                            validity.set(i, false);
+                            scalars.push(Scalar::Null(NullKind::Null));
+                        } else {
+                            let len = (next() % 6) as usize;
+                            let s: String = (0..len)
+                                .map(|_| (b'a' + (next() % 4) as u8) as char)
+                                .collect();
+                            bytes.extend_from_slice(s.as_bytes());
+                            scalars.push(Scalar::Utf8(s));
+                        }
+                        offsets.push(bytes.len());
+                    }
+                    let col = Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                    // Confirm the fixture exercises a typed contiguous arm, not generic.
+                    let has_null = scalars.iter().any(|s| s.is_missing());
+                    assert_eq!(
+                        col.as_utf8_contiguous().is_some(),
+                        !has_null,
+                        "trial {trial} nullable={nullable}: backing gate"
+                    );
+                    for method in ["average", "min", "max", "first", "dense"] {
+                        for ascending in [true, false] {
+                            let got = col.rank(method, ascending).expect("utf8 rank");
+                            let want = ref_rank(&scalars, method, ascending);
+                            assert_eq!(
+                                got.values(),
+                                want,
+                                "trial {trial} nullable={nullable} method={method} asc={ascending}"
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         #[test]
