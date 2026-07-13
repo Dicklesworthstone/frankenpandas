@@ -6193,12 +6193,12 @@ fn count_distinct_i64_wide(data: &[i64]) -> i64 {
 /// returned ascending (matching the generic path's `compare_scalars_na_last`).
 fn mode_i64_wide(data: &[i64]) -> Vec<i64> {
     const EMPTY: i64 = i64::MIN;
-    let cap = data
-        .len()
-        .saturating_add(data.len() / 2)
-        .checked_next_power_of_two()
-        .unwrap_or(0);
-    if cap == 0 || data.len() > u32::MAX as usize {
+    const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
+    let n = data.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n > u32::MAX as usize {
         let mut counts: FxHashMap<i64, u64> = FxHashMap::default();
         for &v in data {
             *counts.entry(v).or_insert(0) += 1;
@@ -6211,20 +6211,57 @@ fn mode_i64_wide(data: &[i64]) -> Vec<i64> {
         winners.sort_unstable();
         return winners;
     }
-    let mask = cap - 1;
+    // GROWABLE open-addressing + FIBONACCI hashing — same fix as `mode_f64_wide`:
+    // the old fixed cap ≈ 1.5·n is a huge SPARSE table (cache miss per probe) for
+    // few-distinct data, and `(v·GOLDEN) & mask` keeps the LOW product bits, which
+    // vanish when keys vary only in high bits (e.g. wide i64 / Datetime64 ns that
+    // are near-multiples of a large power of two) → one bucket → long probe chains.
+    // Grow from small (double at load 0.7) to size the table to the actual distinct
+    // count, and Fibonacci `(v·GOLDEN) >> (64 - log2 cap)` uses the HIGH product
+    // bits. `i64::MIN` is the empty sentinel, counted separately (`sentinel_cnt`)
+    // so it never enters the table. Bit-identical: same key→count mapping and
+    // ascending winners (hashing only moves probe positions).
+    // >= 2 so `shift = 64 - log2(cap)` <= 63 (a 64-bit `>>` is invalid).
+    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
     let mut cnt = vec![0u32; cap];
     let mut sentinel_cnt: u64 = 0;
+    let mut filled = 0usize;
     for &v in data {
         if v == EMPTY {
             sentinel_cnt += 1;
             continue;
         }
-        let mut p = ((v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize) & mask;
+        // Grow before load would exceed 0.7 (`filled` only rises on a fresh key).
+        if filled * 10 >= cap * 7 {
+            let ncap = cap * 2;
+            let nshift = 64 - ncap.trailing_zeros();
+            let nmask = ncap - 1;
+            let mut nkeys = vec![EMPTY; ncap];
+            let mut ncnt = vec![0u32; ncap];
+            for p in 0..cap {
+                if keys[p] != EMPTY {
+                    let mut q = ((keys[p] as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
+                    while nkeys[q] != EMPTY {
+                        q = (q + 1) & nmask;
+                    }
+                    nkeys[q] = keys[p];
+                    ncnt[q] = cnt[p];
+                }
+            }
+            keys = nkeys;
+            cnt = ncnt;
+            cap = ncap;
+            shift = nshift;
+        }
+        let mask = cap - 1;
+        let mut p = ((v as u64).wrapping_mul(GOLDEN) >> shift) as usize;
         loop {
             if keys[p] == EMPTY {
                 keys[p] = v;
                 cnt[p] = 1;
+                filled += 1;
                 break;
             }
             if keys[p] == v {
@@ -31097,6 +31134,65 @@ mod tests {
                     .collect();
                 data[0] = i64::MIN;
                 data[1] = i64::MAX;
+                assert!(
+                    crate::i64_direct_address_range(&data).is_none(),
+                    "trial {trial}: expected wide data"
+                );
+                let mut counts: HashMap<i64, u64> = HashMap::new();
+                for &v in &data {
+                    *counts.entry(v).or_insert(0) += 1;
+                }
+                let max_c = counts.values().copied().max().unwrap();
+                let mut expected: Vec<i64> = counts
+                    .iter()
+                    .filter_map(|(&k, &c)| (c == max_c).then_some(k))
+                    .collect();
+                expected.sort_unstable();
+                let col = Column::from_i64_values_owned(data);
+                let got: Vec<i64> = col
+                    .mode()
+                    .expect("mode")
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Int64(x) => *x,
+                        o => panic!("not int: {o:?}"),
+                    })
+                    .collect();
+                assert_eq!(got, expected, "trial {trial}");
+            }
+        }
+
+        #[test]
+        fn mode_wide_i64_growable_fibonacci_rehash_matches_reference() {
+            // Regression for the mode_i64_wide fix: many distinct WIDE values
+            // (> 1024 ⇒ multiple growable-table rehashes) that vary only in HIGH
+            // bits (k << 34, the case the old low-bit `& mask` hash clustered),
+            // plus the i64::MIN sentinel, with engineered ties. Winners must stay
+            // bit-identical to a HashMap reference.
+            use std::collections::HashMap;
+            let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..40 {
+                let distinct = 2000 + (next() % 800) as i64;
+                let n = 12_000usize;
+                let boosted = ((next() % distinct as u64) as i64) << 34;
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        if i % 400 == 0 {
+                            i64::MIN // sentinel path
+                        } else if i % 9 == 0 {
+                            boosted // clear unique-winner bias
+                        } else {
+                            (((next() % distinct as u64) as i64) - distinct / 2) << 34
+                        }
+                    })
+                    .collect();
                 assert!(
                     crate::i64_direct_address_range(&data).is_none(),
                     "trial {trial}: expected wide data"
