@@ -15129,6 +15129,43 @@ impl Column {
             let trues = data.iter().filter(|&&b| b).count();
             return Scalar::Float64(trues as f64);
         }
+        // Typed Int64 sum: fold `v as f64` over the raw &[i64] (all-valid), matching
+        // nansum's per-Scalar `to_f64` + f64 fold in the SAME order — bit-identical
+        // (both lose precision above 2^53 identically) — without materializing the
+        // Scalar Vec. Empty ⇒ 0.0, exactly nansum's empty arm.
+        if let Some(data) = self.as_i64_slice() {
+            let mut s = 0.0_f64;
+            for &x in data {
+                s += x as f64;
+            }
+            return Scalar::Float64(s);
+        }
+        // Nullable Float64 sum: fold PRESENT values (validity-set AND non-NaN, the
+        // `Ok(x) if ...` / skip-missing behaviour of nansum). Bit-identical.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let mut s = 0.0_f64;
+            for (i, &x) in data.iter().enumerate() {
+                if validity.get(i) && !x.is_nan() {
+                    s += x;
+                }
+            }
+            return Scalar::Float64(s);
+        }
+        // Nullable Int64 sum: fold present `v as f64` (Int64 missingness is the
+        // validity bit alone).
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let mut s = 0.0_f64;
+            for (i, &x) in data.iter().enumerate() {
+                if validity.get(i) {
+                    s += x as f64;
+                }
+            }
+            return Scalar::Float64(s);
+        }
         nansum(&self.values)
     }
 
@@ -15167,6 +15204,55 @@ impl Column {
             let mean = sum / data.len() as i128;
             let clamped = mean.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
             return Scalar::Timedelta64(clamped as i64);
+        }
+        // Typed Int64 mean: Σ(v as f64)/len (all-valid, count == len), matching
+        // nanmean; empty ⇒ Null(NaN). No Scalar materialization of the lazy column.
+        if let Some(data) = self.as_i64_slice() {
+            if data.is_empty() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mut s = 0.0_f64;
+            for &x in data {
+                s += x as f64;
+            }
+            return Scalar::Float64(s / data.len() as f64);
+        }
+        // Nullable Float64/Int64 mean: Σ present / count present (present = validity
+        // -set AND non-NaN for Float64; validity-set for Int64), matching nanmean's
+        // sum+count of finite values. count 0 ⇒ Null(NaN).
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let mut s = 0.0_f64;
+            let mut count = 0usize;
+            for (i, &x) in data.iter().enumerate() {
+                if validity.get(i) && !x.is_nan() {
+                    s += x;
+                    count += 1;
+                }
+            }
+            return if count == 0 {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(s / count as f64)
+            };
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let mut s = 0.0_f64;
+            let mut count = 0usize;
+            for (i, &x) in data.iter().enumerate() {
+                if validity.get(i) {
+                    s += x as f64;
+                    count += 1;
+                }
+            }
+            return if count == 0 {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(s / count as f64)
+            };
         }
         nanmean(&self.values)
     }
@@ -31576,6 +31662,54 @@ mod tests {
         fn mean_empty_is_null() {
             let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
             assert!(col.mean().is_missing());
+        }
+
+        #[test]
+        fn sum_mean_typed_int64_and_nullable_match_nan_reference() {
+            // The typed Int64 + nullable Int64/Float64 sum/mean paths must be
+            // BIT-IDENTICAL to the generic nansum/nanmean. Same fold order (0..n,
+            // skipping missing) ⇒ identical f64 accumulation. Null-missing only.
+            let mut state: u64 = 0x5000_1234_ABCD_9999;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let n = (next() % 300) as usize; // include n=0 (empty)
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 1000) as i64 - 500
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vf.set(i, false);
+                            0.0
+                        } else {
+                            (r % 1000) as f64 - 500.0
+                        }
+                    })
+                    .collect();
+                // all-valid Int64, nullable Int64, nullable Float64 (+ all-valid f64)
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                for col in [&i_all, &i_null, &f_null] {
+                    let vals = col.values().to_vec();
+                    assert_eq!(col.sum(), fp_types::nansum(&vals), "sum trial {trial}");
+                    assert_eq!(col.mean(), fp_types::nanmean(&vals), "mean trial {trial}");
+                }
+            }
         }
 
         #[test]
