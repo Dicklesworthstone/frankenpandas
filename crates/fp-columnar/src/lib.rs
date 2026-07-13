@@ -18810,6 +18810,42 @@ impl Column {
             out.extend(missing_idx);
             return Some(out);
         }
+        // Nullable / NaN-bearing Float64: na-last radix mirroring the Int64 arm. A
+        // slot is "present" iff validity-set AND non-NaN — `compare_scalars_na_last`
+        // treats a present `Float64(NaN)` as missing (`Scalar::is_missing` is true
+        // for NaN) too, so a NaN slot joins the na-last group (which sorts Equal ⇒
+        // original order) rather than sorting by NaN's radix key. Present finite/inf
+        // sort by the SAME `f64_radix_key` the all-valid arm uses (`-0.0` ties `+0.0`
+        // via partial_cmp; reversed for descending). Bit-identical to the stable
+        // Scalar na-last comparator. (The all-valid, no-NaN Float64 arm above fires
+        // first, so this only sees nullable OR NaN-bearing columns. Unlike the
+        // multi-key `typed_radix_keys` — which returns None on any NaN because its
+        // comparator treats NaN as compare-Equal, not na-last — single-key sort's
+        // na-last semantics ARE reproducible here.)
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let n = data.len();
+            let mut present_keys: Vec<u64> = Vec::with_capacity(n);
+            let mut present_idx: Vec<usize> = Vec::with_capacity(n);
+            let mut missing_idx: Vec<usize> = Vec::new();
+            for i in 0..n {
+                if validity.get(i) && !data[i].is_nan() {
+                    let key = f64_radix_key(data[i]);
+                    present_keys.push(if ascending { key } else { !key });
+                    present_idx.push(i);
+                } else {
+                    missing_idx.push(i);
+                }
+            }
+            let perm = radix_argsort_u64(&present_keys);
+            let mut out = Vec::with_capacity(n);
+            for &p in &perm {
+                out.push(present_idx[p]);
+            }
+            out.extend(missing_idx);
+            return Some(out);
+        }
         // Datetime64 / Timedelta64 store i64 nanoseconds that sort identically to
         // Int64, so route them through the same radix. Gated on all-valid + no NAT:
         // the NAT sentinel is `i64::MIN`, which the radix would sort FIRST but the
@@ -28567,6 +28603,55 @@ mod tests {
                     }
                 }
                 let col = Column::from_i64_values_with_validity(data, validity);
+                let vals = col.values();
+                for ascending in [true, false] {
+                    let mut want: Vec<usize> = (0..vals.len()).collect();
+                    want.sort_by(|&a, &b| {
+                        crate::compare_scalars_na_last(&vals[a], &vals[b], ascending)
+                    });
+                    assert_eq!(
+                        col.argsort_with(ascending),
+                        want,
+                        "trial {trial} asc={ascending}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn nullable_float64_sort_na_last_radix_matches_scalar_reference_cf() {
+            // Nullable / NaN-bearing Float64 na-last radix permutation must be
+            // BIT-IDENTICAL to the stable compare_scalars_na_last comparator, both
+            // orders. A slot is na-last iff missing OR present-NaN (both is_missing).
+            // Mixes Null-missing (from_f64_values_with_validity) and present-NaN
+            // (raw NaN in the buffer), plus ±inf, -0.0/+0.0 ties, and value ties.
+            let mut state: u64 = 0x2468_ACE0_1357_9BDF;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let n = (next() % 300) as usize + 1;
+                let mut validity = ValidityMask::all_valid(n);
+                let data: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 13 {
+                            0 => {
+                                validity.set(i, false);
+                                0.0 // Null-missing slot (sentinel)
+                            }
+                            1 => f64::NAN,          // present-NaN ⇒ na-last too
+                            2 => f64::INFINITY,
+                            3 => f64::NEG_INFINITY,
+                            4 => -0.0,
+                            _ => ((r % 11) as f64 - 5.0) / 2.0, // ties + negatives
+                        }
+                    })
+                    .collect();
+                let col = Column::from_f64_values_with_validity(data, validity);
                 let vals = col.values();
                 for ascending in [true, false] {
                     let mut want: Vec<usize> = (0..vals.len()).collect();
