@@ -18774,6 +18774,42 @@ impl Column {
             };
             return Some(radix_argsort_u64(&keys));
         }
+        // Nullable Int64: na-last radix (the all-valid `as_i64_slice` arm above
+        // bailed on the missing bit, so a nullable Int64 column fell to the
+        // O(n log n) Scalar comparator). `compare_scalars_na_last` sorts every
+        // MISSING slot to the END regardless of direction (Equal among themselves ⇒
+        // original order), and the PRESENT values by i64 order (reversed for
+        // descending). Reproduce it: radix-sort the present subset by the SAME
+        // i64_radix_key the all-valid arm uses (LSD radix is stable ⇒ present ties
+        // keep original order), map back to original indices, then append the
+        // missing indices in original order. Bit-identical to the stable Scalar
+        // na-last sort. Int64 has no NaN, so present keys are exact. Gated on Int64
+        // dtype so Datetime/Timedelta (whose i64::MIN NAT would radix-sort FIRST,
+        // not last) keep the Scalar route below.
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let n = data.len();
+            let mut present_keys: Vec<u64> = Vec::with_capacity(n);
+            let mut present_idx: Vec<usize> = Vec::with_capacity(n);
+            let mut missing_idx: Vec<usize> = Vec::new();
+            for i in 0..n {
+                if validity.get(i) {
+                    let key = i64_radix_key(data[i]);
+                    present_keys.push(if ascending { key } else { !key });
+                    present_idx.push(i);
+                } else {
+                    missing_idx.push(i);
+                }
+            }
+            let perm = radix_argsort_u64(&present_keys);
+            let mut out = Vec::with_capacity(n);
+            for &p in &perm {
+                out.push(present_idx[p]);
+            }
+            out.extend(missing_idx);
+            return Some(out);
+        }
         // Datetime64 / Timedelta64 store i64 nanoseconds that sort identically to
         // Int64, so route them through the same radix. Gated on all-valid + no NAT:
         // the NAT sentinel is `i64::MIN`, which the radix would sort FIRST but the
@@ -28493,6 +28529,54 @@ mod tests {
                         via_perm,
                         scalar_sort_reference(vals, true),
                         "{label} trial {trial} argsort mismatch"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn nullable_int64_sort_na_last_radix_matches_scalar_reference_cf() {
+            // Nullable Int64 na-last radix permutation must be BIT-IDENTICAL to the
+            // stable `compare_scalars_na_last` comparator, both orders: present
+            // values by i64 order (ties keep original index order), every missing
+            // slot LAST in original order. Deterministic LCG with ~20% missing and
+            // a narrow value range to force ties.
+            let mut state: u64 = 0x1357_9BDF_2468_ACE0;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let n = (next() % 300) as usize + 1;
+                let data: Vec<i64> = (0..n)
+                    .map(|_| {
+                        let r = next();
+                        if r % 7 == 0 {
+                            r as i64
+                        } else {
+                            (r % 11) as i64 - 5
+                        }
+                    })
+                    .collect();
+                let mut validity = ValidityMask::all_valid(n);
+                for i in 0..n {
+                    if next() % 5 == 0 {
+                        validity.set(i, false);
+                    }
+                }
+                let col = Column::from_i64_values_with_validity(data, validity);
+                let vals = col.values();
+                for ascending in [true, false] {
+                    let mut want: Vec<usize> = (0..vals.len()).collect();
+                    want.sort_by(|&a, &b| {
+                        crate::compare_scalars_na_last(&vals[a], &vals[b], ascending)
+                    });
+                    assert_eq!(
+                        col.argsort_with(ascending),
+                        want,
+                        "trial {trial} asc={ascending}"
                     );
                 }
             }
