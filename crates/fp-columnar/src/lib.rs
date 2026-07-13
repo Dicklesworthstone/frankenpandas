@@ -17503,12 +17503,37 @@ impl Column {
         let count = Scalar::Int64(self.count() as i64);
         let mean = self.mean();
         let std = {
-            let nums: Vec<f64> = self
-                .values
-                .iter()
-                .filter(|v| !v.is_missing())
-                .filter_map(|v| v.to_f64().ok())
-                .collect();
+            // Typed present-collect (Float64/Int64, all-valid or nullable): gather the
+            // present values off the raw slice + validity instead of materializing the
+            // Vec<Scalar> — the ONLY Scalar materialization left in describe (count/
+            // mean/quantile/min/max are all typed), so this lets describe() run without
+            // ever building the Scalar Vec. SAFE (missing-FILTERED, unlike trapz): the
+            // generic filter drops any missing/NaN, so present == validity-set AND
+            // non-NaN (Float64, ±inf kept) / validity-set (Int64) — the exact set
+            // `!is_missing() → to_f64().ok()` yields, in the same 0..n order, so the
+            // two-pass mean/ss/std below is bit-identical. Timedelta64 + exotic
+            // backings fall to the generic collect (dtype gate / accessor returns None).
+            let nums: Vec<f64> = if self.dtype == DType::Float64
+                && let Some((data, validity)) = self.as_f64_slice_with_validity()
+            {
+                data.iter()
+                    .enumerate()
+                    .filter_map(|(i, &x)| (validity.get(i) && !x.is_nan()).then_some(x))
+                    .collect()
+            } else if self.dtype == DType::Int64
+                && let Some((data, validity)) = self.as_i64_slice_with_validity()
+            {
+                data.iter()
+                    .enumerate()
+                    .filter_map(|(i, &v)| validity.get(i).then_some(v as f64))
+                    .collect()
+            } else {
+                self.values
+                    .iter()
+                    .filter(|v| !v.is_missing())
+                    .filter_map(|v| v.to_f64().ok())
+                    .collect()
+            };
             if nums.len() < 2 {
                 Scalar::Null(NullKind::NaN)
             } else {
@@ -32715,6 +32740,86 @@ mod tests {
                             "quantile trial {trial} q {q}"
                         );
                     }
+                }
+            }
+        }
+
+        #[test]
+        fn describe_std_typed_collect_match_scalar_reference() {
+            // describe()'s std now collects present values off the raw slice + validity
+            // instead of materializing Vec<Scalar>. The std field must be BIT-EXACT to
+            // the old generic collect + two-pass math over the MATERIALIZED values().
+            // Float64 carries valid-bit-set NaN (dropped) + ±inf (kept); nullable at
+            // various positions; Int64 all-valid + nullable.
+            let mut state: u64 = 0xDE5C_71BE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            // Exact replica of the pre-typed generic std block.
+            fn ref_std(vals: &[Scalar]) -> Scalar {
+                let nums: Vec<f64> = vals
+                    .iter()
+                    .filter(|v| !v.is_missing())
+                    .filter_map(|v| v.to_f64().ok())
+                    .collect();
+                if nums.len() < 2 {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                let mu = nums.iter().sum::<f64>() / nums.len() as f64;
+                let ss: f64 = nums.iter().map(|x| (x - mu).powi(2)).sum();
+                Scalar::Float64((ss / (nums.len() as f64 - 1.0)).sqrt())
+            }
+            let std_of = |d: &[(&'static str, Scalar)]| -> Scalar {
+                d.iter().find(|(k, _)| *k == "std").map(|(_, v)| v.clone()).unwrap()
+            };
+            for trial in 0..300 {
+                let n = (next() % 250) as usize;
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        match r % 9 {
+                            0 => {
+                                vf.set(i, false);
+                                0.0
+                            }
+                            1 => f64::NAN,
+                            2 => f64::INFINITY,
+                            _ => ((r % 400) as f64 - 200.0) * 0.25,
+                        }
+                    })
+                    .collect();
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 5 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 400) as i64 - 200
+                    })
+                    .collect();
+                let f_all = Column::from_f64_values_owned(fdata.clone());
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                for col in [&f_all, &f_null, &i_all, &i_null] {
+                    let vals = col.values().to_vec();
+                    let got = std_of(&col.describe().unwrap());
+                    assert!(
+                        bit_eq(&got, &ref_std(&vals)),
+                        "describe std trial {trial} n {n}"
+                    );
                 }
             }
         }
