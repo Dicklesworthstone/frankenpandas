@@ -6060,6 +6060,70 @@ fn present_moments_f64(data: &[f64], validity: Option<&ValidityMask>) -> (usize,
     (n, mean, sum_sq)
 }
 
+/// Central moments over the PRESENT subset of an f64 slice for skew/kurt:
+/// `(n, m2, m3, m4)` = present count and `Σ(x − mean)^{2,3,4}`, matching
+/// nanskew/nankurt's `nums.iter().map(|x| (x-mean).powi(k)).sum()` (the k-sums are
+/// independent left-folds, so accumulating all three in one pass over the same
+/// present values in the same order is byte-identical). Present iff (validity-set)
+/// AND non-NaN. `n == 0` ⇒ all-zero.
+fn present_central_moments_f64(
+    data: &[f64],
+    validity: Option<&ValidityMask>,
+) -> (usize, f64, f64, f64) {
+    let mut sum = 0.0_f64;
+    let mut n = 0usize;
+    for (i, &x) in data.iter().enumerate() {
+        if validity.map_or(true, |v| v.get(i)) && !x.is_nan() {
+            sum += x;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return (0, 0.0, 0.0, 0.0);
+    }
+    let mean = sum / n as f64;
+    let (mut m2, mut m3, mut m4) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for (i, &x) in data.iter().enumerate() {
+        if validity.map_or(true, |v| v.get(i)) && !x.is_nan() {
+            let d = x - mean;
+            m2 += d.powi(2);
+            m3 += d.powi(3);
+            m4 += d.powi(4);
+        }
+    }
+    (n, m2, m3, m4)
+}
+
+/// Int64 sibling of [`present_central_moments_f64`]: present iff validity-set,
+/// folds `v as f64` (matching nanskew's `to_f64`).
+fn present_central_moments_i64(
+    data: &[i64],
+    validity: Option<&ValidityMask>,
+) -> (usize, f64, f64, f64) {
+    let mut sum = 0.0_f64;
+    let mut n = 0usize;
+    for (i, &v) in data.iter().enumerate() {
+        if validity.map_or(true, |vm| vm.get(i)) {
+            sum += v as f64;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return (0, 0.0, 0.0, 0.0);
+    }
+    let mean = sum / n as f64;
+    let (mut m2, mut m3, mut m4) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for (i, &v) in data.iter().enumerate() {
+        if validity.map_or(true, |vm| vm.get(i)) {
+            let d = v as f64 - mean;
+            m2 += d.powi(2);
+            m3 += d.powi(3);
+            m4 += d.powi(4);
+        }
+    }
+    (n, m2, m3, m4)
+}
+
 /// Int64 sibling of [`present_moments_f64`]: present iff validity-set; folds
 /// `v as f64` (matching nanvar's `to_f64`), so bit-identical.
 fn present_moments_i64(data: &[i64], validity: Option<&ValidityMask>) -> (usize, f64, f64) {
@@ -16837,6 +16901,30 @@ impl Column {
             let s3 = s2.powf(1.5);
             return Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s3));
         }
+        // Nullable Float64/Int64: same math over the PRESENT central moments,
+        // skipping nanskew's Vec<Scalar> materialization + collect_finite.
+        // Bit-identical (same present values/order ⇒ same n/m2/m3).
+        let moments = if self.dtype == DType::Float64 {
+            self.as_f64_slice_with_validity()
+                .map(|(d, v)| present_central_moments_f64(d, Some(v)))
+        } else if self.dtype == DType::Int64 {
+            self.as_i64_slice_with_validity()
+                .map(|(d, v)| present_central_moments_i64(d, Some(v)))
+        } else {
+            None
+        };
+        if let Some((cnt, m2, m3, _m4)) = moments {
+            let n = cnt as f64;
+            if n < 3.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let s2 = m2 / (n - 1.0);
+            if s2 == 0.0 {
+                return Scalar::Float64(0.0);
+            }
+            let s3 = s2.powf(1.5);
+            return Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s3));
+        }
         nanskew(&self.values)
     }
 
@@ -16855,6 +16943,30 @@ impl Column {
             let mean = nums.iter().sum::<f64>() / n;
             let m2: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
             let m4: f64 = nums.iter().map(|x| (x - mean).powi(4)).sum();
+            let s2 = m2 / (n - 1.0);
+            if s2 == 0.0 {
+                return Scalar::Float64(0.0);
+            }
+            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
+            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
+            return Scalar::Float64(adj * (m4 / (s2 * s2)) - sub);
+        }
+        // Nullable Float64/Int64: same math over the PRESENT central moments.
+        // Bit-identical (same present values/order ⇒ same n/m2/m4).
+        let moments = if self.dtype == DType::Float64 {
+            self.as_f64_slice_with_validity()
+                .map(|(d, v)| present_central_moments_f64(d, Some(v)))
+        } else if self.dtype == DType::Int64 {
+            self.as_i64_slice_with_validity()
+                .map(|(d, v)| present_central_moments_i64(d, Some(v)))
+        } else {
+            None
+        };
+        if let Some((cnt, m2, _m3, m4)) = moments {
+            let n = cnt as f64;
+            if n < 4.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
             let s2 = m2 / (n - 1.0);
             if s2 == 0.0 {
                 return Scalar::Float64(0.0);
@@ -32123,6 +32235,67 @@ mod tests {
                             "sem trial {trial} ddof {ddof}"
                         );
                     }
+                }
+            }
+        }
+
+        #[test]
+        fn skew_kurt_nullable_typed_match_nan_reference() {
+            // Typed nullable Int64/Float64 skew/kurt (present central moments) must
+            // be BIT-EXACT to nanskew/nankurt. Null-missing only. Small n exercises
+            // the n<3 (skew) / n<4 (kurt) Null edges; a constant-ish tail exercises
+            // the s2==0 ⇒ 0.0 branch occasionally.
+            let mut state: u64 = 0x3C0F_2468_ACE0_1357;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            for trial in 0..200 {
+                let n = (next() % 250) as usize;
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 100) as i64 - 50
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vf.set(i, false);
+                            0.0
+                        } else {
+                            (r % 100) as f64 - 50.0
+                        }
+                    })
+                    .collect();
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                for col in [&i_all, &i_null, &f_null] {
+                    let vals = col.values().to_vec();
+                    assert!(
+                        bit_eq(&col.skew(), &fp_types::nanskew(&vals)),
+                        "skew trial {trial}"
+                    );
+                    assert!(
+                        bit_eq(&col.kurt(), &fp_types::nankurt(&vals)),
+                        "kurt trial {trial}"
+                    );
                 }
             }
         }
