@@ -19263,10 +19263,19 @@ impl Column {
                     }
                     return Ok(Self::from_f64_values_with_validity(out, out_valid));
                 }
+                // Temporal (Datetime64/Timedelta64) & any other nullable backing:
+                // clone the source's own scalars in permutation order — identical
+                // gather to the fallthrough, only the comparison sort is replaced.
+                // NOTE: a typed gather (rebuild via from_datetime64/timedelta64_
+                // values_with_validity) IS bit-identical here (those variants and the
+                // constructors share the pure-validity materialization rule, so
+                // present-NaT round-trips), but it is NOT a win: temporal already has
+                // the radix order on this path, so the change would only trade the
+                // Scalar-clone gather for a typed one — and when the output is
+                // materialized back to scalars (the common case) that rebuilds the
+                // Scalar Vec anyway PLUS an extra i64 buffer, measuring 0.86-1.14x
+                // (a wash / slight regression). See negative-ledger note.
                 _ => {
-                    // Temporal (Datetime64/Timedelta64) & any other nullable backing:
-                    // clone the source's own scalars in permutation order — identical
-                    // gather to the fallthrough, only the comparison sort is replaced.
                     let src = self.values.as_slice();
                     let sorted: Vec<Scalar> = perm.iter().map(|&i| src[i].clone()).collect();
                     return Self::new(self.dtype, sorted);
@@ -28952,6 +28961,68 @@ mod tests {
                         want.sort_by(|a, b| {
                             crate::compare_scalars_na_last(a, b, ascending)
                         });
+                        let want: Vec<Scalar> = want.into_iter().cloned().collect();
+                        assert_eq!(
+                            col.sort_values(ascending).expect("sort_values").values(),
+                            want.as_slice(),
+                            "{tag} trial {trial} asc={ascending}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn sort_values_temporal_dt64_td64_matches_na_last_scalar_reference() {
+            // sort_values on a nullable Datetime64/Timedelta64 column now typed-
+            // gathers via from_*_with_validity. Result must stay bit-identical to
+            // the na-last Scalar comparator, INCLUDING present-NaT (i64::MIN at a
+            // valid slot ⇒ Datetime64/Timedelta64(i64::MIN), is_missing ⇒ na-last).
+            // Integer/Null scalars only ⇒ structural eq is well-defined.
+            let mut state: u64 = 0x7104_DA7E_9001_4242;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let len = (next() % 300) as usize + 1;
+                let mut vd = crate::ValidityMask::all_valid(len);
+                let mut vt = crate::ValidityMask::all_valid(len);
+                let ddata: Vec<i64> = (0..len)
+                    .map(|i| {
+                        let r = next();
+                        match r % 6 {
+                            0 => {
+                                vd.set(i, false);
+                                55
+                            }
+                            1 => i64::MIN, // present-NaT
+                            _ => (r % 8) as i64 * 100, // ties
+                        }
+                    })
+                    .collect();
+                let tdata: Vec<i64> = (0..len)
+                    .map(|i| {
+                        let r = next();
+                        match r % 6 {
+                            0 => {
+                                vt.set(i, false);
+                                66
+                            }
+                            1 => i64::MIN,
+                            _ => (r % 8) as i64 * 50,
+                        }
+                    })
+                    .collect();
+                let dcol = Column::from_datetime64_values_with_validity(ddata, vd);
+                let tcol = Column::from_timedelta64_values_with_validity(tdata, vt);
+                for (col, tag) in [(&dcol, "dt64"), (&tcol, "td64")] {
+                    let vals = col.values().to_vec();
+                    for ascending in [true, false] {
+                        let mut want: Vec<&Scalar> = vals.iter().collect();
+                        want.sort_by(|a, b| crate::compare_scalars_na_last(a, b, ascending));
                         let want: Vec<Scalar> = want.into_iter().cloned().collect();
                         assert_eq!(
                             col.sort_values(ascending).expect("sort_values").values(),
