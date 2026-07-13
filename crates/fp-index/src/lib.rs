@@ -18188,6 +18188,31 @@ impl MultiIndex {
     /// Count unique tuple occurrences, sorted by count descending then tuple.
     #[must_use]
     pub fn value_counts(&self) -> Vec<(Vec<IndexLabel>, usize)> {
+        if let Some(layout) = self.compact_two_level_identity_layout() {
+            let mut counts = vec![0usize; layout.slot_count];
+            let mut first_rows = vec![usize::MAX; layout.slot_count];
+            let mut unique_count = 0usize;
+            for row in 0..self.len() {
+                let slot = layout.slot(row);
+                if counts[slot] == 0 {
+                    first_rows[slot] = row;
+                    unique_count += 1;
+                }
+                counts[slot] += 1;
+            }
+            let mut pairs = Vec::with_capacity(unique_count);
+            for (slot, count) in counts.into_iter().enumerate() {
+                if count != 0 {
+                    pairs.push((self.tuple_at(first_rows[slot]), count));
+                }
+            }
+            pairs.sort_by(|(left_tuple, left_count), (right_tuple, right_count)| {
+                right_count
+                    .cmp(left_count)
+                    .then_with(|| left_tuple.cmp(right_tuple))
+            });
+            return pairs;
+        }
         let mut counts: FxHashMap<Vec<IndexLabel>, usize> =
             FxHashMap::with_capacity_and_hasher(self.len(), Default::default());
         for tuple in self.to_list() {
@@ -31995,6 +32020,58 @@ mod tests {
                 (vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)], 1),
             ]
         );
+    }
+
+    #[test]
+    fn multi_index_value_counts_compact_matches_tuple_oracle() {
+        fn oracle(mi: &MultiIndex) -> Vec<(Vec<IndexLabel>, usize)> {
+            let mut counts = std::collections::HashMap::<Vec<IndexLabel>, usize>::new();
+            for tuple in mi.to_list() {
+                *counts.entry(tuple).or_insert(0) += 1;
+            }
+            let mut pairs: Vec<_> = counts.into_iter().collect();
+            pairs.sort_by(|(left_tuple, left_count), (right_tuple, right_count)| {
+                right_count
+                    .cmp(left_count)
+                    .then_with(|| left_tuple.cmp(right_tuple))
+            });
+            pairs
+        }
+
+        let mi = MultiIndex::from_tuples(vec![
+            vec![IndexLabel::Utf8("z".into()), IndexLabel::Int64(2)],
+            vec![IndexLabel::Int64(7), IndexLabel::Utf8("a".into())],
+            vec![IndexLabel::Utf8("z".into()), IndexLabel::Int64(2)],
+            vec![
+                IndexLabel::Bool(true),
+                IndexLabel::Null(fp_types::NullKind::NaN),
+            ],
+            vec![IndexLabel::Int64(7), IndexLabel::Utf8("a".into())],
+            vec![
+                IndexLabel::Bool(false),
+                IndexLabel::Null(fp_types::NullKind::NaN),
+            ],
+            vec![
+                IndexLabel::Bool(true),
+                IndexLabel::Null(fp_types::NullKind::NaN),
+            ],
+        ])
+        .expect("two-level MultiIndex");
+        assert!(mi.compact_two_level_identity_layout().is_some());
+        assert_eq!(mi.value_counts(), oracle(&mi));
+
+        let without_sidecar = super::MultiIndex {
+            levels: mi.levels.clone(),
+            names: mi.names.clone(),
+            identity_codes: None,
+        };
+        assert!(
+            without_sidecar
+                .compact_two_level_identity_layout()
+                .is_none()
+        );
+        assert_eq!(without_sidecar.value_counts(), oracle(&without_sidecar));
+        assert_eq!(mi.value_counts(), without_sidecar.value_counts());
     }
 
     #[test]

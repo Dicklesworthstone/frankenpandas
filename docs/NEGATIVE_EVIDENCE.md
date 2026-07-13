@@ -14973,3 +14973,42 @@ the two pre-existing unused `Scalar` imports in untouched test modules. Focused 
 `git diff --check` are green; the production/test source is byte-identical to the exact clean proof worktree. The
 mandatory static-only UBS scan completed with the broad existing `fp-columnar` inventory; it emitted no finding on the new
 compaction arm, while noting only expected fail-fast unwraps in the synthetic benchmark among the changed lines.
+
+### 2026-07-12 MagentaOak — WIN: compact two-level `MultiIndex::value_counts` tally — 55.36x FP-side
+
+Negative-ledger-first routing found no existing `MultiIndex::value_counts` row. The nearby dense `nunique` retry is a
+no-retry boundary for rebuilding identity codes inside each call; this lever is distinct because the later persisted compact
+two-level identity sidecar is already available before `value_counts` starts. The old path still called `to_list()`, cloned a
+`Vec<IndexLabel>` (including owned strings) for every row, and hashed all one million cloned tuples even when only 4,900
+unique tuples survived.
+
+One lever (`br-frankenpandas-g3nn0`) reuses the existing bijective two-level slot, tallies counts in a bounded dense vector,
+records the first source row for each occupied slot, and materializes exactly one tuple per output. The unchanged final
+count-descending/tuple-ascending comparator preserves ordering and tie-breaking. Empty, non-two-level, oversized-code-space,
+and deserialized/no-sidecar indexes retain the generic tuple-map path unchanged; float/null label identity and names are not
+modified.
+
+Strict remote-only same-binary A/B on `vmi1152480` used 1,000,000 rows, 4,900 unique two-Utf8 tuples, and nine
+alternating-order iterations under `release-perf`. The reference function is an exact copy of the former tuple-map body, and
+the binary asserted exact ordered tuple/count equality before timing:
+
+| arm | p50 | p95 |
+| --- | ---: | ---: |
+| reference per-row tuple clone + hash | 296.059 ms | 483.768 ms |
+| candidate compact identity tally | 5.347 ms | 6.748 ms |
+
+Reference/candidate = **55.365x at p50** (98.19% latency reduction) and **71.692x at p95**. A pre-candidate strict-remote
+A/A on `vmi1167313` measured 534.054 ms reference versus 520.845 ms current p50, confirming the comparator while exposing
+tail noise. An attempted worker pin later routed to `vmi1152480`; only the in-binary same-worker A/B above is used as ship
+evidence.
+
+Correctness: the focused strict-remote test is **1/1 green** on `vmi1153651`. It compares the compact path with the generic
+tuple oracle across tied counts and mixed Utf8, Int64, Bool, and typed-null labels, then removes the sidecar and proves the
+fallback returns the identical ordered result. Full `fp-conformance --lib` is **1596/1596 green** on `vmi1227854`.
+
+Validation: strict-remote workspace `cargo check --workspace --all-targets` is green on `vmi1152480` with only the two
+pre-existing unused `Scalar` imports in untouched `fp-columnar` tests; focused `fp-index` lib clippy is warning-clean on
+`vmi1149989`; the corrected benchmark target checks green on `vmi1227854`; pinned rustfmt and `git diff --check` are green.
+Three optional full-`fp-index` suite dispatches found no admissible RCH worker and refused local fallback; no local Cargo
+command ran. The static-only two-file UBS scan completed with **0 critical** findings and no focused production-path issue;
+its changed-line zero-iteration benchmark warning was fixed with a nonempty iteration clamp and checked percentile access.
