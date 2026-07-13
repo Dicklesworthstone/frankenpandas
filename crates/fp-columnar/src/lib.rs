@@ -15736,6 +15736,33 @@ impl Column {
         if let Some(data) = self.as_i64_slice() {
             return Self::median_from_f64_vec(data.iter().map(|&v| v as f64).collect());
         }
+        // Nullable Float64/Int64: collect the PRESENT values (validity-set AND
+        // non-NaN for Float64 — exactly collect_finite's drop-missing; validity bit
+        // for Int64) into an f64 Vec and run the SAME median_from_f64_vec, skipping
+        // nanmedian's Vec<Scalar> materialization + per-Scalar to_f64. Bit-identical:
+        // the median is order-independent (select_nth), so the present multiset alone
+        // determines it; empty present ⇒ median_from_f64_vec's empty ⇒ Null(NaN),
+        // matching nanmedian.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            let present: Vec<f64> = data
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &x)| (validity.get(i) && !x.is_nan()).then_some(x))
+                .collect();
+            return Self::median_from_f64_vec(present);
+        }
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let present: Vec<f64> = data
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &v)| validity.get(i).then_some(v as f64))
+                .collect();
+            return Self::median_from_f64_vec(present);
+        }
         nanmedian(&self.values)
     }
 
@@ -32293,6 +32320,62 @@ mod tests {
                     assert!(
                         bit_eq(&col.kurt(), &fp_types::nankurt(&vals)),
                         "kurt trial {trial}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn median_nullable_typed_match_nan_reference() {
+            // Typed nullable Int64/Float64 median (collect present ⇒ median_from_
+            // f64_vec) must be BIT-EXACT to nanmedian. Even n exercises the 2-element
+            // average; all-missing/empty ⇒ Null(NaN). Null-missing only.
+            let mut state: u64 = 0x0DDE_1234_ABCD_2468;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            for trial in 0..250 {
+                let n = (next() % 250) as usize;
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let idata: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 500) as i64 - 250
+                    })
+                    .collect();
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vf.set(i, false);
+                            0.0
+                        } else {
+                            (r % 500) as f64 - 250.0
+                        }
+                    })
+                    .collect();
+                let i_all = Column::from_i64_values_owned(idata.clone());
+                let i_null = Column::from_i64_values_with_validity(idata, vi);
+                let f_null = Column::from_f64_values_with_validity(fdata, vf);
+                for col in [&i_all, &i_null, &f_null] {
+                    let vals = col.values().to_vec();
+                    assert!(
+                        bit_eq(&col.median(), &fp_types::nanmedian(&vals)),
+                        "median trial {trial}"
                     );
                 }
             }
