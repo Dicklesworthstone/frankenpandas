@@ -24512,6 +24512,42 @@ impl Column {
             return Ok(Self::from_bool_values(out));
         }
 
+        // Nullable contiguous-Utf8 fast path (COLD cache): the all-valid arm above gates
+        // on `as_utf8_contiguous` (validity.all()), so a `LazyNullableUtf8` column — a
+        // string column WITH missing rows — fell to the generic scan below, which
+        // materializes a `Vec<Scalar::Utf8>` (one heap `String` per row). Probe each
+        // PRESENT row's `&[u8]` span against the same Utf8-needle byte set; a MISSING row
+        // maps to false. Bit-identical to the generic path: `key_of` of a missing value is
+        // `None` ⇒ false (this impl treats `missing.isin(..)` as false regardless of the
+        // needles — matching, NOT pandas' NaN-in-list rule), and a present Utf8 value's
+        // `Key::Utf8` matches only Utf8 needles (others inert either way). `validity.get`
+        // false ⇒ the `&&` short-circuits to false without probing. Output all-valid Bool.
+        // Gated on a COLD `values` cache: the win is skipping the materialization on a
+        // fresh column (the usual `df[col].isin(..)` shape); a warm/already-materialized
+        // column defers to the generic `Key` probe over the cached Scalar Vec — no
+        // regression from the per-row `validity.get`.
+        if let ScalarValues::LazyNullableUtf8 {
+            bytes,
+            offsets,
+            validity,
+            values,
+        } = &self.values
+            && values.get().is_none()
+        {
+            let mut lookup: FxHashSet<&[u8]> = FxHashSet::default();
+            for n in needles {
+                if let Scalar::Utf8(s) = n {
+                    lookup.insert(s.as_bytes());
+                }
+            }
+            let out: Vec<bool> = (0..offsets.len().saturating_sub(1))
+                .map(|idx| {
+                    validity.get(idx) && lookup.contains(&bytes[offsets[idx]..offsets[idx + 1]])
+                })
+                .collect();
+            return Ok(Self::from_bool_values(out));
+        }
+
         let mut lookup: FxHashSet<Key<'_>> = FxHashSet::default();
         for n in needles {
             if let Some(k) = key_of(n) {
@@ -31408,6 +31444,70 @@ mod tests {
             let r = col.isin(&[]).expect("isin");
             assert_eq!(r.values()[0], Scalar::Bool(false));
             assert_eq!(r.values()[1], Scalar::Bool(false));
+        }
+
+        #[test]
+        fn isin_nullable_utf8_typed_matches_generic() {
+            // The typed nullable-Utf8 isin arm (cold cache) must be BIT-EXACT to the
+            // generic Key path: a present row probes the Utf8-needle set, a MISSING row is
+            // false (this impl ignores null needles). A/B on identical LazyNullableUtf8
+            // data: `col_cold` (fresh, cold cache) exercises the typed arm; `col_warm` has
+            // its Scalar cache pre-materialized so the cold-cache gate defers to the
+            // generic path. Needles include a null (must NOT flip missing rows to true) and
+            // a non-Utf8 Int64 (inert). Seeded short strings over {a,b,c,d} + ~25% nulls.
+            let mut state: u64 = 0x1519_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..120 {
+                let n = (next() % 300) as usize;
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                for i in 0..n {
+                    if next() % 4 == 0 {
+                        validity.set(i, false);
+                    } else {
+                        let len = (next() % 4) as usize;
+                        let s: String = (0..len)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                    }
+                    offsets.push(bytes.len());
+                }
+                let col_cold = Column::from_utf8_values_with_validity(
+                    bytes.clone(),
+                    offsets.clone(),
+                    validity.clone(),
+                );
+                let col_warm =
+                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let _ = col_warm.values(); // warm cache ⇒ generic path (oracle)
+                // Needle sets: subset of {a,b,c,d} short strings + a null + an Int64.
+                let needle_variants: [Vec<Scalar>; 3] = [
+                    vec![],
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("bb".to_string()),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(7),
+                    ],
+                    vec![
+                        Scalar::Utf8(String::new()),
+                        Scalar::Utf8("cd".to_string()),
+                        Scalar::Utf8("ab".to_string()),
+                    ],
+                ];
+                for needles in &needle_variants {
+                    let cold = col_cold.isin(needles).expect("cold isin");
+                    let warm = col_warm.isin(needles).expect("warm isin");
+                    assert_eq!(cold.values(), warm.values(), "trial {trial}");
+                }
+            }
         }
     }
 
