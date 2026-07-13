@@ -20500,6 +20500,32 @@ impl Column {
                 let out: Vec<i64> = (0..s.len()).map(|i| if cb[i] { o } else { s[i] }).collect();
                 return Ok(Self::from_i64_values_owned(out));
             }
+            // Nullable Int64 self (all-valid cond) — mirror of the where_cond nullable
+            // Int64 arm (inverse: cond-true ⇒ other, cond-false ⇒ self). With an
+            // ALL-VALID cond there is no cond-missing, so the only missing source is a
+            // cond-false+self-missing slot ⇒ Null(Null) == missing_for_dtype(Int64) in
+            // both paths. Int64 has no NaN so no NaN/validity ambiguity. (Nullable
+            // FLOAT64 self is EXCLUDED — a validity-set NaN datum renders present
+            // Float64(NaN) via from_f64_values but Null(NaN) via Self::new; it keeps the
+            // generic path.) Bit-identical: cond[i] ? Int64(other) : self[i].
+            if self.dtype == DType::Int64
+                && let Some((sd, sv)) = self.as_i64_slice_with_validity()
+                && let Scalar::Int64(o) = other
+            {
+                let o = *o;
+                let mut out = vec![0_i64; sd.len()];
+                let mut vmask = ValidityMask::all_valid(sd.len());
+                for i in 0..sd.len() {
+                    if cb[i] {
+                        out[i] = o;
+                    } else if sv.get(i) {
+                        out[i] = sd[i];
+                    } else {
+                        vmask.set(i, false);
+                    }
+                }
+                return Ok(Self::from_i64_values_with_validity(out, vmask));
+            }
         }
         let out: Vec<Scalar> = self
             .values
@@ -33131,6 +33157,61 @@ mod tests {
                             "quantile trial {trial} q {q}"
                         );
                     }
+                }
+            }
+        }
+
+        #[test]
+        fn mask_nullable_int64_self_typed_match_scalar_reference() {
+            // The typed nullable-Int64-self arm for mask (all-valid Bool cond) must be
+            // BIT-EXACT to the generic Scalar loop: cond[i] ? other : self[i] (inverse
+            // of where_cond). self missing at cond-false ⇒ Null(Null); cond-true ⇒ other.
+            let mut state: u64 = 0x11A5_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Int64(x), Scalar::Int64(y)) => x == y,
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            fn ref_mask(vals: &[Scalar], cb: &[bool], other: &Scalar) -> Column {
+                let out: Vec<Scalar> = vals
+                    .iter()
+                    .zip(cb.iter())
+                    .map(|(v, &c)| if c { other.clone() } else { v.clone() })
+                    .collect();
+                Column::new(DType::Int64, out).unwrap()
+            }
+            let other = Scalar::Int64(-99);
+            for trial in 0..300 {
+                let n = (next() % 200) as usize;
+                let cb: Vec<bool> = (0..n).map(|_| next() % 2 == 0).collect();
+                let cond = Column::from_bool_values(cb.clone());
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 400) as i64 - 200
+                    })
+                    .collect();
+                let col = Column::from_i64_values_with_validity(data, vi);
+                let vals = col.values().to_vec();
+                let got = col.mask(&cond, &other).unwrap();
+                let want = ref_mask(&vals, &cb, &other);
+                let gv = got.values();
+                let wv = want.values();
+                assert_eq!(gv.len(), wv.len(), "mask len trial {trial}");
+                for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                    assert!(bit_eq(g, w), "mask trial {trial} idx {k}: {g:?} != {w:?}");
                 }
             }
         }
