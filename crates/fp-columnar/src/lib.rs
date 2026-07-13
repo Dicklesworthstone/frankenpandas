@@ -16835,6 +16835,40 @@ impl Column {
             return Scalar::Int64(count_distinct_i64_wide(data));
         }
 
+        // Nullable Bool has only two present-value buckets plus, when requested,
+        // one missing bucket. Scan the raw bits and validity instead of forcing
+        // `LazyNullableBool` to materialize a `Vec<Scalar>` and hash every row.
+        // The variant guarantees every invalid slot observes `Null(Null)`, so all
+        // missing rows collapse to the same bucket exactly as `nannunique` does.
+        if let ScalarValues::LazyNullableBool { data, validity, .. } = &self.values {
+            let mut seen_false = false;
+            let mut seen_true = false;
+            let mut seen_missing = false;
+            let maximum = if dropna { 2 } else { 3 };
+            for (i, &value) in data.iter().enumerate() {
+                if validity.get(i) {
+                    if value {
+                        seen_true = true;
+                    } else {
+                        seen_false = true;
+                    }
+                } else {
+                    seen_missing = true;
+                }
+                let distinct = i64::from(seen_false)
+                    + i64::from(seen_true)
+                    + i64::from(!dropna && seen_missing);
+                if distinct == maximum {
+                    return Scalar::Int64(distinct);
+                }
+            }
+            return Scalar::Int64(
+                i64::from(seen_false)
+                    + i64::from(seen_true)
+                    + i64::from(!dropna && seen_missing),
+            );
+        }
+
         // Contiguous-Utf8 fast path (sibling of `unique`/`value_counts`'s byte-span
         // dedup): `nannunique(&self.values)` forces `as_slice()` to materialize a
         // `Vec<Scalar::Utf8>` -- one heap `String` per row -- then keys each by
@@ -38019,6 +38053,54 @@ mod tests {
             .expect("col");
             assert_eq!(col.nunique(), Scalar::Int64(0));
             assert_eq!(col.nunique_with_dropna(false), Scalar::Int64(1));
+        }
+
+        #[test]
+        fn nunique_nullable_bool_typed_matches_scalar_oracle() {
+            let mut state = 0xB001_5EED_1234_5678_u64;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let n = (next() % 400) as usize;
+                let null_mode = next() % 3;
+                let mut data = Vec::with_capacity(n);
+                let mut validity = ValidityMask::all_valid(n);
+                let mut scalar_oracle = Vec::with_capacity(n);
+                for i in 0..n {
+                    let value = next() & 1 == 1;
+                    let missing = match null_mode {
+                        0 => false,
+                        2 => true,
+                        _ => next().is_multiple_of(4),
+                    };
+                    data.push(value);
+                    if missing {
+                        validity.set(i, false);
+                        scalar_oracle.push(Scalar::Null(NullKind::Null));
+                    } else {
+                        scalar_oracle.push(Scalar::Bool(value));
+                    }
+                }
+                let column = Column::from_bool_values_with_validity(data, validity);
+                for dropna in [true, false] {
+                    let mut expected = match fp_types::nannunique(&scalar_oracle) {
+                        Scalar::Int64(count) => count,
+                        _ => unreachable!("nannunique count must be Int64"),
+                    };
+                    if !dropna && scalar_oracle.iter().any(Scalar::is_missing) {
+                        expected += 1;
+                    }
+                    assert_eq!(
+                        column.nunique_with_dropna(dropna),
+                        Scalar::Int64(expected),
+                        "trial={trial} null_mode={null_mode} dropna={dropna}"
+                    );
+                }
+            }
         }
 
         #[test]

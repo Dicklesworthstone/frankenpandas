@@ -15206,3 +15206,34 @@ Validation: strict-remote workspace `cargo check -j 1 --workspace --all-targets`
 no local Cargo command ran. The mandatory static-only UBS scan reports **0 critical** findings. Its first pass exposed and
 prompted a fix for a benchmark-only zero-sample percentile panic; the clean rerun contains only the broad existing
 whole-file inventory and no focused finding on the production affine-construction arm.
+
+### 2026-07-13 IvoryGlacier — WIN: nullable Bool `nunique` scans three raw buckets — 412.772x p50
+
+Negative-ledger-first routing excluded the rejected dense-groupby mean hoist and found no prior nullable-Bool `nunique`
+keep or rejection. `Column::nunique_with_dropna` still forced `LazyNullableBool` through scalar materialization and generic
+hashing even though its complete result domain is only `false`, `true`, and, when `dropna=false`, one missing bucket.
+
+One lever (`br-frankenpandas-i9pnl`) scans the existing bool bits and validity mask directly, tracks those three states, and
+returns as soon as every possible bucket is present. It preserves the old path for every other representation. The nullable
+Bool constructor invariant makes every invalid slot the same `Null(Null)` bucket, so null collapsing and both `dropna`
+modes remain unchanged.
+
+An untouched strict-remote A/A control on `vmi1293453` measured **23.974 ms** versus **23.890 ms** p50 (**0.996x**) before
+the production edit. The ship gate was then a same-binary, alternating-order A/B on `vmi1149989`: five million rows, every
+fourth row invalid, nine measured samples, and exact candidate/reference assertions for both `dropna` modes.
+
+| arm | p50 | p95 |
+| --- | ---: | ---: |
+| scalar-materializing reference | 18.090 ms | 24.980 ms |
+| typed three-state scan | 0.044 ms | 0.044 ms |
+
+Reference/candidate = **412.772x p50** on this domain-saturating workload. The candidate encounters all three buckets in
+the first four rows and exits early; this result is intentionally not claimed as the worst-case full-scan ratio.
+
+Correctness: the focused strict-remote proof is **1/1 green** and compares the typed arm to the scalar oracle for 200 seeded
+nullable-Bool shapes, including empty, all-valid, randomly missing, and all-missing columns under both `dropna` modes.
+Workspace `cargo check --workspace --all-targets` is green. Full workspace Clippy remains blocked by 23 pre-existing
+`fp-columnar` findings in three unrelated lint families; the changed benchmark target passes `-D warnings` when those exact
+families are allowed. Fail-closed RCH refused remote `cargo fmt --check` as non-compilation command `RCH-E301`, so no local
+fallback ran; `git diff --check` is green. The bounded static-only UBS run reproduced the known broad whole-file inventory;
+its one focused benchmark indexing warning was removed before the final scan, with no production-hunk finding.
