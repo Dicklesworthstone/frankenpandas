@@ -13569,6 +13569,71 @@ impl Column {
                     ValidityMask::from_words(words, count),
                 ));
             }
+            // Nullable temporal / Bool siblings (mirror the take_positions gathers):
+            // Datetime64/Timedelta64 store i64 ns (missing ⇒ Null(NaT)), Bool raw
+            // bits (missing ⇒ Null(Null)). Variant-gated to the canonical lazy
+            // backing; byte-identical to the Scalar-clone path (present ⇒ datum
+            // Scalar; missing ⇒ the variant's invalid emission == missing_for_dtype).
+            if let ScalarValues::LazyNullableDatetime64 { data, .. } = &self.values {
+                let src = data.as_slice();
+                let count = mask_bits.iter().filter(|&&m| m).count();
+                let mut gathered = Vec::with_capacity(count);
+                let mut words = vec![0_u64; count.div_ceil(64)];
+                let mut out_idx = 0usize;
+                for (i, &m) in mask_bits.iter().enumerate() {
+                    if m {
+                        gathered.push(src[i]);
+                        if self.validity.get(i) {
+                            words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                        }
+                        out_idx += 1;
+                    }
+                }
+                return Ok(Self::from_datetime64_values_with_validity(
+                    gathered,
+                    ValidityMask::from_words(words, count),
+                ));
+            }
+            if let ScalarValues::LazyNullableTimedelta64 { data, .. } = &self.values {
+                let src = data.as_slice();
+                let count = mask_bits.iter().filter(|&&m| m).count();
+                let mut gathered = Vec::with_capacity(count);
+                let mut words = vec![0_u64; count.div_ceil(64)];
+                let mut out_idx = 0usize;
+                for (i, &m) in mask_bits.iter().enumerate() {
+                    if m {
+                        gathered.push(src[i]);
+                        if self.validity.get(i) {
+                            words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                        }
+                        out_idx += 1;
+                    }
+                }
+                return Ok(Self::from_timedelta64_values_with_validity(
+                    gathered,
+                    ValidityMask::from_words(words, count),
+                ));
+            }
+            if let ScalarValues::LazyNullableBool { data, .. } = &self.values {
+                let src = data.as_slice();
+                let count = mask_bits.iter().filter(|&&m| m).count();
+                let mut gathered = Vec::with_capacity(count);
+                let mut words = vec![0_u64; count.div_ceil(64)];
+                let mut out_idx = 0usize;
+                for (i, &m) in mask_bits.iter().enumerate() {
+                    if m {
+                        gathered.push(src[i]);
+                        if self.validity.get(i) {
+                            words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                        }
+                        out_idx += 1;
+                    }
+                }
+                return Ok(Self::from_bool_values_with_validity(
+                    gathered,
+                    ValidityMask::from_words(words, count),
+                ));
+            }
             let values = self
                 .values
                 .iter()
@@ -25925,6 +25990,63 @@ mod tests {
                 Scalar::Float64(x) => assert_eq!(*x, 7.0),
                 o => panic!("nv4={o:?}"),
             }
+        }
+
+        #[test]
+        fn filter_by_mask_nullable_temporal_bool_matches_reference_cf() {
+            // Datetime64/Timedelta64/Bool nullable filter arms. mask-true: 0,2,3,5.
+            let mask = Column::from_bool_values(vec![true, false, true, true, false, true]);
+            let mut v = ValidityMask::all_valid(6);
+            v.set(2, false);
+            v.set(5, false);
+
+            let dt = Column::from_datetime64_values_with_validity(
+                vec![100, 200, 0, 400, 500, 0],
+                v.clone(),
+            );
+            let dtr = dt.filter_by_mask(&mask).expect("dt filter");
+            assert_eq!(dtr.dtype(), DType::Datetime64);
+            assert_eq!(
+                dtr.values(),
+                &[
+                    Scalar::Datetime64(100),
+                    Scalar::Null(NullKind::NaT),
+                    Scalar::Datetime64(400),
+                    Scalar::Null(NullKind::NaT),
+                ]
+            );
+
+            let td = Column::from_timedelta64_values_with_validity(
+                vec![10, 20, 0, 40, 50, 0],
+                v.clone(),
+            );
+            let tdr = td.filter_by_mask(&mask).expect("td filter");
+            assert_eq!(tdr.dtype(), DType::Timedelta64);
+            assert_eq!(
+                tdr.values(),
+                &[
+                    Scalar::Timedelta64(10),
+                    Scalar::Null(NullKind::NaT),
+                    Scalar::Timedelta64(40),
+                    Scalar::Null(NullKind::NaT),
+                ]
+            );
+
+            let b = Column::from_bool_values_with_validity(
+                vec![true, false, false, true, true, false],
+                v.clone(),
+            );
+            let br = b.filter_by_mask(&mask).expect("bool filter");
+            assert_eq!(br.dtype(), DType::Bool);
+            assert_eq!(
+                br.values(),
+                &[
+                    Scalar::Bool(true),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Bool(true),
+                    Scalar::Null(NullKind::Null),
+                ]
+            );
         }
 
         #[test]
