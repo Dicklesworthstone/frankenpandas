@@ -13567,6 +13567,13 @@ impl Column {
                 right: other.len(),
             });
         }
+        // Typed Int64 fast path (both-present ⇒ Int64(x << clamp(y)), else Null(Null));
+        // same kernel + missing rule as the Scalar loop below, no Scalar materialization.
+        if let Some(out) = self.typed_i64_both_present_binary(other, |x, y| {
+            x.wrapping_shl(y.clamp(0, 63) as u32)
+        }) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
             if a.is_missing() || b.is_missing() {
@@ -13598,6 +13605,13 @@ impl Column {
                 left: self.len(),
                 right: other.len(),
             });
+        }
+        // Typed Int64 fast path (both-present ⇒ Int64(x >> clamp(y)), else Null(Null));
+        // same kernel + missing rule as the Scalar loop below, no Scalar materialization.
+        if let Some(out) = self.typed_i64_both_present_binary(other, |x, y| {
+            x.wrapping_shr(y.clamp(0, 63) as u32)
+        }) {
+            return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
@@ -33044,6 +33058,100 @@ mod tests {
                             bit_eq(&col.quantile(q), &fp_types::nanquantile(&vals, q)),
                             "quantile trial {trial} q {q}"
                         );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn shift_i64_both_present_nullable_match_scalar_reference() {
+            // left_shift/right_shift now route Int64 input through
+            // typed_i64_both_present_binary. Must be BIT-EXACT to the generic Scalar
+            // loop (both-present ⇒ Int64(x <</>> clamp(y,0,63)), else Null(Null)).
+            // Covers shift counts >63 and <0 (clamped), negative x (arithmetic >>), gaps.
+            let mut state: u64 = 0x5417_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Int64(x), Scalar::Int64(y)) => x == y,
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            fn ref_binop(a: &[Scalar], b: &[Scalar], f: fn(i64, i64) -> i64) -> Column {
+                let out: Vec<Scalar> = a
+                    .iter()
+                    .zip(b.iter())
+                    .map(|(x, y)| {
+                        if x.is_missing() || y.is_missing() {
+                            Scalar::Null(NullKind::Null)
+                        } else {
+                            match (x, y) {
+                                (Scalar::Int64(xi), Scalar::Int64(yi)) => Scalar::Int64(f(*xi, *yi)),
+                                _ => unreachable!(),
+                            }
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Int64, out).unwrap()
+            }
+            // Values column: full-range i64 incl negatives. Shift-count column: incl
+            // out-of-range (>63) and negative (clamp to 0).
+            let mk_vals = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            vi.set(i, false);
+                        }
+                        r as i64
+                    })
+                    .collect();
+                Column::from_i64_values_with_validity(data, vi)
+            };
+            let mk_shifts = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut vi = crate::ValidityMask::all_valid(n);
+                let data: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 5 == 0 {
+                            vi.set(i, false);
+                        }
+                        (r % 140) as i64 - 10 // range [-10, 129] ⇒ exercises clamp both ends
+                    })
+                    .collect();
+                Column::from_i64_values_with_validity(data, vi)
+            };
+            for trial in 0..300 {
+                let n = (next() % 200) as usize;
+                let a = mk_vals(n, &mut next);
+                let b = mk_shifts(n, &mut next);
+                let av = a.values().to_vec();
+                let bv = b.values().to_vec();
+                let cases: [(&str, Column, Column); 2] = [
+                    (
+                        "shl",
+                        a.left_shift(&b).unwrap(),
+                        ref_binop(&av, &bv, |x, y| x.wrapping_shl(y.clamp(0, 63) as u32)),
+                    ),
+                    (
+                        "shr",
+                        a.right_shift(&b).unwrap(),
+                        ref_binop(&av, &bv, |x, y| x.wrapping_shr(y.clamp(0, 63) as u32)),
+                    ),
+                ];
+                for (name, got, want) in cases {
+                    let gv = got.values();
+                    let wv = want.values();
+                    assert_eq!(gv.len(), wv.len(), "{name} len trial {trial}");
+                    for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                        assert!(bit_eq(g, w), "{name} trial {trial} idx {k}: {g:?} != {w:?}");
                     }
                 }
             }
