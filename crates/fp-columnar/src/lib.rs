@@ -13955,6 +13955,53 @@ impl Column {
         ))
     }
 
+    /// Raw packed `&[bool]` backing + validity mask for a Bool column, covering
+    /// BOTH the all-valid backings (`as_bool_slice`: contiguous / LazyAllValidBool
+    /// / LazyShiftedBool, whose `self.validity` is the all-valid sentinel) and the
+    /// `LazyNullableBool` variant (data + its validity). Returns None for non-Bool
+    /// dtypes and for eager Scalar-backed Bool columns carrying mixed NullKind
+    /// values (validity not all AND not LazyNullableBool) — those keep the generic
+    /// Scalar path, mirroring the fillna/dropna variant-gating.
+    fn bool_data_and_validity(&self) -> Option<(&[bool], &ValidityMask)> {
+        if self.dtype != DType::Bool {
+            return None;
+        }
+        if let ScalarValues::LazyNullableBool { data, validity, .. } = &self.values {
+            return Some((data.as_ref(), validity));
+        }
+        let slice = self.as_bool_slice()?;
+        Some((slice, &self.validity))
+    }
+
+    /// Nullable-capable sibling of `typed_bool_binary`: both operands are Bool
+    /// columns (all-valid OR `LazyNullableBool`). Apply `op` over the raw bool
+    /// slices — a masked slot computes a throwaway value the combined mask then
+    /// hides — and AND the two validity masks so the output is missing exactly
+    /// where either input is missing, matching the Scalar loop's
+    /// `a.is_missing() || b.is_missing() ⇒ Null(Null)`. Present slots use the same
+    /// `op(a, b)` on the same bools, and `from_bool_values_with_validity`
+    /// materializes a missing slot as `Null(Null) == missing_for_dtype(Bool)`, so
+    /// this is bit-identical to the generic loop for Bool×Bool. Skips the
+    /// Vec<Scalar> materialization + Column::new. None for non-Bool / mixed
+    /// operands (generic numeric-coercing path retained) or length mismatch.
+    fn typed_bool_binary_nullable<F>(&self, other: &Self, op: F) -> Option<Self>
+    where
+        F: Fn(bool, bool) -> bool,
+    {
+        let (ld, lv) = self.bool_data_and_validity()?;
+        let (rd, rv) = other.bool_data_and_validity()?;
+        if ld.len() != rd.len() {
+            return None;
+        }
+        let bools: Vec<bool> = ld
+            .iter()
+            .zip(rd)
+            .map(|(&a, &b)| op(a, b))
+            .collect();
+        let out_valid = lv.and_mask(rv);
+        Some(Self::from_bool_values_with_validity(bools, out_valid))
+    }
+
     /// Logical AND between two boolean columns.
     pub fn logical_and(&self, other: &Self) -> Result<Self, ColumnError> {
         if self.len() != other.len() {
@@ -13964,6 +14011,9 @@ impl Column {
             });
         }
         if let Some(out) = self.typed_bool_binary(other, |left, right| left && right) {
+            return Ok(out);
+        }
+        if let Some(out) = self.typed_bool_binary_nullable(other, |left, right| left && right) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -13996,6 +14046,9 @@ impl Column {
         if let Some(out) = self.typed_bool_binary(other, |left, right| left || right) {
             return Ok(out);
         }
+        if let Some(out) = self.typed_bool_binary_nullable(other, |left, right| left || right) {
+            return Ok(out);
+        }
         let mut out = Vec::with_capacity(self.values.len());
         for (a, b) in self.values.iter().zip(&other.values) {
             if a.is_missing() || b.is_missing() {
@@ -14024,6 +14077,9 @@ impl Column {
             });
         }
         if let Some(out) = self.typed_bool_binary(other, |left, right| left ^ right) {
+            return Ok(out);
+        }
+        if let Some(out) = self.typed_bool_binary_nullable(other, |left, right| left ^ right) {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -33311,6 +33367,93 @@ mod tests {
                     assert_eq!(gv.len(), wv.len(), "lognot len trial {trial}");
                     for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
                         assert!(bit_eq(g, w), "lognot trial {trial} idx {k}: {g:?} != {w:?}");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn logical_binop_bool_nullable_typed_match_scalar_reference() {
+            // The typed_bool_binary_nullable arm for logical_and/or/xor must be
+            // BIT-EXACT to the Scalar loop over nullable Bool operands: present∧present
+            // ⇒ Bool(op); either missing ⇒ Null(Null). Covers nullable×nullable,
+            // all-valid×nullable, nullable×all-valid, and all-valid×all-valid (which
+            // takes the earlier typed_bool_binary path). AND/OR/XOR each checked.
+            let mut state: u64 = 0xB001_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Bool(x), Scalar::Bool(y)) => x == y,
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            fn ref_binop(a: &[Scalar], b: &[Scalar], op: fn(bool, bool) -> bool) -> Column {
+                let out: Vec<Scalar> = a
+                    .iter()
+                    .zip(b)
+                    .map(|(x, y)| {
+                        if x.is_missing() || y.is_missing() {
+                            Scalar::Null(NullKind::Null)
+                        } else {
+                            let xv = match x {
+                                Scalar::Bool(v) => *v,
+                                _ => x.to_f64().map(|v| v != 0.0).unwrap_or(false),
+                            };
+                            let yv = match y {
+                                Scalar::Bool(v) => *v,
+                                _ => y.to_f64().map(|v| v != 0.0).unwrap_or(false),
+                            };
+                            Scalar::Bool(op(xv, yv))
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Bool, out).unwrap()
+            }
+            // Build a Bool column: `nullable`=false ⇒ all-valid (from_bool_values via
+            // the folding constructor); true ⇒ some slots masked out.
+            let mut build = |n: usize, nullable: bool, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let data: Vec<bool> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if nullable && r % 4 == 0 {
+                            validity.set(i, false);
+                        }
+                        (r >> 19) & 1 == 1
+                    })
+                    .collect();
+                Column::from_bool_values_with_validity(data, validity)
+            };
+            let ops: [(fn(bool, bool) -> bool, fn(&Column, &Column) -> Result<Column, ColumnError>); 3] = [
+                (|a, b| a && b, |a, b| a.logical_and(b)),
+                (|a, b| a || b, |a, b| a.logical_or(b)),
+                (|a, b| a ^ b, |a, b| a.logical_xor(b)),
+            ];
+            for trial in 0..250 {
+                let n = (next() % 200) as usize;
+                for (ln, rn) in [(true, true), (false, true), (true, false), (false, false)] {
+                    let a = build(n, ln, &mut next);
+                    let b = build(n, rn, &mut next);
+                    let av = a.values().to_vec();
+                    let bv = b.values().to_vec();
+                    for (ref_op, col_op) in ops.iter() {
+                        let got = col_op(&a, &b).unwrap();
+                        let want = ref_binop(&av, &bv, *ref_op);
+                        let gv = got.values();
+                        let wv = want.values();
+                        assert_eq!(gv.len(), wv.len(), "binop len trial {trial}");
+                        for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                            assert!(
+                                bit_eq(g, w),
+                                "binop trial {trial} ln={ln} rn={rn} idx {k}: {g:?} != {w:?}"
+                            );
+                        }
                     }
                 }
             }
