@@ -19663,6 +19663,26 @@ impl Column {
                 self.validity.clone(),
             ));
         }
+        // Nullable Int64 fast path (sibling of the nullable Float64 arm): the
+        // all-valid `as_i64_slice` above bails on ANY missing slot, so a nullable
+        // Int64 column fell to the per-element Scalar loop below. Int64 abs is
+        // dtype-preserving with NO NaN — `wrapping_abs` of any i64 (incl i64::MIN)
+        // is an i64 — so abs PRESERVES missingness exactly (output validity ==
+        // input validity). Abs every slot over the raw &[i64] (a masked slot's
+        // sentinel abs's to some i64 the carried validity then hides) and re-ingest
+        // via `from_i64_values_with_validity`. Bit-identical to the loop:
+        // present ⇒ Int64(x.wrapping_abs()); missing ⇒ Null(Null) ==
+        // missing_for_dtype(Int64) == the loop's `v.clone()` of a nullable-Int64
+        // missing slot; validity == input validity == the loop's is_missing derivation.
+        if self.dtype == DType::Int64
+            && let Some((data, _)) = self.as_i64_slice_with_validity()
+        {
+            let out: Vec<i64> = data.iter().map(|&x| x.wrapping_abs()).collect();
+            return Ok(Self::from_i64_values_with_validity(
+                out,
+                self.validity.clone(),
+            ));
+        }
 
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
@@ -27604,6 +27624,26 @@ mod tests {
             let b = float_col.abs().expect("abs");
             assert_eq!(b.values()[0], Scalar::Float64(1.5));
             assert!(b.values()[1].is_missing());
+        }
+
+        #[test]
+        fn abs_nullable_int64_typed_matches_reference_cf() {
+            // Nullable Int64 abs routes through the typed as_i64_slice_with_validity
+            // arm: present ⇒ Int64(wrapping_abs); missing ⇒ Null; dtype preserved;
+            // i64::MIN abs wraps to i64::MIN (matching the scalar loop's wrapping_abs).
+            let mut validity = ValidityMask::all_valid(5);
+            validity.set(1, false);
+            validity.set(3, false);
+            let col =
+                Column::from_i64_values_with_validity(vec![-3, 0, i64::MIN, 7, -5], validity);
+            let r = col.abs().expect("abs");
+            assert_eq!(r.dtype(), DType::Int64);
+            let v = r.values();
+            assert_eq!(v[0], Scalar::Int64(3));
+            assert!(matches!(v[1], Scalar::Null(_)), "missing stays missing");
+            assert_eq!(v[2], Scalar::Int64(i64::MIN.wrapping_abs()));
+            assert!(matches!(v[3], Scalar::Null(_)));
+            assert_eq!(v[4], Scalar::Int64(5));
         }
 
         #[test]
