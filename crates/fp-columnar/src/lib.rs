@@ -13809,7 +13809,9 @@ impl Column {
         // validity, no per-element Scalar materialization. Bit-identical to the
         // Scalar filter: a present slot keeps its value in order; a Float64 valid
         // slot whose datum is NaN is dropped (Scalar::Float64(NaN).is_missing()),
-        // and Int64 missingness is the validity bit alone. Output is all-valid.
+        // and Int64/Bool missingness is the validity bit alone. Output is
+        // all-valid. Bool is deliberately variant-gated: Scalar-backed Bool
+        // columns may preserve mixed NullKind values and retain the generic path.
         if self.dtype == DType::Float64
             && let Some((data, validity)) = self.as_f64_slice_with_validity()
         {
@@ -13831,6 +13833,17 @@ impl Column {
                 }
             }
             return Ok(Self::from_i64_values_owned(out));
+        }
+        if self.dtype == DType::Bool
+            && let ScalarValues::LazyNullableBool { data, validity, .. } = &self.values
+        {
+            let mut out = Vec::with_capacity(data.len());
+            for (i, &d) in data.iter().enumerate() {
+                if validity.get(i) {
+                    out.push(d);
+                }
+            }
+            return Ok(Self::from_bool_values(out));
         }
         let values = self
             .values
@@ -26521,7 +26534,7 @@ mod tests {
 
         #[test]
         fn dropna_typed_matches_oracle() {
-            // Typed nullable i64/f64 dropna == an independent order-preserving
+            // Typed nullable i64/f64/bool dropna == an independent order-preserving
             // filter. Built via from_*_values_with_validity to drive the typed path.
             let mut state: u64 = 0x6BD3_27F1_0A95_CC48;
             let mut next = || {
@@ -26534,6 +26547,7 @@ mod tests {
                 let n = (next() % 200) as usize + 1;
                 let ivals: Vec<i64> = (0..n).map(|_| (next() % 1000) as i64).collect();
                 let fvals: Vec<f64> = ivals.iter().map(|&v| v as f64 + 0.5).collect();
+                let bvals: Vec<bool> = ivals.iter().map(|&v| v & 1 == 0).collect();
                 let mut vmask = ValidityMask::all_valid(n);
                 let mut present = vec![true; n];
                 for (i, p) in present.iter_mut().enumerate() {
@@ -26544,6 +26558,7 @@ mod tests {
                 }
                 let icol = Column::from_i64_values_with_validity(ivals.clone(), vmask.clone());
                 let fcol = Column::from_f64_values_with_validity(fvals.clone(), vmask.clone());
+                let bcol = Column::from_bool_values_with_validity(bvals.clone(), vmask.clone());
                 let iexp: Vec<Scalar> = (0..n)
                     .filter(|&i| present[i])
                     .map(|i| Scalar::Int64(ivals[i]))
@@ -26552,8 +26567,15 @@ mod tests {
                     .filter(|&i| present[i])
                     .map(|i| Scalar::Float64(fvals[i]))
                     .collect();
+                let bexp: Vec<Scalar> = (0..n)
+                    .filter(|&i| present[i])
+                    .map(|i| Scalar::Bool(bvals[i]))
+                    .collect();
                 assert_eq!(icol.dropna().unwrap().values(), iexp);
                 assert_eq!(fcol.dropna().unwrap().values(), fexp);
+                let bdropped = bcol.dropna().unwrap();
+                assert_eq!(bdropped.dtype(), DType::Bool);
+                assert_eq!(bdropped.values(), bexp);
             }
         }
 

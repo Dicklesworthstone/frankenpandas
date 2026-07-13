@@ -14937,3 +14937,39 @@ clippy is green there with only the two pre-existing `question_mark` findings al
 **1596/1596 green** on `vmi1153651`; package formatting and `git diff --check` are green. The mandatory 180-second UBS scan
 used static-only mode because compile gates were already remote-only, hit the documented `fp-frame/src/lib.rs` timeout, and
 emitted no focused finding before timing out.
+
+### 2026-07-12 MagentaOak — WIN: nullable Bool `Column::dropna` typed compaction — 12.10x FP-side
+
+Negative-ledger-first routing started from the June 27 `dropna` row: raw-buffer compaction had already made nullable Float64
+and Int64 13.5x and 7.6x faster, but nullable Bool still fell through to the scalar filter. That fallback materialized the
+entire `LazyNullableBool` input as `Vec<Scalar>`, cloned every present `Scalar::Bool`, then rebuilt an all-valid typed column.
+
+One lever (`br-frankenpandas-37fit`) variant-gates `LazyNullableBool`, scans its raw `Vec<bool>` plus validity in row order,
+and emits the present bits directly with `from_bool_values`. The variant gate is part of the semantic proof: invalid slots in
+this backing always mean `Null(Null)`, while Scalar-backed Bool columns that may preserve different `NullKind` values retain
+the generic path unchanged. Output dtype, order, and values are identical; missing slots are the only rows removed.
+
+Strict remote-only same-binary A/B on `vmi1152480` used 5,000,000 rows, 25% missing, and 15 alternating reference/candidate
+pairs under `release-perf`. The reference function is the exact former scalar filter plus `Column::new` body, and the binary
+asserted equal dtype and every output value before timing:
+
+| arm | p50 | p95/p99 | best |
+| --- | ---: | ---: | ---: |
+| reference scalar materialization path | 122.168 ms | 160.574 ms | 114.671 ms |
+| candidate raw Bool + validity compaction | 10.101 ms | 12.611 ms | 7.415 ms |
+
+Reference/candidate = **12.095x at p50** (91.73% latency reduction), **12.732x at p95/p99**, and **15.465x best-to-best**.
+The p95 and p99 select the same sample at this quick-run size. A pre-candidate strict-remote baseline on the same worker
+measured 158.424 ms best and is directionally consistent; the same-binary pair above is the accepted ship evidence.
+
+Correctness: the focused randomized oracle is **1/1 green** remotely on `vmi1293453`. Across 200 validity/value shapes it now
+checks Bool alongside the existing Int64 and Float64 cases, including exact output dtype, present-value order, and complete
+removal of invalid slots. The first baseline dispatch found no admissible worker and refused local fallback; the unchanged
+strict command succeeded on retry, and no local Cargo command ran.
+
+Validation: strict-remote workspace `cargo check --workspace --all-targets` is green on `vmi1227854`; its only warnings are
+the two pre-existing unused `Scalar` imports in untouched test modules. Focused `fp-columnar` lib clippy is warning-clean on
+`vmi1293453`, and full `fp-conformance --lib` is **1596/1596 green** there. The benchmark's pinned-rustfmt check and
+`git diff --check` are green; the production/test source is byte-identical to the exact clean proof worktree. The
+mandatory static-only UBS scan completed with the broad existing `fp-columnar` inventory; it emitted no finding on the new
+compaction arm, while noting only expected fail-fast unwraps in the synthetic benchmark among the changed lines.
