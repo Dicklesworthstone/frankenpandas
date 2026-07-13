@@ -19694,6 +19694,46 @@ impl Column {
                 }
                 return Ok(Self::from_i64_values_with_validity(out, vmask));
             }
+            // Utf8 self (all-valid OR nullable `LazyNullableUtf8`) + Utf8 other, all-valid
+            // cond: the generic loop below materializes a `Vec<Scalar::Utf8>` and clones a
+            // heap `String` per row. Build the select output as ONE contiguous buffer —
+            // cond-true ⇒ the self span (present) or a null (self missing), cond-false ⇒
+            // the `other` bytes — carrying validity. `self.validity` is the right mask for
+            // both backings (all-true for a contiguous all-valid column, the null mask for
+            // `LazyNullableUtf8`). Bit-identical to the loop: cond[i] ? self[i] (present ⇒
+            // Utf8(span), missing ⇒ Null(Null)) : Utf8(other); all-valid cond ⇒ the
+            // cond-missing → Null arm never fires. Ungated (contiguous build beats per-row
+            // String clones warm too).
+            if let Scalar::Utf8(o) = other
+                && let Some((bytes, offsets)) = self
+                    .as_utf8_contiguous()
+                    .or_else(|| self.as_nullable_utf8_contiguous())
+            {
+                let o_bytes = o.as_bytes();
+                let sv = &self.validity;
+                let n = offsets.len().saturating_sub(1);
+                let mut out_bytes: Vec<u8> = Vec::with_capacity(bytes.len());
+                let mut out_offsets: Vec<usize> = Vec::with_capacity(n + 1);
+                out_offsets.push(0);
+                let mut vmask = ValidityMask::all_valid(n);
+                for i in 0..n {
+                    if cb[i] {
+                        if sv.get(i) {
+                            out_bytes.extend_from_slice(&bytes[offsets[i]..offsets[i + 1]]);
+                        } else {
+                            vmask.set(i, false);
+                        }
+                    } else {
+                        out_bytes.extend_from_slice(o_bytes);
+                    }
+                    out_offsets.push(out_bytes.len());
+                }
+                return Ok(Self::from_utf8_values_with_validity(
+                    out_bytes,
+                    out_offsets,
+                    vmask,
+                ));
+            }
         }
         let out: Vec<Scalar> = self
             .values
@@ -21060,6 +21100,39 @@ impl Column {
                     }
                 }
                 return Ok(Self::from_i64_values_with_validity(out, vmask));
+            }
+            // Utf8 self (all-valid OR nullable) + Utf8 other, all-valid cond — inverse of
+            // the where_cond Utf8 arm: cond-true ⇒ the `other` bytes, cond-false ⇒ the self
+            // span (present) or a null (self missing). Bit-identical to the loop below
+            // (cond[i] ? Utf8(other) : self[i]); `self.validity` masks self-missing;
+            // all-valid cond ⇒ no cond-missing. Ungated (contiguous build vs per-row clones).
+            if let Scalar::Utf8(o) = other
+                && let Some((bytes, offsets)) = self
+                    .as_utf8_contiguous()
+                    .or_else(|| self.as_nullable_utf8_contiguous())
+            {
+                let o_bytes = o.as_bytes();
+                let sv = &self.validity;
+                let n = offsets.len().saturating_sub(1);
+                let mut out_bytes: Vec<u8> = Vec::with_capacity(bytes.len());
+                let mut out_offsets: Vec<usize> = Vec::with_capacity(n + 1);
+                out_offsets.push(0);
+                let mut vmask = ValidityMask::all_valid(n);
+                for i in 0..n {
+                    if cb[i] {
+                        out_bytes.extend_from_slice(o_bytes);
+                    } else if sv.get(i) {
+                        out_bytes.extend_from_slice(&bytes[offsets[i]..offsets[i + 1]]);
+                    } else {
+                        vmask.set(i, false);
+                    }
+                    out_offsets.push(out_bytes.len());
+                }
+                return Ok(Self::from_utf8_values_with_validity(
+                    out_bytes,
+                    out_offsets,
+                    vmask,
+                ));
             }
         }
         let out: Vec<Scalar> = self
@@ -39999,6 +40072,63 @@ mod tests {
             assert_eq!(out.values()[0], Scalar::Int64(1));
             assert_eq!(out.values()[1], Scalar::Int64(-1));
             assert_eq!(out.values()[2], Scalar::Int64(3));
+        }
+
+        #[test]
+        fn where_mask_utf8_typed_matches_generic() {
+            // The typed Utf8 where_cond/mask arms (all-valid contiguous + nullable
+            // LazyNullableUtf8 self, Utf8 scalar other, all-valid cond) must be BIT-EXACT
+            // to the generic clone-select path. A/B: col_typed (contiguous/nullable) hits
+            // the typed arm; col_eager (from_values, Eager) hits the generic path. Seeded
+            // short strings over {a,b,c,d}, some trials all-valid, some ~25% null; cond a
+            // seeded bool mask. Missing self at a self-taking position ⇒ Null.
+            let mut state: u64 = 0x9E7E_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..120 {
+                let n = (next() % 250) as usize;
+                let nullable = trial % 2 == 0;
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                let mut eager: Vec<Scalar> = Vec::with_capacity(n);
+                let mut cbits: Vec<bool> = Vec::with_capacity(n);
+                for i in 0..n {
+                    if nullable && next() % 4 == 0 {
+                        validity.set(i, false);
+                        eager.push(Scalar::Null(NullKind::Null));
+                    } else {
+                        let len = (next() % 4) as usize;
+                        let s: String = (0..len)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                        eager.push(Scalar::Utf8(s));
+                    }
+                    cbits.push(next() % 2 == 0);
+                    offsets.push(bytes.len());
+                }
+                let col_typed = Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let col_eager = Column::new(DType::Utf8, eager).expect("eager utf8");
+                // col_eager (from_values) must be on the generic path.
+                assert!(
+                    col_eager.as_utf8_contiguous().is_none()
+                        && col_eager.as_nullable_utf8_contiguous().is_none(),
+                    "eager fixture must be on the generic where/mask path"
+                );
+                let cond = Column::from_bool_values(cbits);
+                let other = Scalar::Utf8("DEF".to_string());
+                let wt = col_typed.where_cond(&cond, &other).expect("typed where");
+                let we = col_eager.where_cond(&cond, &other).expect("eager where");
+                assert_eq!(wt.values(), we.values(), "where trial {trial}");
+                let mt = col_typed.mask(&cond, &other).expect("typed mask");
+                let me = col_eager.mask(&cond, &other).expect("eager mask");
+                assert_eq!(mt.values(), me.values(), "mask trial {trial}");
+            }
         }
 
         #[test]
