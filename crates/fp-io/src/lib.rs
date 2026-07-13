@@ -2118,6 +2118,13 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
         // (validity.get(r)) renders its span; a missing row renders na_rep — so a
         // string column WITH nulls no longer forces the WHOLE frame off the fast path.
         UN(&'a [u8], &'a [usize], &'a fp_columnar::ValidityMask),
+        // NULLABLE Float64: (data, validity). A present row (validity.get(r) AND
+        // non-NaN) renders format_pandas_float; a missing row (validity-clear OR a
+        // valid-bit NaN — both `is_missing` for Float64) renders na_rep.
+        FN(&'a [f64], &'a fp_columnar::ValidityMask),
+        // NULLABLE Int64: (data, validity). Present → decimal; missing → na_rep.
+        // Int64 has no NaN, so missingness is the validity bit alone.
+        IN(&'a [i64], &'a fp_columnar::ValidityMask),
         // All-valid (no validity-mask null) Datetime64 ns + the column-uniform
         // to_csv format; NaT sentinels render as na_rep inline.
         Dt(&'a [i64], DatetimeCsvFormat),
@@ -2156,6 +2163,20 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                 return None;
             }
             cols.push(FastCol::UN(bytes, offsets, column.validity()));
+        } else if let Some((s, validity)) = column.as_f64_slice_with_validity() {
+            // Nullable Float64: the all-valid `as_f64_slice` above bailed (any NaN or
+            // mask-null), so a null-bearing float column would otherwise force the whole
+            // frame off the fast path. Render present slots and na_rep at missing ones.
+            if s.len() != n {
+                return None;
+            }
+            cols.push(FastCol::FN(s, validity));
+        } else if let Some((s, validity)) = column.as_i64_slice_with_validity() {
+            // Nullable Int64 sibling (no NaN — missingness is the validity bit alone).
+            if s.len() != n {
+                return None;
+            }
+            cols.push(FastCol::IN(s, validity));
         } else if column.dtype() == DType::Datetime64 {
             // A validity-mask null (data slot ≠ NaT) would diverge from the
             // general path's `Scalar::Null` → na_rep; require no mask-nulls. NaT
@@ -2265,6 +2286,31 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                             let field = &bytes[offsets[r]..offsets[r + 1]];
                             let field = std::str::from_utf8(field).unwrap_or("");
                             append_csv_minimal_field(dst, field, delim, single_field);
+                        } else if single_field && options.na_rep.is_empty() {
+                            dst.push_str("\"\"");
+                        } else {
+                            dst.push_str(&options.na_rep);
+                        }
+                    }
+                    // Nullable Float64: a present, non-NaN row renders like FastCol::F
+                    // (write_pandas_float == format_pandas_float in scalar_to_csv_with_na);
+                    // a missing row (validity-clear OR valid-bit NaN — both is_missing for
+                    // Float64) renders na_rep with the same sole-empty-field quoting.
+                    FastCol::FN(s, validity) => {
+                        let v = s[r];
+                        if validity.get(r) && !v.is_nan() {
+                            write_pandas_float(dst, v);
+                        } else if single_field && options.na_rep.is_empty() {
+                            dst.push_str("\"\"");
+                        } else {
+                            dst.push_str(&options.na_rep);
+                        }
+                    }
+                    // Nullable Int64: present ⇒ decimal (== FastCol::I / scalar_to_csv);
+                    // missing (validity-clear) ⇒ na_rep.
+                    FastCol::IN(s, validity) => {
+                        if validity.get(r) {
+                            append_i64_decimal(dst, s[r]);
                         } else if single_field && options.na_rep.is_empty() {
                             dst.push_str("\"\"");
                         } else {
@@ -18092,6 +18138,82 @@ mod tests {
             assert_eq!(
                 fast, general,
                 "fast nullable-Utf8 JSON ({orient:?}) must byte-match the serde tree"
+            );
+        }
+    }
+
+    #[test]
+    fn test_write_csv_nullable_numeric_fast_matches_general() {
+        // Nullable Float64 (FastCol::FN) and Int64 (FastCol::IN) columns now take the fast
+        // CSV writer. Output must be BYTE-IDENTICAL to the general (Scalar) writer, which
+        // the same frame falls to when an EAGER Utf8 column forces it off the fast path.
+        // Covers: validity-clear missing, a valid-bit NaN (still → na_rep), whole numbers
+        // ("1.0"), negatives, large magnitude (sci notation), i64::MIN/MAX; default +
+        // na_rep configs.
+        let n = 9usize;
+        let fdata: Vec<f64> = vec![1.0, -2.5, 0.0, f64::NAN, 1e20, -0.0, 3.14159, 100.0, 42.0];
+        let mut fv = fp_columnar::ValidityMask::all_valid(n);
+        fv.set(2, false); // validity-clear (data 0.0 → must render na_rep, not "0.0")
+        fv.set(7, false); // validity-clear
+        // slot 3 is a VALID-bit NaN (fv still set) → must also render na_rep.
+
+        let idata: Vec<i64> = vec![0, i64::MIN, i64::MAX, -1, 1000, 0, -999999, 7, 123456789];
+        let mut iv = fp_columnar::ValidityMask::all_valid(n);
+        iv.set(0, false); // validity-clear (data 0 → na_rep, not "0")
+        iv.set(5, false);
+
+        let names: Vec<&str> = vec![
+            "a", "b,c", "d", "e", "", "f\"g", "h", "plain", "z",
+        ];
+        let mut nb: Vec<u8> = Vec::new();
+        let mut no: Vec<usize> = vec![0];
+        for s in &names {
+            nb.extend_from_slice(s.as_bytes());
+            no.push(nb.len());
+        }
+        let eager_names: Vec<Scalar> =
+            names.iter().map(|s| Scalar::Utf8((*s).to_string())).collect();
+
+        let mk = |name_col: Column| -> DataFrame {
+            let mut cols = std::collections::BTreeMap::new();
+            cols.insert(
+                "f".to_string(),
+                Column::from_f64_values_with_validity(fdata.clone(), fv.clone()),
+            );
+            cols.insert(
+                "i".to_string(),
+                Column::from_i64_values_with_validity(idata.clone(), iv.clone()),
+            );
+            cols.insert("name".to_string(), name_col);
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, n),
+                cols,
+                vec!["f".to_string(), "i".to_string(), "name".to_string()],
+            )
+            .unwrap()
+        };
+        let frame_fast = mk(Column::from_utf8_contiguous(nb, no));
+        let frame_general = mk(Column::from_values(eager_names).unwrap());
+
+        // The eager name column forces the whole general frame off the fast path.
+        let ctl = frame_general.column("name").unwrap();
+        assert!(
+            ctl.as_utf8_contiguous().is_none() && ctl.as_nullable_utf8_contiguous().is_none(),
+            "control name column must force the general writer"
+        );
+
+        for options in [
+            CsvWriteOptions::default(),
+            CsvWriteOptions {
+                na_rep: "NA".to_string(),
+                ..CsvWriteOptions::default()
+            },
+        ] {
+            let fast = write_csv_string_with_options(&frame_fast, &options).expect("fast");
+            let general = write_csv_string_with_options(&frame_general, &options).expect("general");
+            assert_eq!(
+                fast, general,
+                "fast nullable-numeric CSV must byte-match the general writer"
             );
         }
     }
