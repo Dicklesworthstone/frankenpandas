@@ -6148,6 +6148,48 @@ fn present_moments_i64(data: &[i64], validity: Option<&ValidityMask>) -> (usize,
     (n, mean, sum_sq)
 }
 
+/// Borrowed typed view of a numeric column (all-valid OR nullable Float64/Int64)
+/// for the pairwise cov/corr fast paths. `get_finite(i)` returns the value at `i`
+/// iff it is PRESENT and finite — exactly the `to_f64()` `Ok(v) if v.is_finite()`
+/// gate cov/corr apply per Scalar (Float64: validity-set AND finite, i.e. not
+/// NaN/±inf; Int64: validity-set, `v as f64` always finite). Avoids materializing
+/// the `Vec<Scalar>` of BOTH columns.
+enum TypedNumericValues<'a> {
+    F64(&'a [f64], &'a ValidityMask),
+    I64(&'a [i64], &'a ValidityMask),
+}
+
+impl TypedNumericValues<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Self::F64(d, _) => d.len(),
+            Self::I64(d, _) => d.len(),
+        }
+    }
+
+    #[inline]
+    fn get_finite(&self, i: usize) -> Option<f64> {
+        match self {
+            Self::F64(d, v) => {
+                let x = d[i];
+                if v.get(i) && x.is_finite() {
+                    Some(x)
+                } else {
+                    None
+                }
+            }
+            Self::I64(d, v) => {
+                if v.get(i) {
+                    Some(d[i] as f64)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
 fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Column, ColumnError> {
     if !matches!(keep, "first" | "last" | "all") {
         return Err(ColumnError::Type(TypeError::NonNumericValue {
@@ -16783,12 +16825,55 @@ impl Column {
         self.cov_ddof(other, 1)
     }
 
+    /// Borrowed typed numeric view for the pairwise cov/corr fast paths — `Some`
+    /// only for an all-valid or nullable Float64/Int64 column with a slice-exposing
+    /// backing.
+    fn typed_numeric_values(&self) -> Option<TypedNumericValues<'_>> {
+        match self.dtype {
+            DType::Float64 => self
+                .as_f64_slice_with_validity()
+                .map(|(d, v)| TypedNumericValues::F64(d, v)),
+            DType::Int64 => self
+                .as_i64_slice_with_validity()
+                .map(|(d, v)| TypedNumericValues::I64(d, v)),
+            _ => None,
+        }
+    }
+
     /// Sample covariance with custom ddof.
     #[must_use]
     pub fn cov_ddof(&self, other: &Self, ddof: usize) -> Scalar {
         let n = self.values.len().min(other.values.len());
         if n == 0 {
             return Scalar::Null(NullKind::NaN);
+        }
+        // Typed pairwise fast path: both columns Float64/Int64 (all-valid or
+        // nullable) fold straight off the raw slices via `get_finite`, skipping the
+        // Vec<Scalar> materialization of BOTH columns + per-Scalar to_f64. Bit-
+        // identical: `get_finite` == the `to_f64() Ok(v) if v.is_finite()` gate, and
+        // the two passes sum the same pairwise-present values in the same 0..n order.
+        if let (Some(sx), Some(sy)) = (self.typed_numeric_values(), other.typed_numeric_values()) {
+            let n = sx.len().min(sy.len());
+            let (mut sum_x, mut sum_y, mut count) = (0.0_f64, 0.0_f64, 0usize);
+            for i in 0..n {
+                if let (Some(x), Some(y)) = (sx.get_finite(i), sy.get_finite(i)) {
+                    sum_x += x;
+                    sum_y += y;
+                    count += 1;
+                }
+            }
+            if count <= ddof {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean_x = sum_x / count as f64;
+            let mean_y = sum_y / count as f64;
+            let mut cov_sum = 0.0_f64;
+            for i in 0..n {
+                if let (Some(x), Some(y)) = (sx.get_finite(i), sy.get_finite(i)) {
+                    cov_sum += (x - mean_x) * (y - mean_y);
+                }
+            }
+            return Scalar::Float64(cov_sum / (count - ddof) as f64);
         }
         let mut sum_x = 0.0;
         let mut sum_y = 0.0;
@@ -16834,6 +16919,37 @@ impl Column {
         let n = self.values.len().min(other.values.len());
         if n == 0 {
             return Scalar::Null(NullKind::NaN);
+        }
+        // Typed pairwise fast path (single pass, mirror of cov): fold the 5 sums
+        // straight off both raw slices via `get_finite`, skipping the Vec<Scalar>
+        // materialization of BOTH columns. Bit-identical (same present pairs, same
+        // 0..n order ⇒ same sums; same count<2 / denom==0 guards).
+        if let (Some(sx), Some(sy)) = (self.typed_numeric_values(), other.typed_numeric_values()) {
+            let m = sx.len().min(sy.len());
+            let (mut sum_x, mut sum_y, mut sum_xx, mut sum_yy, mut sum_xy) =
+                (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+            let mut count = 0usize;
+            for i in 0..m {
+                if let (Some(x), Some(y)) = (sx.get_finite(i), sy.get_finite(i)) {
+                    sum_x += x;
+                    sum_y += y;
+                    sum_xx += x * x;
+                    sum_yy += y * y;
+                    sum_xy += x * y;
+                    count += 1;
+                }
+            }
+            if count < 2 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let n_f = count as f64;
+            let numerator = n_f * sum_xy - sum_x * sum_y;
+            let denom_x = (n_f * sum_xx - sum_x * sum_x).sqrt();
+            let denom_y = (n_f * sum_yy - sum_y * sum_y).sqrt();
+            if denom_x == 0.0 || denom_y == 0.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            return Scalar::Float64(numerator / (denom_x * denom_y));
         }
         let mut sum_x = 0.0;
         let mut sum_y = 0.0;
@@ -32378,6 +32494,146 @@ mod tests {
                         "median trial {trial}"
                     );
                 }
+            }
+        }
+
+        #[test]
+        fn cov_corr_typed_pairwise_match_scalar_reference() {
+            // The typed pairwise cov/corr fast paths must be BIT-EXACT to the
+            // Scalar loop they replace (to_f64() Ok(v) if v.is_finite(), same 0..n
+            // order). Reference computed off the MATERIALIZED values() = the exact
+            // old code. Mixed dtypes (i64 vs f64), all-valid + nullable, with the
+            // two columns' missing bits at DIFFERENT positions (pairwise present).
+            let mut state: u64 = 0xC02C_0221_1234_5678;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            // Old Scalar-loop reference for cov (ddof=1) and corr over values().
+            fn ref_cov(a: &[Scalar], b: &[Scalar], ddof: usize) -> Scalar {
+                let n = a.len().min(b.len());
+                if n == 0 {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                let (mut sx, mut sy, mut c) = (0.0f64, 0.0f64, 0usize);
+                let present = |v: &Scalar| -> Option<f64> {
+                    match v.to_f64() {
+                        Ok(x) if x.is_finite() => Some(x),
+                        _ => None,
+                    }
+                };
+                for i in 0..n {
+                    if let (Some(x), Some(y)) = (present(&a[i]), present(&b[i])) {
+                        sx += x;
+                        sy += y;
+                        c += 1;
+                    }
+                }
+                if c <= ddof {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                let (mx, my) = (sx / c as f64, sy / c as f64);
+                let mut cs = 0.0f64;
+                for i in 0..n {
+                    if let (Some(x), Some(y)) = (present(&a[i]), present(&b[i])) {
+                        cs += (x - mx) * (y - my);
+                    }
+                }
+                Scalar::Float64(cs / (c - ddof) as f64)
+            }
+            fn ref_corr(a: &[Scalar], b: &[Scalar]) -> Scalar {
+                let n = a.len().min(b.len());
+                if n == 0 {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                let present = |v: &Scalar| -> Option<f64> {
+                    match v.to_f64() {
+                        Ok(x) if x.is_finite() => Some(x),
+                        _ => None,
+                    }
+                };
+                let (mut sx, mut sy, mut sxx, mut syy, mut sxy, mut c) =
+                    (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0usize);
+                for i in 0..n {
+                    if let (Some(x), Some(y)) = (present(&a[i]), present(&b[i])) {
+                        sx += x;
+                        sy += y;
+                        sxx += x * x;
+                        syy += y * y;
+                        sxy += x * y;
+                        c += 1;
+                    }
+                }
+                if c < 2 {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                let nf = c as f64;
+                let num = nf * sxy - sx * sy;
+                let dx = (nf * sxx - sx * sx).sqrt();
+                let dy = (nf * syy - sy * sy).sqrt();
+                if dx == 0.0 || dy == 0.0 {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                Scalar::Float64(num / (dx * dy))
+            }
+            let mk_i = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut v = crate::ValidityMask::all_valid(n);
+                let d: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 5 == 0 {
+                            v.set(i, false);
+                        }
+                        (r % 400) as i64 - 200
+                    })
+                    .collect();
+                Column::from_i64_values_with_validity(d, v)
+            };
+            let mk_f = |n: usize, next: &mut dyn FnMut() -> u64| -> Column {
+                let mut v = crate::ValidityMask::all_valid(n);
+                let d: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        if r % 5 == 0 {
+                            v.set(i, false);
+                            0.0
+                        } else {
+                            (r % 400) as f64 - 200.0
+                        }
+                    })
+                    .collect();
+                Column::from_f64_values_with_validity(d, v)
+            };
+            for trial in 0..150 {
+                let n = (next() % 250) as usize + 1;
+                let a = if next() % 2 == 0 {
+                    mk_i(n, &mut next)
+                } else {
+                    mk_f(n, &mut next)
+                };
+                let b = if next() % 2 == 0 {
+                    mk_i(n, &mut next)
+                } else {
+                    mk_f(n, &mut next)
+                };
+                let (av, bv) = (a.values().to_vec(), b.values().to_vec());
+                assert!(
+                    bit_eq(&a.cov(&b), &ref_cov(&av, &bv, 1)),
+                    "cov trial {trial}"
+                );
+                assert!(
+                    bit_eq(&a.corr(&b), &ref_corr(&av, &bv)),
+                    "corr trial {trial}"
+                );
             }
         }
 
