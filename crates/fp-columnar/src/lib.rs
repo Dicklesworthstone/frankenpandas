@@ -5664,6 +5664,82 @@ fn nkeep_typed_f64(data: &[f64], k: usize, ascending: bool) -> Vec<f64> {
     top.iter().map(|&(v, _)| v).collect()
 }
 
+/// Nullable Int64 analogue of [`nkeep_typed_i64`]: bounded top-`k` over the
+/// PRESENT (validity-set) subset of a nullable i64 buffer, skipping missing
+/// slots (Int64 missingness is the validity bit alone — no NaN sentinel). The
+/// comparator (value asc/desc then position ascending) matches the stable
+/// `compare_scalars_na_last(ascending)`, which sorts every present value ahead
+/// of every missing one; so the returned present top-`k` is byte-identical to
+/// the first `k` of `sort_values(ascending)` WHEN `k` present values exist.
+/// Returns fewer than `k` values only if fewer than `k` present slots exist —
+/// the caller uses that to fall back to the generic na-last sort (whose result
+/// then carries the missing tail).
+fn nkeep_typed_i64_nullable(
+    data: &[i64],
+    validity: &ValidityMask,
+    k: usize,
+    ascending: bool,
+) -> Vec<i64> {
+    use std::cmp::Ordering;
+    let cmp = |a: (i64, u32), b: (i64, u32)| -> Ordering {
+        let ord = a.0.cmp(&b.0);
+        let ord = if ascending { ord } else { ord.reverse() };
+        ord.then(a.1.cmp(&b.1))
+    };
+    let mut top: Vec<(i64, u32)> = Vec::with_capacity(k);
+    for (i, &v) in data.iter().enumerate() {
+        if !validity.get(i) {
+            continue;
+        }
+        let item = (v, i as u32);
+        if top.len() < k {
+            let pos = top.partition_point(|&x| cmp(x, item) == Ordering::Less);
+            top.insert(pos, item);
+        } else if cmp(item, top[k - 1]) == Ordering::Less {
+            let pos = top.partition_point(|&x| cmp(x, item) == Ordering::Less);
+            top.insert(pos, item);
+            top.pop();
+        }
+    }
+    top.iter().map(|&(v, _)| v).collect()
+}
+
+/// Nullable/NaN Float64 analogue of [`nkeep_typed_f64`]: bounded top-`k` over the
+/// PRESENT subset, where "present" is validity-set AND non-NaN — a valid-bit NaN
+/// is missing per `Scalar::is_missing`, so it joins the na-last group exactly as
+/// `compare_scalars_na_last` treats it. Present values are non-NaN, so
+/// `partial_cmp` is total, matching the na-last comparator among present values.
+/// Same short-return contract as [`nkeep_typed_i64_nullable`].
+fn nkeep_typed_f64_nullable(
+    data: &[f64],
+    validity: &ValidityMask,
+    k: usize,
+    ascending: bool,
+) -> Vec<f64> {
+    use std::cmp::Ordering;
+    let cmp = |a: (f64, u32), b: (f64, u32)| -> Ordering {
+        let ord = a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal);
+        let ord = if ascending { ord } else { ord.reverse() };
+        ord.then(a.1.cmp(&b.1))
+    };
+    let mut top: Vec<(f64, u32)> = Vec::with_capacity(k);
+    for (i, &v) in data.iter().enumerate() {
+        if !validity.get(i) || v.is_nan() {
+            continue;
+        }
+        let item = (v, i as u32);
+        if top.len() < k {
+            let pos = top.partition_point(|&x| cmp(x, item) == Ordering::Less);
+            top.insert(pos, item);
+        } else if cmp(item, top[k - 1]) == Ordering::Less {
+            let pos = top.partition_point(|&x| cmp(x, item) == Ordering::Less);
+            top.insert(pos, item);
+            top.pop();
+        }
+    }
+    top.iter().map(|&(v, _)| v).collect()
+}
+
 fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Column, ColumnError> {
     if !matches!(keep, "first" | "last" | "all") {
         return Err(ColumnError::Type(TypeError::NonNumericValue {
@@ -18597,6 +18673,32 @@ impl Column {
                 return Ok(Self::from_datetime64_values(nkeep_typed_i64(
                     data, n, false,
                 )));
+            } else if self.dtype == DType::Int64
+                && let Some((data, validity)) = self.as_i64_slice_with_validity()
+            {
+                // Nullable Int64 (the all-valid `as_i64_slice` arm bailed on the
+                // missing bit): bounded top-k over the PRESENT subset. Missing
+                // sorts na-last, so with `n` present values the top-n are all
+                // present ⇒ all-valid typed output, bit-identical to
+                // sort_values(false)[..n]. `n < count_valid()` guarantees ≥ n
+                // present (Int64 missingness is the validity bit alone).
+                if n < validity.count_valid() {
+                    return Ok(Self::from_i64_values_owned(nkeep_typed_i64_nullable(
+                        data, validity, n, false,
+                    )));
+                }
+            } else if self.dtype == DType::Float64
+                && let Some((data, validity)) = self.as_f64_slice_with_validity()
+            {
+                // Nullable/NaN Float64: present = validity-set AND non-NaN. The
+                // scan returns up to n present values; if it fills exactly n they
+                // are the top-n present ⇒ all-valid output. Fewer than n present ⇒
+                // the na-last result would carry a null tail, so fall through to
+                // the generic sort (which materializes that tail).
+                let top = nkeep_typed_f64_nullable(data, validity, n, false);
+                if top.len() == n {
+                    return Ok(Self::from_f64_values(top));
+                }
             }
         }
         // Contiguous-Utf8: reuse sort_values' EXACT stable MSD permutation but
@@ -18644,6 +18746,26 @@ impl Column {
                 && n < data.len()
             {
                 return Ok(Self::from_datetime64_values(nkeep_typed_i64(data, n, true)));
+            } else if self.dtype == DType::Int64
+                && let Some((data, validity)) = self.as_i64_slice_with_validity()
+            {
+                // Nullable Int64, symmetric to `nlargest` (ascending): bounded
+                // bottom-k over the present subset. Missing sorts na-last, so with
+                // `n` present the bottom-n are all present ⇒ all-valid output,
+                // bit-identical to sort_values(true)[..n].
+                if n < validity.count_valid() {
+                    return Ok(Self::from_i64_values_owned(nkeep_typed_i64_nullable(
+                        data, validity, n, true,
+                    )));
+                }
+            } else if self.dtype == DType::Float64
+                && let Some((data, validity)) = self.as_f64_slice_with_validity()
+            {
+                // Nullable/NaN Float64, symmetric to `nlargest`.
+                let bot = nkeep_typed_f64_nullable(data, validity, n, true);
+                if bot.len() == n {
+                    return Ok(Self::from_f64_values(bot));
+                }
             }
         }
         // Contiguous-Utf8 (symmetric to `nlargest`): reuse sort_values(true)'s
@@ -33373,6 +33495,99 @@ mod tests {
             let top = col.nlargest(0).expect("nlargest");
             assert!(top.is_empty());
             assert_eq!(top.dtype(), DType::Int64);
+        }
+
+        // Reference nlargest/nsmallest via the stable na-last Scalar comparator
+        // (the exact semantics the typed fast paths must reproduce): sort a
+        // position permutation, take the first `n`, gather the scalars.
+        fn nkeep_reference(vals: &[Scalar], n: usize, ascending: bool) -> Vec<Scalar> {
+            let mut idx: Vec<usize> = (0..vals.len()).collect();
+            idx.sort_by(|&a, &b| crate::compare_scalars_na_last(&vals[a], &vals[b], ascending));
+            let take = n.min(idx.len());
+            idx[..take].iter().map(|&i| vals[i].clone()).collect()
+        }
+
+        #[test]
+        fn nlargest_nsmallest_nullable_i64_matches_na_last_reference() {
+            // Typed nullable Int64 bounded top/bottom-k must be BIT-IDENTICAL to
+            // the na-last Scalar sort + take, across n that both fit within the
+            // present count (fast path) and exceed it (fall-through carries the
+            // null tail). Deterministic LCG, ~25% missing, narrow range for ties.
+            let mut state: u64 = 0x51ED_270B_1234_5678;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..150 {
+                let len = (next() % 260) as usize + 1;
+                let data: Vec<i64> = (0..len).map(|_| (next() % 13) as i64 - 6).collect();
+                let mut validity = crate::ValidityMask::all_valid(len);
+                for i in 0..len {
+                    if next() % 4 == 0 {
+                        validity.set(i, false);
+                    }
+                }
+                let col = Column::from_i64_values_with_validity(data, validity);
+                let vals = col.values().to_vec();
+                for &n in &[1usize, 3, 7, len / 2, len, len + 5] {
+                    assert_eq!(
+                        col.nlargest(n).expect("nlargest").values(),
+                        nkeep_reference(&vals, n, false).as_slice(),
+                        "nlargest trial {trial} n={n}"
+                    );
+                    assert_eq!(
+                        col.nsmallest(n).expect("nsmallest").values(),
+                        nkeep_reference(&vals, n, true).as_slice(),
+                        "nsmallest trial {trial} n={n}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn nlargest_nsmallest_nullable_f64_matches_na_last_reference() {
+            // Typed nullable Float64 counterpart. Null-missing only (no present-NaN)
+            // so gathered Scalars are Float64|Null and compare with structural eq;
+            // the fast path's `present = valid && !NaN` split is still exercised —
+            // its NaN handling is covered by the sort na-last tests.
+            let mut state: u64 = 0x0BAD_C0DE_FEED_9001;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..150 {
+                let len = (next() % 260) as usize + 1;
+                let mut validity = crate::ValidityMask::all_valid(len);
+                let data: Vec<f64> = (0..len)
+                    .map(|i| {
+                        let r = next();
+                        if r % 4 == 0 {
+                            validity.set(i, false);
+                            0.0
+                        } else {
+                            ((r % 13) as f64 - 6.0) / 2.0
+                        }
+                    })
+                    .collect();
+                let col = Column::from_f64_values_with_validity(data, validity);
+                let vals = col.values().to_vec();
+                for &n in &[1usize, 3, 7, len / 2, len, len + 5] {
+                    assert_eq!(
+                        col.nlargest(n).expect("nlargest").values(),
+                        nkeep_reference(&vals, n, false).as_slice(),
+                        "nlargest trial {trial} n={n}"
+                    );
+                    assert_eq!(
+                        col.nsmallest(n).expect("nsmallest").values(),
+                        nkeep_reference(&vals, n, true).as_slice(),
+                        "nsmallest trial {trial} n={n}"
+                    );
+                }
+            }
         }
     }
 
