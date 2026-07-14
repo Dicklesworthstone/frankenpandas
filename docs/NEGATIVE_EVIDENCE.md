@@ -15334,6 +15334,27 @@ one in a peer-added test left outside this commit.
 Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran;
 `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — public `nanskew` fused central-moment scan: 1.072473x WIN (`br-frankenpandas-mavln`)
+
+Negative-ledger-first attribution found that the public nullable/generic `fp_types::nanskew` path collected finite
+scalars, computed the mean, and then traversed the resulting buffer separately for `m2` and `m3`. The shipped lever
+keeps collection, mean evaluation, per-moment term order, zero-variance handling, final formula, and null semantics
+unchanged, but accumulates both central moments in one traversal. The ignored test harness retains the former function
+as the control and asserts exact `f64::to_bits()` parity for empty, undersized, constant, mixed nullable/dtype, and
+100,000-row nullable Int64 inputs.
+
+The pre-edit strict-remote `--profile release` attribution on `vmi1227854` measured **4,580,243 ns** former versus
+**4,363,068 ns** fused p50 per eight calls (**1.049776x**). The one final foreground same-binary ABBA gate on
+`vmi1149989` completed in 83.7 seconds and measured **4,742,972 ns** former versus **4,422,461 ns** public candidate
+p50 per eight calls: **1.072473x**, or **6.757% lower latency**. It used two warmups and 18 samples per arm; the timed
+body itself completed in 0.31 seconds.
+
+Correctness: the final release harness passed exact-bit parity; the strict-remote focused `nanskew` suite was 5/5
+green; strict-remote scoped `fp-types --all-targets --no-deps -D warnings` Clippy was green; direct rustfmt and
+`git diff --check` were green. Bounded changed-file UBS reported no finding on the touched production/test hunk and
+only reproduced the file's broad pre-existing scanner inventory. All direct Cargo invocations were fail-closed RCH
+remote executions; no stash was changed.
+
 ### 2026-07-14 IvoryGlacier — WIN: RaptorQ prefixed SHA-256 writes one buffer — 1.084x p50
 
 Negative-ledger-first routing (`br-frankenpandas-qfz4j`) found no prior row for the `fp-runtime` RaptorQ hash-emission
