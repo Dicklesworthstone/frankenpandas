@@ -18152,6 +18152,22 @@ impl Column {
     /// Matches `pd.Series.has_duplicates`.
     #[must_use]
     pub fn has_duplicates(&self) -> bool {
+        // All-valid typed Int64 columns can hash their borrowed primitive
+        // backing directly. The generic path below first materializes a
+        // Scalar array and hashes the wider tagged `Key` enum for every row.
+        // Equality is still exact i64 equality, and duplicate detection does
+        // not expose insertion order, so this is behavior-identical for the
+        // admitted representation.
+        if let Some(data) = self.as_i64_slice() {
+            let mut seen = FxHashSet::<i64>::default();
+            for &value in data {
+                if !seen.insert(value) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {
             Bool(bool),
@@ -40155,6 +40171,39 @@ mod tests {
             let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(1)]).expect("col");
             assert!(col.has_duplicates());
             assert!(!col.is_unique());
+        }
+
+        #[test]
+        fn has_duplicates_typed_int64_matches_reference_without_materializing_zny9w() {
+            let cases = [
+                Vec::new(),
+                vec![7],
+                vec![3, -1, 8, i64::MIN, i64::MAX],
+                vec![4, 4],
+                vec![i64::MIN, 0, i64::MAX, i64::MIN],
+                vec![9, 3, 1, 0, -7, 9],
+            ];
+
+            for values in cases {
+                let mut seen = rustc_hash::FxHashSet::<i64>::default();
+                let expected = values.iter().any(|value| !seen.insert(*value));
+                let column = Column::from_i64_values_owned(values);
+
+                assert!(matches!(
+                    &column.values,
+                    ScalarValues::LazyAllValidInt64Vec { .. }
+                ));
+                if let ScalarValues::LazyAllValidInt64Vec {
+                    values: scalar_cache,
+                    ..
+                } = &column.values
+                {
+                    assert!(scalar_cache.get().is_none());
+                    assert_eq!(column.has_duplicates(), expected);
+                    assert_eq!(column.is_unique(), !expected);
+                    assert!(scalar_cache.get().is_none());
+                }
+            }
         }
 
         #[test]

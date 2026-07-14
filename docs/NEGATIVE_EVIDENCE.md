@@ -16043,6 +16043,59 @@ whole-file inventory (21 critical labels: 19 token-comparison false positives, o
 test-only panic), with no finding on the changed production helper. `git diff --check` is green. No local Cargo command
 ran.
 
+### 2026-07-14 IvoryGlacier — WIN: typed Int64 `has_duplicates` hashes raw values — 3.230x p50
+
+Negative-ledger-first routing began with `bv --robot-triage` (3,663 issues, 340 actionable, no dependency cycles).
+The top-ranked umbrella was already owned, and the recent GroupBy variance/stddev hoist
+(`br-frankenpandas-moyq8`) was explicitly closed as a **0.995x** no-ship inside its **12.824%** duplicated-control
+floor. Rather than retry that saturated aggregation vein, this pass pivoted to the fresh `fp-columnar` uniqueness
+boundary: an all-valid typed Int64 column materialized `Scalar` values and then hashed the wider tagged `Key` enum for
+every row. No prior ledger row covered `Column::has_duplicates` or `Column::is_unique`. The opportunity score for
+`br-frankenpandas-zny9w` was `impact 4 * confidence 4 / effort 1 = 16`.
+
+Attribution preceded the production edit. The first strict-remote attempt on `vmi1153651` was invalid evidence: the RCH
+daemon timed out after 330 seconds (`RCH-I010`), recovered into compilation, and then exited 143 before the timed path.
+No timing and no local fallback were claimed. A valid normal-`release` retry, routed by RCH to `vmi1152480`, measured
+250,000 unique typed Int64 values over 11 foreground samples:
+
+| pre-edit attributed phase | p50 |
+| --- | ---: |
+| lazy Int64 to `Scalar` materialization | 2,278,118 ns |
+| warm generic enum-key duplicate scan | 27,499,614 ns |
+| cold public `has_duplicates` | 28,672,895 ns |
+
+Materialization was only **7.945%** of the cold call; hashing the tagged enum dominated. The selected one lever therefore
+borrows the already-validated all-valid `i64` backing and inserts raw values into `FxHashSet<i64>`. It preserves exact
+integer equality and the former early return on the first duplicate. Nullable Int64, floating-point/NaN, temporal,
+string, interval, and every other representation retain the generic body unchanged. No order or tie result is exposed,
+and RNG state is not involved. A focused invariant test covers empty, singleton, signed-boundary, early-duplicate, and
+late-duplicate inputs against an independent raw-set reference, proves `is_unique` remains the exact inverse, and proves
+the lazy `Scalar` cache remains uninitialized.
+
+The decisive foreground A/B used one normal-`release` binary on `vmi1152480`: 250,000 unique typed Int64 values, three
+warmups, 15 ABBA-reversed/interleaved samples per duplicate arm, construction outside the timed body, and exact Boolean
+parity preflight including a duplicate case. The former arm is a semantic transcription of the displaced Int64 work:
+cold scalar materialization followed by `FxHashSet<FormerDuplicateKey::Int64>`.
+
+| same-binary `has_duplicates` lifecycle | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| former scalar + enum-key path | 21,861,694 ns | 19,614,322 ns | 20,738,008 ns |
+| candidate borrowed raw-i64 path | 6,559,673 ns | 6,281,057 ns | 6,420,365 ns |
+
+The candidate is **3.230036x faster at p50** (**69.0406% latency reduction**). Former duplicate spread is **11.458%**;
+candidate duplicate spread is **4.436%**, so the win clears the same-binary noise control decisively. This benchmark was
+the single final ship gate; no `release-perf` or LTO cold build ran.
+
+Correctness and build evidence is strict-remote: the focused normal-`release` test is **1/1 green**, and
+`cargo check --workspace --all-targets` is green with five known test/example warnings. Scoped production-plus-example
+Clippy reached `vmi1152480` and stopped on the tracked 23-warning broad `fp-columnar` inventory; none points to the
+touched function, focused test, or benchmark. Fail-closed RCH rejected `cargo fmt --check` as a non-compilation command
+(`RCH-E301`), so no local Cargo fallback ran. The owned example passes direct rustfmt checking; the source file retains
+its broad pre-existing rustfmt drift rather than taking an unrelated whole-file rewrite. The bounded changed-file UBS
+scan reproduced 50 test-only `panic!` sites from the tracked broad inventory, with no finding on the touched production
+path; its one new benchmark-only direct-index warning was eliminated before landing. Final `git diff --check` is green.
+No local Cargo command ran.
+
 ### 2026-07-13 IvoryGlacier — WIN: affine Datetime64 monotonic predicates read their witness — 2132.524x p50
 
 Negative-ledger-first routing found affine Datetime64 construction, search, and frequency keeps but no monotonicity row.
