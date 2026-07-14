@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use fp_columnar::Column;
 use fp_frame::Series;
-use fp_groupby::{AggFunc, GroupByOptions, groupby_agg, groupby_sum};
+use fp_groupby::{AggFunc, GroupByOptions, groupby_agg, groupby_mean, groupby_sum};
 use fp_index::{Index, IndexLabel};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
@@ -326,6 +326,197 @@ fn run_sum_ab() {
     );
 }
 
+fn former_dense_i64_groupby_mean(
+    keys: &Series,
+    values: &Series,
+    policy: &RuntimePolicy,
+) -> Option<Series> {
+    assert_eq!(keys.index(), values.index());
+    assert!(!keys.index().has_duplicates());
+    let key_values = keys.values();
+    let data_values = values.values();
+    let mut ledger = EvidenceLedger::new();
+    let _ = policy.decide_join_admission(key_values.len(), &mut ledger);
+
+    if key_values.is_empty() {
+        return Series::new(
+            "mean",
+            Index::new(Vec::new()),
+            Column::from_values(Vec::new()).ok()?,
+        )
+        .ok();
+    }
+
+    let mut min_key = i64::MAX;
+    let mut max_key = i64::MIN;
+    for key in key_values {
+        let Scalar::Int64(key) = key else {
+            return None;
+        };
+        min_key = min_key.min(*key);
+        max_key = max_key.max(*key);
+    }
+    let span = usize::try_from(i128::from(max_key) - i128::from(min_key) + 1).ok()?;
+    if span > 65_536 {
+        return None;
+    }
+
+    let mut sums = vec![0.0_f64; span];
+    let mut counts = vec![0_i64; span];
+    let mut seen = vec![false; span];
+    for (key, value) in key_values.iter().zip(data_values) {
+        let Scalar::Int64(key) = key else {
+            return None;
+        };
+        let Scalar::Int64(value) = value else {
+            return None;
+        };
+        let bucket = usize::try_from(i128::from(*key) - i128::from(min_key)).ok()?;
+        seen[bucket] = true;
+        sums[bucket] += *value as f64;
+        counts[bucket] += 1;
+    }
+
+    let mut out_index = Vec::with_capacity(span);
+    let mut out_values = Vec::with_capacity(span);
+    for (bucket, was_seen) in seen.iter().enumerate() {
+        if !*was_seen {
+            continue;
+        }
+        let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
+        out_index.push(IndexLabel::Int64(key));
+        out_values.push(Scalar::Float64(sums[bucket] / counts[bucket] as f64));
+    }
+    Series::new(
+        "mean",
+        Index::new(out_index),
+        Column::from_values(out_values).ok()?,
+    )
+    .ok()
+}
+
+fn run_mean_ab() {
+    const N: usize = 100_000;
+    const GROUPS: i64 = 1_000;
+    const SAMPLES: usize = 10;
+    let started = Instant::now();
+    let policy = RuntimePolicy::strict();
+    let options = GroupByOptions::default();
+
+    let (former_keys, former_vals) = build_typed_i64_sum_data(N, GROUPS);
+    let (candidate_keys, candidate_vals) = build_typed_i64_sum_data(N, GROUPS);
+    let former = former_dense_i64_groupby_mean(&former_keys, &former_vals, &policy)
+        .expect("valid former mean input");
+    let mut candidate_ledger = EvidenceLedger::new();
+    let candidate = groupby_mean(
+        &candidate_keys,
+        &candidate_vals,
+        options,
+        &policy,
+        &mut candidate_ledger,
+    )
+    .expect("candidate mean");
+    assert_eq!(candidate.index(), former.index());
+    assert_eq!(candidate.values(), former.values());
+
+    for _ in 0..2 {
+        let (former_keys, former_vals) = build_typed_i64_sum_data(N, GROUPS);
+        let (candidate_keys, candidate_vals) = build_typed_i64_sum_data(N, GROUPS);
+        std::hint::black_box(
+            former_dense_i64_groupby_mean(&former_keys, &former_vals, &policy)
+                .expect("valid former warmup input"),
+        );
+        let mut ledger = EvidenceLedger::new();
+        std::hint::black_box(
+            groupby_mean(
+                &candidate_keys,
+                &candidate_vals,
+                options,
+                &policy,
+                &mut ledger,
+            )
+            .expect("candidate warmup"),
+        );
+    }
+
+    let mut former_a = Vec::with_capacity(SAMPLES);
+    let mut former_b = Vec::with_capacity(SAMPLES);
+    let mut candidate_a = Vec::with_capacity(SAMPLES);
+    let mut candidate_b = Vec::with_capacity(SAMPLES);
+    for sample in 0..SAMPLES {
+        let (former_a_keys, former_a_vals) = build_typed_i64_sum_data(N, GROUPS);
+        let (candidate_a_keys, candidate_a_vals) = build_typed_i64_sum_data(N, GROUPS);
+        let (candidate_b_keys, candidate_b_vals) = build_typed_i64_sum_data(N, GROUPS);
+        let (former_b_keys, former_b_vals) = build_typed_i64_sum_data(N, GROUPS);
+
+        let mut measure_former_a = || {
+            former_a.push(measure_nanos(|| {
+                former_dense_i64_groupby_mean(&former_a_keys, &former_a_vals, &policy)
+                    .expect("valid former A input")
+            }));
+        };
+        let mut measure_former_b = || {
+            former_b.push(measure_nanos(|| {
+                former_dense_i64_groupby_mean(&former_b_keys, &former_b_vals, &policy)
+                    .expect("valid former B input")
+            }));
+        };
+        let mut measure_candidate_a = || {
+            candidate_a.push(measure_nanos(|| {
+                let mut ledger = EvidenceLedger::new();
+                groupby_mean(
+                    &candidate_a_keys,
+                    &candidate_a_vals,
+                    options,
+                    &policy,
+                    &mut ledger,
+                )
+                .expect("candidate A")
+            }));
+        };
+        let mut measure_candidate_b = || {
+            candidate_b.push(measure_nanos(|| {
+                let mut ledger = EvidenceLedger::new();
+                groupby_mean(
+                    &candidate_b_keys,
+                    &candidate_b_vals,
+                    options,
+                    &policy,
+                    &mut ledger,
+                )
+                .expect("candidate B")
+            }));
+        };
+
+        if sample.is_multiple_of(2) {
+            measure_former_a();
+            measure_candidate_a();
+            measure_candidate_b();
+            measure_former_b();
+        } else {
+            measure_former_b();
+            measure_candidate_b();
+            measure_candidate_a();
+            measure_former_a();
+        }
+    }
+
+    let former_a_p50 = median_nanos(&mut former_a);
+    let former_b_p50 = median_nanos(&mut former_b);
+    let candidate_a_p50 = median_nanos(&mut candidate_a);
+    let candidate_b_p50 = median_nanos(&mut candidate_b);
+    let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
+    let candidate_mean = (candidate_a_p50 + candidate_b_p50) as f64 / 2.0;
+    println!("dense Int64 groupby_mean A/B: n={N} groups={GROUPS} samples={SAMPLES}");
+    println!("former cold Scalar p50 A/B: {former_a_p50} / {former_b_p50} ns");
+    println!("candidate raw slices p50 A/B: {candidate_a_p50} / {candidate_b_p50} ns");
+    println!(
+        "former/candidate duplicate-p50 ratio: {:.6}x",
+        former_mean / candidate_mean
+    );
+    println!("measurement wall: {:.3} s", started.elapsed().as_secs_f64());
+}
+
 /// `cargo bench` entry point. The unstable libtest bencher reports the median
 /// sample time, which makes this the decision surface for dispatch changes.
 #[cfg(test)]
@@ -381,6 +572,10 @@ fn main() {
     }
     if mode == "sum-ab" {
         run_sum_ab();
+        return;
+    }
+    if mode == "mean-ab" {
+        run_mean_ab();
         return;
     }
     let n: usize = 2_000_000;

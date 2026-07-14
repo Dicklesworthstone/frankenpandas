@@ -870,6 +870,68 @@ fn try_groupby_sum_dense_int64_slices(
     Some((out_index, out_values))
 }
 
+/// Dense-bucket `groupby_mean` directly over all-valid Int64 buffers.
+///
+/// This is the raw-slice equivalent of the `AggFunc::Mean` arm in
+/// `try_groupby_agg_dense_int64`: it casts each value to f64, folds in row
+/// order, and divides by the same per-bucket count. Keeping it before
+/// `Series::values()` avoids materializing both input columns as Scalars.
+fn try_groupby_mean_dense_int64_slices(
+    keys: &[i64],
+    values: &[i64],
+    sort: bool,
+) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    if keys.len() != values.len() {
+        return None;
+    }
+    if keys.is_empty() {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    let mut min_key = i64::MAX;
+    let mut max_key = i64::MIN;
+    for &key in keys {
+        min_key = min_key.min(key);
+        max_key = max_key.max(key);
+    }
+
+    let span = i128::from(max_key) - i128::from(min_key) + 1;
+    if span <= 0 || span > DENSE_INT_KEY_RANGE_LIMIT {
+        return None;
+    }
+
+    let bucket_len = usize::try_from(span).ok()?;
+    let mut sums = vec![0.0_f64; bucket_len];
+    let mut counts = vec![0_i64; bucket_len];
+    let mut seen = vec![false; bucket_len];
+    let mut ordering = Vec::<i64>::new();
+    for (&key, &value) in keys.iter().zip(values) {
+        let raw = i128::from(key) - i128::from(min_key);
+        let bucket = usize::try_from(raw).ok()?;
+        if !seen[bucket] {
+            seen[bucket] = true;
+            ordering.push(key);
+        }
+        sums[bucket] += value as f64;
+        counts[bucket] += 1;
+    }
+
+    if sort {
+        ordering.sort_unstable();
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in ordering {
+        let raw = i128::from(key) - i128::from(min_key);
+        let bucket = usize::try_from(raw).ok()?;
+        out_index.push(IndexLabel::Int64(key));
+        out_values.push(Scalar::Float64(sums[bucket] / counts[bucket] as f64));
+    }
+
+    Some((out_index, out_values))
+}
+
 /// Scan keys and return (min, max, saw_any_int). Returns None if a non-Int64,
 /// non-droppable-null key is found.
 fn dense_int64_range(keys: &[Scalar], dropna: bool) -> Option<(i64, i64, bool)> {
@@ -2517,15 +2579,34 @@ pub fn groupby_agg(
         Some((aligned_keys, aligned_values))
     };
 
+    let input_rows = aligned_storage
+        .as_ref()
+        .map_or_else(|| keys.len(), |(aligned_keys, _)| aligned_keys.len());
+    // Record an admission decision for policy observability without altering
+    // the current groupby output behavior.
+    let _ = policy.decide_join_admission(input_rows, ledger);
+
+    // Identity-aligned, all-valid Int64 inputs already expose raw buffers.
+    // Mean's dense fold is exactly representable over those slices, so run it
+    // before `values()` materializes two Scalar arrays. Wide key ranges keep
+    // the existing Scalar path, as do aligned, nullable, and non-Int64 inputs.
+    if aligned_storage.is_none()
+        && matches!(func, AggFunc::Mean)
+        && let (Some(raw_keys), Some(raw_values)) =
+            (keys.column().as_i64_slice(), values.column().as_i64_slice())
+        && let Some((out_index, out_values)) =
+            try_groupby_mean_dense_int64_slices(raw_keys, raw_values, options.sort)
+    {
+        let out_column = Column::from_values(out_values)?;
+        return Ok(Series::new("mean", Index::new(out_index), out_column)?);
+    }
+
     let (key_vals, val_vals): (&[Scalar], &[Scalar]) =
         if let Some((ref ak, ref av)) = aligned_storage {
             (ak.values(), av.values())
         } else {
             (keys.values(), values.values())
         };
-    // Record an admission decision for policy observability without altering
-    // the current groupby output behavior.
-    let _ = policy.decide_join_admission(key_vals.len(), ledger);
     let value_dtype = values.column().dtype();
 
     let agg_name = match func {
@@ -3373,9 +3454,10 @@ mod tests {
 
     use super::{
         GroupByExecutionOptions, GroupByOptions, groupby_nunique, groupby_prod, groupby_size,
-        groupby_sum, groupby_sum_with_options, groupby_sum_with_trace,
-        try_groupby_median_dense_int64, try_groupby_median_numeric_vectors,
-        try_groupby_sum_dense_int64_slices, try_groupby_sum_dense_int64_values,
+        groupby_sum, groupby_sum_with_options, groupby_sum_with_trace, try_groupby_agg_dense_int64,
+        try_groupby_mean_dense_int64_slices, try_groupby_median_dense_int64,
+        try_groupby_median_numeric_vectors, try_groupby_sum_dense_int64_slices,
+        try_groupby_sum_dense_int64_values,
     };
 
     #[test]
@@ -4877,6 +4959,79 @@ mod tests {
         );
         assert!(try_groupby_sum_dense_int64_slices(&[0], &[], true).is_none());
         assert!(try_groupby_sum_dense_int64_slices(&[i64::MIN, i64::MAX], &[1, 2], true).is_none());
+    }
+
+    #[test]
+    fn dense_int64_raw_mean_matches_scalar_reference_o9svg() {
+        let raw_keys = vec![10_i64, 5, 10, -2, 5];
+        let raw_values = vec![i64::MAX, 2, i64::MIN + 1, 4, -3];
+        let scalar_keys = raw_keys
+            .iter()
+            .copied()
+            .map(Scalar::Int64)
+            .collect::<Vec<_>>();
+        let scalar_values = raw_values
+            .iter()
+            .copied()
+            .map(Scalar::Int64)
+            .collect::<Vec<_>>();
+
+        for sort in [true, false] {
+            let expected = try_groupby_agg_dense_int64(
+                &scalar_keys,
+                &scalar_values,
+                AggFunc::Mean,
+                true,
+                sort,
+            )
+            .expect("former Scalar dense path");
+            let actual = try_groupby_mean_dense_int64_slices(&raw_keys, &raw_values, sort)
+                .expect("raw dense path");
+            assert_eq!(actual, expected);
+
+            let index = Index::from_range(0, raw_keys.len() as i64, 1);
+            let keys = Series::new(
+                "key",
+                index.clone(),
+                Column::from_i64_values_owned(raw_keys.clone()),
+            )
+            .expect("typed keys");
+            let values = Series::new(
+                "value",
+                index,
+                Column::from_i64_values_owned(raw_values.clone()),
+            )
+            .expect("typed values");
+            let mut ledger = EvidenceLedger::new();
+            let public = groupby_mean(
+                &keys,
+                &values,
+                GroupByOptions {
+                    sort,
+                    ..GroupByOptions::default()
+                },
+                &RuntimePolicy::strict(),
+                &mut ledger,
+            )
+            .expect("public raw mean");
+            let expected_public = Series::new(
+                "mean",
+                Index::new(expected.0.clone()),
+                Column::from_values(expected.1.clone()).expect("former output column"),
+            )
+            .expect("former public output");
+            assert_eq!(public.index(), expected_public.index());
+            assert_eq!(public.values(), expected_public.values());
+        }
+
+        assert_eq!(
+            try_groupby_mean_dense_int64_slices(&[], &[], true),
+            Some((Vec::new(), Vec::new()))
+        );
+        assert!(try_groupby_mean_dense_int64_slices(&[0], &[], true).is_none());
+        assert!(
+            try_groupby_mean_dense_int64_slices(&[i64::MIN, i64::MAX], &[1, 2], true).is_none()
+        );
     }
 
     #[test]

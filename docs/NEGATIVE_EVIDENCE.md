@@ -15334,6 +15334,42 @@ one in a peer-added test left outside this commit.
 Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran;
 `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: dense Int64 `groupby_mean` scans raw slices — 10.956x p50
+
+Negative-ledger-first routing rejected the top `bv --robot-triage` performance picks because their stated levers were
+already present in `main`, then pivoted to the fresh `fp-groupby` mean path (`br-frankenpandas-o9svg`). Attribution
+found that identity-aligned, all-valid Int64 keys and values still crossed two full `Series::values()` materialization
+boundaries before the dense direct-address mean fold, constructing and reading 2N `Scalar` values even though both raw
+`&[i64]` slices were already available. The opportunity score was 4 impact × 5 confidence / 2 effort = **10**. An
+initial strict-remote release attribution run was cancelled by RCH's stuck-build detector before reaching the timed
+body, so it is recorded as invalid timing rather than performance evidence.
+
+The one lever admits only identity-aligned `AggFunc::Mean` calls whose key and value columns expose all-valid Int64
+slices and whose key span fits the existing dense-range bound. It folds those slices directly while preserving the
+former row-order `i64`-to-`f64` accumulation, per-group counts, first-seen or sorted key order, Float64 output, and
+policy admission record. Aligned, nullable, non-Int64, and wide-range inputs retain the former scalar path.
+
+The final strict-remote foreground probe uses one normal-release binary, 100,000 rows, 1,000 groups, two warmups, ten
+alternating samples per duplicate arm, exact output/index parity preflight, and a 240-second hard process cap.
+
+| final same-binary arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| former materializing body | 2,709,071 ns | 2,197,328 ns | 2,453,199.5 ns |
+| raw-slice candidate | 223,223 ns | 224,615 ns | 223,919 ns |
+
+Result: **KEEP**. Duplicate-p50 mean latency fell from 2,453,199.5 ns to 223,919 ns, a **10.955745x p50
+speedup** (**90.872% latency reduction**). The former duplicate controls differ by
+20.860%, while candidate controls differ by 0.622%; even comparing the
+faster former arm with the slower candidate arm leaves a **9.7826x** advantage. The timed body
+completed in 0.174 seconds. The strict-remote invocation completed on `vmi1152480` in 225.9 seconds including a
+cold-cache normal-release compile, within the 240-second hard cap.
+
+Correctness: the strict-remote focused helper/public-path proof is **1/1 green** for exact output parity in sorted and
+first-seen order plus empty, length-mismatch, and wide-span fallbacks. Strict-remote focused `fp-groupby --all-targets
+--no-deps -D warnings` Clippy is green on `vmi1227854`. Direct Rustfmt and `git diff --check` are green. The bounded
+static-only UBS scan reports **0 critical** while reproducing the broad pre-existing inventory. No local Cargo command
+ran.
+
 ### 2026-07-14 IvoryGlacier — WIN: dense Int64 `groupby_sum` scans raw slices — 11.795x p50
 
 Negative-ledger-first routing began with `bv --robot-triage`: the graph had 3,662 issues, 340 actionable items, and no
