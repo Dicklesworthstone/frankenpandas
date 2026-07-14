@@ -22391,6 +22391,34 @@ impl Column {
             return Ok(Self::from_bool_values(duplicated_flags_typed(data, policy)));
         }
 
+        // Nullable Int64, "first" policy (the default of `duplicated()` / `drop_duplicates()`
+        // — by far the hottest case): the all-valid `as_i64_slice` arm above bails on ANY
+        // missing, so a nullable Int64 column fell to the generic `Vec<Scalar>` + `key_of` +
+        // `Key`-hashset scan. Scan the raw `&[i64]` + validity: a PRESENT value is a duplicate
+        // iff its i64 was seen earlier (FxHashSet<i64>); a MISSING value is a duplicate iff any
+        // earlier row was also missing (single `seen_null` bucket == the generic grouping all
+        // missing under `Key::Null`). Output all-valid Bool. Bit-identical to the generic
+        // "first" pass. Non-first policies keep the generic path.
+        if matches!(policy, DupPolicy::First)
+            && self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let mut seen: FxHashSet<i64> = FxHashSet::default();
+            let mut seen_null = false;
+            let out: Vec<bool> = (0..data.len())
+                .map(|i| {
+                    if validity.get(i) {
+                        !seen.insert(data[i])
+                    } else {
+                        let dup = seen_null;
+                        seen_null = true;
+                        dup
+                    }
+                })
+                .collect();
+            return Ok(Self::from_bool_values(out));
+        }
+
         // Datetime64 / Timedelta64 (i64-ns-backed): an all-valid, no-NaT column
         // reuses the Int64 duplicate-flag machinery over the raw ns. The Bool
         // output is dtype-independent (no re-tag). Bit-identical to the generic
@@ -35008,6 +35036,49 @@ mod tests {
             assert_eq!(d.values()[0], Scalar::Bool(false));
             assert_eq!(d.values()[1], Scalar::Bool(true));
             assert_eq!(d.values()[2], Scalar::Bool(false));
+        }
+
+        #[test]
+        fn duplicated_nullable_i64_first_typed_matches_reference() {
+            // The typed nullable-Int64 duplicated("first") arm must match the spec: a PRESENT
+            // value is a duplicate iff its i64 was seen earlier; all MISSING rows share ONE
+            // bucket (a null duplicates an earlier null). Output all-valid Bool. Hand-computed
+            // reference over Option<i64> keys (None == the shared null bucket); ~30% nulls +
+            // small alphabet ⇒ frequent ties and repeated nulls. i64::MIN/MAX included.
+            let mut state: u64 = 0xD0B1_15EE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let n = (next() % 300) as usize;
+                let mut data = vec![0i64; n];
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut vbits = vec![true; n];
+                for i in 0..n {
+                    if next() % 3 == 0 {
+                        validity.set(i, false);
+                        vbits[i] = false;
+                    } else if next() % 20 == 0 {
+                        data[i] = if next() % 2 == 0 { i64::MIN } else { i64::MAX };
+                    } else {
+                        data[i] = (next() % 30) as i64 - 15;
+                    }
+                }
+                let col = Column::from_i64_values_with_validity(data.clone(), validity);
+                let got = col.duplicated().expect("duplicated");
+                let mut seen: std::collections::HashSet<Option<i64>> =
+                    std::collections::HashSet::new();
+                let expected: Vec<Scalar> = (0..n)
+                    .map(|i| {
+                        let key = if vbits[i] { Some(data[i]) } else { None };
+                        Scalar::Bool(!seen.insert(key))
+                    })
+                    .collect();
+                assert_eq!(got.values(), expected, "trial {trial}");
+            }
         }
 
         #[test]
