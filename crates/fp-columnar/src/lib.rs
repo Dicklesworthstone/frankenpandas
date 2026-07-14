@@ -12112,6 +12112,34 @@ impl Column {
                 ValidityMask::from_words(words, n),
             ));
         }
+        // Nullable Int64 source null-introducing gather (variant-gated, sibling of the
+        // take_positions LazyNullableInt64 gather): the all-valid Int64 arm above requires
+        // `validity.all()`, so a nullable Int64 source (with some None/out-of-range positions)
+        // fell to the generic per-row Scalar clone below. Gather the raw i64 + validity:
+        // a present, in-range Some(idx) keeps `data[idx]` and sets the bit; a missing source
+        // slot, an out-of-range index, or None clears the bit (⇒ Null(Null) ==
+        // missing_for_dtype(Int64) — the same value the all-valid arm and the generic clone
+        // emit). Gate on the VARIANT (not `as_i64_slice_with_validity`, which also matches an
+        // Eager ColumnData::Int64 whose Scalars may hold Null(NaT)/Null(Null)); Int64 has no
+        // NaN so missingness is the validity bit alone.
+        if let ScalarValues::LazyNullableInt64 { data, .. } = &self.values {
+            let src = data.as_slice();
+            let mut out = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, slot) in positions.iter().enumerate() {
+                match slot {
+                    Some(idx) if *idx < src.len() && self.validity.get(*idx) => {
+                        out.push(src[*idx]);
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                    _ => out.push(0),
+                }
+            }
+            return Ok(Self::from_i64_values_with_validity(
+                out,
+                ValidityMask::from_words(words, n),
+            ));
+        }
         if self.validity.all()
             && let Some(slice) = self.as_f64_slice()
         {
@@ -27151,6 +27179,60 @@ mod tests {
         assert_eq!(gathered.dtype(), expected.dtype());
         assert_eq!(gathered.values(), expected.values());
         assert_eq!(gathered.validity(), expected.validity());
+    }
+
+    #[test]
+    fn reindex_nullable_i64_null_introducing_typed_matches_generic() {
+        // The typed nullable-Int64 null-introducing reindex arm (LazyNullableInt64 source +
+        // some None/out-of-range positions) must be BIT-EXACT to the generic Scalar-clone
+        // gather. A/B: col_typed (from_i64_values_with_validity => LazyNullableInt64) hits the
+        // typed arm; col_eager (Column::new, Eager) hits the generic path. Positions mix
+        // Some(present), Some(missing-source), Some(out-of-range), and None.
+        let mut state: u64 = 0x2E1D_C0DE_1234_9E37;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..200 {
+            let src_n = (next() % 120) as usize;
+            let mut data = vec![0i64; src_n];
+            let mut validity = crate::ValidityMask::all_valid(src_n);
+            let mut eager: Vec<Scalar> = Vec::with_capacity(src_n);
+            let mut some_missing = false;
+            for i in 0..src_n {
+                if next() % 3 == 0 {
+                    validity.set(i, false);
+                    eager.push(Scalar::Null(NullKind::Null));
+                    some_missing = true;
+                } else {
+                    let v = (next() % 20_000) as i64 - 10_000;
+                    data[i] = v;
+                    eager.push(Scalar::Int64(v));
+                }
+            }
+            // Force nullable backing: if the source happened to be all-valid, skip (the
+            // all-valid arm covers it and col_typed would be LazyAllValidInt64, not this arm).
+            if !some_missing || src_n == 0 {
+                continue;
+            }
+            let col_typed = Column::from_i64_values_with_validity(data, validity);
+            let col_eager = Column::new(DType::Int64, eager).expect("eager i64");
+            // Build positions: mix present, out-of-range, and None (null-introducing).
+            let plen = (next() % 200) as usize;
+            let positions: Vec<Option<usize>> = (0..plen)
+                .map(|_| match next() % 4 {
+                    0 => None,
+                    1 => Some((next() % (src_n as u64 + 5)) as usize), // may be out-of-range
+                    _ => Some((next() % src_n as u64) as usize),
+                })
+                .collect();
+            let a = col_typed.reindex_by_positions(&positions).expect("typed reindex");
+            let b = col_eager.reindex_by_positions(&positions).expect("eager reindex");
+            assert_eq!(a.values(), b.values(), "reindex trial {trial}");
+            assert_eq!(a.validity(), b.validity(), "reindex validity trial {trial}");
+        }
     }
 
     #[test]
