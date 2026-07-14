@@ -611,7 +611,13 @@ impl ValidityMask {
         if self.is_all_valid_sentinel() {
             return true;
         }
-        self.count_valid() == self.len
+        // A sparse-range mask is constructed only with at least one invalid
+        // range, so it can decline immediately. Packed masks need only find
+        // the first non-full word instead of popcounting every word.
+        if self.invalid_ranges.is_some() {
+            return false;
+        }
+        Self::words_are_all_valid(&self.words, self.len)
     }
 
     /// Bitwise XOR (symmetric difference) with another mask.
@@ -26572,6 +26578,83 @@ mod tests {
     };
 
     #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn validity_mask_all_short_circuit_ab_x7u6w() {
+        const ROWS: usize = 1_000_003;
+        const BATCH: usize = 256;
+
+        fn former(mask: &ValidityMask) -> bool {
+            if mask.is_all_valid_sentinel() {
+                return true;
+            }
+            mask.count_valid() == mask.len
+        }
+
+        fn elapsed(mask: &ValidityMask, check: fn(&ValidityMask) -> bool) -> u128 {
+            std::hint::black_box(check(std::hint::black_box(mask)));
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(check(std::hint::black_box(mask)));
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn median(samples: &mut [u128]) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let mut restored = ValidityMask::all_valid(70);
+        restored.set(5, false);
+        restored.set(5, true);
+        let cases = [
+            ValidityMask::all_valid(0),
+            ValidityMask::all_valid(70),
+            ValidityMask::all_invalid(70),
+            restored,
+            ValidityMask::from_invalid_ranges(Arc::from(vec![(1, 2), (65, 1)]), 70),
+        ];
+        for mask in &cases {
+            assert_eq!(former(mask), mask.all());
+        }
+
+        let mut mask = ValidityMask::all_valid(ROWS);
+        mask.set(257, false);
+        assert!(!former(&mask));
+        assert_eq!(former(&mask), mask.all());
+
+        for _ in 0..2 {
+            std::hint::black_box(elapsed(&mask, former));
+            std::hint::black_box(elapsed(&mask, ValidityMask::all));
+        }
+
+        let mut former_samples = Vec::with_capacity(18);
+        let mut candidate_samples = Vec::with_capacity(18);
+        for block in 0_usize..9 {
+            if block.is_multiple_of(2) {
+                former_samples.push(elapsed(&mask, former));
+                candidate_samples.push(elapsed(&mask, ValidityMask::all));
+                candidate_samples.push(elapsed(&mask, ValidityMask::all));
+                former_samples.push(elapsed(&mask, former));
+            } else {
+                candidate_samples.push(elapsed(&mask, ValidityMask::all));
+                former_samples.push(elapsed(&mask, former));
+                former_samples.push(elapsed(&mask, former));
+                candidate_samples.push(elapsed(&mask, ValidityMask::all));
+            }
+        }
+
+        let former_p50 = median(&mut former_samples);
+        let candidate_p50 = median(&mut candidate_samples);
+        eprintln!(
+            "VALIDITY_ALL_SHORT_CIRCUIT_AB rows={ROWS} batch={BATCH} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} ratio={:.6}",
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("VALIDITY_ALL_SHORT_CIRCUIT_AB former_samples_ns={former_samples:?}");
+        eprintln!("VALIDITY_ALL_SHORT_CIRCUIT_AB candidate_samples_ns={candidate_samples:?}");
+    }
+
+    #[test]
     fn reindex_injects_missing_values() {
         let column = Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)])
             .expect("column should build");
@@ -27755,6 +27838,9 @@ mod tests {
         assert!(mask.get(63));
         assert!(mask.get(65));
         assert_eq!(mask.bits().filter(|valid| *valid).count(), 129);
+
+        mask.set(64, true);
+        assert!(mask.all(), "restored packed words must report all-valid");
     }
 
     #[test]
@@ -27770,6 +27856,7 @@ mod tests {
         assert_eq!(sparse, explicit);
         assert_eq!(sparse.count_valid(), 7);
         assert_eq!(sparse.count_invalid(), 5);
+        assert!(!sparse.all());
         assert!(sparse.get(1));
         assert!(!sparse.get(3));
         assert!(sparse.get(8));

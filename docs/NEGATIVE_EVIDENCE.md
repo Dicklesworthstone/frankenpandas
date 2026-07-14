@@ -16698,3 +16698,26 @@ remains blocked before `fp-join` by 23 peer-owned `fp-columnar` findings. Fail-c
 scan reproduced seven tracked broad whole-file critical labels; a line-scoped staged disposition found no finding on
 any touched production, test, or probe line.
 `git diff --check` is green. No local Cargo command ran.
+
+### 2026-07-14 IvoryGlacier — `ValidityMask::all` first-invalid-word short circuit: 1467.590825x WIN (`br-frankenpandas-x7u6w`)
+
+Negative-ledger-first attribution found that `ValidityMask::all()`—used directly by `fp-join` typed fast-path
+admission—answered a boolean question by calling `count_valid()`, popcounting every packed word even after an invalid
+word made the result irrevocably false. The shipped one-lever change preserves the positive-length all-valid sentinel
+and empty-mask vacuous truth, returns false immediately for the constructor-enforced non-empty sparse-invalid-range
+representation, and otherwise reuses the existing tail-aware `words_are_all_valid` predicate, which stops at the first
+non-full word. No mask representation, count, mutation, join ordering, null semantics, or output is changed.
+
+The pre-edit strict-remote `--profile release` attribution on `vmi1149989` used a 1,000,003-row packed mask with its
+first invalid bit at row 257, two warmups, 18 reversed-ABBA samples per arm, and 256 calls per sample. It measured
+**2,185,212 ns** former versus **1,513 ns** short-circuit p50 per batch (**1444.290813x**). The one final foreground
+same-binary gate on the same worker completed in 117.2 seconds and measured **2,367,224 ns** former versus **1,613 ns**
+public candidate p50 per batch: **1467.590825x**, or **99.932% lower latency**. The timed test body was 0.09 seconds.
+
+Correctness: exact boolean parity passed for empty, positive all-valid sentinel, all-invalid, restored packed-all-valid,
+partial-tail, sparse-invalid-range, and measured nullable masks. The strict-remote focused validity suite was **24/24
+green**. Strict-remote production-only Clippy reached `fp-columnar` but remains blocked by 23 pre-existing findings
+outside this hunk; the release test likewise reported four pre-existing test-only warnings. The bounded static-only UBS
+scan skipped all build/lint/dependency phases and found no targeted issue on the touched `ValidityMask` lines, only the
+file's broad existing inventory. `git diff --check` is green. All direct Cargo invocations were fail-closed RCH remote
+executions; no stash was changed.
