@@ -393,6 +393,62 @@ fn coalesce_utf8_contiguous_key_column(
     Some(Column::from_utf8_contiguous(bytes, offsets))
 }
 
+/// Coalesce an all-valid temporal OUTER key directly over raw nanoseconds.
+///
+/// The optional position tapes already define output order and matched-row
+/// precedence. Any malformed tape, nullable input, mixed dtype, out-of-bounds
+/// position, or selected NaT declines to the existing Scalar fallback.
+fn coalesce_temporal_i64_key_column(
+    left_key_col: &Column,
+    right_key_col: &Column,
+    left_positions: &[Option<usize>],
+    right_positions: &[Option<usize>],
+) -> Option<Column> {
+    if left_positions.len() != right_positions.len()
+        || !left_key_col.validity().all()
+        || !right_key_col.validity().all()
+    {
+        return None;
+    }
+
+    let (left_keys, right_keys, nat, is_datetime) =
+        match (left_key_col.dtype(), right_key_col.dtype()) {
+            (DType::Datetime64, DType::Datetime64) => (
+                left_key_col.as_datetime64_slice()?,
+                right_key_col.as_datetime64_slice()?,
+                fp_types::Timestamp::NAT,
+                true,
+            ),
+            (DType::Timedelta64, DType::Timedelta64) => (
+                left_key_col.as_timedelta64_slice()?,
+                right_key_col.as_timedelta64_slice()?,
+                fp_types::Timedelta::NAT,
+                false,
+            ),
+            _ => return None,
+        };
+
+    let mut data = Vec::with_capacity(left_positions.len());
+    for (left_pos, right_pos) in left_positions.iter().zip(right_positions.iter()) {
+        let value = match (*left_pos, *right_pos) {
+            (Some(pos), _) => *left_keys.get(pos)?,
+            (None, Some(pos)) => *right_keys.get(pos)?,
+            (None, None) => return None,
+        };
+        if value == nat {
+            return None;
+        }
+        data.push(value);
+    }
+
+    let validity = ValidityMask::all_valid(data.len());
+    Some(if is_datetime {
+        Column::from_datetime64_values_with_validity(data, validity)
+    } else {
+        Column::from_timedelta64_values_with_validity(data, validity)
+    })
+}
+
 enum SharedOptionalUtf8GatherPlan {
     NullableRange {
         null_prefix: usize,
@@ -6434,6 +6490,14 @@ fn build_single_key_ordered_unique_outer_merge_output(
                 left_key_col,
                 right_key_col,
             } => {
+                if let Some(column) = coalesce_temporal_i64_key_column(
+                    left_key_col,
+                    right_key_col,
+                    left_positions,
+                    right_positions,
+                ) {
+                    return Ok(column);
+                }
                 if let (Some(left_keys), Some(right_keys)) =
                     (left_key_col.as_i64_slice(), right_key_col.as_i64_slice())
                 {
@@ -12539,6 +12603,199 @@ mod tests {
         assert!(nat_left_values[2].is_missing());
 
         Ok(())
+    }
+
+    #[test]
+    fn temporal_i64_outer_key_coalesce_matches_scalar_and_declines_unsupported_i4gzc() {
+        let left_positions = [None, Some(0), Some(1), None, Some(2), Some(3), None];
+        let right_positions = [Some(0), Some(1), None, Some(2), Some(3), None, Some(4)];
+        let left_ns = vec![-20, 10, 30, 50];
+        let right_ns = vec![-30, -20, 20, 30, 60];
+        let union_ns = [-30, -20, 10, 20, 30, 50, 60];
+        let temporal_column = |dtype, values: Vec<i64>| {
+            let len = values.len();
+            match dtype {
+                DType::Datetime64 => Column::from_datetime64_values_with_validity(
+                    values,
+                    ValidityMask::all_valid(len),
+                ),
+                DType::Timedelta64 => Column::from_timedelta64_values_with_validity(
+                    values,
+                    ValidityMask::all_valid(len),
+                ),
+                _ => unreachable!("test iterates only temporal dtypes"),
+            }
+        };
+
+        for temporal in [DType::Datetime64, DType::Timedelta64] {
+            let left = temporal_column(temporal, left_ns.clone());
+            let right = temporal_column(temporal, right_ns.clone());
+            let candidate = super::coalesce_temporal_i64_key_column(
+                &left,
+                &right,
+                &left_positions,
+                &right_positions,
+            )
+            .expect("supported temporal key coalesce");
+            assert_eq!(candidate.dtype(), temporal);
+            assert!(candidate.validity().all());
+            let candidate_ns = match temporal {
+                DType::Datetime64 => candidate.as_datetime64_slice(),
+                DType::Timedelta64 => candidate.as_timedelta64_slice(),
+                _ => unreachable!("test iterates only temporal dtypes"),
+            };
+            assert_eq!(candidate_ns, Some(union_ns.as_slice()));
+
+            let reference_values = left_positions
+                .iter()
+                .zip(right_positions.iter())
+                .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
+                    (Some(pos), _) => left.values()[*pos].clone(),
+                    (None, Some(pos)) => right.values()[*pos].clone(),
+                    (None, None) => Scalar::Null(NullKind::Null),
+                })
+                .collect::<Vec<_>>();
+            let reference = Column::from_values(reference_values).expect("scalar reference");
+            assert_eq!(candidate, reference);
+        }
+
+        let datetime_left = temporal_column(DType::Datetime64, left_ns);
+        let datetime_right = temporal_column(DType::Datetime64, right_ns);
+        let timedelta_right = temporal_column(DType::Timedelta64, vec![-30, -20, 20, 30, 60]);
+        let mut nullable_validity = ValidityMask::all_valid(datetime_left.len());
+        nullable_validity.set(1, false);
+        let nullable_left = Column::from_datetime64_values_with_validity(
+            vec![-20, 10, 30, 50],
+            nullable_validity,
+        );
+        let nat_left = Column::from_datetime64_values_with_validity(
+            vec![fp_types::Timestamp::NAT, 10, 30, 50],
+            ValidityMask::all_valid(4),
+        );
+        for (left, right, left_tape, right_tape) in [
+            (
+                &nullable_left,
+                &datetime_right,
+                left_positions.as_slice(),
+                right_positions.as_slice(),
+            ),
+            (
+                &datetime_left,
+                &timedelta_right,
+                left_positions.as_slice(),
+                right_positions.as_slice(),
+            ),
+            (&nat_left, &datetime_right, &[Some(0)], &[Some(0)]),
+            (&datetime_left, &datetime_right, &[Some(0)], &[]),
+            (&datetime_left, &datetime_right, &[Some(99)], &[None]),
+            (&datetime_left, &datetime_right, &[None], &[None]),
+        ] {
+            assert!(
+                super::coalesce_temporal_i64_key_column(
+                    left,
+                    right,
+                    left_tape,
+                    right_tape,
+                )
+                .is_none(),
+                "unsupported temporal key coalesce must retain Scalar fallback",
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn bench_temporal_i64_outer_key_coalesce_i4gzc() {
+        let n = 200_000_i64;
+        let input_len = usize::try_from(n).expect("positive benchmark length");
+        let left = Column::from_datetime64_values_with_validity(
+            (0..n).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+        let right = Column::from_datetime64_values_with_validity(
+            (0..n).map(|value| value * 2).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+        let (left_positions, right_positions) =
+            super::ordered_unique_temporal_i64_outer_positions(&left, &right)
+                .expect("ordered temporal position tapes");
+        let expected_rows = 300_000usize;
+        assert_eq!(left_positions.len(), expected_rows);
+
+        let former = || {
+            let values = left_positions
+                .iter()
+                .zip(right_positions.iter())
+                .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
+                    (Some(pos), _) => left.values()[*pos].clone(),
+                    (None, Some(pos)) => right.values()[*pos].clone(),
+                    (None, None) => Scalar::Null(NullKind::Null),
+                })
+                .collect::<Vec<_>>();
+            Column::from_values(values).expect("former Scalar key coalesce")
+        };
+        let candidate = || {
+            super::coalesce_temporal_i64_key_column(
+                &left,
+                &right,
+                &left_positions,
+                &right_positions,
+            )
+            .expect("typed temporal key coalesce")
+        };
+
+        let former_output = former();
+        let candidate_output = candidate();
+        assert_eq!(candidate_output, former_output);
+        drop((former_output, candidate_output));
+        for _ in 0..2 {
+            std::hint::black_box(former());
+            std::hint::black_box(candidate());
+        }
+
+        let sample = |build: &dyn Fn() -> Column| {
+            let start = std::time::Instant::now();
+            let output = std::hint::black_box(build());
+            assert_eq!(std::hint::black_box(output.len()), expected_rows);
+            drop(output);
+            start.elapsed().as_secs_f64() * 1_000.0
+        };
+        let mut former_a = Vec::with_capacity(15);
+        let mut former_b = Vec::with_capacity(15);
+        let mut candidate_a = Vec::with_capacity(15);
+        let mut candidate_b = Vec::with_capacity(15);
+        for round in 0..15 {
+            if round % 2 == 0 {
+                former_a.push(sample(&former));
+                candidate_a.push(sample(&candidate));
+                candidate_b.push(sample(&candidate));
+                former_b.push(sample(&former));
+            } else {
+                former_b.push(sample(&former));
+                candidate_b.push(sample(&candidate));
+                candidate_a.push(sample(&candidate));
+                former_a.push(sample(&former));
+            }
+        }
+
+        let report = |label: &str, mut samples: Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            let p50 = samples[samples.len() / 2];
+            let p95_idx = samples
+                .len()
+                .saturating_mul(95)
+                .div_ceil(100)
+                .saturating_sub(1);
+            println!(
+                "{label}: p50={p50:.3} ms p95={:.3} ms max={:.3} ms",
+                samples[p95_idx],
+                samples[samples.len() - 1],
+            );
+        };
+        report("outer_key_scalar_former_a", former_a);
+        report("outer_key_scalar_former_b", former_b);
+        report("outer_key_typed_candidate_a", candidate_a);
+        report("outer_key_typed_candidate_b", candidate_b);
     }
 
     #[test]

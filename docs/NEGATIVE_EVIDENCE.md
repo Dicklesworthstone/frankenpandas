@@ -15388,6 +15388,73 @@ whole-file critical labels but found none on the new production helper or dispat
 intentional fail-fast `unwrap`/`expect` behavior of this foreground-only harness. `git diff --check` is green. No local
 Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: temporal OUTER shared key coalesces over raw nanoseconds — 3.508x raw p50
+
+Negative-ledger-first routing started from the residual named by `br-frankenpandas-rvb6u`: its ordered-unique temporal
+OUTER planner deliberately left output-key construction unchanged. The existing shared-key output builder already
+coalesced raw Int64 and contiguous UTF-8 keys, but Datetime64 and Timedelta64 still cloned one `Scalar` per output row
+and rebuilt the key through `Column::from_values`. This is not a retry of the rejected UTF-8 plan-setup, numeric-builder,
+or composite-OUTER families, and it is narrower than the already-landed typed temporal null-fill gather.
+
+One lever (`br-frankenpandas-i4gzc`) extends that shared-key coalescer to all-valid, same-dtype Datetime64 and
+Timedelta64 inputs. It follows the already-planned optional position tapes, preserves left precedence for matched rows,
+and moves the selected raw `i64` nanoseconds into the temporal typed constructor. Unequal or malformed tapes, nullable
+inputs, mixed dtypes, an out-of-bounds selected position, a missing selection on both sides, or a selected NaT sentinel
+decline to the existing Scalar path. Position planning and payload gathers are unchanged. The public admission path is
+still the strictly increasing, unique, NaT-free ordered temporal OUTER shape established by `rvb6u`.
+
+Before editing, strict-remote RCH built and ran the existing release-perf public probe on `vmi1152480`. The workload has
+200,000 rows per side, 100,000 overlaps, and exactly 300,000 OUTER rows. Each arm used two warmups and seven measured
+samples; the generic temporal reference was asserted exactly equal to the public output before timing.
+
+| pre-edit public arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| Int64 OUTER control | 7.353 ms | 5.817 ms | 6.5850 ms |
+| sort-forced generic temporal reference | 229.854 ms | 293.937 ms | 261.8955 ms |
+| temporal OUTER public path | 21.910 ms | 18.572 ms | 20.2410 ms |
+
+The exact former key-coalesce body and the typed candidate were then measured inside one strict-remote test binary on
+the same 300,000-row position tapes. Equality of the complete temporal `Column` was asserted before timing. Fifteen
+ABBA-reversed/interleaved samples per duplicate arm include construction and output destruction:
+
+| same-binary key-coalesce lifecycle | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| former `Vec<Scalar>` rebuild | 14.148 ms | 14.255 ms | 14.2015 ms |
+| typed raw-nanosecond coalescer | 1.270 ms | 1.305 ms | 1.2875 ms |
+
+That boundary improved **11.0303x p50** with only **1.0076x** former-arm and **1.0276x** candidate-arm duplicate
+spread. This is merge-construction lifecycle latency: the candidate preserves a lazy typed temporal backing, so a later
+consumer that explicitly requests the scalar view pays that materialization then rather than during the merge.
+
+The final public probe rebuilt the edited source and ran on the same `vmi1152480` worker as the baseline:
+
+| post-edit public arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| Int64 OUTER control | 24.158 ms | 39.067 ms | 31.6125 ms |
+| sort-forced generic temporal reference | 276.750 ms | 252.911 ms | 264.8305 ms |
+| temporal OUTER public path | 4.884 ms | 6.657 ms | 5.7705 ms |
+
+The raw public-path reduction is **3.5077x p50** (**71.491%**). These are separate pre/post binaries, so attribution is
+based on the same-worker controls rather than pretending they are a same-binary A/B: temporal/Int64 improved from
+**3.0738x** to **0.18254x**, a **16.8392x ratio-of-ratios**. The worker was materially slower during the post-edit run
+(the duplicated Int64 mean rose 4.80x), which makes the raw temporal result conservative but can magnify normalization.
+A deliberately pessimistic endpoint comparison, `(pre temporal min / pre Int64 max) / (post temporal max / post Int64
+min)`, is still **9.1659x**, well clear of the control floor. With seven public samples per arm, printed p95 is the
+sample maximum and descriptive only; it is not used for the ship verdict.
+
+Correctness: the exact-source focused temporal proof is green (**1 passed, 1 ignored foreground probe**), covering both
+temporal dtypes, raw output values, dtype and validity, exact equality to the former Scalar body, and every helper
+fallback listed above. The full strict-remote `fp-join` library suite is green (**149 passed, 1 ignored**), and scoped
+`fp-join --all-targets --no-deps -D warnings` Clippy is green. Strict-remote workspace check is green with five
+peer-owned `fp-columnar` warnings. Full workspace Clippy stops in that peer-owned crate with 23 denied existing lints
+(12 `unnecessary_map_or`, seven `needless_range_loop`, and four `unnecessary_lazy_evaluations`); the first is at
+`crates/fp-columnar/src/lib.rs:5938`, before downstream workspace Clippy. The final public probe also preflights exact
+full-output equality to the sort-forced generic planner. Fail-closed RCH rejected remote `cargo fmt --check` as a
+non-compilation command (`RCH-E301`), so no local fallback ran. The bounded static-only UBS scan completed and
+reproduced the broad tracked `fp-join` inventory (12 critical labels, dominated by scanner false positives and test-only
+panic surfaces), with no finding on the new production helper or dispatch. `git diff --check` is green. No local Cargo
+command ran.
+
 ### 2026-07-13 IvoryGlacier — WIN: affine Datetime64 monotonic predicates read their witness — 2132.524x p50
 
 Negative-ledger-first routing found affine Datetime64 construction, search, and frequency keeps but no monotonicity row.
