@@ -16721,3 +16721,25 @@ outside this hunk; the release test likewise reported four pre-existing test-onl
 scan skipped all build/lint/dependency phases and found no targeted issue on the touched `ValidityMask` lines, only the
 file's broad existing inventory. `git diff --check` is green. All direct Cargo invocations were fail-closed RCH remote
 executions; no stash was changed.
+
+### 2026-07-14 IvoryGlacier — affine Datetime64 `argmax` reads its endpoint-position witness: 3195.391x WIN (`br-frankenpandas-h453b`)
+
+Negative-ledger-first routing found the affine Datetime64 `argmin` keep explicitly left `argmax` untouched. Source
+attribution confirmed the asymmetry: `Index::argmax` already selected an endpoint for affine Int64, but the equivalent
+validated Datetime64 `(start, step, len)` backing materialized and scanned one `IndexLabel` per row. The one-lever
+change returns `len - 1` for a nondecreasing affine Datetime64 range and zero for a descending range. Empty and
+singleton behavior is unchanged; irregular, eager, nullable, mixed, Int64, and Timedelta64 indexes keep their former
+paths. Raw nanosecond ordering, including the reserved `i64::MIN` NaT sentinel, makes the endpoint position exact.
+
+The final foreground same-binary A/B ran fail-closed through RCH on `vmi1227854` with `--profile release`: a
+250,000-row ascending affine range, three in-process warmups, and 10 reversed-ABBA samples per duplicate arm. The
+former materialize/scan body measured **594,070 / 623,374 ns** p50; the shipped public witness measured
+**201 / 180 ns** p50. Duplicate-p50 means are **608,722 ns** and **190.5 ns**, respectively: **3195.391x faster**
+(**99.9687% lower latency**). Former duplicate controls differ by **4.814%**; witness spread is timer-floor noise.
+
+Correctness: the strict-remote eager-oracle proof is **1/1 green** across empty, regular and NaT singletons,
+ascending, descending, NaT-starting, NaT-ending, and near-`i64::MAX` ranges, and proves the affine path initializes
+neither the materialized-label cache nor the failed Int64-view cache. The fp-index release test binary compiled cleanly
+and `git diff --check` is green. A broader fp-io warm-up independently surfaced a committed fp-types/fp-frame
+`Scalar::Period` API mismatch before reaching that unrelated target; it was not treated as benchmark evidence. All
+Cargo invocations were strict remote RCH executions, and no stash was changed.

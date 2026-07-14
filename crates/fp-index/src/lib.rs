@@ -4094,6 +4094,13 @@ impl Index {
         if let Some(affine) = self.labels.int64_affine_range() {
             return (affine.len > 0).then(|| if affine.step >= 0 { affine.len - 1 } else { 0 });
         }
+        // A validated Datetime64 affine range is unique for len > 1 and uses
+        // raw nanosecond ordering, so its maximum is the same endpoint without
+        // materializing one IndexLabel per row. Singleton and empty ranges keep
+        // the former tie/empty behavior.
+        if let Some(affine) = self.labels.datetime64_affine_range() {
+            return (affine.len > 0).then(|| if affine.step >= 0 { affine.len - 1 } else { 0 });
+        }
         // Lazy typed/strided Int64: scan the i64 view with the identical max_by
         // (last-of-equal) tie-break — bit-identical, no label vector.
         if self.labels.has_lazy_int64_backing()
@@ -24071,6 +24078,130 @@ mod tests {
         println!("former/witness p50 ratio: {:.3}x", former_mean / witness_mean);
         assert!(candidate_a.labels.materialized.get().is_none());
         assert!(candidate_b.labels.materialized.get().is_none());
+    }
+
+    #[test]
+    fn datetime64_affine_argmax_matches_eager_oracle_h453b() {
+        let cases = [
+            ("empty", 0, 0, 0),
+            ("singleton", 7, 0, 1),
+            ("singleton_nat", i64::MIN, 0, 1),
+            ("ascending", 0, 2, 4),
+            ("descending", 12, -4, 4),
+            ("nat_start", i64::MIN, 1, 4),
+            ("nat_end", i64::MIN + 3, -1, 4),
+            ("near_max", i64::MAX, -1, 3),
+        ];
+
+        for (name, start, step, len) in cases {
+            let affine = Index::from_datetime64_affine_range(start, step, len)
+                .expect("valid Datetime64 affine range");
+            let eager_values = (0..len)
+                .map(|offset| {
+                    let offset = i64::try_from(offset).expect("test offset fits i64");
+                    start
+                        .checked_add(step.checked_mul(offset).expect("test span fits i64"))
+                        .expect("test endpoint fits i64")
+                })
+                .collect();
+            let eager = Index::from_datetime64(eager_values);
+
+            assert_eq!(affine.argmax(), eager.argmax(), "{name}");
+            assert!(
+                affine.labels.materialized.get().is_none(),
+                "{name}: affine argmax must not materialize labels",
+            );
+            assert!(
+                affine.labels.int64_typed.get().is_none(),
+                "{name}: affine argmax must not probe the Int64 view",
+            );
+        }
+    }
+
+    fn datetime64_argmax_former_body_h453b(index: &Index) -> Option<usize> {
+        if let Some(affine) = index.labels.int64_affine_range() {
+            return (affine.len > 0).then(|| if affine.step >= 0 { affine.len - 1 } else { 0 });
+        }
+        if index.labels.has_lazy_int64_backing()
+            && let Some(values) = index.labels.int64_view()
+        {
+            return values
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.cmp(b))
+                .map(|(i, _)| i);
+        }
+        index
+            .labels
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.cmp(b))
+            .map(|(i, _)| i)
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --ignored --nocapture"]
+    fn datetime64_affine_argmax_profile_h453b() {
+        const LEN: usize = 250_000;
+        const SAMPLES: usize = 10;
+        let former_a = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+        let former_b = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+        let witness_a = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+        let witness_b = Index::from_datetime64_affine_range(0, 1, LEN).unwrap();
+
+        assert_eq!(
+            datetime64_argmax_former_body_h453b(&former_a),
+            witness_a.argmax(),
+        );
+        for _ in 0..3 {
+            std::hint::black_box(datetime64_argmax_former_body_h453b(&former_a));
+            std::hint::black_box(witness_a.argmax());
+            std::hint::black_box(witness_b.argmax());
+            std::hint::black_box(datetime64_argmax_former_body_h453b(&former_b));
+        }
+
+        let measure = |f: &dyn Fn() -> Option<usize>| {
+            let started = std::time::Instant::now();
+            std::hint::black_box(f());
+            started.elapsed().as_nanos()
+        };
+        let mut former_a_ns = Vec::with_capacity(SAMPLES);
+        let mut former_b_ns = Vec::with_capacity(SAMPLES);
+        let mut witness_a_ns = Vec::with_capacity(SAMPLES);
+        let mut witness_b_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                former_a_ns.push(measure(&|| datetime64_argmax_former_body_h453b(&former_a)));
+                witness_a_ns.push(measure(&|| witness_a.argmax()));
+                witness_b_ns.push(measure(&|| witness_b.argmax()));
+                former_b_ns.push(measure(&|| datetime64_argmax_former_body_h453b(&former_b)));
+            } else {
+                former_b_ns.push(measure(&|| datetime64_argmax_former_body_h453b(&former_b)));
+                witness_b_ns.push(measure(&|| witness_b.argmax()));
+                witness_a_ns.push(measure(&|| witness_a.argmax()));
+                former_a_ns.push(measure(&|| datetime64_argmax_former_body_h453b(&former_a)));
+            }
+        }
+
+        for samples in [
+            &mut former_a_ns,
+            &mut former_b_ns,
+            &mut witness_a_ns,
+            &mut witness_b_ns,
+        ] {
+            samples.sort_unstable();
+        }
+        let middle = SAMPLES / 2;
+        let former_a_p50 = former_a_ns[middle];
+        let former_b_p50 = former_b_ns[middle];
+        let witness_a_p50 = witness_a_ns[middle];
+        let witness_b_p50 = witness_b_ns[middle];
+        let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
+        let witness_mean = (witness_a_p50 + witness_b_p50) as f64 / 2.0;
+        println!("affine Datetime64 argmax, len={LEN}, samples={SAMPLES}");
+        println!("former body p50 A/B: {former_a_p50} / {former_b_p50} ns");
+        println!("affine witness p50 A/B: {witness_a_p50} / {witness_b_p50} ns");
+        println!("former/witness p50 ratio: {:.3}x", former_mean / witness_mean);
     }
 
     #[test]
