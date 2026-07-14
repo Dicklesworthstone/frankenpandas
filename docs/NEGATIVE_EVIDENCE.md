@@ -15334,6 +15334,60 @@ one in a peer-added test left outside this commit.
 Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran;
 `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-13 IvoryGlacier — WIN: ordered-unique temporal OUTER joins plan over raw nanoseconds — 8.178x p50
+
+Negative-ledger-first routing found temporal INNER, LEFT, and RIGHT keeps but no temporal OUTER row. Older rejected
+OUTER work covered UTF-8 plan construction or numeric builders, not a raw-nanosecond ordered temporal union. This lever
+(`br-frankenpandas-rvb6u`) is restricted to the exact shape where the generic planner was still materializing temporal
+`Scalar` keys even though both inputs already expose ordered raw nanoseconds.
+
+One helper borrows the `i64` nanosecond slices of all-valid, same-dtype `Datetime64` or `Timedelta64` keys and performs a
+two-pointer three-way union. It emits the two optional position tapes consumed by the unchanged ordered-unique OUTER
+builder, avoiding input-key materialization for position planning while leaving output-key construction and payload
+gathering unchanged. The dispatch admits one key, `sort=false`, no indicator, no enforcing validation, no NaT sentinel,
+and strictly increasing unique inputs. Nullable, NaT-bearing, mixed-dtype, duplicate, unsorted, composite, explicitly
+sorted, indicator-bearing, or enforcing-validation merges retain the generic planner. The typed-slice probes and all
+admission checks fail closed; this adds no unsafe code, parser surface, or recovery policy.
+
+The strict-remote foreground probe used 200,000 rows per side: the left keys were `0..200000`, the right keys were the
+even nanoseconds, 100,000 keys overlapped, and every OUTER result had 300,000 rows. It used two warmups and seven
+measured samples per arm. Before the production edit, `vmi1152480` established the following exact-input baseline and a
+**1.328576x** duplicated-Int64 max/min p50 floor:
+
+| pre-edit arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| Int64 OUTER control | 11.842 ms | 15.733 ms | 13.7875 ms |
+| sort-forced generic temporal reference | 251.040 ms | 229.853 ms | 240.4465 ms |
+| untouched temporal OUTER path | 260.437 ms | 268.732 ms | 264.5845 ms |
+
+The final ship gate ran from one binary on the same worker. The generic-reference arms use the identical clean inputs and
+assert an exactly equal full output before timing; `sort=true` bypasses the `sort=false` fast dispatch while OUTER's
+existing mandatory key ordering preserves the same output. The two proof outputs are dropped before timed samples.
+
+| final same-binary arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| Int64 OUTER control | 14.778 ms | 8.812 ms | 11.7950 ms |
+| sort-forced generic temporal reference | 292.749 ms | 285.760 ms | 289.2545 ms |
+| raw-nanosecond temporal candidate | 23.019 ms | 47.717 ms | 35.3680 ms |
+
+The duplicate-p50 mean ratio is **8.1784x** (**87.773% latency reduction**). The worker was noisy: the final Int64
+control max/min spread is **1.6770x**, and candidate duplicate p50s differ by **2.0729x**. The conservative minimum
+reference / maximum candidate comparison is still **5.9886x** (**83.302% latency reduction**), comfortably above both
+the pre-edit and final control floors. With only seven samples per arm, the printed p95 is the sample maximum and is
+descriptive only; it is not used for the ship verdict.
+
+Correctness: the strict-remote focused proof is **2/2 green**. It covers both temporal dtypes, exact position tapes,
+overlap/disjoint/empty inputs, full public output equality to the generic planner, temporal dtype and key order, both
+payload null-fill directions, and mandatory fallback for NaT, nullable, mixed-dtype, duplicate, and unsorted keys.
+The full `fp-join` library suite is **148/148 green**. Strict-remote workspace
+`cargo check -j 1 --workspace --all-targets` is green with five peer-owned `fp-columnar` warnings. Focused
+`fp-join --all-targets --no-deps -D warnings` Clippy is green. Full workspace Clippy remains blocked before `fp-join`
+by 23 peer-owned `fp-columnar` findings. Fail-closed RCH rejected remote `cargo fmt --check` as a non-compilation
+command (`RCH-E301`), so no local fallback ran. The bounded static-only UBS scan reproduced seven broad tracked
+whole-file critical labels but found none on the new production helper or dispatch; its touched probe warnings are the
+intentional fail-fast `unwrap`/`expect` behavior of this foreground-only harness. `git diff --check` is green. No local
+Cargo command ran.
+
 ### 2026-07-13 IvoryGlacier — WIN: affine Datetime64 monotonic predicates read their witness — 2132.524x p50
 
 Negative-ledger-first routing found affine Datetime64 construction, search, and frequency keeps but no monotonicity row.

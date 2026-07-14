@@ -3,7 +3,9 @@ use std::{collections::BTreeMap, hint::black_box, time::Instant};
 use fp_columnar::Column;
 use fp_frame::DataFrame;
 use fp_index::{Index, IndexLabel};
-use fp_join::{JoinType, merge_dataframes_on};
+use fp_join::{
+    JoinType, MergeExecutionOptions, merge_dataframes_on, merge_dataframes_on_with_options,
+};
 use fp_types::Scalar;
 fn col_dt(vals: Vec<i64>) -> Column {
     Column::from_values(vals.into_iter().map(Scalar::Datetime64).collect()).unwrap()
@@ -45,27 +47,48 @@ fn bench(
     l: &DataFrame,
     r: &DataFrame,
     join_type: JoinType,
+    sort: bool,
     expected_rows: usize,
     it: usize,
 ) {
     for _ in 0..2 {
-        black_box(
+        let merged = if sort {
+            merge_dataframes_on_with_options(
+                l,
+                r,
+                &["key"],
+                &["key"],
+                join_type,
+                MergeExecutionOptions {
+                    sort: true,
+                    ..MergeExecutionOptions::default()
+                },
+            )
+        } else {
             merge_dataframes_on(l, r, &["key"], join_type)
-                .unwrap()
-                .index
-                .len(),
-        );
+        };
+        black_box(merged.unwrap().index.len());
     }
     let mut samples = Vec::with_capacity(it);
     let mut checksum = 0usize;
     for _ in 0..it {
         let start = Instant::now();
-        let rows = black_box(
+        let merged = if sort {
+            merge_dataframes_on_with_options(
+                l,
+                r,
+                &["key"],
+                &["key"],
+                join_type,
+                MergeExecutionOptions {
+                    sort: true,
+                    ..MergeExecutionOptions::default()
+                },
+            )
+        } else {
             merge_dataframes_on(l, r, &["key"], join_type)
-                .unwrap()
-                .index
-                .len(),
-        );
+        };
+        let rows = black_box(merged.unwrap().index.len());
         assert_eq!(rows, expected_rows);
         checksum ^= rows;
         samples.push(start.elapsed().as_secs_f64() * 1_000.0);
@@ -81,6 +104,89 @@ fn bench(
 }
 fn main() {
     let n = 200_000usize;
+    let scenario = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "right".to_owned());
+    if scenario == "outer" {
+        let expected_rows = n
+            .checked_mul(2)
+            .and_then(|total| total.checked_sub(n.div_ceil(2)))
+            .expect("benchmark cardinality fits usize");
+        let (li, ri) = build(n, false, false);
+        bench(
+            "outer_int64_control_a",
+            &li,
+            &ri,
+            JoinType::Outer,
+            false,
+            expected_rows,
+            7,
+        );
+        bench(
+            "outer_int64_control_b",
+            &li,
+            &ri,
+            JoinType::Outer,
+            false,
+            expected_rows,
+            7,
+        );
+        let (ld, rd) = build(n, true, false);
+        let candidate = merge_dataframes_on(&ld, &rd, &["key"], JoinType::Outer)
+            .expect("candidate outer merge");
+        let reference = merge_dataframes_on_with_options(
+            &ld,
+            &rd,
+            &["key"],
+            &["key"],
+            JoinType::Outer,
+            MergeExecutionOptions {
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect("generic outer merge");
+        assert_eq!(candidate, reference, "candidate must match generic output");
+        drop((candidate, reference));
+        bench(
+            "outer_datetime_scalar_ref_a",
+            &ld,
+            &rd,
+            JoinType::Outer,
+            true,
+            expected_rows,
+            7,
+        );
+        bench(
+            "outer_datetime_key_a",
+            &ld,
+            &rd,
+            JoinType::Outer,
+            false,
+            expected_rows,
+            7,
+        );
+        bench(
+            "outer_datetime_scalar_ref_b",
+            &ld,
+            &rd,
+            JoinType::Outer,
+            true,
+            expected_rows,
+            7,
+        );
+        bench(
+            "outer_datetime_key_b",
+            &ld,
+            &rd,
+            JoinType::Outer,
+            false,
+            expected_rows,
+            7,
+        );
+        return;
+    }
+
     let expected_rows = n;
     let (li, ri) = build(n, false, false);
     bench(
@@ -88,6 +194,7 @@ fn main() {
         &li,
         &ri,
         JoinType::Right,
+        false,
         expected_rows,
         7,
     );
@@ -96,6 +203,7 @@ fn main() {
         &li,
         &ri,
         JoinType::Right,
+        false,
         expected_rows,
         7,
     );
@@ -105,6 +213,7 @@ fn main() {
         &reference_left,
         &reference_right,
         JoinType::Right,
+        false,
         expected_rows,
         7,
     );
@@ -113,6 +222,7 @@ fn main() {
         &reference_left,
         &reference_right,
         JoinType::Right,
+        false,
         expected_rows,
         7,
     );
@@ -122,6 +232,7 @@ fn main() {
         &ld,
         &rd,
         JoinType::Right,
+        false,
         expected_rows,
         7,
     );
@@ -130,6 +241,7 @@ fn main() {
         &ld,
         &rd,
         JoinType::Right,
+        false,
         expected_rows,
         7,
     );
