@@ -25412,6 +25412,30 @@ impl Column {
             return Ok(Self::from_bool_values(out));
         }
 
+        // Nullable Int64 isin (sibling of the nullable-Utf8 arm below): the all-valid
+        // `as_i64_slice` arms above bail on ANY missing, so a nullable Int64 column
+        // (`df["id"].isin(ids)` over a column WITH nulls) fell to the generic `Vec<Scalar>` +
+        // per-row `key_of` + `Key`-hashset scan. Probe each PRESENT value against an
+        // `FxHashSet<i64>` of the Int64 needles; a missing value ⇒ false (== the generic
+        // `key_of` of a missing value being `None` ⇒ not-in-set; this impl treats
+        // `missing.isin(..)` as false regardless of the needles, matching the other typed
+        // arms, NOT pandas' NaN-in-list rule). Output is all-valid Bool. `validity.get` false
+        // short-circuits without probing.
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let mut set: FxHashSet<i64> = FxHashSet::default();
+            for n in needles {
+                if let Scalar::Int64(v) = n {
+                    set.insert(*v);
+                }
+            }
+            let out: Vec<bool> = (0..data.len())
+                .map(|i| validity.get(i) && set.contains(&data[i]))
+                .collect();
+            return Ok(Self::from_bool_values(out));
+        }
+
         // Contiguous-Utf8 fast path (cardinality/dedup-vein sibling of
         // unique/value_counts/nunique/mode/duplicated): the generic scan below
         // iterates `&self.values`, forcing `as_slice()` to materialize a
@@ -33222,6 +33246,61 @@ mod tests {
                     let cold = col_cold.isin(needles).expect("cold isin");
                     let warm = col_warm.isin(needles).expect("warm isin");
                     assert_eq!(cold.values(), warm.values(), "trial {trial}");
+                }
+            }
+        }
+
+        #[test]
+        fn isin_nullable_i64_typed_matches_reference() {
+            // The typed nullable-Int64 isin arm must match FP's isin spec exactly: output is
+            // all-valid Bool; a PRESENT value is `true` iff its i64 is one of the Int64 needles;
+            // a MISSING value is `false` regardless of the needles (this impl, not pandas'
+            // NaN-in-list rule). Null / Float64(int-valued) / Utf8 needles are inert against an
+            // Int64 value. ~30% nulls; i64::MIN/MAX included. Reference is hand-computed.
+            let mut state: u64 = 0x1519_15EE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let n = (next() % 300) as usize;
+                let mut data = vec![0i64; n];
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut vbits = vec![true; n];
+                for i in 0..n {
+                    if next() % 3 == 0 {
+                        validity.set(i, false);
+                        vbits[i] = false;
+                    } else {
+                        // small alphabet ⇒ frequent membership hits
+                        data[i] = (next() % 40) as i64 - 20;
+                    }
+                }
+                let col = Column::from_i64_values_with_validity(data.clone(), validity);
+                let needle_variants: [Vec<Scalar>; 3] = [
+                    vec![],
+                    vec![
+                        Scalar::Int64(0),
+                        Scalar::Int64(5),
+                        Scalar::Int64(-10),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(5.0), // inert vs Int64 value
+                        Scalar::Utf8("5".to_string()), // inert
+                    ],
+                    vec![Scalar::Int64(-20), Scalar::Int64(19)],
+                ];
+                for needles in &needle_variants {
+                    let int_needles: Vec<i64> = needles
+                        .iter()
+                        .filter_map(|s| if let Scalar::Int64(v) = s { Some(*v) } else { None })
+                        .collect();
+                    let expected: Vec<Scalar> = (0..n)
+                        .map(|i| Scalar::Bool(vbits[i] && int_needles.contains(&data[i])))
+                        .collect();
+                    let got = col.isin(needles).expect("isin");
+                    assert_eq!(got.values(), expected, "trial {trial} needles {needles:?}");
                 }
             }
         }
