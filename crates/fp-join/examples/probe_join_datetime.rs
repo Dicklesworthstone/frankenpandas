@@ -8,10 +8,15 @@ use fp_types::Scalar;
 fn col_dt(vals: Vec<i64>) -> Column {
     Column::from_values(vals.into_iter().map(Scalar::Datetime64).collect()).unwrap()
 }
-fn build(n: usize, datetime: bool) -> (DataFrame, DataFrame) {
+fn build(n: usize, datetime: bool, plant_nat: bool) -> (DataFrame, DataFrame) {
     let idx = |m: usize| Index::new((0..m as i64).map(IndexLabel::Int64).collect());
-    let lk: Vec<i64> = (0..n as i64).collect(); // ordered unique
-    let rk: Vec<i64> = (0..n as i64).map(|i| i * 2).collect();
+    let mut lk: Vec<i64> = (0..n as i64).collect(); // ordered unique
+    let mut rk: Vec<i64> = (0..n as i64).map(|i| i * 2).collect();
+    if plant_nat {
+        *lk.last_mut().expect("benchmark uses a non-empty left key") = fp_types::Timestamp::NAT;
+        *rk.last_mut().expect("benchmark uses a non-empty right key") =
+            fp_types::Timestamp::NAT;
+    }
     let (lkc, rkc) = if datetime {
         (col_dt(lk), col_dt(rk))
     } else {
@@ -35,10 +40,17 @@ fn build(n: usize, datetime: bool) -> (DataFrame, DataFrame) {
         DataFrame::new_with_column_order(idx(n), rm, vec!["key".into(), "rv".into()]).unwrap();
     (left, right)
 }
-fn bench(name: &str, l: &DataFrame, r: &DataFrame, expected_rows: usize, it: usize) {
+fn bench(
+    name: &str,
+    l: &DataFrame,
+    r: &DataFrame,
+    join_type: JoinType,
+    expected_rows: usize,
+    it: usize,
+) {
     for _ in 0..2 {
         black_box(
-            merge_dataframes_on(l, r, &["key"], JoinType::Inner)
+            merge_dataframes_on(l, r, &["key"], join_type)
                 .unwrap()
                 .index
                 .len(),
@@ -49,7 +61,7 @@ fn bench(name: &str, l: &DataFrame, r: &DataFrame, expected_rows: usize, it: usi
     for _ in 0..it {
         let start = Instant::now();
         let rows = black_box(
-            merge_dataframes_on(l, r, &["key"], JoinType::Inner)
+            merge_dataframes_on(l, r, &["key"], join_type)
                 .unwrap()
                 .index
                 .len(),
@@ -67,11 +79,56 @@ fn bench(name: &str, l: &DataFrame, r: &DataFrame, expected_rows: usize, it: usi
 }
 fn main() {
     let n = 200_000usize;
-    let expected_rows = n.div_ceil(2);
-    let (li, ri) = build(n, false);
-    bench("inner_int64_control_a", &li, &ri, expected_rows, 7);
-    bench("inner_int64_control_b", &li, &ri, expected_rows, 7);
-    let (ld, rd) = build(n, true);
-    bench("inner_datetime_key_a", &ld, &rd, expected_rows, 7);
-    bench("inner_datetime_key_b", &ld, &rd, expected_rows, 7);
+    let expected_rows = n;
+    let (li, ri) = build(n, false, false);
+    bench(
+        "left_int64_control_a",
+        &li,
+        &ri,
+        JoinType::Left,
+        expected_rows,
+        7,
+    );
+    bench(
+        "left_int64_control_b",
+        &li,
+        &ri,
+        JoinType::Left,
+        expected_rows,
+        7,
+    );
+    let (reference_left, reference_right) = build(n, true, true);
+    bench(
+        "left_datetime_scalar_ref_a",
+        &reference_left,
+        &reference_right,
+        JoinType::Left,
+        expected_rows,
+        7,
+    );
+    bench(
+        "left_datetime_scalar_ref_b",
+        &reference_left,
+        &reference_right,
+        JoinType::Left,
+        expected_rows,
+        7,
+    );
+    let (ld, rd) = build(n, true, false);
+    bench(
+        "left_datetime_key_a",
+        &ld,
+        &rd,
+        JoinType::Left,
+        expected_rows,
+        7,
+    );
+    bench(
+        "left_datetime_key_b",
+        &ld,
+        &rd,
+        JoinType::Left,
+        expected_rows,
+        7,
+    );
 }

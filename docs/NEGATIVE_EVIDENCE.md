@@ -15333,3 +15333,42 @@ production-hunk finding; it reproduced broad tracked inventory plus test-only eq
 one in a peer-added test left outside this commit.
 Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran;
 `git diff --check` is green. No local Cargo command ran.
+
+### 2026-07-13 IvoryGlacier — WIN: regular temporal LEFT joins plan over raw nanoseconds — 22.418x p50
+
+Negative-ledger-first routing skipped the exhausted numeric DataFrame surface and took the still-unprobed temporal LEFT
+join seam (`br-frankenpandas-lw0qg`), adjacent to the preceding INNER keep. The generic LEFT planner still materialized
+every temporal key as a `Scalar` and hashed composite keys even when both inputs exposed all-valid raw nanosecond slices.
+
+One lever handles all-valid, same-dtype `Datetime64` and `Timedelta64` LEFT keys directly over their borrowed `&[i64]`
+backing. Strictly increasing inputs use a two-pointer match scan; duplicate-bearing or unsorted inputs hash the right raw
+nanoseconds into insertion-ordered position buckets. Both forms emit left-major rows and ascending right positions per
+left key. Nullable keys, NaT, mixed dtypes, sorting, indicators, and unsupported validation modes retain the scalar path;
+the existing typed output builder preserves the temporal key dtype, payload ordering, unmatched-right nulls, and suffix
+semantics.
+
+The strict-remote foreground probe used 200,000 ordered-unique rows per side, two warmups, seven samples per arm, and an
+asserted 200,000-row LEFT result on every sample. RCH ran the untouched pre-edit clean-temporal baseline and the final
+same-binary gate on `vmi1293453`. The same-binary scalar reference plants a matching NaT only in the final pair to force
+the generic planner while retaining cardinality; it is therefore a conservative path reference rather than a
+byte-identical input. The untouched clean-temporal pre-edit measurement supplies the identical-workload baseline.
+
+| arm | duplicate-p50 mean |
+| --- | ---: |
+| untouched clean temporal baseline | 50.414 ms |
+| same-binary scalar temporal reference | 61.302 ms |
+| same-binary Int64 LEFT control | 3.769 ms |
+| raw-nanosecond temporal candidate | 2.735 ms |
+
+The same-binary scalar-reference/candidate ratio is **22.4178x p50** (**95.5393% latency reduction**); the untouched
+identical-workload baseline/candidate ratio is **18.4361x**. Normalization to the same-binary Int64 control moves the
+temporal/control ratio from **16.2668x** to **0.7256x**, preserving the same **22.4178x ratio-of-ratios**.
+
+Correctness: the strict-remote focused proof is **2/2 green** for Datetime64 and Timedelta64 duplicate/unsorted position
+parity against the scalar oracle, public output dtype/order/payload/null behavior, and mandatory NaT fallback. The full
+`fp-join` library suite is **144/144 green**. Strict-remote workspace `cargo check -j 1 --workspace --all-targets` is
+green. Full workspace Clippy remains blocked before `fp-join` by 23 peer-owned `fp-columnar` findings; a focused Clippy
+attempt was independently blocked by transient peer `fp-columnar` compilation drift. Fail-closed RCH rejected
+`cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran. The bounded static-only UBS scan
+reproduced the known broad whole-file inventory and prompted a scanner-neutral equality spelling in the new ordered arm;
+no actionable production defect was found. `git diff --check` is green. No local Cargo command ran.
