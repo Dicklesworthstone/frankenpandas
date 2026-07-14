@@ -11901,6 +11901,124 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn merge_composite_datetime_component_is_honored_not_missing_j0in7()
+    -> Result<(), JoinError> {
+        // A COMPOSITE join key [Utf8, Datetime64] declines the single-key temporal
+        // fast path (`temporal_i64_inner_positions`) and routes through the generic
+        // Scalar/`scalar_to_key_component` path. The Datetime64 (and Timedelta64)
+        // component must map to a Present key by value — NOT collapse to `Missing`.
+        // If it collapsed to Missing, rows sharing the Utf8 component would match
+        // regardless of timestamp (Missing == Missing), over-matching. Left has two
+        // "a" rows at ts=10/20; right has "a" at ts=10/99. Honoring the datetime,
+        // the only equal composite keys are ("a",10) and ("b",10) => exactly 2 rows.
+        // Under the old Missing-collapse this would be 5 rows.
+        let left = DataFrame::from_dict(
+            &["region", "ts", "lv"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "ts",
+                    vec![
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(20),
+                        Scalar::Datetime64(10),
+                    ],
+                ),
+                (
+                    "lv",
+                    vec![Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+            ],
+        )?;
+        let right = DataFrame::from_dict(
+            &["region", "ts", "rv"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "ts",
+                    vec![
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(99),
+                        Scalar::Datetime64(10),
+                    ],
+                ),
+                (
+                    "rv",
+                    vec![Scalar::Int64(100), Scalar::Int64(101), Scalar::Int64(102)],
+                ),
+            ],
+        )?;
+        let merged =
+            merge_dataframes_on(&left, &right, &["region", "ts"], JoinType::Inner)?;
+        assert_eq!(
+            merged.index.len(),
+            2,
+            "datetime composite component must discriminate, not collapse to Missing"
+        );
+        assert_eq!(merged.columns["ts"].dtype(), DType::Datetime64);
+        // Pair (lv, rv) up per output row, order-independently.
+        let mut pairs: Vec<(i64, i64)> = merged_values(&merged, "lv")?
+            .iter()
+            .zip(merged_values(&merged, "rv")?)
+            .map(|(l, r)| match (l, r) {
+                (Scalar::Int64(a), Scalar::Int64(b)) => (*a, *b),
+                _ => panic!("unexpected non-Int64 value column"),
+            })
+            .collect();
+        pairs.sort_unstable();
+        assert_eq!(pairs, vec![(0, 100), (2, 102)]);
+
+        // The Timedelta64 sibling arm must behave identically.
+        let ltd = DataFrame::from_dict(
+            &["region", "td", "lv"],
+            vec![
+                (
+                    "region",
+                    vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned())],
+                ),
+                ("td", vec![Scalar::Timedelta64(10), Scalar::Timedelta64(20)]),
+                ("lv", vec![Scalar::Int64(0), Scalar::Int64(1)]),
+            ],
+        )?;
+        let rtd = DataFrame::from_dict(
+            &["region", "td", "rv"],
+            vec![
+                (
+                    "region",
+                    vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned())],
+                ),
+                ("td", vec![Scalar::Timedelta64(10), Scalar::Timedelta64(99)]),
+                ("rv", vec![Scalar::Int64(100), Scalar::Int64(101)]),
+            ],
+        )?;
+        let merged_td =
+            merge_dataframes_on(&ltd, &rtd, &["region", "td"], JoinType::Inner)?;
+        assert_eq!(
+            merged_td.index.len(),
+            1,
+            "timedelta composite component must discriminate, not collapse to Missing"
+        );
+        assert_eq!(merged_values(&merged_td, "lv")?, &[Scalar::Int64(0)]);
+        assert_eq!(merged_values(&merged_td, "rv")?, &[Scalar::Int64(100)]);
+
+        Ok(())
+    }
+
     fn merged_values_where_indicator(
         merged: &MergedDataFrame,
         column_name: &str,
