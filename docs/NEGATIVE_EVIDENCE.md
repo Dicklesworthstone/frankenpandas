@@ -15334,6 +15334,39 @@ one in a peer-added test left outside this commit.
 Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran;
 `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — BENCH-COST PROHIBITIVE: dense Int64 `groupby_min` raw-slice bypass
+
+Negative-ledger-first routing ran `bv --robot-triage`, then rejected its old index-gather and generic-FxHashMap quick
+wins because the ledger records those families as already landed or measured dead ends. The preceding dense Int64
+`groupby_mean` raw-slice keep remained strong at 10.956x, so this turn took the unledgered min sibling
+(`br-frankenpandas-sj6d1`) rather than forcing a weaker subsystem pivot.
+
+Attribution found that identity-aligned, all-valid Int64 `groupby_min` materialized both complete input columns through
+`Series::values()` before entering the existing dense direct-address fold, despite both raw slices already being
+available. That is 2N avoidable `Scalar` constructions/reads before a one-slot-per-group minimum. The opportunity score
+was 4 impact × 5 confidence / 2 effort = **10**. A strict-remote normal-release instrumentation run was admitted on
+`vmi1227854` but returned RCH exit 125 before reaching the timed body; it is invalid timing, not baseline evidence.
+
+The one lever admits only identity-aligned `AggFunc::Min` calls whose key and value columns expose all-valid Int64
+slices and whose key span fits the existing dense-range bound. It preserves strict-less-than replacement, Int64 output,
+and first-seen or sorted key order. Aligned, nullable, non-Int64, and wide-range inputs retain the former scalar path.
+
+The final strict-remote foreground probe requested one normal-release binary, 100,000 rows, 1,000 groups, two warmups,
+ten alternating samples per duplicate arm, exact output/index parity preflight, and a 180-second hard process cap. RCH
+selected `vmi1152480` and compiled through `fp-groupby`, but returned exit 125 before the binary or timed body ran. No
+samples were produced. This followed the attribution attempt's identical failure mode on `vmi1227854`; neither run is
+performance evidence.
+
+Result: **NO-SHIP — BENCH-COST PROHIBITIVE under the current non-persistent RCH normal-release cache behavior**. The
+production fast path and candidate-only test were removed. The small-input same-binary A/B harness remains as the exact
+retry surface; retry only when the release pool can reach execution inside the cap.
+
+Correctness: the strict-remote helper/public-path proof is **1/1 green** for exact parity in sorted and first-seen
+order, duplicate keys, extreme Int64 values, and empty, length-mismatch, and wide-span fallback behavior. Strict-remote
+focused `fp-groupby --all-targets --no-deps -D warnings` Clippy is green on `vmi1227854`. Direct Rustfmt and
+`git diff --check` are green. The bounded static-only UBS scan reports **0 critical** while reproducing the broad
+pre-existing inventory. These gates covered the candidate before its removal. No local Cargo command ran.
+
 ### 2026-07-14 IvoryGlacier — WIN: dense Int64 `groupby_mean` scans raw slices — 10.956x p50
 
 Negative-ledger-first routing rejected the top `bv --robot-triage` performance picks because their stated levers were
