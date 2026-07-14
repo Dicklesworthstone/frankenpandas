@@ -22398,7 +22398,8 @@ impl Column {
         // iff its i64 was seen earlier (FxHashSet<i64>); a MISSING value is a duplicate iff any
         // earlier row was also missing (single `seen_null` bucket == the generic grouping all
         // missing under `Key::Null`). Output all-valid Bool. Bit-identical to the generic
-        // "first" pass. Non-first policies keep the generic path.
+        // "first" pass. The reverse-scan "last" sibling follows below; keep=False
+        // deliberately retains the generic two-set path.
         if matches!(policy, DupPolicy::First)
             && self.dtype == DType::Int64
             && let Some((data, validity)) = self.as_i64_slice_with_validity()
@@ -22416,6 +22417,28 @@ impl Column {
                     }
                 })
                 .collect();
+            return Ok(Self::from_bool_values(out));
+        }
+
+        // Nullable Int64, "last" policy: mirror the typed first-seen scan above
+        // in reverse. Present values share their raw i64 bucket, while every
+        // missing row shares one null bucket, exactly as the generic Key scan.
+        if matches!(policy, DupPolicy::Last)
+            && self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let mut seen: FxHashSet<i64> = FxHashSet::default();
+            let mut seen_null = false;
+            let mut out = vec![false; data.len()];
+            for idx in (0..data.len()).rev() {
+                out[idx] = if validity.get(idx) {
+                    !seen.insert(data[idx])
+                } else {
+                    let dup = seen_null;
+                    seen_null = true;
+                    dup
+                };
+            }
             return Ok(Self::from_bool_values(out));
         }
 
@@ -35079,6 +35102,203 @@ mod tests {
                     .collect();
                 assert_eq!(got.values(), expected, "trial {trial}");
             }
+        }
+
+        #[test]
+        fn duplicated_nullable_i64_last_typed_matches_reference_a9zs0() {
+            let cases = [
+                vec![None],
+                vec![None, None],
+                vec![Some(4), None, Some(4), None, Some(-2), Some(4)],
+                vec![
+                    Some(i64::MIN),
+                    Some(i64::MAX),
+                    None,
+                    Some(i64::MIN),
+                    None,
+                    Some(i64::MAX),
+                ],
+            ];
+
+            for (case_idx, case) in cases.into_iter().enumerate() {
+                let mut data = vec![0; case.len()];
+                let mut validity = crate::ValidityMask::all_valid(case.len());
+                for (idx, value) in case.iter().enumerate() {
+                    if let Some(value) = value {
+                        data[idx] = *value;
+                    } else {
+                        validity.set(idx, false);
+                    }
+                }
+                let col = Column::from_i64_values_with_validity(data, validity);
+                let got = col
+                    .duplicated_keep("last")
+                    .expect("nullable Int64 last-duplicate flags");
+                let mut seen = std::collections::HashSet::new();
+                let mut expected = vec![Scalar::Bool(false); case.len()];
+                for idx in (0..case.len()).rev() {
+                    expected[idx] = Scalar::Bool(!seen.insert(case[idx]));
+                }
+
+                assert_eq!(got.values(), expected, "case {case_idx}");
+                assert!(matches!(
+                    &col.values,
+                    ScalarValues::LazyNullableInt64 { .. }
+                ));
+                if let ScalarValues::LazyNullableInt64 { values, .. } = &col.values {
+                    assert!(
+                        values.get().is_none(),
+                        "case {case_idx}: typed last scan must not materialize Scalar values",
+                    );
+                }
+            }
+        }
+
+        #[derive(Hash, PartialEq, Eq)]
+        enum NullableI64DupKeyA9zs0 {
+            Null,
+            Int64(i64),
+        }
+
+        fn duplicated_nullable_i64_last_former_body_a9zs0(col: &Column) -> Column {
+            let mut flags = vec![false; col.values.len()];
+            let mut seen: rustc_hash::FxHashSet<NullableI64DupKeyA9zs0> =
+                rustc_hash::FxHashSet::default();
+            for (idx, value) in col.values.iter().enumerate().rev() {
+                let key = if value.is_missing() {
+                    NullableI64DupKeyA9zs0::Null
+                } else {
+                    match value {
+                        Scalar::Int64(value) => NullableI64DupKeyA9zs0::Int64(*value),
+                        _ => NullableI64DupKeyA9zs0::Null,
+                    }
+                };
+                flags[idx] = !seen.insert(key);
+            }
+            let out = flags.into_iter().map(Scalar::Bool).collect();
+            Column::new(DType::Bool, out).expect("former duplicate flags")
+        }
+
+        fn nullable_i64_dup_input_a9zs0(len: usize) -> (Vec<i64>, ValidityMask) {
+            let mut state = 0xA9_2507_1A57_D0B1u64;
+            let mut data = vec![0; len];
+            let mut validity = ValidityMask::all_valid(len);
+            for (idx, value) in data.iter_mut().enumerate() {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                if (state >> 40).is_multiple_of(3) {
+                    validity.set(idx, false);
+                } else {
+                    *value = ((state >> 20) % 250_000) as i64 - 125_000;
+                }
+            }
+            if len > 0 {
+                validity.set(0, false);
+            }
+            (data, validity)
+        }
+
+        fn assert_nullable_i64_unmaterialized_a9zs0(col: &Column) {
+            assert!(matches!(
+                &col.values,
+                ScalarValues::LazyNullableInt64 { .. }
+            ));
+            if let ScalarValues::LazyNullableInt64 { values, .. } = &col.values {
+                assert!(values.get().is_none());
+            }
+        }
+
+        fn median_nanos_a9zs0(samples: &mut [u128]) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        fn measure_nanos_a9zs0<T>(f: impl FnOnce() -> T) -> u128 {
+            let start = std::time::Instant::now();
+            std::hint::black_box(f());
+            start.elapsed().as_nanos()
+        }
+
+        #[test]
+        #[ignore = "perf A/B; run with --ignored --nocapture"]
+        fn duplicated_nullable_i64_last_ab_a9zs0() {
+            const LEN: usize = 1_000_000;
+            const SAMPLES: usize = 15;
+            let (data, validity) = nullable_i64_dup_input_a9zs0(LEN);
+            let reference_a =
+                Column::from_i64_values_with_validity(data.clone(), validity.clone());
+            let reference_b =
+                Column::from_i64_values_with_validity(data.clone(), validity.clone());
+            let candidate_a =
+                Column::from_i64_values_with_validity(data.clone(), validity.clone());
+            let candidate_b = Column::from_i64_values_with_validity(data, validity);
+
+            let former = duplicated_nullable_i64_last_former_body_a9zs0(&reference_a);
+            let witness = candidate_a
+                .duplicated_keep("last")
+                .expect("typed last-duplicate flags");
+            assert_eq!(former.values(), witness.values());
+            assert_nullable_i64_unmaterialized_a9zs0(&candidate_a);
+
+            for _ in 0..3 {
+                std::hint::black_box(duplicated_nullable_i64_last_former_body_a9zs0(
+                    &reference_a,
+                ));
+                std::hint::black_box(duplicated_nullable_i64_last_former_body_a9zs0(
+                    &reference_b,
+                ));
+                std::hint::black_box(candidate_a.duplicated_keep("last").unwrap());
+                std::hint::black_box(candidate_b.duplicated_keep("last").unwrap());
+            }
+
+            let mut former_a = Vec::with_capacity(SAMPLES);
+            let mut former_b = Vec::with_capacity(SAMPLES);
+            let mut typed_a = Vec::with_capacity(SAMPLES);
+            let mut typed_b = Vec::with_capacity(SAMPLES);
+            for sample in 0..SAMPLES {
+                if sample.is_multiple_of(2) {
+                    former_a.push(measure_nanos_a9zs0(|| {
+                        duplicated_nullable_i64_last_former_body_a9zs0(&reference_a)
+                    }));
+                    typed_a.push(measure_nanos_a9zs0(|| {
+                        candidate_a.duplicated_keep("last").unwrap()
+                    }));
+                    typed_b.push(measure_nanos_a9zs0(|| {
+                        candidate_b.duplicated_keep("last").unwrap()
+                    }));
+                    former_b.push(measure_nanos_a9zs0(|| {
+                        duplicated_nullable_i64_last_former_body_a9zs0(&reference_b)
+                    }));
+                } else {
+                    former_b.push(measure_nanos_a9zs0(|| {
+                        duplicated_nullable_i64_last_former_body_a9zs0(&reference_b)
+                    }));
+                    typed_b.push(measure_nanos_a9zs0(|| {
+                        candidate_b.duplicated_keep("last").unwrap()
+                    }));
+                    typed_a.push(measure_nanos_a9zs0(|| {
+                        candidate_a.duplicated_keep("last").unwrap()
+                    }));
+                    former_a.push(measure_nanos_a9zs0(|| {
+                        duplicated_nullable_i64_last_former_body_a9zs0(&reference_a)
+                    }));
+                }
+            }
+
+            let former_a_p50 = median_nanos_a9zs0(&mut former_a);
+            let former_b_p50 = median_nanos_a9zs0(&mut former_b);
+            let typed_a_p50 = median_nanos_a9zs0(&mut typed_a);
+            let typed_b_p50 = median_nanos_a9zs0(&mut typed_b);
+            let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
+            let typed_mean = (typed_a_p50 + typed_b_p50) as f64 / 2.0;
+
+            println!("nullable Int64 duplicated(last), len={LEN}, samples={SAMPLES}");
+            println!("former generic p50 A/B: {former_a_p50} / {former_b_p50} ns");
+            println!("typed reverse p50 A/B: {typed_a_p50} / {typed_b_p50} ns");
+            println!("former/typed p50 ratio: {:.3}x", former_mean / typed_mean);
+            assert_nullable_i64_unmaterialized_a9zs0(&candidate_a);
+            assert_nullable_i64_unmaterialized_a9zs0(&candidate_b);
         }
 
         #[test]
