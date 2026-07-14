@@ -89,6 +89,15 @@ fn legacy_get_loc_reindex_checksum(source: &RangeIndex, targets: &[i64]) -> isiz
     checksum
 }
 
+fn former_range_prod(source: &RangeIndex) -> i64 {
+    let mut total: i128 = 1;
+    for position in 0..source.len() {
+        let value = i128::from(source.start()) + (position as i128) * i128::from(source.step());
+        total = total.saturating_mul(value);
+    }
+    i64::try_from(total).unwrap_or(if total > 0 { i64::MAX } else { i64::MIN })
+}
+
 fn bench_range_index_indexers(c: &mut Criterion) {
     let mut group = c.benchmark_group("range_index_indexers");
     for &size in SIZES {
@@ -180,9 +189,24 @@ fn bench_range_index_values(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_range_index_prod(c: &mut Criterion) {
+    let source = RangeIndex::new(1, 10_001, 1).expect("valid positive range");
+    assert_eq!(source.prod(), former_range_prod(&source));
+
+    let mut group = c.benchmark_group("range_index_prod");
+    group.bench_function("former_full_scan_10000", |b| {
+        b.iter(|| black_box(former_range_prod(black_box(&source))));
+    });
+    group.bench_function("candidate_positive_saturation_10000", |b| {
+        b.iter(|| black_box(black_box(&source).prod()));
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_range_index_indexers,
-    bench_range_index_values
+    bench_range_index_values,
+    bench_range_index_prod
 );
 criterion_main!(benches);

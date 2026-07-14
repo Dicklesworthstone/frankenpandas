@@ -16289,6 +16289,44 @@ and `git diff --check` are green. The bounded 180-second UBS scan reproduced the
 stall without emitting a focused finding. Those checks establish semantic feasibility only, not a performance verdict.
 No local Cargo command ran, no `release-perf` build ran, and strict RCH never fell back locally.
 
+### 2026-07-14 IvoryGlacier — WIN: positive RangeIndex product stops at observable saturation — 572.876x
+
+After the `fp-frame` inline-test benchmark was closed as cost-prohibitive, this pass pivoted to a different crate and
+reduction family (`br-frankenpandas-e87gz`). The negative ledger contains RangeIndex sum/median/var/diff/value and indexer
+rows but no `RangeIndex::prod` row. For an all-positive `RangeIndex(1, 10001, 1)`, the public i64 result becomes
+permanently `i64::MAX` at `21!`, while the former implementation still executes the remaining **9,979 of 10,000**
+widened value calculations and saturating multiplications. Those observably inert iterations are **99.79%** of the loop,
+so the opportunity score was `impact 3 * confidence 5 / effort 1 = 15`.
+
+The one lever checks the already-closed-form first and last values. Only when both are strictly positive does it return
+`i64::MAX` as soon as the positive running product exceeds that bound. Before the threshold the accumulator cannot
+overflow i128 because both operands fit i64. Empty, zero-bearing, mixed-sign, and all-negative ranges retain the former
+saturating-i128 loop verbatim; positive non-overflowing ranges return the same exact product. Range dtype, order, name,
+materialization state, floating-point state, and RNG are untouched.
+
+The single final foreground Criterion comparison used one normal-`release` binary on `vmi1152480`, the 10,000-value
+positive range, an exact former-body transcription in the same binary, and the hard-bounded command-line settings
+`--measurement-time 1 --warm-up-time 1 --sample-size 10` under a 180-second outer timeout.
+
+| same-binary `RangeIndex::prod` | Criterion estimate |
+| --- | ---: |
+| former full 10,000-row scan | [33.354, **37.438**, 41.652] us |
+| positive-saturation candidate | [57.070, **65.351**, 84.929] ns |
+
+The central estimates give a **572.876x speedup** and **99.8254% latency reduction**. Even the deliberately pessimistic
+former-low/candidate-high endpoint ratio is **392.733x**, so the separation dwarfs the two high outliers reported in each
+10-sample arm. **KEEP.** The entire strict-remote invocation, including RCH sync, a fresh normal-release build, both
+one-second warmups, both one-second measurement windows, analysis, and artifact retrieval, returned in **110.4 seconds**
+under the three-minute cap. This was the only final timing run; no `release-perf` build ran.
+
+Correctness is strict-remote: the focused product set is **2 passed / 0 failed**, including the existing pandas-contract
+test and a former-body differential across empty, small/large positive ascending, positive descending, zero/mixed-sign,
+all-negative, and near-`i64::MAX` ranges. Scoped `fp-index --all-targets --no-deps -D warnings` Clippy is green. Direct
+Rustfmt reports only tracked pre-existing drift elsewhere in `fp-index/src/lib.rs`; neither touched source hunk appears,
+and the changed Criterion file plus `git diff --check` are clean. Bounded UBS reports its broad existing inventory and
+the pre-existing benchmark-only `panic!` at line 75, with no finding on the lever; its shadow fmt/check/test subchecks are
+green. All agent-invoked Cargo commands ran through strict-remote RCH; no `release-perf` build ran.
+
 ### 2026-07-13 IvoryGlacier — WIN: affine Datetime64 monotonic predicates read their witness — 2132.524x p50
 
 Negative-ledger-first routing found affine Datetime64 construction, search, and frequency keeps but no monotonicity row.

@@ -12041,6 +12041,20 @@ impl RangeIndex {
     /// returns 1; saturating to i64 on overflow.
     #[must_use]
     pub fn prod(&self) -> i64 {
+        if self
+            .first_last()
+            .is_some_and(|(first, last)| first > 0 && last > 0)
+        {
+            let mut total: i128 = 1;
+            for position in 0..self.len() {
+                total *= i128::from(self.value_at(position));
+                if total > i128::from(i64::MAX) {
+                    return i64::MAX;
+                }
+            }
+            return total as i64;
+        }
+
         let mut total: i128 = 1;
         for position in 0..self.len() {
             let v = self.value_at(position);
@@ -28375,6 +28389,29 @@ mod tests {
 
         let overflow = super::RangeIndex::new(i64::MAX, i64::MAX - 2, -1).unwrap();
         assert_eq!(overflow.prod(), i64::MAX);
+    }
+
+    #[test]
+    fn range_index_prod_positive_saturation_matches_former_e87gz() {
+        fn former(range: &super::RangeIndex) -> i64 {
+            let mut total: i128 = 1;
+            for position in 0..range.len() {
+                total = total.saturating_mul(i128::from(range.value_at(position)));
+            }
+            i64::try_from(total).unwrap_or(if total > 0 { i64::MAX } else { i64::MIN })
+        }
+
+        for range in [
+            super::RangeIndex::new(0, 0, 1).unwrap(),
+            super::RangeIndex::new(1, 10, 1).unwrap(),
+            super::RangeIndex::new(1, 10_001, 1).unwrap(),
+            super::RangeIndex::new(10_000, 0, -1).unwrap(),
+            super::RangeIndex::new(-3, 4, 1).unwrap(),
+            super::RangeIndex::new(-1, -30, -1).unwrap(),
+            super::RangeIndex::new(i64::MAX - 4, i64::MAX, 1).unwrap(),
+        ] {
+            assert_eq!(range.prod(), former(&range));
+        }
     }
 
     #[test]
