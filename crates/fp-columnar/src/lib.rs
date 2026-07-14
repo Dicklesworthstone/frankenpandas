@@ -19553,6 +19553,30 @@ impl Column {
                     .collect();
                 return Ok(Self::from_i64_values_owned(out));
             }
+            // Nullable Int64 self+other (all-valid cond): the all-valid `as_i64_slice` arm
+            // above needs BOTH sides all-valid, so any nullable Int64 operand fell to the
+            // Scalar loop. Read both raw i64 buffers + validity: cond-true ⇒ self[i], false ⇒
+            // other[i]; a taken present slot keeps its datum, a taken missing slot clears the
+            // bit. Int64 has no NaN so "present" is the validity bit alone; all-valid cond ⇒
+            // no cond-missing. Bit-identical (missing Int64 ⇒ Null(Null) in both paths).
+            if self.dtype == DType::Int64
+                && other.dtype == DType::Int64
+                && let (Some((sd, sv)), Some((od, ov))) =
+                    (self.as_i64_slice_with_validity(), other.as_i64_slice_with_validity())
+            {
+                let n = sd.len();
+                let mut out = vec![0_i64; n];
+                let mut vmask = ValidityMask::all_valid(n);
+                for i in 0..n {
+                    let (d, v) = if cb[i] { (sd, sv) } else { (od, ov) };
+                    if v.get(i) {
+                        out[i] = d[i];
+                    } else {
+                        vmask.set(i, false);
+                    }
+                }
+                return Ok(Self::from_i64_values_with_validity(out, vmask));
+            }
             // Typed temporal self+other of the SAME dtype (all-valid OR nullable), all-valid
             // cond. Generic loop materializes Vec<Scalar> + a cast_scalar per row. Select over
             // the raw &[i64] ns via temporal_i64_backing: cond-true ⇒ self[i], cond-false ⇒
@@ -19624,6 +19648,27 @@ impl Column {
                     .map(|i| if cb[i] { o[i] } else { s[i] })
                     .collect();
                 return Ok(Self::from_i64_values_owned(out));
+            }
+            // Nullable Int64 self+other (all-valid cond) — inverse of the where_cond_series
+            // nullable-Int64 arm: cond-true ⇒ other[i], cond-false ⇒ self[i]; a taken present
+            // slot keeps its datum, a taken missing slot clears the bit. Bit-identical.
+            if self.dtype == DType::Int64
+                && other.dtype == DType::Int64
+                && let (Some((sd, sv)), Some((od, ov))) =
+                    (self.as_i64_slice_with_validity(), other.as_i64_slice_with_validity())
+            {
+                let n = sd.len();
+                let mut out = vec![0_i64; n];
+                let mut vmask = ValidityMask::all_valid(n);
+                for i in 0..n {
+                    let (d, v) = if cb[i] { (od, ov) } else { (sd, sv) };
+                    if v.get(i) {
+                        out[i] = d[i];
+                    } else {
+                        vmask.set(i, false);
+                    }
+                }
+                return Ok(Self::from_i64_values_with_validity(out, vmask));
             }
             // Typed temporal self+other same dtype (all-valid OR nullable), all-valid cond —
             // inverse of the where_cond_series temporal arm: cond-true ⇒ other[i], cond-false ⇒
@@ -41133,6 +41178,53 @@ mod tests {
                     let me = s_eager.mask_series(&cond, &o_eager).expect("eager mask_series");
                     assert_eq!(mt.values(), me.values(), "is_dt={is_dt} mask_series trial {trial}");
                 }
+            }
+        }
+
+        #[test]
+        fn where_mask_series_nullable_i64_typed_matches_generic() {
+            // The typed nullable-Int64 where_cond_series/mask_series arms (col-vs-col other,
+            // any nullable Int64 operand, all-valid cond) must be BIT-EXACT to the generic
+            // clone/cast select. A/B: typed self+other (from_i64_values_with_validity) vs
+            // eager (Column::new). ~30% nulls each side; i64::MIN/MAX exercise extremes.
+            let mut state: u64 = 0x171E_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let build = |n: usize, next: &mut dyn FnMut() -> u64| -> (Column, Column) {
+                let mut data = vec![0i64; n];
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut eager: Vec<Scalar> = Vec::with_capacity(n);
+                for i in 0..n {
+                    if next() % 3 == 0 {
+                        validity.set(i, false);
+                        eager.push(Scalar::Null(NullKind::Null));
+                    } else {
+                        let v = (next() % 10_000) as i64 - 5000;
+                        data[i] = v;
+                        eager.push(Scalar::Int64(v));
+                    }
+                }
+                (
+                    Column::from_i64_values_with_validity(data, validity),
+                    Column::new(DType::Int64, eager).expect("eager i64"),
+                )
+            };
+            for trial in 0..150 {
+                let n = (next() % 250) as usize;
+                let (s_typed, s_eager) = build(n, &mut next);
+                let (o_typed, o_eager) = build(n, &mut next);
+                let cbits: Vec<bool> = (0..n).map(|_| next() % 2 == 0).collect();
+                let cond = Column::from_bool_values(cbits);
+                let wt = s_typed.where_cond_series(&cond, &o_typed).expect("typed where");
+                let we = s_eager.where_cond_series(&cond, &o_eager).expect("eager where");
+                assert_eq!(wt.values(), we.values(), "where_series i64 trial {trial}");
+                let mt = s_typed.mask_series(&cond, &o_typed).expect("typed mask");
+                let me = s_eager.mask_series(&cond, &o_eager).expect("eager mask");
+                assert_eq!(mt.values(), me.values(), "mask_series i64 trial {trial}");
             }
         }
 
