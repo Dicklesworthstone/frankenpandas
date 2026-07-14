@@ -12930,30 +12930,34 @@ impl Column {
 
         // Typed TEMPORAL arithmetic fast path — BEFORE the numeric common_dtype/to_f64
         // machinery, which (a) errors: a temporal scalar is not numeric to `to_f64`, so a
-        // present temporal pair hits `Scalar::to_f64()? => Err(NonNumericValue)`, and (b)
+        // present temporal pair hits `Scalar::to_f64()? => Err(NonNumericValue)`; (b)
         // mis-types: common_dtype(Datetime64, Datetime64) = Datetime64, but pandas returns
-        // Timedelta64 for the difference. So `df["end"] - df["start"]` (elapsed duration)
-        // and `td ± td` ERROR today. Handle the pandas-defined same-dtype combos:
-        //   Datetime64 - Datetime64   -> Timedelta64   (elapsed ns)
-        //   Timedelta64 - Timedelta64 -> Timedelta64
-        //   Timedelta64 + Timedelta64 -> Timedelta64
-        // over the raw &[i64] ns with the SAME saturating/NaT-propagating Timedelta::sub/add
-        // the rest of FP uses (Series.diff, reductions) — so byte-consistent with the crate.
+        // Timedelta64 for the difference; and (c) rejects: common_dtype(Datetime64,
+        // Timedelta64) = Err(IncompatibleDtypes) before the body runs. So all temporal
+        // arithmetic ERRORS today. Handle every pandas-defined combo (output dtype VARIES):
+        //   Datetime64  - Datetime64   -> Timedelta64  (elapsed ns)
+        //   Timedelta64 ± Timedelta64  -> Timedelta64
+        //   Datetime64  + Timedelta64  -> Datetime64   (shift a timestamp by a duration)
+        //   Timedelta64 + Datetime64   -> Datetime64   (commutative)
+        //   Datetime64  - Timedelta64  -> Datetime64
+        // The VALUE is uniformly the raw-ns `Timedelta::add`/`Timedelta::sub` (NaT-propagating,
+        // saturating — the SAME helpers the rest of FP uses in Series.diff / reductions /
+        // Timestamp::{add,sub}_timedelta, so byte-consistent); only the OUTPUT dtype differs.
         // A row is missing iff either operand is missing (validity unset OR the NaT sentinel,
-        // which Timedelta::sub/add already fold into a NaT result) => NaT output. Every OTHER
-        // temporal combo (Datetime64 + Datetime64 which pandas raises on; mixed Datetime64
-        // ± Timedelta64; mul/div/mod/pow/floordiv) falls through to the existing path, which
-        // errors or rejects via IncompatibleDtypes — matching pandas raising.
-        let temporal_op = matches!(
-            (self.dtype, right.dtype, op),
-            (DType::Datetime64, DType::Datetime64, ArithmeticOp::Sub)
-                | (
-                    DType::Timedelta64,
-                    DType::Timedelta64,
-                    ArithmeticOp::Sub | ArithmeticOp::Add
-                )
-        );
-        if temporal_op
+        // which add/sub fold into a NaT result). Every OTHER temporal combo — Datetime64 +
+        // Datetime64 (pandas raises), Timedelta64 - Datetime64 (raises), mul/div/mod/pow/
+        // floordiv — falls through to the existing path, which errors / rejects via
+        // IncompatibleDtypes, matching pandas raising.
+        let temporal_out: Option<DType> = match (self.dtype, right.dtype, op) {
+            (DType::Datetime64, DType::Datetime64, ArithmeticOp::Sub) => Some(DType::Timedelta64),
+            (DType::Timedelta64, DType::Timedelta64, ArithmeticOp::Sub | ArithmeticOp::Add) => {
+                Some(DType::Timedelta64)
+            }
+            (DType::Datetime64, DType::Timedelta64, ArithmeticOp::Add | ArithmeticOp::Sub)
+            | (DType::Timedelta64, DType::Datetime64, ArithmeticOp::Add) => Some(DType::Datetime64),
+            _ => None,
+        };
+        if let Some(out_dtype) = temporal_out
             && let (Some((l, lv, _)), Some((r, rv, _))) =
                 (self.temporal_i64_backing(), right.temporal_i64_backing())
         {
@@ -12969,7 +12973,10 @@ impl Column {
                     validity.set(i, false);
                 }
             }
-            return Ok(Self::from_timedelta64_values_with_validity(data, validity));
+            return Ok(match out_dtype {
+                DType::Datetime64 => Self::from_datetime64_values_with_validity(data, validity),
+                _ => Self::from_timedelta64_values_with_validity(data, validity),
+            });
         }
 
         let mut out_dtype = common_dtype(self.dtype, right.dtype)?;
@@ -28410,26 +28417,29 @@ mod tests {
             };
             (col, data, vbits)
         };
-        // (op is Add, dtype_is_dt) -> (label). dt uses Sub only (dt-dt); td uses Add & Sub.
-        let cases: [(bool, bool); 3] = [(false, true), (false, false), (true, false)];
-        for (is_add, is_dt) in cases {
-            let nat = if is_dt {
-                fp_types::Timestamp::NAT
-            } else {
-                fp_types::Timedelta::NAT
-            };
-            for trial in 0..80 {
+        // Every pandas-defined combo: (left_is_dt, right_is_dt, is_add, out_is_dt).
+        let combos: [(bool, bool, bool, bool); 6] = [
+            (true, true, false, false),  // dt - dt -> td
+            (false, false, false, false), // td - td -> td
+            (false, false, true, false),  // td + td -> td
+            (true, false, true, true),    // dt + td -> dt
+            (true, false, false, true),   // dt - td -> dt
+            (false, true, true, true),    // td + dt -> dt
+        ];
+        // NaT sentinel is i64::MIN for both temporal dtypes.
+        let nat = fp_types::Timedelta::NAT;
+        for (l_dt, r_dt, is_add, out_dt) in combos {
+            for trial in 0..60 {
                 let n = (next() % 200) as usize;
                 for nullable in [false, true] {
-                    let (lc, ld, lv) = build(n, nullable, nat, is_dt, &mut next);
-                    let (rc, rd, rv) = build(n, nullable, nat, is_dt, &mut next);
-                    let got = if is_add {
-                        lc.add(&rc)
-                    } else {
-                        lc.sub(&rc)
-                    }
-                    .expect("temporal arith must not error");
-                    assert_eq!(got.dtype(), DType::Timedelta64);
+                    let (lc, ld, lv) = build(n, nullable, nat, l_dt, &mut next);
+                    let (rc, rd, rv) = build(n, nullable, nat, r_dt, &mut next);
+                    let got = if is_add { lc.add(&rc) } else { lc.sub(&rc) }
+                        .expect("temporal arith must not error");
+                    assert_eq!(
+                        got.dtype(),
+                        if out_dt { DType::Datetime64 } else { DType::Timedelta64 }
+                    );
                     let expected: Vec<Scalar> = (0..n)
                         .map(|i| {
                             let v = if is_add {
@@ -28437,17 +28447,19 @@ mod tests {
                             } else {
                                 fp_types::Timedelta::sub(ld[i], rd[i])
                             };
-                            if lv[i] && rv[i] && v != fp_types::Timedelta::NAT {
-                                Scalar::Timedelta64(v)
-                            } else {
+                            if !(lv[i] && rv[i]) || v == fp_types::Timedelta::NAT {
                                 Scalar::Null(NullKind::NaT)
+                            } else if out_dt {
+                                Scalar::Datetime64(v)
+                            } else {
+                                Scalar::Timedelta64(v)
                             }
                         })
                         .collect();
                     assert_eq!(
                         got.values(),
                         expected,
-                        "is_add={is_add} is_dt={is_dt} trial {trial} nullable={nullable}"
+                        "l_dt={l_dt} r_dt={r_dt} is_add={is_add} trial {trial} nullable={nullable}"
                     );
                 }
             }
@@ -28461,7 +28473,8 @@ mod tests {
         );
         assert!(dt.add(&dt2).is_err(), "dt + dt must raise");
         assert!(dt.mul(&dt2).is_err(), "dt * dt must raise");
-        assert!(dt.sub(&td).is_err(), "mixed dt - td must reject (IncompatibleDtypes)");
+        assert!(td.sub(&dt).is_err(), "td - dt must raise (can't subtract a datetime from a duration)");
+        assert!(td.mul(&dt).is_err(), "td * dt must raise");
     }
 
     #[test]

@@ -59,8 +59,28 @@ fn main() {
         (a, b) => println!("td arith err: add={a:?} sub={b:?}"),
     }
 
-    // dt + dt must STILL error (pandas raises).
+    // Mixed dt ± td -> Datetime64.
+    let dtm = Column::from_datetime64_values(vec![base, base + 100]);
+    let tdm = Column::from_timedelta64_values_with_validity(
+        vec![10, 20],
+        fp_columnar::ValidityMask::all_valid(2),
+    );
+    match dtm.add(&tdm) {
+        Ok(o) => println!("dt + td -> dtype={:?} vals={:?} (want Datetime64 [base+10, base+120])", o.dtype(), o.values()),
+        Err(e) => println!("dt + td ERRORED: {e:?}"),
+    }
+    match dtm.sub(&tdm) {
+        Ok(o) => println!("dt - td -> dtype={:?} (want Datetime64)", o.dtype()),
+        Err(e) => println!("dt - td ERRORED: {e:?}"),
+    }
+    match tdm.add(&dtm) {
+        Ok(o) => println!("td + dt -> dtype={:?} (want Datetime64)", o.dtype()),
+        Err(e) => println!("td + dt ERRORED: {e:?}"),
+    }
+
+    // These must STILL error (pandas raises).
     println!("dt + dt is_err = {} (want true)", dt_end.add(&dt_start).is_err());
+    println!("td - dt is_err = {} (want true)", tdm.sub(&dtm).is_err());
 
     // Timing.
     if dt_end.sub(&dt_start).map(|c| c.dtype() == DType::Timedelta64).unwrap_or(false) {
