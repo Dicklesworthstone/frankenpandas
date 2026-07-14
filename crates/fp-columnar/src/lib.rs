@@ -21006,36 +21006,62 @@ impl Column {
         // take the original linear path.
         let strict = bin_edges.windows(2).all(|w| w[0] < w[1]);
 
-        for v in &self.values {
-            if v.is_missing() {
-                continue;
-            }
-            let x = match v.to_f64() {
-                Ok(f) if f.is_finite() => f,
-                _ => continue,
+        {
+            let mut tally = |x: f64| {
+                if strict {
+                    if x >= bin_edges[0] && x <= bin_edges[n_bins] {
+                        let bin =
+                            (bin_edges.partition_point(|&edge| edge <= x) - 1).min(n_bins - 1);
+                        counts[bin] += 1;
+                    }
+                    return;
+                }
+                // Linear scan (non-strict edges fallback).
+                for i in 0..n_bins {
+                    let in_bin = if i == n_bins - 1 {
+                        // Last bin is inclusive on right
+                        x >= bin_edges[i] && x <= bin_edges[i + 1]
+                    } else {
+                        x >= bin_edges[i] && x < bin_edges[i + 1]
+                    };
+                    if in_bin {
+                        counts[i] += 1;
+                        break;
+                    }
+                }
+                // Values outside all bins are not counted (matches numpy).
             };
-            if strict {
-                if x < bin_edges[0] || x > bin_edges[n_bins] {
-                    continue;
+
+            // A cold nullable Float64 column otherwise materializes one Scalar per
+            // row before reaching the already-optimized bin search. Read the raw
+            // f64 buffer plus validity directly: the generic path accepts exactly
+            // validity-set finite values (missing/NaN/inf are skipped). A warm or
+            // different backing retains the generic path, avoiding a regression
+            // when its Scalar cache has already been paid for.
+            if let ScalarValues::LazyNullableFloat64 {
+                data,
+                validity,
+                values,
+            } = &self.values
+                && values.get().is_none()
+            {
+                for (idx, &x) in data.iter().enumerate() {
+                    if validity.get(idx) && x.is_finite() {
+                        tally(x);
+                    }
                 }
-                let bin = (bin_edges.partition_point(|&e| e <= x) - 1).min(n_bins - 1);
-                counts[bin] += 1;
-                continue;
-            }
-            // Linear scan (non-strict edges fallback).
-            for i in 0..n_bins {
-                let in_bin = if i == n_bins - 1 {
-                    // Last bin is inclusive on right
-                    x >= bin_edges[i] && x <= bin_edges[i + 1]
-                } else {
-                    x >= bin_edges[i] && x < bin_edges[i + 1]
-                };
-                if in_bin {
-                    counts[i] += 1;
-                    break;
+            } else {
+                for v in &self.values {
+                    if v.is_missing() {
+                        continue;
+                    }
+                    if let Ok(x) = v.to_f64()
+                        && x.is_finite()
+                    {
+                        tally(x);
+                    }
                 }
             }
-            // Values outside all bins are not counted (matches numpy)
         }
 
         let out: Vec<Scalar> = counts.into_iter().map(Scalar::Int64).collect();
@@ -43789,6 +43815,200 @@ mod tests {
             assert!(python_floor_div_f64(f64::INFINITY, 2.0).is_nan());
             assert!(python_floor_div_f64(f64::NEG_INFINITY, -2.0).is_nan());
             assert!(python_floor_div_f64(f64::INFINITY, f64::INFINITY).is_nan());
+        }
+
+        fn histogram_former_body_wl4jg(
+            col: &Column,
+            bin_edges: &[f64],
+        ) -> Result<Column, ColumnError> {
+            if bin_edges.len() < 2 {
+                return Err(ColumnError::Type(crate::TypeError::NonNumericValue {
+                    value: "histogram requires at least 2 bin edges".to_owned(),
+                    dtype: col.dtype,
+                }));
+            }
+            let n_bins = bin_edges.len() - 1;
+            let mut counts = vec![0i64; n_bins];
+            let strict = bin_edges.windows(2).all(|w| w[0] < w[1]);
+
+            for value in &col.values {
+                if value.is_missing() {
+                    continue;
+                }
+                let x = match value.to_f64() {
+                    Ok(value) if value.is_finite() => value,
+                    _ => continue,
+                };
+                if strict {
+                    if x < bin_edges[0] || x > bin_edges[n_bins] {
+                        continue;
+                    }
+                    let bin =
+                        (bin_edges.partition_point(|&edge| edge <= x) - 1).min(n_bins - 1);
+                    counts[bin] += 1;
+                    continue;
+                }
+                for i in 0..n_bins {
+                    let in_bin = if i == n_bins - 1 {
+                        x >= bin_edges[i] && x <= bin_edges[i + 1]
+                    } else {
+                        x >= bin_edges[i] && x < bin_edges[i + 1]
+                    };
+                    if in_bin {
+                        counts[i] += 1;
+                        break;
+                    }
+                }
+            }
+
+            let out = counts.into_iter().map(Scalar::Int64).collect();
+            Column::new(DType::Int64, out)
+        }
+
+        fn assert_nullable_f64_unmaterialized_wl4jg(col: &Column) {
+            assert!(matches!(
+                &col.values,
+                ScalarValues::LazyNullableFloat64 { .. }
+            ));
+            if let ScalarValues::LazyNullableFloat64 { values, .. } = &col.values {
+                assert!(values.get().is_none());
+            }
+        }
+
+        fn median_nanos_wl4jg(samples: &mut [u128]) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        fn measure_nanos_wl4jg<T>(f: impl FnOnce() -> T) -> u128 {
+            let start = std::time::Instant::now();
+            std::hint::black_box(f());
+            start.elapsed().as_nanos()
+        }
+
+        #[test]
+        fn histogram_nullable_f64_raw_matches_former_wl4jg() {
+            let data = vec![
+                -2.0,
+                -1.0,
+                -0.0,
+                0.0,
+                0.5,
+                1.0,
+                2.0,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                1.5,
+            ];
+            let mut validity = ValidityMask::all_valid(data.len());
+            validity.set(10, false);
+            let reference =
+                Column::from_f64_values_with_validity(data.clone(), validity.clone());
+            let candidate = Column::from_f64_values_with_validity(data, validity);
+
+            for edges in [vec![-1.0, 0.0, 1.0, 2.0], vec![-1.0, 0.0, 0.0, 2.0]] {
+                let former = histogram_former_body_wl4jg(&reference, &edges)
+                    .expect("former nullable Float64 histogram");
+                let got = candidate
+                    .histogram(&edges)
+                    .expect("typed nullable Float64 histogram");
+                assert_eq!(got.values(), former.values(), "edges={edges:?}");
+            }
+            assert_nullable_f64_unmaterialized_wl4jg(&candidate);
+        }
+
+        #[test]
+        #[ignore = "perf A/B; run with --ignored --nocapture"]
+        fn histogram_nullable_f64_ab_wl4jg() {
+            const LEN: usize = 1_000_000;
+            const SAMPLES: usize = 15;
+            let mut state = 0x48_1570_6A4F_6C2Du64;
+            let mut data = vec![0.0; LEN];
+            let mut validity = ValidityMask::all_valid(LEN);
+            for (idx, value) in data.iter_mut().enumerate() {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                if (state >> 40).is_multiple_of(5) {
+                    validity.set(idx, false);
+                } else {
+                    *value = ((state >> 16) % 2_000_000) as f64 / 1000.0 - 1000.0;
+                }
+            }
+            let edges = (0..=64)
+                .map(|idx| -1024.0 + idx as f64 * 32.0)
+                .collect::<Vec<_>>();
+            let reference_a =
+                Column::from_f64_values_with_validity(data.clone(), validity.clone());
+            let reference_b =
+                Column::from_f64_values_with_validity(data.clone(), validity.clone());
+            let candidate_a =
+                Column::from_f64_values_with_validity(data.clone(), validity.clone());
+            let candidate_b = Column::from_f64_values_with_validity(data, validity);
+
+            let former = histogram_former_body_wl4jg(&reference_a, &edges)
+                .expect("former nullable Float64 histogram");
+            let witness = candidate_a
+                .histogram(&edges)
+                .expect("typed nullable Float64 histogram");
+            assert_eq!(former.values(), witness.values());
+            assert_nullable_f64_unmaterialized_wl4jg(&candidate_a);
+
+            for _ in 0..3 {
+                let _ = std::hint::black_box(histogram_former_body_wl4jg(
+                    &reference_a,
+                    &edges,
+                ));
+                let _ = std::hint::black_box(histogram_former_body_wl4jg(
+                    &reference_b,
+                    &edges,
+                ));
+                let _ = std::hint::black_box(candidate_a.histogram(&edges));
+                let _ = std::hint::black_box(candidate_b.histogram(&edges));
+            }
+
+            let mut former_a = Vec::with_capacity(SAMPLES);
+            let mut former_b = Vec::with_capacity(SAMPLES);
+            let mut typed_a = Vec::with_capacity(SAMPLES);
+            let mut typed_b = Vec::with_capacity(SAMPLES);
+            for sample in 0..SAMPLES {
+                if sample.is_multiple_of(2) {
+                    former_a.push(measure_nanos_wl4jg(|| {
+                        histogram_former_body_wl4jg(&reference_a, &edges)
+                    }));
+                    typed_a.push(measure_nanos_wl4jg(|| candidate_a.histogram(&edges)));
+                    typed_b.push(measure_nanos_wl4jg(|| candidate_b.histogram(&edges)));
+                    former_b.push(measure_nanos_wl4jg(|| {
+                        histogram_former_body_wl4jg(&reference_b, &edges)
+                    }));
+                } else {
+                    former_b.push(measure_nanos_wl4jg(|| {
+                        histogram_former_body_wl4jg(&reference_b, &edges)
+                    }));
+                    typed_b.push(measure_nanos_wl4jg(|| candidate_b.histogram(&edges)));
+                    typed_a.push(measure_nanos_wl4jg(|| candidate_a.histogram(&edges)));
+                    former_a.push(measure_nanos_wl4jg(|| {
+                        histogram_former_body_wl4jg(&reference_a, &edges)
+                    }));
+                }
+            }
+
+            let former_a_p50 = median_nanos_wl4jg(&mut former_a);
+            let former_b_p50 = median_nanos_wl4jg(&mut former_b);
+            let typed_a_p50 = median_nanos_wl4jg(&mut typed_a);
+            let typed_b_p50 = median_nanos_wl4jg(&mut typed_b);
+            let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
+            let typed_mean = (typed_a_p50 + typed_b_p50) as f64 / 2.0;
+
+            println!(
+                "nullable Float64 histogram, len={LEN}, bins=64, samples={SAMPLES}"
+            );
+            println!("former Scalar p50 A/B: {former_a_p50} / {former_b_p50} ns");
+            println!("typed raw p50 A/B: {typed_a_p50} / {typed_b_p50} ns");
+            println!("former/typed p50 ratio: {:.3}x", former_mean / typed_mean);
+            assert_nullable_f64_unmaterialized_wl4jg(&candidate_a);
+            assert_nullable_f64_unmaterialized_wl4jg(&candidate_b);
         }
 
         #[test]

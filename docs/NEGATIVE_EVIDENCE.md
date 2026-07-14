@@ -15575,6 +15575,46 @@ as non-compilation command `RCH-E301`, so no local fallback ran. The bounded UBS
 50-marker whole-file critical inventory; direct base/current counting confirms the textual `panic!` count is unchanged
 at 48/48, with no added critical marker in the touched hunk. `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: nullable Float64 histogram scans raw values — 1.093x p50
+
+Negative-ledger-first routing found no nullable-Float64 `Column::histogram` representation result. Source history did
+show `53b92abd3`, which replaced the per-value linear bin search with `partition_point` for strict edges, but that
+separate keep still reached the bin search through a materializing `Scalar` iterator. The cold nullable backing was
+therefore paying per-row enum dispatch before its already-optimized bin lookup. This fresh reduction lever
+(`br-frankenpandas-wl4jg`) scored `impact 4 * confidence 5 / effort 1 = 20`.
+
+The new arm is deliberately narrow: only a `LazyNullableFloat64` whose `Scalar` cache is still empty scans its raw
+`&[f64]` and validity mask. It admits exactly validity-set finite values, preserving the former treatment of missing
+rows, NaN, and positive/negative infinity. Strict edges retain the same binary partition, first-edge inclusion, and
+inclusive final edge; duplicate or otherwise non-strict edges retain the same linear fallback. Warm nullable columns,
+all other backings and dtypes, output dtype/order, `histogram_auto`, floating-point arithmetic, and RNG state retain
+their former routes. No parser, unsafe-code, or recovery-policy surface moved.
+
+The single strict-remote foreground benchmark ran on `vmi1153651` in one release-perf binary. It used one million
+nullable Float64 rows with approximately 20% invalid slots, 64 strict bins, three warmups, 15 ABBA-reversed samples
+per duplicate arm, and exact-output preflight. The former helper transcribes the generic materialized-`Scalar` body.
+Its two reference inputs are materialized before timing, so the comparison conservatively excludes the additional
+first-call materialization cost; both candidate inputs retain empty `Scalar` caches throughout.
+
+| same-binary arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| former warmed Scalar scan | 26,533,591 ns | 27,548,961 ns | 27,041,276.0 ns |
+| nullable raw-buffer scan | 24,003,739 ns | 25,467,445 ns | 24,735,592.0 ns |
+
+The candidate is **1.0932x faster at p50** (**8.5265% latency reduction**). Duplicate-arm spreads are **3.8267%**
+for the former body and **6.0978%** for the typed path, both below the 10% stability ceiling; the 9.3213% effect is
+1.529x the larger same-binary duplicate deviation, so it clears this function's observed control floor.
+
+Correctness: the strict-remote focused proof is **1/1 green** against the exact former body for both strict and
+duplicate-edge cases, covering values outside the range, first/interior/final boundaries, signed zero, invalid finite
+values, NaN, and both infinities while proving that the candidate's lazy `Scalar` cache remains empty. Strict-remote
+workspace `check --workspace --all-targets` is green with the same five pre-existing fp-columnar warnings.
+Strict-remote `fp-columnar --all-targets --no-deps -D warnings` Clippy reproduces exactly the tracked inventory (23
+library and 64 test-target findings) and reports no changed-hunk finding. Fail-closed RCH rejected `cargo fmt --check`
+as non-compilation command `RCH-E301`, so no local fallback ran. The bounded UBS scan reproduces the existing
+50-marker whole-file critical inventory; direct base/current counting confirms the textual `panic!` count is unchanged
+at 48/48, with no added critical marker in the touched hunk. `git diff --check` is green. No local Cargo command ran.
+
 ### 2026-07-14 IvoryGlacier — WIN: temporal INNER validates while intersecting — 1.396x p50
 
 Negative-ledger-first routing found the temporal INNER raw-nanosecond keep, plus later validation-fusion keeps for its
