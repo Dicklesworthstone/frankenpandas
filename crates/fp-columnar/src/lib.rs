@@ -12140,6 +12140,38 @@ impl Column {
                 ValidityMask::from_words(words, n),
             ));
         }
+        // Nullable Bool source null-introducing gather (sibling of the nullable-Int64 arm).
+        // Bool has NO sentinel value — every missing slot (validity-clear, None, or
+        // out-of-range) is the single `Null(Null)` == missing_for_dtype(Bool), and a present
+        // slot is the validity bit alone (a `false` datum at a valid slot is a legit present
+        // `false`, never missing). So a uniform validity-bit gather is bit-identical to the
+        // generic clone. Variant-gated to the canonical `LazyNullableBool` backing (Eager
+        // NullKind columns keep the generic gather).
+        if let ScalarValues::LazyNullableBool { data, .. } = &self.values {
+            let src = data.as_slice();
+            let mut out = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, slot) in positions.iter().enumerate() {
+                match slot {
+                    Some(idx) if *idx < src.len() && self.validity.get(*idx) => {
+                        out.push(src[*idx]);
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                    _ => out.push(false),
+                }
+            }
+            return Ok(Self::from_bool_values_with_validity(
+                out,
+                ValidityMask::from_words(words, n),
+            ));
+        }
+        // NOTE (negative evidence, 2026-07-14 cc_fp): a nullable-TEMPORAL sibling here is a
+        // NullKind TRAP — the generic gather fills None/out-of-range with
+        // `missing_for_dtype(Datetime64)` == `Datetime64(NAT)` (a present-ish NaT scalar) but
+        // clones a source-missing slot as `Null(NaT)`; those two missing representations coexist
+        // in one output and a uniform `from_datetime64_values_with_validity` (all `Null(NaT)`)
+        // cannot reproduce the mix. Int64/Bool are safe only because both are the single
+        // `Null(Null)`.
         if self.validity.all()
             && let Some(slice) = self.as_f64_slice()
         {
@@ -27232,6 +27264,54 @@ mod tests {
             let b = col_eager.reindex_by_positions(&positions).expect("eager reindex");
             assert_eq!(a.values(), b.values(), "reindex trial {trial}");
             assert_eq!(a.validity(), b.validity(), "reindex validity trial {trial}");
+        }
+    }
+
+    #[test]
+    fn reindex_nullable_bool_null_introducing_typed_matches_generic() {
+        // The typed nullable-Bool null-introducing reindex arm (LazyNullableBool source +
+        // some None/out-of-range positions) must be BIT-EXACT to the generic Scalar-clone
+        // gather. A/B: col_typed (from_bool_values_with_validity => LazyNullableBool) hits the
+        // typed arm; col_eager (Column::new from col_typed's values) hits the generic path.
+        // Bool has no sentinel, so every missing is the single Null(Null) — no NullKind trap.
+        let mut state: u64 = 0xB001_C0DE_1234_9E37;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..200 {
+            let src_n = (next() % 120) as usize;
+            let mut data = vec![false; src_n];
+            let mut validity = crate::ValidityMask::all_valid(src_n);
+            let mut nullable = false;
+            for i in 0..src_n {
+                if next() % 3 == 0 {
+                    validity.set(i, false);
+                    nullable = true;
+                } else {
+                    data[i] = next() % 2 == 0;
+                }
+            }
+            if !nullable || src_n == 0 {
+                continue;
+            }
+            let col_typed = Column::from_bool_values_with_validity(data, validity);
+            let col_eager =
+                Column::new(DType::Bool, col_typed.values().to_vec()).expect("eager bool");
+            let plen = (next() % 200) as usize;
+            let positions: Vec<Option<usize>> = (0..plen)
+                .map(|_| match next() % 4 {
+                    0 => None,
+                    1 => Some((next() % (src_n as u64 + 5)) as usize),
+                    _ => Some((next() % src_n as u64) as usize),
+                })
+                .collect();
+            let a = col_typed.reindex_by_positions(&positions).expect("typed reindex");
+            let b = col_eager.reindex_by_positions(&positions).expect("eager reindex");
+            assert_eq!(a.values(), b.values(), "bool reindex trial {trial}");
+            assert_eq!(a.validity(), b.validity(), "bool reindex validity trial {trial}");
         }
     }
 
