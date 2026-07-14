@@ -21572,6 +21572,35 @@ impl Column {
         if let Some(strs) = self.as_all_valid_str_vec() {
             return utf8_msd_argsort(&strs, ascending);
         }
+        // Nullable contiguous Utf8 (`LazyNullableUtf8`): the all-valid Utf8 arms above
+        // bail on the missing bit, so a nullable string key fell to the O(n log n) na-last
+        // `Scalar` comparator. Radix-sort the PRESENT spans (`utf8_msd_argsort_bytes` —
+        // byte order == the Utf8 arm of `compare_scalars_na_last`), map to original row
+        // indices, then append the missing rows in original order (na-last). Bit-identical
+        // to the stable comparator: present rows sort asc/desc with stable ties (the radix
+        // is stable and present_idx is ascending original order), and missing rows keep
+        // their original relative order in the na-last suffix. Backs Series/DataFrame
+        // `sort_values`/`sort_index`/`argsort` on a nullable string column (all route
+        // through `argsort_with`, not `Column::sort_values`).
+        if let ScalarValues::LazyNullableUtf8 {
+            bytes,
+            offsets,
+            validity,
+            ..
+        } = &self.values
+        {
+            let n = offsets.len().saturating_sub(1);
+            let present_idx: Vec<usize> = (0..n).filter(|&i| validity.get(i)).collect();
+            let present_spans: Vec<&[u8]> = present_idx
+                .iter()
+                .map(|&i| &bytes[offsets[i]..offsets[i + 1]])
+                .collect();
+            let sub = utf8_msd_argsort_bytes(&present_spans, ascending);
+            let mut perm: Vec<usize> = Vec::with_capacity(n);
+            perm.extend(sub.iter().map(|&p| present_idx[p]));
+            perm.extend((0..n).filter(|&i| !validity.get(i)));
+            return perm;
+        }
         let mut indexed: Vec<(usize, &Scalar)> = self.values.iter().enumerate().collect();
         indexed.sort_by(|a, b| compare_scalars_na_last(a.1, b.1, ascending));
         indexed.into_iter().map(|(i, _)| i).collect()
@@ -32338,6 +32367,55 @@ mod tests {
                             "{tag} trial {trial} asc={ascending}"
                         );
                     }
+                }
+            }
+        }
+
+        #[test]
+        fn argsort_with_nullable_utf8_matches_na_last_scalar_reference() {
+            // argsort_with on a nullable contiguous-Utf8 column now uses the MSD byte radix
+            // over present spans + na-last suffix. The PERMUTATION must be bit-identical to
+            // the stable na-last Scalar comparator (compare_scalars_na_last) — which backs
+            // Series/DataFrame sort_values/sort_index/argsort on a nullable string key.
+            // Tiny alphabet {a,b,c,d} + short lengths ⇒ frequent ties (stability matters);
+            // ~25% nulls; both directions. Deterministic LCG.
+            let mut state: u64 = 0xA5C0_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let len = (next() % 300) as usize + 1;
+                let mut v = crate::ValidityMask::all_valid(len);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                for i in 0..len {
+                    if next() % 4 == 0 {
+                        v.set(i, false);
+                    } else {
+                        let slen = (next() % 4) as usize;
+                        let s: String = (0..slen)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                    }
+                    offsets.push(bytes.len());
+                }
+                let col = Column::from_utf8_values_with_validity(bytes, offsets, v);
+                let vals = col.values().to_vec();
+                for ascending in [true, false] {
+                    let mut want: Vec<usize> = (0..vals.len()).collect();
+                    // Stable sort_by == the generic argsort_with fallthrough.
+                    want.sort_by(|&a, &b| {
+                        crate::compare_scalars_na_last(&vals[a], &vals[b], ascending)
+                    });
+                    assert_eq!(
+                        col.argsort_with(ascending),
+                        want,
+                        "argsort perm trial {trial} asc={ascending}"
+                    );
                 }
             }
         }
