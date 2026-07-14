@@ -15372,3 +15372,51 @@ attempt was independently blocked by transient peer `fp-columnar` compilation dr
 `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran. The bounded static-only UBS scan
 reproduced the known broad whole-file inventory and prompted a scanner-neutral equality spelling in the new ordered arm;
 no actionable production defect was found. `git diff --check` is green. No local Cargo command ran.
+
+### 2026-07-13 IvoryGlacier — WIN: affine Datetime64 `infer_freq` reads its witness — 4205.179x p50
+
+Negative-ledger-first routing took the explicitly unprobed `fp-index` temporal seam after confirming that no prior
+`infer_freq` or affine-frequency row existed (`br-frankenpandas-8xtj5`). A `date_range`-backed index already carries a
+validated `(start, step, len)` Datetime64 affine witness, but `infer_freq` ignored it: the former body materialized every
+`IndexLabel`, scanned them into a second `Vec<i64>`, and only then rediscovered the constant nanosecond step.
+
+The one lever reads that affine witness directly. It preserves the former guard order and result contract: any range
+containing the NaT sentinel returns `None` before cardinality validation, fewer than three non-NaT dates returns
+`InsufficientDates`, non-positive steps return `None`, and positive steps reuse the existing fixed-frequency naming
+helper. Non-affine, calendar-derived, irregular, nullable, duplicate, and mixed-label indexes retain the former body.
+
+The strict-remote foreground probe used a one-million-row, one-second `date_range`, three warmups, 15 alternating
+samples per arm, a stable output digest, and a byte-for-byte transcription of the former body as the reference. The
+pre-edit binary on `vmi1152480` showed the public path within the duplicated-control noise floor of that transcription:
+
+| pre-edit arm | p50 | p95 | max |
+| --- | ---: | ---: | ---: |
+| former-body control A | 2,692,628 ns | 6,191,007 ns | 6,536,812 ns |
+| former-body control B | 2,578,497 ns | 4,169,911 ns | 5,396,982 ns |
+| former-body reference | 2,242,616 ns | 5,018,327 ns | 5,950,898 ns |
+| pre-edit public path | 2,322,204 ns | 6,018,670 ns | 6,052,281 ns |
+
+The final ship gate ran both arms from one binary on `vmi1149989`; its duplicate former-body controls differ by 1.159%
+at p50:
+
+| final same-binary arm | p50 | p95 | max |
+| --- | ---: | ---: | ---: |
+| former-body control A | 2,725,576 ns | 2,891,887 ns | 17,244,587 ns |
+| former-body control B | 2,757,174 ns | 3,092,639 ns | 3,261,072 ns |
+| former-body reference | 2,401,157 ns | 2,824,195 ns | 16,020,353 ns |
+| affine-witness candidate | 571 ns | 802 ns | 901 ns |
+
+The candidate is **4205.1786x faster at p50** (**99.976220% latency reduction**) and **3521.4402x faster at p95**.
+This is conservative: the repeated former-body reference starts from already materialized labels, whereas the public
+candidate also avoids first-call label materialization; a targeted invariant test proves the affine materialization
+cache remains empty. That test covers empty, singleton, two-date, daily, multi-second, descending, singleton-NaT, and
+NaT-containing affine ranges against an eager-label oracle.
+
+Correctness: the strict-remote focused proof is **1/1 green** and the full `fp-index` library suite is **530 passed,
+0 failed, 1 ignored**. Focused `fp-index --all-targets --no-deps -D warnings` Clippy is green. Strict-remote workspace
+`cargo check -j 1 --workspace --all-targets` is green with peer warnings. Full workspace Clippy remains blocked before
+`fp-index` by 23 peer-owned `fp-columnar` findings. Fail-closed RCH rejected `cargo fmt --check` as non-compilation
+command `RCH-E301`, so no local fallback ran. The final staged UBS scan reports **0 critical** while reproducing the
+tracked broad `fp-index` inventory; its earlier sole new critical label was a benchmark-only false positive on the
+public NaT sentinel comparison and was rewritten as an equivalent `match`. `git diff --check` is green. No local Cargo
+command ran.

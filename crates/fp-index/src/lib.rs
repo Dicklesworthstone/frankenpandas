@@ -16057,6 +16057,19 @@ fn infer_month_end_freq(dates: &[(chrono::NaiveDate, i64)]) -> Option<String> {
 /// Returns `Ok(None)` for irregular or duplicate timestamp sequences. Returns
 /// an error for the pandas-compatible "fewer than 3 dates" case.
 pub fn infer_freq(index: &Index) -> Result<Option<String>, DateRangeError> {
+    if let Some(range) = index.labels.datetime64_affine_range() {
+        if range.position(i64::MIN).is_some() {
+            return Ok(None);
+        }
+        if range.len < 3 {
+            return Err(DateRangeError::InsufficientDates);
+        }
+        if range.step <= 0 {
+            return Ok(None);
+        }
+        return Ok(fixed_frequency_name(range.step));
+    }
+
     let mut values = Vec::with_capacity(index.len());
     for label in index.labels() {
         match label {
@@ -19151,7 +19164,7 @@ mod tests {
         CategoricalIndex, DateOffset, DateRangeError, DatetimeIndex, Index, IndexLabel,
         Int64AffineLabels, MultiIndex, PeriodFields, PeriodIndex, RangeIndex, TimedeltaIndex,
         TimedeltaRangeError, align_union, apply_date_offset, bdate_range, date_range,
-        infer_freq_from_timestamps, timedelta_range, validate_alignment_plan,
+        infer_freq, infer_freq_from_timestamps, timedelta_range, validate_alignment_plan,
     };
 
     fn int64_labels(index: &Index) -> Vec<i64> {
@@ -19397,6 +19410,43 @@ mod tests {
             infer_freq_from_timestamps(&["2024-01-01", "2024-01-02", "2024-01-02"]).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn infer_freq_uses_datetime_affine_witness_without_materializing_8xtj5() {
+        let cases = [
+            (0, 1, 0),
+            (0, 0, 1),
+            (0, Timedelta::NANOS_PER_SEC, 2),
+            (0, Timedelta::NANOS_PER_DAY, 3),
+            (17, 2 * Timedelta::NANOS_PER_SEC, 100),
+            (0, -Timedelta::NANOS_PER_SEC, 3),
+            (i64::MIN, 1, 1),
+            (i64::MIN, 1, 3),
+        ];
+
+        for (start, step, len) in cases {
+            let affine = Index::from_datetime64_affine_range(start, step, len)
+                .expect("valid affine test range");
+            let eager_values = (0..len)
+                .map(|offset| {
+                    start
+                        + i64::try_from(offset).expect("small test offset") * step
+                })
+                .collect();
+            let eager = Index::from_datetime64(eager_values);
+            let affine_result = infer_freq(&affine);
+            let eager_result = infer_freq(&eager);
+            assert_eq!(
+                format!("{affine_result:?}"),
+                format!("{eager_result:?}"),
+                "affine inference must preserve eager semantics for start={start}, step={step}, len={len}",
+            );
+            assert!(
+                affine.labels.materialized.get().is_none(),
+                "frequency inference must not materialize affine labels",
+            );
+        }
     }
 
     #[test]

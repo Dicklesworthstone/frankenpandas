@@ -27,10 +27,13 @@
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_join
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 50 range_isin
 //!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 25 date_range
+//!   cargo run -p fp-index --example bench_range_setops --release -- 1000000 25 date_range_infer_freq
 
 use std::{hint::black_box, time::Instant};
 
-use fp_index::{Index, IndexLabel, RangeIndex, date_range};
+use fp_index::{
+    Index, IndexLabel, RangeIndex, date_range, infer_freq, infer_freq_from_nanos,
+};
 use fp_types::Timedelta;
 use rustc_hash::FxHashMap;
 
@@ -487,6 +490,32 @@ fn range_median_digest(index: &RangeIndex, calls: usize) -> usize {
     digest
 }
 
+fn frequency_digest(frequency: Option<String>) -> usize {
+    frequency.map_or(0, |value| {
+        value.bytes().fold(0usize, |digest, byte| {
+            digest.wrapping_mul(131).wrapping_add(usize::from(byte))
+        })
+    })
+}
+
+fn former_infer_freq_digest(index: &Index) -> usize {
+    let mut values = Vec::with_capacity(index.len());
+    for label in black_box(index).labels() {
+        match label {
+            IndexLabel::Datetime64(value) => match *value {
+                i64::MIN => return 0,
+                value => values.push(value),
+            },
+            _ => return usize::MAX,
+        }
+    }
+    frequency_digest(infer_freq_from_nanos(&values).expect("valid benchmark frequency"))
+}
+
+fn public_infer_freq_digest(index: &Index) -> usize {
+    frequency_digest(infer_freq(black_box(index)).expect("valid benchmark frequency"))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args
@@ -531,6 +560,48 @@ fn main() {
         let (reference_ns, candidate_ns, sink) = paired_percentiles_ns(iters, reference, candidate);
         println!(
             "date_range n={n} reference_p50_ns={} reference_p95_ns={} reference_p99_ns={} candidate_p50_ns={} candidate_p95_ns={} candidate_p99_ns={} sink={sink}",
+            reference_ns.0,
+            reference_ns.1,
+            reference_ns.2,
+            candidate_ns.0,
+            candidate_ns.1,
+            candidate_ns.2,
+        );
+        return;
+    }
+    if scenario == "date_range_infer_freq" {
+        let index = date_range(
+            Some("1970-01-01"),
+            None,
+            Some(n),
+            Timedelta::NANOS_PER_SEC,
+            Some("timestamp"),
+        )
+        .expect("valid benchmark date range");
+        assert_eq!(
+            former_infer_freq_digest(&index),
+            public_infer_freq_digest(&index),
+            "public frequency inference must match the former materializing body",
+        );
+        let (control_a_ns, control_b_ns, control_sink) = paired_percentiles_ns(
+            iters,
+            || former_infer_freq_digest(&index),
+            || former_infer_freq_digest(&index),
+        );
+        let (reference_ns, candidate_ns, candidate_sink) = paired_percentiles_ns(
+            iters,
+            || former_infer_freq_digest(&index),
+            || public_infer_freq_digest(&index),
+        );
+        let sink = control_sink ^ candidate_sink;
+        println!(
+            "date_range_infer_freq n={n} control_a_p50_ns={} control_a_p95_ns={} control_a_max_ns={} control_b_p50_ns={} control_b_p95_ns={} control_b_max_ns={} reference_p50_ns={} reference_p95_ns={} reference_max_ns={} candidate_p50_ns={} candidate_p95_ns={} candidate_max_ns={} sink={sink}",
+            control_a_ns.0,
+            control_a_ns.1,
+            control_a_ns.2,
+            control_b_ns.0,
+            control_b_ns.1,
+            control_b_ns.2,
             reference_ns.0,
             reference_ns.1,
             reference_ns.2,
