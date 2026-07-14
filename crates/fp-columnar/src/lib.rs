@@ -12928,6 +12928,50 @@ impl Column {
             });
         }
 
+        // Typed TEMPORAL arithmetic fast path — BEFORE the numeric common_dtype/to_f64
+        // machinery, which (a) errors: a temporal scalar is not numeric to `to_f64`, so a
+        // present temporal pair hits `Scalar::to_f64()? => Err(NonNumericValue)`, and (b)
+        // mis-types: common_dtype(Datetime64, Datetime64) = Datetime64, but pandas returns
+        // Timedelta64 for the difference. So `df["end"] - df["start"]` (elapsed duration)
+        // and `td ± td` ERROR today. Handle the pandas-defined same-dtype combos:
+        //   Datetime64 - Datetime64   -> Timedelta64   (elapsed ns)
+        //   Timedelta64 - Timedelta64 -> Timedelta64
+        //   Timedelta64 + Timedelta64 -> Timedelta64
+        // over the raw &[i64] ns with the SAME saturating/NaT-propagating Timedelta::sub/add
+        // the rest of FP uses (Series.diff, reductions) — so byte-consistent with the crate.
+        // A row is missing iff either operand is missing (validity unset OR the NaT sentinel,
+        // which Timedelta::sub/add already fold into a NaT result) => NaT output. Every OTHER
+        // temporal combo (Datetime64 + Datetime64 which pandas raises on; mixed Datetime64
+        // ± Timedelta64; mul/div/mod/pow/floordiv) falls through to the existing path, which
+        // errors or rejects via IncompatibleDtypes — matching pandas raising.
+        let temporal_op = matches!(
+            (self.dtype, right.dtype, op),
+            (DType::Datetime64, DType::Datetime64, ArithmeticOp::Sub)
+                | (
+                    DType::Timedelta64,
+                    DType::Timedelta64,
+                    ArithmeticOp::Sub | ArithmeticOp::Add
+                )
+        );
+        if temporal_op
+            && let (Some((l, lv, _)), Some((r, rv, _))) =
+                (self.temporal_i64_backing(), right.temporal_i64_backing())
+        {
+            let apply: fn(i64, i64) -> i64 = if matches!(op, ArithmeticOp::Add) {
+                fp_types::Timedelta::add
+            } else {
+                fp_types::Timedelta::sub
+            };
+            let data: Vec<i64> = l.iter().zip(r).map(|(&a, &b)| apply(a, b)).collect();
+            let mut validity = lv.and_mask(rv);
+            for (i, &v) in data.iter().enumerate() {
+                if v == Timedelta::NAT {
+                    validity.set(i, false);
+                }
+            }
+            return Ok(Self::from_timedelta64_values_with_validity(data, validity));
+        }
+
         let mut out_dtype = common_dtype(self.dtype, right.dtype)?;
         if matches!(out_dtype, DType::Bool) {
             out_dtype = DType::Int64;
@@ -28320,6 +28364,104 @@ mod tests {
             left.pow(&right).expect("pow"),
             left.binary_numeric(&right, ArithmeticOp::Pow).expect("pow")
         );
+    }
+
+    #[test]
+    fn temporal_two_col_arith_exact_masks_missing_and_rejects_bad_combos() {
+        // Typed temporal arm in binary_numeric: dt - dt -> Timedelta64 (elapsed ns),
+        // td - td / td + td -> Timedelta64, over raw i64 ns with the saturating/
+        // NaT-propagating Timedelta::sub/add the rest of FP uses. A row is missing iff
+        // either operand is missing (validity unset OR NaT sentinel) => Timedelta64(NaT).
+        // Was erroring (to_f64 rejects a temporal scalar). Reference mirrors the arm
+        // exactly; values near 1.6e18 >> 2^53 prove exactness. Also asserts the combos
+        // that must STILL error: dt + dt (pandas raises), dt * dt, mixed dt - td.
+        let mut state: u64 = 0x7EA0_C0DE_1234_9E37;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let build = |n: usize,
+                     nullable: bool,
+                     nat: i64,
+                     is_dt: bool,
+                     next: &mut dyn FnMut() -> u64|
+         -> (Column, Vec<i64>, Vec<bool>) {
+            let base: i64 = if is_dt { 1_600_000_000_000_000_000 } else { 0 };
+            let mut data = Vec::with_capacity(n);
+            let mut validity = ValidityMask::all_valid(n);
+            let mut vbits = vec![true; n];
+            for i in 0..n {
+                if nullable && next() % 4 == 0 {
+                    validity.set(i, false);
+                    vbits[i] = false;
+                    data.push(base + (next() % 1000) as i64);
+                } else if next() % 6 == 0 {
+                    data.push(nat);
+                } else {
+                    data.push(base + (next() % 100_000) as i64 - 50_000);
+                }
+            }
+            let col = if is_dt {
+                Column::from_datetime64_values_with_validity(data.clone(), validity)
+            } else {
+                Column::from_timedelta64_values_with_validity(data.clone(), validity)
+            };
+            (col, data, vbits)
+        };
+        // (op is Add, dtype_is_dt) -> (label). dt uses Sub only (dt-dt); td uses Add & Sub.
+        let cases: [(bool, bool); 3] = [(false, true), (false, false), (true, false)];
+        for (is_add, is_dt) in cases {
+            let nat = if is_dt {
+                fp_types::Timestamp::NAT
+            } else {
+                fp_types::Timedelta::NAT
+            };
+            for trial in 0..80 {
+                let n = (next() % 200) as usize;
+                for nullable in [false, true] {
+                    let (lc, ld, lv) = build(n, nullable, nat, is_dt, &mut next);
+                    let (rc, rd, rv) = build(n, nullable, nat, is_dt, &mut next);
+                    let got = if is_add {
+                        lc.add(&rc)
+                    } else {
+                        lc.sub(&rc)
+                    }
+                    .expect("temporal arith must not error");
+                    assert_eq!(got.dtype(), DType::Timedelta64);
+                    let expected: Vec<Scalar> = (0..n)
+                        .map(|i| {
+                            let v = if is_add {
+                                fp_types::Timedelta::add(ld[i], rd[i])
+                            } else {
+                                fp_types::Timedelta::sub(ld[i], rd[i])
+                            };
+                            if lv[i] && rv[i] && v != fp_types::Timedelta::NAT {
+                                Scalar::Timedelta64(v)
+                            } else {
+                                Scalar::Null(NullKind::NaT)
+                            }
+                        })
+                        .collect();
+                    assert_eq!(
+                        got.values(),
+                        expected,
+                        "is_add={is_add} is_dt={is_dt} trial {trial} nullable={nullable}"
+                    );
+                }
+            }
+        }
+        // Combos that must keep rejecting (match pandas raising / IncompatibleDtypes).
+        let dt = Column::from_datetime64_values(vec![10, 20]);
+        let dt2 = Column::from_datetime64_values(vec![1, 2]);
+        let td = Column::from_timedelta64_values_with_validity(
+            vec![3, 4],
+            ValidityMask::all_valid(2),
+        );
+        assert!(dt.add(&dt2).is_err(), "dt + dt must raise");
+        assert!(dt.mul(&dt2).is_err(), "dt * dt must raise");
+        assert!(dt.sub(&td).is_err(), "mixed dt - td must reject (IncompatibleDtypes)");
     }
 
     #[test]
