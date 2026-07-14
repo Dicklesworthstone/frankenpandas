@@ -6691,9 +6691,11 @@ fn dense_int64_inner_positions(
 /// values is identical to matching their same-variant `IndexLabel` wrappers.
 ///
 /// The fast path requires equal temporal dtypes and rejects NaT explicitly.
-/// Nullable keys therefore fall through to the Scalar oracle, preserving its
-/// Missing-to-Missing join behavior. Output construction still gathers the
-/// original temporal key column, so dtype and value representation are kept.
+/// Ordered inputs validate each newly reached value while intersecting, instead
+/// of pre-scanning both slices for NaT and strict ordering. Nullable keys
+/// therefore fall through to the Scalar oracle, preserving its Missing-to-
+/// Missing join behavior. Output construction still gathers the original
+/// temporal key column, so dtype and value representation are kept.
 fn temporal_i64_inner_positions(
     left_key: &Column,
     right_key: &Column,
@@ -6715,29 +6717,45 @@ fn temporal_i64_inner_positions(
         ),
         _ => return None,
     };
-    if left.contains(&nat) || right.contains(&nat) {
-        return None;
-    }
-
-    if left.windows(2).all(|pair| pair[0] < pair[1])
-        && right.windows(2).all(|pair| pair[0] < pair[1])
-    {
-        let mut left_positions = Vec::with_capacity(left.len().min(right.len()));
-        let mut right_positions = Vec::with_capacity(left_positions.capacity());
-        let (mut left_idx, mut right_idx) = (0usize, 0usize);
-        while left_idx < left.len() && right_idx < right.len() {
-            match left[left_idx].cmp(&right[right_idx]) {
-                Ordering::Equal => {
-                    left_positions.push(left_idx);
-                    right_positions.push(right_idx);
-                    left_idx += 1;
-                    right_idx += 1;
-                }
-                Ordering::Less => left_idx += 1,
-                Ordering::Greater => right_idx += 1,
+    let mut left_positions = Vec::with_capacity(left.len().min(right.len()));
+    let mut right_positions = Vec::with_capacity(left_positions.capacity());
+    let (mut left_idx, mut right_idx) = (0usize, 0usize);
+    let mut ordered = newly_reached_temporal_i64_value_is_strict(left, 0, nat)
+        && newly_reached_temporal_i64_value_is_strict(right, 0, nat);
+    while ordered && left_idx < left.len() && right_idx < right.len() {
+        match left[left_idx].cmp(&right[right_idx]) {
+            Ordering::Equal => {
+                left_positions.push(left_idx);
+                right_positions.push(right_idx);
+                left_idx += 1;
+                right_idx += 1;
+                ordered = newly_reached_temporal_i64_value_is_strict(left, left_idx, nat)
+                    && newly_reached_temporal_i64_value_is_strict(right, right_idx, nat);
+            }
+            Ordering::Less => {
+                left_idx += 1;
+                ordered = newly_reached_temporal_i64_value_is_strict(left, left_idx, nat);
+            }
+            Ordering::Greater => {
+                right_idx += 1;
+                ordered = newly_reached_temporal_i64_value_is_strict(right, right_idx, nat);
             }
         }
+    }
+    while ordered && left_idx < left.len() {
+        left_idx += 1;
+        ordered = newly_reached_temporal_i64_value_is_strict(left, left_idx, nat);
+    }
+    while ordered && right_idx < right.len() {
+        right_idx += 1;
+        ordered = newly_reached_temporal_i64_value_is_strict(right, right_idx, nat);
+    }
+    if ordered {
         return Some((left_positions, right_positions));
+    }
+
+    if left.contains(&nat) || right.contains(&nat) {
+        return None;
     }
 
     dense_i64_inner_positions_slices(left, right)
@@ -12133,6 +12151,129 @@ mod tests {
                 "raw-nanosecond planner must preserve scalar-oracle pair order for {temporal:?}"
             );
         }
+
+        let nat = fp_types::Timestamp::NAT;
+        let ordered = Column::from_datetime64_values(vec![1, 2, 3, 4]);
+        let nat_middle = Column::from_datetime64_values(vec![1, 2, nat, 4]);
+        let nat_tail = Column::from_datetime64_values(vec![1, 2, 3, nat]);
+        let single_nat = Column::from_datetime64_values(vec![nat]);
+        for (left, right) in [
+            (&nat_middle, &ordered),
+            (&ordered, &nat_tail),
+            (&single_nat, &ordered),
+        ] {
+            assert!(
+                super::temporal_i64_inner_positions(left, right).is_none(),
+                "NaT anywhere must retain the scalar INNER fallback",
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn bench_temporal_i64_inner_validation_fusion_71kgc() {
+        let n = 400_000_i64;
+        let input_len = usize::try_from(n).expect("positive benchmark length");
+        let left = Column::from_datetime64_values_with_validity(
+            (0..n).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+        let right = Column::from_datetime64_values_with_validity(
+            (0..n).map(|value| value * 2).collect(),
+            ValidityMask::all_valid(input_len),
+        );
+
+        // Exact pre-71kgc ordered body: separate NaT and strict-order scans
+        // followed by the same two-pointer intersection.
+        let former = || {
+            if !left.validity().all() || !right.validity().all() {
+                return None;
+            }
+            let left_raw = left.as_datetime64_slice()?;
+            let right_raw = right.as_datetime64_slice()?;
+            let nat = fp_types::Timestamp::NAT;
+            if left_raw.contains(&nat) || right_raw.contains(&nat) {
+                return None;
+            }
+            if left_raw.windows(2).any(|pair| pair[0] >= pair[1])
+                || right_raw.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return None;
+            }
+
+            let mut left_positions = Vec::with_capacity(left_raw.len().min(right_raw.len()));
+            let mut right_positions = Vec::with_capacity(left_positions.capacity());
+            let (mut left_idx, mut right_idx) = (0usize, 0usize);
+            while left_idx < left_raw.len() && right_idx < right_raw.len() {
+                match left_raw[left_idx].cmp(&right_raw[right_idx]) {
+                    std::cmp::Ordering::Equal => {
+                        left_positions.push(left_idx);
+                        right_positions.push(right_idx);
+                        left_idx += 1;
+                        right_idx += 1;
+                    }
+                    std::cmp::Ordering::Less => left_idx += 1,
+                    std::cmp::Ordering::Greater => right_idx += 1,
+                }
+            }
+            Some((left_positions, right_positions))
+        };
+        let candidate = || super::temporal_i64_inner_positions(&left, &right);
+
+        let former_output = former().expect("former temporal INNER positions");
+        let candidate_output = candidate().expect("temporal INNER positions");
+        assert_eq!(candidate_output, former_output);
+        assert_eq!(candidate_output.0.len(), input_len.div_ceil(2));
+        drop((former_output, candidate_output));
+        for _ in 0..2 {
+            std::hint::black_box(former());
+            std::hint::black_box(candidate());
+        }
+
+        type InnerPositions = Option<(Vec<usize>, Vec<usize>)>;
+        let sample = |plan: &dyn Fn() -> InnerPositions| {
+            let start = std::time::Instant::now();
+            let output = std::hint::black_box(plan()).expect("supported temporal INNER plan");
+            assert_eq!(std::hint::black_box(output.0.len()), input_len.div_ceil(2));
+            drop(output);
+            start.elapsed().as_secs_f64() * 1_000.0
+        };
+        let mut former_a = Vec::with_capacity(15);
+        let mut former_b = Vec::with_capacity(15);
+        let mut candidate_a = Vec::with_capacity(15);
+        let mut candidate_b = Vec::with_capacity(15);
+        for round in 0..15 {
+            if round % 2 == 0 {
+                former_a.push(sample(&former));
+                candidate_a.push(sample(&candidate));
+                candidate_b.push(sample(&candidate));
+                former_b.push(sample(&former));
+            } else {
+                former_b.push(sample(&former));
+                candidate_b.push(sample(&candidate));
+                candidate_a.push(sample(&candidate));
+                former_a.push(sample(&former));
+            }
+        }
+
+        let report = |label: &str, mut samples: Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            let p50 = samples[samples.len() / 2];
+            let p95_idx = samples
+                .len()
+                .saturating_mul(95)
+                .div_ceil(100)
+                .saturating_sub(1);
+            println!(
+                "{label}: p50={p50:.3} ms p95={:.3} ms max={:.3} ms",
+                samples[p95_idx],
+                samples[samples.len() - 1],
+            );
+        };
+        report("inner_plan_three_pass_former_a", former_a);
+        report("inner_plan_three_pass_former_b", former_b);
+        report("inner_plan_fused_candidate_a", candidate_a);
+        report("inner_plan_fused_candidate_b", candidate_b);
     }
 
     #[test]

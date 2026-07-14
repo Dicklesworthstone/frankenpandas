@@ -15334,6 +15334,55 @@ one in a peer-added test left outside this commit.
 Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran;
 `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: temporal INNER validates while intersecting — 1.396x p50
+
+Negative-ledger-first routing found the temporal INNER raw-nanosecond keep, plus later validation-fusion keeps for its
+RIGHT and OUTER siblings, but no INNER fusion row. `temporal_i64_inner_positions` still scanned both inputs once for
+NaT, again through `windows(2)` for strict order, and a third time to emit the ordered intersection. This lever
+(`br-frankenpandas-71kgc`) scored `impact 3 * confidence 5 / effort 1 = 15`: the redundant scans immediately preceded
+an already-hot linear intersection and could be removed without changing representation, dispatch, or output assembly.
+
+The ordered arm now validates each newly reached raw nanosecond while performing the same two-pointer intersection.
+After either pointer exhausts, it validates the untouched tail so a late NaT, duplicate, or inversion cannot be
+admitted. If strict ordering fails, the partial ordered tapes are discarded, both inputs retain the complete NaT guard,
+and the exact existing dense-CSR/hash fallback handles duplicate or unsorted keys. A NaT anywhere still declines the
+typed path. Nullable keys, mixed temporal dtypes, output dtype, pair order, duplicate multiplication, scalar fallback,
+and payload gathering are unchanged; no floating-point, RNG, parser, unsafe-code, or recovery-policy surface moved.
+
+The untouched strict-remote baseline and final ship gate both ran foreground on `vmi1149989`. Each arm builds and drops
+the complete two-vector result for 400,000 ordered-unique Datetime64 rows per side with 200,000 matches. The harness
+asserts exact former/current tape equality before timing, warms both arms twice, and takes 15 ABBA-reversed/interleaved
+samples per duplicate arm. Before the production edit, the current path remained inside a **1.0425x** duplicated-arm
+null-control envelope:
+
+| untouched pre-edit arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| exact three-pass former body | 1.467 ms | 1.471 ms | 1.4690 ms |
+| current three-pass function | 1.515 ms | 1.548 ms | 1.5315 ms |
+
+The final exact-source same-binary gate measured:
+
+| final planning lifecycle | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| exact three-pass former body | 0.884 ms | 1.009 ms | 0.9465 ms |
+| fused validate-and-intersect candidate | 0.654 ms | 0.702 ms | 0.6780 ms |
+
+The candidate improves the planning boundary **1.3960x p50** (**28.368% latency reduction**), clearing the untouched
+null-control floor. The final former-arm duplicate spread is **1.1414x** and the candidate spread is **1.0734x**. The
+15-sample p95 is the maximum and is descriptive only; the duplicate-p50 mean is the ship metric.
+
+Correctness: the strict-remote release-perf probe is green and asserts exact position-tape equality before every timing
+phase. The focused direct parity test is **1/1 green** on `vmi1152480`; it covers Datetime64 and Timedelta64
+duplicate/unsorted pair order against the scalar oracle plus middle, tail, and singleton NaT rejection. Scoped
+`fp-join --all-targets --no-deps -D warnings` Clippy is green. Two full `fp-join` suite attempts failed closed before
+Cargo because RCH reported `no admissible workers: insufficient_slots=9,hard_preflight=1`; no local fallback ran. The
+strict-remote workspace check compiled every crate through final `fp-bench`, then stopped emitting progress for roughly
+one minute and was boundedly interrupted rather than reported green. Fail-closed RCH rejected `cargo fmt --check` as a
+non-compilation command (`RCH-E301`), so no local fallback ran. The bounded static-only UBS scan reproduced the tracked
+whole-file inventory (21 critical labels: 19 token-comparison false positives, one decode-name false positive, and one
+test-only panic), with no finding on the changed production body; benchmark warnings are intentional test-only
+fail-fast assertions and printing. `git diff --check` is green. No local Cargo command ran.
+
 ### 2026-07-13 IvoryGlacier — WIN: ordered-unique temporal OUTER joins plan over raw nanoseconds — 8.178x p50
 
 Negative-ledger-first routing found temporal INNER, LEFT, and RIGHT keeps but no temporal OUTER row. Older rejected
