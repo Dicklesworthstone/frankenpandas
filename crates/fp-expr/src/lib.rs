@@ -383,6 +383,35 @@ impl EvalContext {
         Ok(context)
     }
 
+    fn from_dataframe_for_expr_with_locals(
+        frame: &fp_frame::DataFrame,
+        locals: &BTreeMap<String, Scalar>,
+        expr: &Expr,
+    ) -> Result<Self, ExprError> {
+        let mut referenced = std::collections::BTreeSet::new();
+        MaterializedView::extract_series(expr, &mut referenced);
+
+        let mut context = Self {
+            series: BTreeMap::new(),
+            locals: locals.clone(),
+            anchor_index: Some(frame.index().clone()),
+        };
+        for name in referenced {
+            // DataFrame columns shadow the synthetic index aliases, matching
+            // `from_dataframe_with_locals`, which inserts columns last.
+            if let Some(column) = frame.column(&name) {
+                let series = Series::new(name, frame.index().clone(), column.clone())?;
+                context.insert_series(series);
+            } else if name == "index"
+                || name == "ilevel_0"
+                || frame.index().name() == Some(name.as_str())
+            {
+                context.insert_index_series(&name, frame.index())?;
+            }
+        }
+        Ok(context)
+    }
+
     #[must_use]
     pub fn get_series(&self, name: &str) -> Option<&Series> {
         self.series.get(name)
@@ -769,7 +798,7 @@ pub fn evaluate_on_dataframe(
     policy: &RuntimePolicy,
     ledger: &mut EvidenceLedger,
 ) -> Result<Series, ExprError> {
-    let context = EvalContext::from_dataframe(frame)?;
+    let context = EvalContext::from_dataframe_for_expr_with_locals(frame, &BTreeMap::new(), expr)?;
     evaluate(expr, &context, policy, ledger)
 }
 
@@ -780,7 +809,7 @@ pub fn evaluate_on_dataframe_with_locals(
     policy: &RuntimePolicy,
     ledger: &mut EvidenceLedger,
 ) -> Result<Series, ExprError> {
-    let context = EvalContext::from_dataframe_with_locals(frame, locals)?;
+    let context = EvalContext::from_dataframe_for_expr_with_locals(frame, locals, expr)?;
     evaluate(expr, &context, policy, ledger)
 }
 
@@ -8853,6 +8882,152 @@ mod tests {
             Err(ExprError::Frame(FrameError::CompatibilityRejected(message)))
                 if message.contains("scalar boolean query")
         ));
+    }
+
+    #[test]
+    fn referenced_binding_context_matches_full_context_wtdap() {
+        let frame = fp_frame::DataFrame::new(
+            fp_index::Index::from_i64_values(vec![10, 20, 30]).rename_index(Some("row")),
+            BTreeMap::from([
+                (
+                    "index".to_owned(),
+                    fp_columnar::Column::from_i64_values_owned(vec![1, 2, 3]),
+                ),
+                (
+                    "target".to_owned(),
+                    fp_columnar::Column::from_i64_values_owned(vec![4, 5, 6]),
+                ),
+                (
+                    "unused".to_owned(),
+                    fp_columnar::Column::from_i64_values_owned(vec![7, 8, 9]),
+                ),
+            ]),
+        )
+        .expect("frame");
+        let policy = RuntimePolicy::hardened(Some(100));
+
+        for source in ["target + row", "target + ilevel_0", "index + 1"] {
+            let expr = super::parse_expr(source).expect("expression");
+            let full_context = EvalContext::from_dataframe(&frame).expect("full context");
+            let mut former_ledger = EvidenceLedger::new();
+            let former = evaluate(&expr, &full_context, &policy, &mut former_ledger)
+                .expect("full evaluation");
+            let mut candidate_ledger = EvidenceLedger::new();
+            let candidate =
+                super::evaluate_on_dataframe(&expr, &frame, &policy, &mut candidate_ledger)
+                    .expect("selective evaluation");
+
+            assert_eq!(candidate.name(), former.name());
+            assert_eq!(candidate.index(), former.index());
+            assert_eq!(candidate.values(), former.values());
+        }
+
+        let locals = BTreeMap::from([("threshold".to_owned(), Scalar::Int64(4))]);
+        let expr = super::parse_expr("target > @threshold").expect("local expression");
+        let full_context =
+            EvalContext::from_dataframe_with_locals(&frame, &locals).expect("full local context");
+        let mut former_ledger = EvidenceLedger::new();
+        let former = evaluate(&expr, &full_context, &policy, &mut former_ledger)
+            .expect("full local evaluation");
+        let mut candidate_ledger = EvidenceLedger::new();
+        let candidate = super::evaluate_on_dataframe_with_locals(
+            &expr,
+            &frame,
+            &locals,
+            &policy,
+            &mut candidate_ledger,
+        )
+        .expect("selective local evaluation");
+        assert_eq!(candidate.index(), former.index());
+        assert_eq!(candidate.values(), former.values());
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn eval_context_referenced_binding_ab_wtdap() {
+        const ROWS: usize = 100_000;
+        const ROWS_I64: i64 = 100_000;
+        const SAMPLES: usize = 15;
+        let labels = (0..ROWS_I64).map(Into::into).collect::<Vec<_>>();
+        let values = (0..ROWS_I64).map(Scalar::Int64).collect::<Vec<_>>();
+        let series = [
+            "target", "unused_1", "unused_2", "unused_3", "unused_4", "unused_5", "unused_6",
+            "unused_7",
+        ]
+        .into_iter()
+        .map(|name| Series::from_values(name, labels.clone(), values.clone()).expect("series"))
+        .collect();
+        let frame = fp_frame::DataFrame::from_series(series).expect("frame");
+        let expr = super::parse_expr("target > 50000").expect("expression");
+        let policy = RuntimePolicy::hardened(Some(100));
+
+        let measure_former = || {
+            let mut ledger = EvidenceLedger::new();
+            let started = std::time::Instant::now();
+            let context = EvalContext::from_dataframe(&frame).expect("context");
+            let result = evaluate(&expr, &context, &policy, &mut ledger).expect("evaluate");
+            let elapsed = started.elapsed().as_nanos();
+            assert_eq!(result.len(), ROWS);
+            elapsed
+        };
+        let measure_candidate = || {
+            let mut ledger = EvidenceLedger::new();
+            let started = std::time::Instant::now();
+            let result = super::evaluate_on_dataframe(&expr, &frame, &policy, &mut ledger)
+                .expect("selective evaluate");
+            let elapsed = started.elapsed().as_nanos();
+            assert_eq!(result.len(), ROWS);
+            elapsed
+        };
+
+        let full_context = EvalContext::from_dataframe(&frame).expect("full context");
+        let mut former_ledger = EvidenceLedger::new();
+        let former =
+            evaluate(&expr, &full_context, &policy, &mut former_ledger).expect("full evaluation");
+        let mut candidate_ledger = EvidenceLedger::new();
+        let candidate = super::evaluate_on_dataframe(&expr, &frame, &policy, &mut candidate_ledger)
+            .expect("selective evaluation");
+        assert_eq!(candidate.index(), former.index());
+        assert_eq!(candidate.values(), former.values());
+
+        for _ in 0..3 {
+            std::hint::black_box(measure_former());
+            std::hint::black_box(measure_candidate());
+        }
+        let mut former_a = Vec::with_capacity(SAMPLES);
+        let mut former_b = Vec::with_capacity(SAMPLES);
+        let mut candidate_a = Vec::with_capacity(SAMPLES);
+        let mut candidate_b = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_a.push(measure_former());
+                candidate_a.push(measure_candidate());
+                candidate_b.push(measure_candidate());
+                former_b.push(measure_former());
+            } else {
+                former_b.push(measure_former());
+                candidate_b.push(measure_candidate());
+                candidate_a.push(measure_candidate());
+                former_a.push(measure_former());
+            }
+        }
+        former_a.sort_unstable();
+        former_b.sort_unstable();
+        candidate_a.sort_unstable();
+        candidate_b.sort_unstable();
+        let former_a_p50 = former_a.get(SAMPLES / 2).copied().unwrap_or(0);
+        let former_b_p50 = former_b.get(SAMPLES / 2).copied().unwrap_or(0);
+        let candidate_a_p50 = candidate_a.get(SAMPLES / 2).copied().unwrap_or(0);
+        let candidate_b_p50 = candidate_b.get(SAMPLES / 2).copied().unwrap_or(0);
+        let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
+        let candidate_mean = (candidate_a_p50 + candidate_b_p50) as f64 / 2.0;
+        println!("fp-expr referenced binding A/B: rows={ROWS} columns=8 samples={SAMPLES}");
+        println!("former eager-binding p50 A/B: {former_a_p50} / {former_b_p50} ns");
+        println!("candidate referenced-binding p50 A/B: {candidate_a_p50} / {candidate_b_p50} ns");
+        println!(
+            "former/candidate ratio: {:.6}x",
+            former_mean / candidate_mean
+        );
     }
 
     #[test]

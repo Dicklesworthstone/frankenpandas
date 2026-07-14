@@ -16096,6 +16096,57 @@ scan reproduced 50 test-only `panic!` sites from the tracked broad inventory, wi
 path; its one new benchmark-only direct-index warning was eliminated before landing. Final `git diff --check` is green.
 No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: fp-expr builds contexts from referenced bindings — 50.416x p50
+
+Negative-ledger-first routing began with `bv --robot-triage` (3,664 issues, 340 actionable, no dependency cycles). The
+highest-ranked umbrella and quick wins were already assigned, landed, or explicitly rejected in this ledger; stale
+`astype`, CSV, expanding, and temporal candidates likewise had no fresh executable seam. Rather than deepen a saturated
+columnar/datetime vein, this pass pivoted to the previously unmeasured `fp-expr` boundary. An expression referencing one
+column still made `EvalContext::from_dataframe` construct `Series` bindings for every DataFrame column plus `index`,
+`ilevel_0`, and a named-index alias before evaluation. The opportunity score for `br-frankenpandas-wtdap` was
+`impact 4 * confidence 5 / effort 2 = 10`.
+
+Attribution preceded the production edit. A strict-remote normal-`release` probe on `vmi1152480` used 100,000 rows,
+eight columns, and 11 foreground samples for `target > 50000`:
+
+| pre-edit attributed phase | p50 |
+| --- | ---: |
+| eager context construction | 2,878,164 ns |
+| evaluation over a prebuilt context | 58,316 ns |
+
+Context setup accounted for **98.0141%** of the summed measured lifecycle and was **49.3546x** the evaluation time.
+The selected one lever therefore extracts the expression's referenced series names with the existing complete AST
+walker and binds only those inputs for the two DataFrame evaluation entrypoints. DataFrame columns are checked before
+synthetic index aliases, preserving the former column-shadowing behavior. `index`, `ilevel_0`, and the named-index alias
+are materialized only when referenced; locals and the anchor index are retained exactly. Unknown bindings remain absent
+and reach the same evaluation error. The public full-context constructors remain unchanged, as do all kernels,
+alignment, null/NaN propagation, dtype promotion, output order, tie behavior, and evidence-ledger writes. Floating-point
+arithmetic and RNG state are untouched.
+
+The decisive foreground A/B used one normal-`release` binary on the same `vmi1152480` worker: 100,000 rows, eight
+columns, three warmups, 15 ABBA-reversed/interleaved samples per duplicate arm, construction outside frame setup, and
+exact output parity preflight. The former arm constructs the complete public context and evaluates it; the candidate arm
+uses the referenced-binding public entrypoint.
+
+| same-binary evaluation lifecycle | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| former eager-binding path | 4,206,289 ns | 4,461,600 ns | 4,333,944.5 ns |
+| referenced-binding candidate | 90,325 ns | 81,602 ns | 85,963.5 ns |
+
+The candidate is **50.416101x faster at p50** (**98.016507% latency reduction**). Former duplicate spread is
+**6.0697%** and candidate duplicate spread is **10.6897%**, so the win clears its same-binary noise control decisively.
+This was the single final ship benchmark; no `release-perf` profile or LTO cold build ran.
+
+Correctness and build evidence is strict-remote. The focused normal-`release` parity proof is **1/1 green**, covering a
+named index, `ilevel_0`, a column named `index`, locals, exact values, and exact output indexes. The full `fp-expr`
+library suite is **128 passed / 0 failed / 1 ignored foreground benchmark**. Scoped `fp-expr --all-targets` check and
+`--all-targets --no-deps -D warnings` Clippy are green. An earlier full release-suite admission was refused before Cargo
+with `insufficient_slots=9,hard_preflight=1`; strict mode correctly refused local fallback, and the later full remote dev
+suite passed. Fail-closed RCH rejected `cargo fmt --check` as a non-compilation command (`RCH-E301`), so no local Cargo
+fallback ran; direct Rustfmt checking of the owned source and `git diff --check` are green. The bounded changed-file UBS
+scan reproduced its broad whole-file inventory (seven pre-existing test-only panics plus 138 false-positive
+name/token-comparison labels), with no production correctness or safety finding on the lever. No local Cargo command ran.
+
 ### 2026-07-13 IvoryGlacier — WIN: affine Datetime64 monotonic predicates read their witness — 2132.524x p50
 
 Negative-ledger-first routing found affine Datetime64 construction, search, and frequency keeps but no monotonicity row.
