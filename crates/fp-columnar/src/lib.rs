@@ -15060,6 +15060,41 @@ impl Column {
                 .collect();
             return Ok(Self::from_i64_values_owned(gathered));
         }
+        // Nullable Int64 gather (mirror of the Bool-self path above): the all-valid
+        // `as_i64_slice` arm bails on ANY missing, so a nullable Int64 column fell to the
+        // generic per-element `Vec<Scalar>` gather. Compact the raw buffer at the mask-true
+        // positions AND gather the validity bit into the output — no Scalar materialization.
+        // Bit-identical to the generic clone: a kept present slot keeps its datum, a kept
+        // missing slot stays missing (Int64 has no NaN, so present = the validity bit alone).
+        // A missing/non-Bool mask slot is never kept (== the generic `matches!(m, Bool(true))`).
+        // (Nullable Float64 stays on the generic path: its three-way NaN rep — a validity-clear
+        // slot whose datum materializes as a PRESENT Float64(NaN) — is not reproducible by a
+        // simple validity-bit gather; see filter_by_mask_nullable_typed_gather_matches_reference_cf.)
+        if self.dtype == DType::Int64
+            && let Some((data, validity)) = self.as_i64_slice_with_validity()
+        {
+            let count = mask
+                .values
+                .iter()
+                .filter(|m| matches!(m, Scalar::Bool(true)))
+                .count();
+            let mut gathered = Vec::with_capacity(count);
+            let mut words = vec![0_u64; count.div_ceil(64)];
+            let mut out_idx = 0usize;
+            for (i, m) in mask.values.iter().enumerate() {
+                if matches!(m, Scalar::Bool(true)) {
+                    gathered.push(data[i]);
+                    if validity.get(i) {
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                    out_idx += 1;
+                }
+            }
+            return Ok(Self::from_i64_values_with_validity(
+                gathered,
+                ValidityMask::from_words(words, count),
+            ));
+        }
 
         let values = self
             .values
@@ -29708,6 +29743,51 @@ mod tests {
             match &nv[4] {
                 Scalar::Float64(x) => assert_eq!(*x, 7.0),
                 o => panic!("nv4={o:?}"),
+            }
+        }
+
+        #[test]
+        fn filter_by_mask_nullable_i64_typed_matches_generic() {
+            // The typed nullable-Int64 filter_by_mask arm (compact raw i64 + validity at
+            // mask-true positions) must be BIT-EXACT to the generic Scalar-clone gather. A/B:
+            // col_typed (from_i64_values_with_validity => LazyNullableInt64) hits the typed
+            // arm; col_eager (Column::new, Eager) hits the generic path. ~30% nulls; the mask
+            // is a seeded bool with ~15% missing (missing mask slot ⇒ not selected).
+            let mut state: u64 = 0x1717_C0DE_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let n = (next() % 300) as usize;
+                let mut data = vec![0i64; n];
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut eager: Vec<Scalar> = Vec::with_capacity(n);
+                let mut mask_scalars: Vec<Scalar> = Vec::with_capacity(n);
+                for i in 0..n {
+                    if next() % 3 == 0 {
+                        validity.set(i, false);
+                        eager.push(Scalar::Null(NullKind::Null));
+                    } else {
+                        let v = (next() % 20_000) as i64 - 10_000;
+                        data[i] = v;
+                        eager.push(Scalar::Int64(v));
+                    }
+                    // ~15% missing mask, else a seeded bool.
+                    if next() % 7 == 0 {
+                        mask_scalars.push(Scalar::Null(NullKind::NaN));
+                    } else {
+                        mask_scalars.push(Scalar::Bool(next() % 2 == 0));
+                    }
+                }
+                let col_typed = Column::from_i64_values_with_validity(data, validity);
+                let col_eager = Column::new(DType::Int64, eager).expect("eager i64");
+                let mask = Column::new(DType::Bool, mask_scalars).expect("mask");
+                let a = col_typed.filter_by_mask(&mask).expect("typed filter");
+                let b = col_eager.filter_by_mask(&mask).expect("eager filter");
+                assert_eq!(a.values(), b.values(), "filter trial {trial}");
             }
         }
 
