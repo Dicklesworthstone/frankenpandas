@@ -1652,6 +1652,8 @@ impl Timedelta {
     /// NaT returns "NaT".
     #[must_use]
     pub fn isoformat(nanos: i64) -> String {
+        use std::fmt::Write as _;
+
         if nanos == Self::NAT {
             return "NaT".to_string();
         }
@@ -1671,21 +1673,23 @@ impl Timedelta {
         let seconds = remaining / Self::NANOS_PER_SEC;
         let sub_sec_nanos = remaining % Self::NANOS_PER_SEC;
 
-        let mut result = String::new();
+        // Build directly into the returned allocation. The former sequence of
+        // `format!` calls allocated two temporary strings for integral values
+        // and three for fractional values before copying them into `result`.
+        let mut result = String::with_capacity(40);
         if negative {
             result.push('-');
         }
-
-        result.push_str(&format!("P{days}DT{hours}H{minutes}M"));
-
-        if sub_sec_nanos == 0 {
-            result.push_str(&format!("{seconds}S"));
-        } else {
-            let frac = format!("{:09}", sub_sec_nanos);
-            let trimmed = frac.trim_end_matches('0');
-            result.push_str(&format!("{seconds}.{trimmed}S"));
+        // `fmt::Write for String` is infallible.
+        let _ = write!(result, "P{days}DT{hours}H{minutes}M{seconds}");
+        if sub_sec_nanos != 0 {
+            result.push('.');
+            let _ = write!(result, "{sub_sec_nanos:09}");
+            while result.ends_with('0') {
+                result.pop();
+            }
         }
-
+        result.push('S');
         result
     }
 
@@ -7290,6 +7294,130 @@ mod tests {
             Timedelta::isoformat(-(Timedelta::NANOS_PER_DAY + Timedelta::NANOS_PER_HOUR)),
             "-P1DT1H0M0S"
         );
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn timedelta_isoformat_single_buffer_ab_7jra1() {
+        use std::{hint::black_box, time::Instant};
+
+        use super::Timedelta;
+
+        fn former_impl(nanos: i64) -> String {
+            if nanos == Timedelta::NAT {
+                return "NaT".to_string();
+            }
+
+            let negative = nanos < 0;
+            let abs_nanos = nanos.saturating_abs();
+            let days = abs_nanos / Timedelta::NANOS_PER_DAY;
+            let remaining = abs_nanos % Timedelta::NANOS_PER_DAY;
+            let hours = remaining / Timedelta::NANOS_PER_HOUR;
+            let remaining = remaining % Timedelta::NANOS_PER_HOUR;
+            let minutes = remaining / Timedelta::NANOS_PER_MIN;
+            let remaining = remaining % Timedelta::NANOS_PER_MIN;
+            let seconds = remaining / Timedelta::NANOS_PER_SEC;
+            let sub_sec_nanos = remaining % Timedelta::NANOS_PER_SEC;
+
+            let mut result = String::new();
+            if negative {
+                result.push('-');
+            }
+
+            result.push_str(&format!("P{days}DT{hours}H{minutes}M"));
+
+            if sub_sec_nanos == 0 {
+                result.push_str(&format!("{seconds}S"));
+            } else {
+                let frac = format!("{sub_sec_nanos:09}");
+                let trimmed = frac.trim_end_matches('0');
+                result.push_str(&format!("{seconds}.{trimmed}S"));
+            }
+
+            result
+        }
+
+        fn elapsed(values: &[i64], format: impl Fn(i64) -> String) -> u128 {
+            let start = Instant::now();
+            let mut digest = 0_usize;
+            for &value in values {
+                digest = digest.wrapping_add(black_box(format(black_box(value))).len());
+            }
+            black_box(digest);
+            start.elapsed().as_nanos()
+        }
+
+        fn median(values: &mut [u128]) -> u128 {
+            values.sort_unstable();
+            values[values.len() / 2]
+        }
+
+        let mut seed = 0x7d5a_4c31_91e2_b607_u64;
+        let values: Vec<i64> = (0..16_384)
+            .map(|i| {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let magnitude =
+                    (seed & i64::MAX as u64) as i64 % (3_650 * Timedelta::NANOS_PER_DAY);
+                match i % 4 {
+                    0 => magnitude - magnitude % Timedelta::NANOS_PER_SEC,
+                    1 => magnitude,
+                    2 => -(magnitude - magnitude % Timedelta::NANOS_PER_MICRO),
+                    _ => -magnitude,
+                }
+            })
+            .collect();
+
+        for &value in &[
+            Timedelta::NAT,
+            0,
+            1,
+            -1,
+            Timedelta::NANOS_PER_DAY,
+            i64::MAX,
+            i64::MIN + 1,
+        ] {
+            assert_eq!(former_impl(value), Timedelta::isoformat(value));
+        }
+        for &value in &values {
+            assert_eq!(former_impl(value), Timedelta::isoformat(value));
+        }
+
+        for _ in 0..2 {
+            black_box(elapsed(&values, former_impl));
+            black_box(elapsed(&values, Timedelta::isoformat));
+        }
+
+        let mut former = Vec::with_capacity(18);
+        let mut candidate = Vec::with_capacity(18);
+        for block in 0..9 {
+            if block % 2 == 0 {
+                former.push(elapsed(&values, former_impl));
+                candidate.push(elapsed(&values, Timedelta::isoformat));
+                candidate.push(elapsed(&values, Timedelta::isoformat));
+                former.push(elapsed(&values, former_impl));
+            } else {
+                candidate.push(elapsed(&values, Timedelta::isoformat));
+                former.push(elapsed(&values, former_impl));
+                former.push(elapsed(&values, former_impl));
+                candidate.push(elapsed(&values, Timedelta::isoformat));
+            }
+        }
+
+        let former_p50 = median(&mut former);
+        let candidate_p50 = median(&mut candidate);
+        eprintln!(
+            "ISOFORMAT_AB rows={} former_p50_ns={} candidate_p50_ns={} ratio={:.6} former_ns_per_row={:.3} candidate_ns_per_row={:.3}",
+            values.len(),
+            former_p50,
+            candidate_p50,
+            former_p50 as f64 / candidate_p50 as f64,
+            former_p50 as f64 / values.len() as f64,
+            candidate_p50 as f64 / values.len() as f64,
+        );
+        eprintln!("ISOFORMAT_AB former_samples_ns={former:?}");
+        eprintln!("ISOFORMAT_AB candidate_samples_ns={candidate:?}");
     }
 
     #[test]

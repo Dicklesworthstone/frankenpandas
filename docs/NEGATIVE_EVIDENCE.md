@@ -15334,6 +15334,45 @@ one in a peer-added test left outside this commit.
 Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran;
 `git diff --check` is green. No local Cargo command ran.
 
+### 2026-07-14 IvoryGlacier — WIN: `Timedelta::isoformat` writes one output buffer — 2.223x p50
+
+Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable). The ranked perf work was
+already assigned, landed, or rejected, and the preceding groupby / `fp-types` reduction veins were exhausted or held,
+so `br-frankenpandas-7jra1` pivoted to the fresh `fp-types` timedelta-formatting boundary. No prior ledger row covered
+`Timedelta::isoformat`. Static attribution found that the fractional path allocated the returned `String` plus three
+temporary `format!` strings; the integral path allocated the return plus two temporaries.
+
+Attribution preceded the production edit. A strict-remote normal-`release` binary on `vmi1227854` compared the untouched
+public implementation with a test-local one-buffer reference across 16,384 deterministic positive, negative, integral,
+microsecond, and nanosecond values. It used two warmups and nine reversed `A-B-B-A` blocks, and asserted exact string
+parity for every timed value plus NaT, zero, signed one nanosecond, one day, `i64::MAX`, and `i64::MIN + 1`.
+
+| pre-edit attributed arm | p50 batch | p50 per value |
+| --- | ---: | ---: |
+| former temporary-string path | 4.375 ms | 267.009 ns |
+| test-local one-buffer reference | 2.004 ms | 122.345 ns |
+
+The **2.182x** attributed win cleared the lever. Production now reserves one 40-byte output buffer, writes the duration
+fields and zero-padded fractional nanoseconds directly into it, trims trailing fractional zeroes in place, and appends
+the final `S`. Arithmetic, negative-duration spelling, NaT handling, and fractional precision are unchanged; the frozen
+former body remains in the ignored exact A/B harness.
+
+The single final foreground gate used normal `release` on the same worker, the same 16,384-value corpus, two warmups,
+and nine reversed `A-B-B-A` blocks. The timed body completed in 0.16 seconds and the full strict-remote command returned
+in 70.6 seconds; no `release-perf` profile ran.
+
+| final same-binary arm | p50 batch | p50 per value |
+| --- | ---: | ---: |
+| frozen former body | 5.207 ms | 317.832 ns |
+| production one-buffer path | 2.343 ms | 142.979 ns |
+
+The production path is **2.222937x faster at p50**, a **55.0145% latency reduction**. Exact parity cleared before every
+timing phase. Strict-remote `fp-types` library tests are **276 passed / 0 failed / 1 ignored benchmark**, and scoped
+`fp-types --all-targets --no-deps -D warnings` Clippy was green. Direct Rustfmt and `git diff --check` are green. The
+bounded changed-file UBS scan reproduced the broad pre-existing whole-file test/panic inventory (four test-only
+`panic!` labels), found no unsafe code or touched-hunk correctness defect, and prompted removal of the new infallible
+writer `expect` calls. No direct local Cargo command ran.
+
 ### 2026-07-14 IvoryGlacier — BENCH-COST PROHIBITIVE: dense Int64 `groupby_min` raw-slice bypass
 
 Negative-ledger-first routing ran `bv --robot-triage`, then rejected its old index-gather and generic-FxHashMap quick
