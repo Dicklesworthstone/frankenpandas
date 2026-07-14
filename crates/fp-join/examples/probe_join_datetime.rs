@@ -71,10 +71,12 @@ fn bench(
         samples.push(start.elapsed().as_secs_f64() * 1_000.0);
     }
     samples.sort_by(f64::total_cmp);
+    let p95 = (samples.len() * 95).div_ceil(100).saturating_sub(1);
     println!(
-        "{name:28}: p50={:.3} ms min={:.3} ms (rows={expected_rows}, checksum={checksum})",
+        "{name:29}: p50={:.3} ms p95={:.3} ms max={:.3} ms (rows={expected_rows}, checksum={checksum})",
         samples[samples.len() / 2],
-        samples[0]
+        samples[p95],
+        samples[samples.len() - 1]
     );
 }
 fn main() {
@@ -82,52 +84,52 @@ fn main() {
     let expected_rows = n;
     let (li, ri) = build(n, false, false);
     bench(
-        "left_int64_control_a",
+        "right_int64_control_a",
         &li,
         &ri,
-        JoinType::Left,
+        JoinType::Right,
         expected_rows,
         7,
     );
     bench(
-        "left_int64_control_b",
+        "right_int64_control_b",
         &li,
         &ri,
-        JoinType::Left,
+        JoinType::Right,
         expected_rows,
         7,
     );
     let (reference_left, reference_right) = build(n, true, true);
     bench(
-        "left_datetime_scalar_ref_a",
+        "right_datetime_scalar_ref_a",
         &reference_left,
         &reference_right,
-        JoinType::Left,
+        JoinType::Right,
         expected_rows,
         7,
     );
     bench(
-        "left_datetime_scalar_ref_b",
+        "right_datetime_scalar_ref_b",
         &reference_left,
         &reference_right,
-        JoinType::Left,
+        JoinType::Right,
         expected_rows,
         7,
     );
     let (ld, rd) = build(n, true, false);
     bench(
-        "left_datetime_key_a",
+        "right_datetime_key_a",
         &ld,
         &rd,
-        JoinType::Left,
+        JoinType::Right,
         expected_rows,
         7,
     );
     bench(
-        "left_datetime_key_b",
+        "right_datetime_key_b",
         &ld,
         &rd,
-        JoinType::Left,
+        JoinType::Right,
         expected_rows,
         7,
     );

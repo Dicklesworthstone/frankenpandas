@@ -15420,3 +15420,46 @@ command `RCH-E301`, so no local fallback ran. The final staged UBS scan reports 
 tracked broad `fp-index` inventory; its earlier sole new critical label was a benchmark-only false positive on the
 public NaT sentinel comparison and was rewritten as an equivalent `match`. `git diff --check` is green. No local Cargo
 command ran.
+
+### 2026-07-13 IvoryGlacier — WIN: ordered-unique temporal RIGHT joins plan over raw nanoseconds — 33.903x p50
+
+Negative-ledger-first routing found the preceding temporal INNER and LEFT keeps but no temporal RIGHT row. The older
+rejected UTF-8 RIGHT experiment was materially different: it hashed duplicate-bearing strings, emitted two optional
+position tapes, and paid a dense-right builder cost. This lever (`br-frankenpandas-8tf5c`) is restricted to strictly
+increasing, unique temporal keys and emits only the optional left-position tape required by a right-major result.
+
+One helper borrows the `i64` nanosecond slices of all-valid, same-dtype `Datetime64` or `Timedelta64` keys and performs a
+two-pointer scan in right order. The existing ordered-unique RIGHT builder then reuses the right key and payload columns
+identically and nullable-gathers only left payloads. Nullable keys, NaT sentinels, mixed temporal dtypes, duplicates,
+unsorted inputs, sorting, indicators, and unsupported validation modes retain the scalar planner. Those admission gates
+leave null/NaN, dtype, output-order, and suffix semantics outside the new path unchanged.
+
+The strict-remote foreground probe used 200,000 ordered-unique rows per side, two warmups, seven measured samples per
+arm, duplicate Int64 controls, and an asserted 200,000-row RIGHT result on every sample. The pre-production-edit
+implementation, built with the RIGHT benchmark harness, ran on `vmi1152480`; its clean temporal duplicate p50s were
+111.366 and 117.807 ms (**114.5865 ms mean**). The final
+same-binary ship gate ran on `vmi1227854`. Its scalar reference replaces only the final key on each side with matching
+NaT, which forces the historical planner while preserving result cardinality; it is a conservative path reference, not
+byte-identical input.
+
+| final same-binary arm | p50 A | p50 B | duplicate-p50 mean |
+| --- | ---: | ---: | ---: |
+| Int64 RIGHT control | 0.727 ms | 0.918 ms | 0.8225 ms |
+| NaT-routed scalar temporal reference | 76.050 ms | 76.716 ms | 76.383 ms |
+| raw-nanosecond temporal candidate | 2.311 ms | 2.195 ms | 2.253 ms |
+
+The same-binary scalar-reference/candidate ratio is **33.9028x p50** (**97.050% latency reduction**). The
+pre-production-edit identical-workload baseline/candidate comparison is explicitly cross-worker and measures
+**50.8595x** (**98.034%**).
+Duplicate candidate p50s differ by **5.149%**; duplicate scalar-reference p50s differ by **0.872%**.
+
+Correctness: the strict-remote focused proof is **2/2 green** for Datetime64 and Timedelta64 position parity against the
+scalar oracle, empty-left behavior, public key dtype/order, right payload identity, left null-fill, and mandatory
+fallback for NaT, nullable, mixed-dtype, duplicate, and unsorted keys. The full `fp-join` library suite is **146/146
+green**. Strict-remote workspace `cargo check -j 1 --workspace --all-targets` is green with five peer-owned
+`fp-columnar` warnings. Focused `fp-join --all-targets --no-deps -D warnings` Clippy is green. Full workspace Clippy
+remains blocked before `fp-join` by 23 peer-owned `fp-columnar` findings. Fail-closed RCH rejected remote
+`cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran. The bounded static-only UBS source
+scan reproduced seven tracked broad whole-file critical labels; a line-scoped staged disposition found no finding on
+any touched production, test, or probe line.
+`git diff --check` is green. No local Cargo command ran.

@@ -6758,6 +6758,56 @@ fn temporal_i64_left_positions(
     Some((left_positions, right_positions))
 }
 
+/// Ordered-unique single-key RIGHT matches for all-valid temporal columns.
+/// Datetime64 and Timedelta64 both store exact nanoseconds in `i64`, so a
+/// monotone two-pointer scan produces the same optional left position per
+/// right row as the generic Scalar planner without materializing either key.
+/// Nullable, NaT-bearing, duplicate, unsorted, or mixed-dtype keys decline.
+fn ordered_unique_temporal_i64_right_match_positions(
+    left_key: &Column,
+    right_key: &Column,
+) -> Option<Vec<Option<usize>>> {
+    if !left_key.validity().all() || !right_key.validity().all() {
+        return None;
+    }
+
+    let (left, right, nat) = match (left_key.dtype(), right_key.dtype()) {
+        (DType::Datetime64, DType::Datetime64) => (
+            left_key.as_datetime64_slice()?,
+            right_key.as_datetime64_slice()?,
+            fp_types::Timestamp::NAT,
+        ),
+        (DType::Timedelta64, DType::Timedelta64) => (
+            left_key.as_timedelta64_slice()?,
+            right_key.as_timedelta64_slice()?,
+            fp_types::Timedelta::NAT,
+        ),
+        _ => return None,
+    };
+    if left.contains(&nat) || right.contains(&nat) {
+        return None;
+    }
+    if left.windows(2).any(|pair| pair[0] >= pair[1])
+        || right.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return None;
+    }
+
+    let mut left_positions = Vec::with_capacity(right.len());
+    let mut left_idx = 0usize;
+    for &right_value in right {
+        while left_idx < left.len() && left[left_idx] < right_value {
+            left_idx += 1;
+        }
+        left_positions.push(
+            (left_idx < left.len()
+                && matches!(left[left_idx].cmp(&right_value), Ordering::Equal))
+            .then_some(left_idx),
+        );
+    }
+    Some(left_positions)
+}
+
 /// Core counting-sort/CSR inner-join over two `i64` key slices (see
 /// [`dense_int64_inner_positions`]). Emits `(left_pos, right_pos)` pairs with
 /// right positions ascending per left key, left probed ascending — matching the
@@ -8372,6 +8422,26 @@ pub fn merge_dataframes_on_with_options(
         && validate_allows_fast_positions
         && let Some(left_positions) =
             ordered_unique_int64_right_match_positions(left_key_columns[0], right_key_columns[0])
+    {
+        return build_single_key_ordered_unique_right_merge_output(
+            left,
+            right,
+            left_on,
+            right_on,
+            &left_positions,
+            &suffixes,
+        );
+    }
+    if matches!(join_type, JoinType::Right)
+        && left_on.len() == 1
+        && right_on.len() == 1
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && let Some(left_positions) = ordered_unique_temporal_i64_right_match_positions(
+            left_key_columns[0],
+            right_key_columns[0],
+        )
     {
         return build_single_key_ordered_unique_right_merge_output(
             left,
@@ -10412,7 +10482,7 @@ impl DataFrameMergeExt for fp_frame::DataFrame {
 
 #[cfg(test)]
 mod tests {
-    use fp_columnar::Column;
+    use fp_columnar::{Column, ValidityMask};
     use fp_frame::Series;
     use fp_index::{Index, IndexLabel};
     use fp_types::{DType, NullKind, Scalar};
@@ -12176,6 +12246,202 @@ mod tests {
         let nat_right_values = merged_values(&nat_merged, "rv")?;
         assert_eq!(&nat_right_values[..2], &[Scalar::Int64(10), Scalar::Int64(11)]);
         assert!(nat_right_values[2].is_missing());
+
+        Ok(())
+    }
+
+    #[test]
+    fn temporal_i64_right_positions_match_scalar_oracle_and_reject_unsupported_8tf5c() {
+        let scalar_oracle = |left: &Column, right: &Column| {
+            let left_keys = super::collect_single_join_keys(left);
+            let right_keys = super::collect_single_join_keys(right);
+            right_keys
+                .iter()
+                .map(|right_key| left_keys.iter().position(|left_key| left_key == right_key))
+                .collect::<Vec<_>>()
+        };
+
+        let left_ns = [-20, 10, 30, 50];
+        let right_ns = [-30, -20, 20, 30, 60];
+        for temporal in [DType::Datetime64, DType::Timedelta64] {
+            let scalar = |ns| match temporal {
+                DType::Datetime64 => Scalar::Datetime64(ns),
+                DType::Timedelta64 => Scalar::Timedelta64(ns),
+                _ => unreachable!("test iterates only temporal dtypes"),
+            };
+            let left = Column::from_values(left_ns.into_iter().map(scalar).collect())
+                .expect("left temporal key");
+            let right = Column::from_values(right_ns.into_iter().map(scalar).collect())
+                .expect("right temporal key");
+            assert_eq!(
+                super::ordered_unique_temporal_i64_right_match_positions(&left, &right),
+                Some(scalar_oracle(&left, &right)),
+                "raw-nanosecond RIGHT planner must preserve right-major scalar matches for {temporal:?}",
+            );
+        }
+
+        let empty_left = Column::from_datetime64_values(Vec::new());
+        let ordered_right = Column::from_datetime64_values(vec![1, 2, 3]);
+        assert_eq!(
+            super::ordered_unique_temporal_i64_right_match_positions(
+                &empty_left,
+                &ordered_right,
+            ),
+            Some(vec![None; 3]),
+        );
+
+        let nat = fp_types::Timestamp::NAT;
+        let nat_left = Column::from_datetime64_values(vec![nat, 1, 2]);
+        let duplicate_left = Column::from_datetime64_values(vec![1, 1, 2]);
+        let unsorted_right = Column::from_datetime64_values(vec![2, 1, 3]);
+        let mixed_right = Column::from_values(
+            [1, 2, 3]
+                .into_iter()
+                .map(Scalar::Timedelta64)
+                .collect(),
+        )
+        .expect("mixed timedelta key");
+        let mut validity = ValidityMask::all_valid(3);
+        validity.set(1, false);
+        let nullable_left =
+            Column::from_datetime64_values_with_validity(vec![1, 2, 3], validity);
+        for (left, right) in [
+            (&nat_left, &ordered_right),
+            (&duplicate_left, &ordered_right),
+            (&ordered_right, &unsorted_right),
+            (&ordered_right, &mixed_right),
+            (&nullable_left, &ordered_right),
+        ] {
+            assert!(
+                super::ordered_unique_temporal_i64_right_match_positions(left, right).is_none(),
+                "unsupported temporal RIGHT shape must retain the scalar fallback",
+            );
+        }
+    }
+
+    #[test]
+    fn merge_datetime_right_preserves_dtype_order_and_nat_fallback_8tf5c()
+    -> Result<(), JoinError> {
+        let left = DataFrame::from_dict(
+            &["key", "lv"],
+            vec![
+                (
+                    "key",
+                    vec![
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(30),
+                        Scalar::Datetime64(50),
+                    ],
+                ),
+                (
+                    "lv",
+                    vec![Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+            ],
+        )?;
+        let right = DataFrame::from_dict(
+            &["key", "rv"],
+            vec![
+                (
+                    "key",
+                    vec![
+                        Scalar::Datetime64(0),
+                        Scalar::Datetime64(10),
+                        Scalar::Datetime64(40),
+                        Scalar::Datetime64(50),
+                        Scalar::Datetime64(60),
+                    ],
+                ),
+                (
+                    "rv",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(101),
+                        Scalar::Int64(102),
+                        Scalar::Int64(103),
+                        Scalar::Int64(104),
+                    ],
+                ),
+            ],
+        )?;
+        let merged = merge_dataframes_on(&left, &right, &["key"], JoinType::Right)?;
+        assert_eq!(merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(
+            merged_values(&merged, "key")?,
+            &[
+                Scalar::Datetime64(0),
+                Scalar::Datetime64(10),
+                Scalar::Datetime64(40),
+                Scalar::Datetime64(50),
+                Scalar::Datetime64(60),
+            ],
+        );
+        assert_eq!(
+            merged_values(&merged, "rv")?,
+            &[
+                Scalar::Int64(100),
+                Scalar::Int64(101),
+                Scalar::Int64(102),
+                Scalar::Int64(103),
+                Scalar::Int64(104),
+            ],
+        );
+        let left_values = merged_values(&merged, "lv")?;
+        assert_eq!(left_values.len(), 5);
+        assert!(left_values[0].is_missing());
+        assert_eq!(left_values[1], Scalar::Int64(0));
+        assert!(left_values[2].is_missing());
+        assert_eq!(left_values[3], Scalar::Int64(2));
+        assert!(left_values[4].is_missing());
+
+        let nat = fp_types::Timestamp::NAT;
+        let nat_left = DataFrame::from_dict(
+            &["key", "lv"],
+            vec![
+                (
+                    "key",
+                    vec![Scalar::Datetime64(nat), Scalar::Datetime64(5)],
+                ),
+                ("lv", vec![Scalar::Int64(0), Scalar::Int64(1)]),
+            ],
+        )?;
+        let nat_right = DataFrame::from_dict(
+            &["key", "rv"],
+            vec![
+                (
+                    "key",
+                    vec![
+                        Scalar::Datetime64(nat),
+                        Scalar::Datetime64(5),
+                        Scalar::Datetime64(7),
+                    ],
+                ),
+                (
+                    "rv",
+                    vec![Scalar::Int64(10), Scalar::Int64(11), Scalar::Int64(12)],
+                ),
+            ],
+        )?;
+        assert!(
+            super::ordered_unique_temporal_i64_right_match_positions(
+                nat_left.column("key").expect("left NaT key"),
+                nat_right.column("key").expect("right NaT key"),
+            )
+            .is_none(),
+            "NaT must retain the scalar Missing-key fallback",
+        );
+        let nat_merged =
+            merge_dataframes_on(&nat_left, &nat_right, &["key"], JoinType::Right)?;
+        assert_eq!(nat_merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(nat_merged.index.len(), 3);
+        assert!(merged_values(&nat_merged, "key")?[0].is_missing());
+        assert_eq!(
+            &merged_values(&nat_merged, "key")?[1..],
+            &[Scalar::Datetime64(5), Scalar::Datetime64(7)],
+        );
+        let nat_left_values = merged_values(&nat_merged, "lv")?;
+        assert_eq!(&nat_left_values[..2], &[Scalar::Int64(0), Scalar::Int64(1)]);
+        assert!(nat_left_values[2].is_missing());
 
         Ok(())
     }
