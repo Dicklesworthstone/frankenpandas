@@ -15291,3 +15291,45 @@ two-pass mean-centered accumulation ULP-for-ULP) on an op that already beats pan
 increment; needs a golden-safe corr investigation, not a quick lever. Numeric compute surface confirmed dry; real remaining levers
 are subsystem-level (khash i64 groupby high-card, Categorical dtype for cut/qcut, 2D-block transpose) or in un-probed subsystems
 (fp-join numeric/temporal keys, fp-index temporal routing).
+
+### 2026-07-13 IvoryGlacier — WIN: regular temporal INNER joins plan over raw nanoseconds — 46.492x p50
+
+Negative-ledger-first routing skipped the exhausted numeric DataFrame surface and took the explicitly unprobed regular
+`fp-join` temporal-key seam (`br-frankenpandas-b2hwb`). Inspection found a correctness prerequisite: the generic key
+extractor classified every non-NaT `Datetime64` and `Timedelta64` scalar as `Missing`, so distinct temporal keys could
+produce an invalid cartesian match. The exact scalar fallback now maps present temporal values to their matching
+`IndexLabel` variants and keeps NaT as `Missing`; that corrected fallback is the reference arm below.
+
+One performance lever handles all-valid, same-dtype `Datetime64` or `Timedelta64` INNER keys directly over their borrowed
+`&[i64]` nanosecond backing. Strictly increasing keys use a two-pointer intersection; remaining keys reuse the existing
+bounded dense-CSR planner and then the raw-i64 hash planner. Mixed dtypes, nullable keys, explicit NaT sentinels, and
+non-temporal keys retain the scalar path. Output still gathers the original key column, preserving temporal dtype,
+left-major row order, right-bucket insertion order, duplicate multiplication, and null representation.
+
+The strict-remote foreground probe used 200,000 ordered-unique rows per side, a 50% overlap (100,000 output rows), two
+warmups, seven samples per arm, an asserted row count on every sample, and duplicate Int64 controls within each binary.
+RCH scheduled the corrected scalar reference on `vmi1149989` and the candidate on `vmi1293453`, so the direct ratio is
+explicitly cross-worker rather than same-worker ship proof:
+
+| binary / arm | p50 A | p50 B | mean of duplicate p50s |
+| --- | ---: | ---: | ---: |
+| corrected scalar temporal reference | 37.119 ms | 39.361 ms | 38.240 ms |
+| reference-binary Int64 control | 0.423 ms | 0.563 ms | 0.493 ms |
+| raw-nanosecond temporal candidate | 0.832 ms | 0.813 ms | 0.8225 ms |
+| candidate-binary Int64 control | 0.719 ms | 0.744 ms | 0.7315 ms |
+
+The raw cross-worker reduction is **46.492x p50** (**97.8491%**). Normalizing each binary to its same-binary Int64
+control improves the temporal/control ratio from **77.566x** to **1.124x**, a **68.984x ratio-of-ratios**; the duplicated
+candidate temporal samples differ by 2.34%, while every sample produced the exact expected cardinality.
+
+Correctness: the strict-remote full `fp-join` library suite is **141/141 green**; after the final scanner-driven syntax
+refactor, the exact-source focused proof is **2/2 green**. It compares raw-nanosecond positions against the corrected
+scalar oracle for unsorted duplicate-bearing Datetime64 and Timedelta64 keys, including exact left-major/right-insertion
+pair order. The public merge proof checks output dtype, key values, duplicate cardinality, both payload columns, and a NaT
+case that must reject the fast path and preserve Missing-to-Missing matching. Workspace check is green. Focused
+`fp-join --all-targets --no-deps -D warnings` Clippy is green. Full workspace Clippy remains blocked before `fp-join`
+by the peer-owned `fp-columnar` backlog (23 library and 45 test findings). The bounded final UBS scan completed with no
+production-hunk finding; it reproduced broad tracked inventory plus test-only equality/panic false positives, including
+one in a peer-added test left outside this commit.
+Fail-closed RCH rejected `cargo fmt --check` as non-compilation command `RCH-E301`, so no local fallback ran;
+`git diff --check` is green. No local Cargo command ran.

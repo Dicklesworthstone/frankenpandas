@@ -35,34 +35,43 @@ fn build(n: usize, datetime: bool) -> (DataFrame, DataFrame) {
         DataFrame::new_with_column_order(idx(n), rm, vec!["key".into(), "rv".into()]).unwrap();
     (left, right)
 }
-fn bench(name: &str, l: &DataFrame, r: &DataFrame, it: usize) {
-    for _ in 0..3 {
+fn bench(name: &str, l: &DataFrame, r: &DataFrame, expected_rows: usize, it: usize) {
+    for _ in 0..2 {
         black_box(
             merge_dataframes_on(l, r, &["key"], JoinType::Inner)
                 .unwrap()
-                .columns
+                .index
                 .len(),
         );
     }
-    let st = Instant::now();
-    let mut k = 0usize;
+    let mut samples = Vec::with_capacity(it);
+    let mut checksum = 0usize;
     for _ in 0..it {
-        k ^= black_box(
+        let start = Instant::now();
+        let rows = black_box(
             merge_dataframes_on(l, r, &["key"], JoinType::Inner)
                 .unwrap()
-                .columns
+                .index
                 .len(),
         );
+        assert_eq!(rows, expected_rows);
+        checksum ^= rows;
+        samples.push(start.elapsed().as_secs_f64() * 1_000.0);
     }
+    samples.sort_by(f64::total_cmp);
     println!(
-        "{name:24}: {:.3} ms/call (k={k})",
-        st.elapsed().as_secs_f64() * 1000.0 / it as f64
+        "{name:28}: p50={:.3} ms min={:.3} ms (rows={expected_rows}, checksum={checksum})",
+        samples[samples.len() / 2],
+        samples[0]
     );
 }
 fn main() {
-    let n = 1_000_000usize;
+    let n = 200_000usize;
+    let expected_rows = n.div_ceil(2);
     let (li, ri) = build(n, false);
-    bench("inner_int64_key", &li, &ri, 30);
+    bench("inner_int64_control_a", &li, &ri, expected_rows, 7);
+    bench("inner_int64_control_b", &li, &ri, expected_rows, 7);
     let (ld, rd) = build(n, true);
-    bench("inner_datetime_key", &ld, &rd, 30);
+    bench("inner_datetime_key_a", &ld, &rd, expected_rows, 7);
+    bench("inner_datetime_key_b", &ld, &rd, expected_rows, 7);
 }
