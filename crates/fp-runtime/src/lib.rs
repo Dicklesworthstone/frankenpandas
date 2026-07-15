@@ -609,7 +609,7 @@ impl RaptorQEnvelope {
 
 #[must_use]
 pub fn semantic_fingerprint_bytes(bytes: &[u8]) -> String {
-    format!("sha256:{}", sha256_hex(bytes))
+    sha256_prefixed_hex(bytes)
 }
 
 #[derive(Debug)]
@@ -641,6 +641,7 @@ impl SemanticFingerprintBuilder {
     }
 }
 
+#[cfg(test)]
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     sha256_digest_hex(digest)
@@ -1023,6 +1024,82 @@ mod tests {
         );
         eprintln!("RAPTORQ_HASH_AB former_samples_ns={former_samples:?}");
         eprintln!("RAPTORQ_HASH_AB candidate_samples_ns={candidate_samples:?}");
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn semantic_fingerprint_one_buffer_ab_9yiey() {
+        const BATCH: usize = 2_048;
+        const BLOCKS: usize = 10;
+
+        fn former(bytes: &[u8]) -> String {
+            format!("sha256:{}", super::sha256_hex(bytes))
+        }
+
+        fn candidate(bytes: &[u8]) -> String {
+            super::semantic_fingerprint_bytes(bytes)
+        }
+
+        fn elapsed(bytes: &[u8], fingerprint: fn(&[u8]) -> String) -> u128 {
+            let started = Instant::now();
+            let mut digest = 0_u8;
+            for _ in 0..BATCH {
+                let output = black_box(fingerprint(black_box(bytes)));
+                digest ^= output.as_bytes()[70];
+            }
+            black_box(digest);
+            started.elapsed().as_nanos() / BATCH as u128
+        }
+
+        fn percentile(samples: &mut [u128], pct: usize) -> u128 {
+            samples.sort_unstable();
+            let rank = (samples.len() * pct).div_ceil(100).saturating_sub(1);
+            samples[rank]
+        }
+
+        for len in [0, 1, 31, 64, 65, 1_024, 1_025] {
+            let bytes = (0..len)
+                .map(|i| ((i * 131 + i / 7) % 251) as u8)
+                .collect::<Vec<_>>();
+            assert_eq!(former(&bytes), candidate(&bytes));
+        }
+
+        let bytes = (0..64)
+            .map(|i| ((i * 131 + i / 7) % 251) as u8)
+            .collect::<Vec<_>>();
+        for _ in 0..2 {
+            black_box(elapsed(&bytes, former));
+            black_box(elapsed(&bytes, candidate));
+        }
+
+        let mut former_samples = Vec::with_capacity(BLOCKS * 2);
+        let mut candidate_samples = Vec::with_capacity(BLOCKS * 2);
+        for block in 0..BLOCKS {
+            if block.is_multiple_of(2) {
+                former_samples.push(elapsed(&bytes, former));
+                candidate_samples.push(elapsed(&bytes, candidate));
+                candidate_samples.push(elapsed(&bytes, candidate));
+                former_samples.push(elapsed(&bytes, former));
+            } else {
+                candidate_samples.push(elapsed(&bytes, candidate));
+                former_samples.push(elapsed(&bytes, former));
+                former_samples.push(elapsed(&bytes, former));
+                candidate_samples.push(elapsed(&bytes, candidate));
+            }
+        }
+
+        let former_p50 = percentile(&mut former_samples, 50);
+        let candidate_p50 = percentile(&mut candidate_samples, 50);
+        let former_p95 = percentile(&mut former_samples, 95);
+        let candidate_p95 = percentile(&mut candidate_samples, 95);
+        eprintln!(
+            "SEMANTIC_FINGERPRINT_AB bytes={} batch={BATCH} samples={} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} ratio={:.6} former_p95_ns={former_p95} candidate_p95_ns={candidate_p95}",
+            bytes.len(),
+            BLOCKS * 2,
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("SEMANTIC_FINGERPRINT_AB former_samples_ns={former_samples:?}");
+        eprintln!("SEMANTIC_FINGERPRINT_AB candidate_samples_ns={candidate_samples:?}");
     }
 
     #[test]

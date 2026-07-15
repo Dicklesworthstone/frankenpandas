@@ -16743,3 +16743,31 @@ neither the materialized-label cache nor the failed Int64-view cache. The fp-ind
 and `git diff --check` is green. A broader fp-io warm-up independently surfaced a committed fp-types/fp-frame
 `Scalar::Period` API mismatch before reaching that unrelated target; it was not treated as benchmark evidence. All
 Cargo invocations were strict remote RCH executions, and no stash was changed.
+
+### 2026-07-14 IvoryGlacier — one-buffer `semantic_fingerprint_bytes`: 1.680233x p50 WIN (`br-frankenpandas-9yiey`)
+
+Negative-ledger-first routing found that the earlier RaptorQ hash-emission keep covered only
+`RaptorQEnvelope::from_source_bytes`; the public one-shot semantic fingerprint still built a 64-byte unprefixed digest
+`String` and then allocated and copied it through `format!("sha256:{}", ...)`. The one lever routes that function through
+the existing exactly-sized prefixed SHA-256 writer. Hashing, lowercase hexadecimal encoding, the `sha256:` prefix, output
+length, streaming-builder equivalence, and every returned byte are unchanged. The former unprefixed helper is now test-only
+so the permanent A/B continues to exercise the exact historical body without leaving dead production code.
+
+Attribution preceded the production edit. A strict-remote normal-`release` run on `vmi1149989` used a 64-byte input,
+2,048 calls per sample, two warmups, and 20 reversed-ABBA samples per arm. The exact former body measured **221 ns p50**
+versus **132 ns p50** for the one-buffer helper (**1.674242x**); p95 was **250 / 153 ns**. Exact output parity passed for
+lengths 0, 1, 31, 64, 65, 1,024, and 1,025 before timing.
+
+The single final foreground same-binary gate ran on `vmi1227854` with `--profile release` and the same small-input shape:
+
+| final arm | p50 | p95 |
+| --- | ---: | ---: |
+| former two-allocation fingerprint | 289 ns | 643 ns |
+| public one-buffer fingerprint | 172 ns | 430 ns |
+
+The public candidate is **1.680233x faster at p50** (**40.484% lower latency**) and **1.495349x faster at p95**. The
+timed test body finished in 0.03 seconds; RCH's repeated cold dependency builds were explicitly separated by untimed
+no-run warmups and are not benchmark evidence. Correctness is strict-remote: the full `fp-runtime` release library suite
+is **41 passed / 0 failed / 3 ignored performance probes**, including SHA-256 known answers and streaming/one-shot
+equivalence. Scoped `fp-runtime --all-targets --no-deps -D warnings` Clippy, direct Rustfmt, and `git diff --check` are
+green. UBS reports zero critical findings. No local Cargo or `release-perf` command ran, and no stash was changed.
