@@ -2623,6 +2623,11 @@ fn write_html_table_string(
     frame: &DataFrame,
     options: &HtmlWriteOptions,
 ) -> Result<String, IoError> {
+    let column_names = frame.column_names();
+    let columns = column_names
+        .iter()
+        .map(|name| frame.column(name))
+        .collect::<Vec<_>>();
     let mut out = String::new();
     push_html_table_open(&mut out, options);
     out.push_str("  <thead>\n    <tr style=\"text-align: ");
@@ -2634,7 +2639,7 @@ fn write_html_table_string(
     if options.include_index {
         out.push_str("      <th></th>\n");
     }
-    for name in frame.column_names() {
+    for name in &column_names {
         out.push_str("      <th>");
         out.push_str(&html_text(name, options.escape));
         out.push_str("</th>\n");
@@ -2648,8 +2653,8 @@ fn write_html_table_string(
             out.push_str(&html_index_label_string(frame, row_idx, options.escape)?);
             out.push_str("</th>\n");
         }
-        for name in frame.column_names() {
-            let value = frame.column(name).and_then(|column| column.value(row_idx));
+        for column in &columns {
+            let value = (*column).and_then(|column| column.value(row_idx));
             out.push_str("      <td>");
             match value {
                 Some(scalar) => out.push_str(&html_scalar_string(scalar, options)),
@@ -15029,6 +15034,142 @@ mod tests {
             std::fs::read_to_string(&free_latex_path).expect("read free latex options"),
             write_latex_string_with_options(&frame, &latex_options)
                 .expect("free latex options string")
+        );
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn html_table_writer_ordered_column_hoist_profile_z8gge() {
+        const ROWS: usize = 256;
+        const COLUMNS: usize = 24;
+        const BATCH: usize = 8;
+        const BLOCKS: usize = 9;
+
+        fn former(frame: &DataFrame, options: &HtmlWriteOptions) -> Result<String, IoError> {
+            let mut out = String::new();
+            super::push_html_table_open(&mut out, options);
+            out.push_str("  <thead>\n    <tr style=\"text-align: ");
+            out.push_str(&super::escape_html_attr(
+                options.justify.as_deref().unwrap_or("right"),
+            ));
+            out.push_str(";\">\n");
+
+            if options.include_index {
+                out.push_str("      <th></th>\n");
+            }
+            for name in frame.column_names() {
+                out.push_str("      <th>");
+                out.push_str(&super::html_text(name, options.escape));
+                out.push_str("</th>\n");
+            }
+            out.push_str("    </tr>\n  </thead>\n  <tbody>\n");
+
+            for row_idx in 0..frame.index().len() {
+                out.push_str("    <tr>\n");
+                if options.include_index {
+                    out.push_str("      <th>");
+                    out.push_str(&super::html_index_label_string(
+                        frame,
+                        row_idx,
+                        options.escape,
+                    )?);
+                    out.push_str("</th>\n");
+                }
+                for name in frame.column_names() {
+                    let value = frame.column(name).and_then(|column| column.value(row_idx));
+                    out.push_str("      <td>");
+                    match value {
+                        Some(scalar) => {
+                            out.push_str(&super::html_scalar_string(scalar, options));
+                        }
+                        None => {
+                            out.push_str(&super::html_text(&options.na_rep, options.escape));
+                        }
+                    }
+                    out.push_str("</td>\n");
+                }
+                out.push_str("    </tr>\n");
+            }
+
+            out.push_str("  </tbody>\n</table>");
+            Ok(out)
+        }
+
+        fn prototype(frame: &DataFrame, options: &HtmlWriteOptions) -> Result<String, IoError> {
+            super::write_html_table_string(frame, options)
+        }
+
+        fn elapsed_ns(frame: &DataFrame, options: &HtmlWriteOptions, use_prototype: bool) -> u128 {
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                let output = if use_prototype {
+                    prototype(frame, options)
+                } else {
+                    former(frame, options)
+                }
+                .expect("HTML render");
+                std::hint::black_box(output.as_bytes().last());
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn median(mut samples: Vec<u128>) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let mut columns = BTreeMap::new();
+        let mut column_order = Vec::with_capacity(COLUMNS);
+        for column_idx in 0..COLUMNS {
+            let name = format!("column_{column_idx:02}");
+            let values = (0..ROWS)
+                .map(|row_idx| (column_idx * ROWS + row_idx) as i64)
+                .collect();
+            columns.insert(name.clone(), Column::from_i64_values(values));
+            column_order.push(name);
+        }
+        column_order.reverse();
+        let frame = DataFrame::new_with_column_order(
+            Index::from_range(0, ROWS as i64, 1),
+            columns,
+            column_order,
+        )
+        .expect("profile frame");
+        let options = HtmlWriteOptions {
+            include_index: false,
+            ..HtmlWriteOptions::default()
+        };
+
+        let expected = former(&frame, &options).expect("former HTML");
+        let actual = prototype(&frame, &options).expect("prototype HTML");
+        assert_eq!(actual, expected, "prototype must be byte-identical");
+
+        std::hint::black_box(former(&frame, &options).expect("former warm-up"));
+        std::hint::black_box(prototype(&frame, &options).expect("prototype warm-up"));
+
+        let mut former_samples = Vec::with_capacity(BLOCKS * 2);
+        let mut prototype_samples = Vec::with_capacity(BLOCKS * 2);
+        for block in 0..BLOCKS {
+            let order = if block % 2 == 0 {
+                [false, true, true, false]
+            } else {
+                [true, false, false, true]
+            };
+            for use_prototype in order {
+                let elapsed = elapsed_ns(&frame, &options, use_prototype);
+                if use_prototype {
+                    prototype_samples.push(elapsed);
+                } else {
+                    former_samples.push(elapsed);
+                }
+            }
+        }
+
+        let former_ns = median(former_samples) / BATCH as u128;
+        let prototype_ns = median(prototype_samples) / BATCH as u128;
+        println!(
+            "HTML_COLUMN_HOIST_PROFILE rows={ROWS} columns={COLUMNS} former_ns={former_ns} prototype_ns={prototype_ns} speedup={:.6}",
+            former_ns as f64 / prototype_ns as f64
         );
     }
 

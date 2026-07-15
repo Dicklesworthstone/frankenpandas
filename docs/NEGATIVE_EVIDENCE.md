@@ -16973,3 +16973,35 @@ are **4 passed / 0 failed / 1 ignored attribution harness**; scoped `fp-types --
 direct Rustfmt, and `git diff --check` are green. Bounded UBS found no touched-hunk issue while reproducing the file's
 pre-existing broad test panic/unwrap/assert inventory. Every explicit Cargo command used fail-closed remote RCH; no
 local Cargo or `release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were not changed.
+
+### 2026-07-14 IvoryGlacier — HTML writer ordered-column hoist: 1.938060x p50 WIN (`br-frankenpandas-z8gge`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable, four blocked). Its ranked
+performance quick wins remained assigned to other agents, while the recent ledger was saturated across validity,
+index, runtime, GroupBy, datetime, and scalar-ordering paths. This fresh `fp-io` retry resumed
+`br-frankenpandas-r78hj`, whose earlier profile had been blocked before timing by unrelated committed API drift. The
+HTML writer still allocated `DataFrame::column_names()` once per row and performed one BTreeMap column lookup per cell.
+
+Attribution preceded the production edit: the exact former writer body was captured in a test-only harness, and static
+call-count inspection established one name-vector allocation per row plus `rows * columns` map probes. The one lever
+resolves the observable-order names and matching `Option<&Column>` entries once per render, retaining the former
+missing-column `na_rep` behavior. Header order, row order, index handling, escaping, links, scalar formatting, null/NaN/
+NaT behavior, CSS options, public APIs, and output bytes are unchanged.
+
+The single final foreground same-binary gate ran on strict-remote worker `vmi1149989` with normal `--profile release`:
+a 256-row by 24-column deliberately reverse-ordered frame, two in-process warmups, and nine reversed-ABBA blocks of
+eight renders per sample. Before timing, the public production output matched the exact former body byte for byte.
+
+| final arm | p50 per HTML render |
+| --- | ---: |
+| former per-row names plus per-cell map probes | 241,742 ns |
+| public ordered-column hoist | 124,734 ns |
+
+The public candidate is **1.938060x faster at p50**; the complete timed test body finished in **0.06 seconds**. RCH
+discarded the same-worker release cache after both explicit untimed warmups and cold-built the final command for 7m01s;
+that compilation and transfer stayed outside every in-process sample and is recorded as infrastructure cost, not A/B
+evidence. Five focused HTML writer release tests and the exact A/B test pass. Scoped `fp-io --lib --no-deps -D warnings`
+release Clippy and `git diff --check` are green. Direct Rustfmt reproduced only tracked pre-existing CSV-test drift below
+the touched hunk; bounded UBS reproduced the broad existing whole-file inventory with no production-hoist finding.
+Every Cargo invocation used fail-closed remote RCH; no local Cargo or `release-perf` command ran, unrelated artifact dirt
+was untouched, and the 70 stashes were unchanged.
