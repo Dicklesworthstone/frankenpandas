@@ -17286,3 +17286,44 @@ remained outside every in-process sample. Crate-scoped Clippy is clean under `-D
 indexing, and false-positive secret inventories, with no finding in either touched matcher or test hunk. Every Cargo
 command used fail-closed remote RCH; no explicit local Cargo or `release-perf` command ran, unrelated artifact dirt
 was untouched, and the 71 stashes were not changed.
+
+### 2026-07-15 IvoryGlacier — short-circuit `MultiIndex::is_unique`: 3.133128x / 1.268051x p50 WIN (`br-frankenpandas-haoam`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable, four blocked). Every ranked
+performance quick win was assigned to `cc` or `cod-b`, while the recent validity, timestamp, expression, GroupBy,
+Python, and join veins were already mined. The fresh `fp-index` seam was `MultiIndex::is_unique`: it materialized the
+complete `duplicated(First)` bitmap and only then searched that bitmap for one true bit. The existing compact-two-level
+ledger measured that duplicate kernel at 1.798 ms for one million rows, attributing the boolean predicate completely
+to full duplicate-output construction and ruling out early termination. Opportunity score was
+`impact 4 * confidence 5 / effort 2 = 10`.
+
+The one production lever scans the same identity representations directly and returns on the first repeated tuple.
+Compact two-level indexes reuse their exact mixed-radix slot, packed indexes reuse the existing bijective `u64` keys,
+and overflow/wide indexes retain exact `Vec<IndexLabel>` tuple equality. Empty/singleton behavior, tuple identity,
+hashing, level names, stored labels, duplicate masks, ordering, and every public output remain unchanged; only the
+predicate's discarded `Vec<bool>` is omitted. A permanent exact-former gate covers empty and singleton indexes plus
+unique/duplicate inputs through compact two-level, packed three-level, and forced generic 65-level fallbacks, and also
+checks `has_duplicates == !is_unique`.
+
+The single final foreground same-binary A/B ran fail-closed through RCH on `vmi1149989` with normal
+`--profile release`: 131,072 rows, four calls per sample, ten alternating-order samples, an early-repeat input and an
+all-unique control. Both public results matched the exact former `duplicated(First).iter().any(...)` body before timing;
+the complete in-process test body finished in 0.05 seconds.
+
+| final shape | former bitmap p50 | public predicate p50 | speedup | latency reduction |
+| --- | ---: | ---: | ---: | ---: |
+| duplicate in the first two rows | 894,226 ns | 285,410 ns | **3.133128x** | **68.0830%** |
+| all 131,072 tuples unique | 1,134,648 ns | 894,797 ns | **1.268051x** | **21.1388%** |
+
+Early-duplicate former samples were 751,081 / 766,494 / 807,786 / 845,202 / 890,861 / 894,226 / 901,727 / 906,825 /
+909,039 / 1,521,990 ns; candidate samples were 275,925 / 277,388 / 282,035 / 282,086 / 283,737 / 285,410 / 287,683 /
+287,793 / 549,988 / 767,485 ns. All-unique former samples were 985,583 / 992,263 / 1,038,614 / 1,062,779 / 1,132,094 /
+1,134,648 / 1,144,753 / 1,145,023 / 1,172,144 / 1,182,059 ns; candidate samples were 824,982 / 862,297 / 865,893 /
+869,389 / 892,143 / 894,797 / 900,205 / 909,549 / 944,461 / 1,175,760 ns.
+
+An untimed cold release warm-up completed first on `vmi1153651`; RCH rerouted correctness to `vmi1264463` and the
+final same-binary gate to `vmi1149989`, where its 50.0-second compile remained outside every sample. Scoped
+`fp-index --lib --no-deps -D warnings` Clippy is clean, `git diff --check` and touched-hunk Rustfmt are clean, and
+bounded UBS completed with zero critical findings while reproducing the file's broad pre-existing scanner inventory.
+Every Cargo command used fail-closed remote RCH; no explicit local Cargo or `release-perf` command ran, unrelated
+artifact dirt was untouched, and the 70 stashes were not changed.

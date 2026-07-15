@@ -18188,7 +18188,30 @@ impl MultiIndex {
     /// Matches `pd.MultiIndex.is_unique`.
     #[must_use]
     pub fn is_unique(&self) -> bool {
-        !self.duplicated(DuplicateKeep::First).iter().any(|&b| b)
+        let len = self.len();
+        if len <= 1 {
+            return true;
+        }
+        if let Some(layout) = self.compact_two_level_identity_layout() {
+            let mut seen = vec![0_u8; layout.slot_count];
+            for row in 0..len {
+                let key = layout.slot(row);
+                if seen[key] != 0 {
+                    return false;
+                }
+                seen[key] = 1;
+            }
+            return true;
+        }
+        if let Some(keys) = self.identity_packed_keys() {
+            let mut seen: FxHashSet<u64> =
+                FxHashSet::with_capacity_and_hasher(len, Default::default());
+            return keys.into_iter().all(|key| seen.insert(key));
+        }
+
+        let mut seen: FxHashSet<Vec<IndexLabel>> =
+            FxHashSet::with_capacity_and_hasher(len, Default::default());
+        (0..len).all(|row| seen.insert(self.tuple_at(row)))
     }
 
     /// Whether any composite tuple appears more than once.
@@ -27092,6 +27115,146 @@ mod tests {
         .unwrap();
         assert!(!duped.is_unique());
         assert!(duped.has_duplicates());
+    }
+
+    fn multi_index_is_unique_former_haoam(index: &MultiIndex) -> bool {
+        !index
+            .duplicated(DuplicateKeep::First)
+            .iter()
+            .any(|&duplicated| duplicated)
+    }
+
+    #[test]
+    fn multi_index_is_unique_short_circuit_matches_former_haoam() {
+        let compact_unique = MultiIndex::from_arrays(vec![
+            vec![0_i64.into(), 1_i64.into(), 0_i64.into(), 1_i64.into()],
+            vec![0_i64.into(), 0_i64.into(), 1_i64.into(), 1_i64.into()],
+        ])
+        .unwrap();
+        let compact_duplicate = MultiIndex::from_arrays(vec![
+            vec![0_i64.into(), 0_i64.into(), 1_i64.into()],
+            vec![1_i64.into(), 1_i64.into(), 0_i64.into()],
+        ])
+        .unwrap();
+        let packed_unique = MultiIndex::from_arrays(vec![
+            vec![0_i64.into(), 1_i64.into(), 0_i64.into()],
+            vec![0_i64.into(), 0_i64.into(), 1_i64.into()],
+            vec![1_i64.into(), 1_i64.into(), 0_i64.into()],
+        ])
+        .unwrap();
+        let packed_duplicate = MultiIndex::from_arrays(vec![
+            vec![0_i64.into(), 1_i64.into(), 0_i64.into()],
+            vec![0_i64.into(), 1_i64.into(), 0_i64.into()],
+            vec![1_i64.into(), 0_i64.into(), 1_i64.into()],
+        ])
+        .unwrap();
+
+        let generic = |keys: &[i64]| {
+            let levels = (0..65)
+                .map(|level| {
+                    keys.iter()
+                        .map(|key| IndexLabel::Utf8(format!("level-{level}:key-{key}")))
+                        .collect()
+                })
+                .collect();
+            MultiIndex::from_arrays(levels).unwrap()
+        };
+        let generic_unique = generic(&[0, 1, 2]);
+        let generic_duplicate = generic(&[0, 1, 0]);
+        let empty = MultiIndex::from_arrays(vec![Vec::new(), Vec::new()]).unwrap();
+        let singleton = MultiIndex::from_tuples(vec![vec![0_i64.into(), "x".into()]]).unwrap();
+
+        for index in [
+            &empty,
+            &singleton,
+            &compact_unique,
+            &compact_duplicate,
+            &packed_unique,
+            &packed_duplicate,
+            &generic_unique,
+            &generic_duplicate,
+        ] {
+            let former = multi_index_is_unique_former_haoam(index);
+            assert_eq!(index.is_unique(), former);
+            assert_eq!(index.has_duplicates(), !former);
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release A/B for br-frankenpandas-haoam"]
+    fn multi_index_is_unique_short_circuit_ab_haoam() {
+        const ITEMS: usize = 131_072;
+        const SAMPLES: usize = 10;
+        const CALLS: usize = 4;
+
+        let make_index = |duplicate_first: bool| {
+            let mut level0 = Vec::with_capacity(ITEMS);
+            let mut level1 = Vec::with_capacity(ITEMS);
+            for row in 0..ITEMS {
+                let key = if duplicate_first && row < 2 {
+                    0
+                } else if duplicate_first {
+                    row - 1
+                } else {
+                    row
+                };
+                level0.push(IndexLabel::Int64((key % 512) as i64));
+                level1.push(IndexLabel::Int64((key / 512) as i64));
+            }
+            MultiIndex::from_arrays(vec![level0, level1]).unwrap()
+        };
+        let early_duplicate = make_index(true);
+        let all_unique = make_index(false);
+
+        for index in [&early_duplicate, &all_unique] {
+            assert_eq!(index.is_unique(), multi_index_is_unique_former_haoam(index));
+            std::hint::black_box(multi_index_is_unique_former_haoam(index));
+            std::hint::black_box(index.is_unique());
+        }
+
+        let measure = |index: &MultiIndex, former: bool| {
+            let start = std::time::Instant::now();
+            for _ in 0..CALLS {
+                let unique = if former {
+                    multi_index_is_unique_former_haoam(index)
+                } else {
+                    index.is_unique()
+                };
+                std::hint::black_box(unique);
+            }
+            start.elapsed().as_nanos()
+        };
+        let mut early_former = Vec::with_capacity(SAMPLES);
+        let mut early_candidate = Vec::with_capacity(SAMPLES);
+        let mut unique_former = Vec::with_capacity(SAMPLES);
+        let mut unique_candidate = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                early_former.push(measure(&early_duplicate, true));
+                early_candidate.push(measure(&early_duplicate, false));
+                unique_candidate.push(measure(&all_unique, false));
+                unique_former.push(measure(&all_unique, true));
+            } else {
+                early_candidate.push(measure(&early_duplicate, false));
+                early_former.push(measure(&early_duplicate, true));
+                unique_former.push(measure(&all_unique, true));
+                unique_candidate.push(measure(&all_unique, false));
+            }
+        }
+        early_former.sort_unstable();
+        early_candidate.sort_unstable();
+        unique_former.sort_unstable();
+        unique_candidate.sort_unstable();
+        let middle = SAMPLES / 2;
+        println!(
+            "multi_index_is_unique_short_circuit_ab items={ITEMS} calls={CALLS} samples={SAMPLES} early_former_p50_ns={} early_candidate_p50_ns={} early_speedup={:.6}x unique_former_p50_ns={} unique_candidate_p50_ns={} unique_speedup={:.6}x\nearly_former_samples_ns={early_former:?}\nearly_candidate_samples_ns={early_candidate:?}\nunique_former_samples_ns={unique_former:?}\nunique_candidate_samples_ns={unique_candidate:?}",
+            early_former[middle],
+            early_candidate[middle],
+            early_former[middle] as f64 / early_candidate[middle] as f64,
+            unique_former[middle],
+            unique_candidate[middle],
+            unique_former[middle] as f64 / unique_candidate[middle] as f64,
+        );
     }
 
     #[test]
