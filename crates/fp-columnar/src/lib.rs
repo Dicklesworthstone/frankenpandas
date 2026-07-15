@@ -670,6 +670,36 @@ impl ValidityMask {
         if self.is_all_valid_sentinel() {
             return Self::all_valid(effective_len);
         }
+
+        // Packed nullable masks are already laid out LSB-first in u64 words.
+        // Extract each output word from at most two adjacent source words instead
+        // of probing and setting every bit independently. The sparse-range
+        // representation keeps its existing path below: materializing it merely
+        // to make a slice would discard the representation's compactness.
+        if self.invalid_ranges.is_none() {
+            let source_word = start / 64;
+            let shift = start % 64;
+            let mut words = Vec::with_capacity(effective_len.div_ceil(64));
+            for output_word in 0..effective_len.div_ceil(64) {
+                let low = self.words[source_word + output_word] >> shift;
+                let high = if shift == 0 {
+                    0
+                } else {
+                    self.words
+                        .get(source_word + output_word + 1)
+                        .copied()
+                        .unwrap_or(0)
+                        << (64 - shift)
+                };
+                words.push(low | high);
+            }
+            let remainder = effective_len % 64;
+            if remainder > 0 {
+                *words.last_mut().expect("non-empty sliced validity") &= (1_u64 << remainder) - 1;
+            }
+            return Self::from_words(words, effective_len);
+        }
+
         let mut out = Self::all_invalid(effective_len);
         for i in 0..effective_len {
             if self.get(start + i) {
@@ -26579,6 +26609,140 @@ mod tests {
         ArithmeticOp, BoolAffineSelectionWitness, Column, ColumnData, ColumnError, ScalarValues,
         SparseColumn, ValidityMask,
     };
+
+    #[test]
+    fn validity_mask_slice_packed_matches_bit_reference_y7i9g() {
+        for source_len in [0, 1, 2, 63, 64, 65, 127, 128, 129, 257] {
+            let mut mask = ValidityMask::all_valid(source_len);
+            if source_len > 0 {
+                mask.set(source_len / 2, false);
+                for position in (3..source_len).step_by(11) {
+                    mask.set(position, false);
+                }
+            }
+
+            for start in [
+                0,
+                1,
+                63,
+                64,
+                65,
+                source_len.saturating_sub(1),
+                source_len,
+                source_len.saturating_add(1),
+            ] {
+                for take_len in [0, 1, 2, 63, 64, 65, 129, usize::MAX] {
+                    let expected = if start >= source_len {
+                        Vec::new()
+                    } else {
+                        (start..start.saturating_add(take_len).min(source_len))
+                            .map(|position| mask.get(position))
+                            .collect::<Vec<_>>()
+                    };
+                    let actual = mask.slice(start, take_len);
+                    assert_eq!(actual.len(), expected.len());
+                    assert_eq!(actual.bits().collect::<Vec<_>>(), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn validity_mask_slice_packed_ab_y7i9g() {
+        const ROWS: usize = 1_000_003;
+        const START: usize = 37;
+        const SLICE_LEN: usize = 900_001;
+        const SAMPLES: usize = 10;
+
+        fn former(mask: &ValidityMask, start: usize, len: usize) -> ValidityMask {
+            if start >= mask.len {
+                return ValidityMask::all_invalid(0);
+            }
+            let effective_len = len.min(mask.len - start);
+            if mask.is_all_valid_sentinel() {
+                return ValidityMask::all_valid(effective_len);
+            }
+            let mut out = ValidityMask::all_invalid(effective_len);
+            for i in 0..effective_len {
+                if mask.get(start + i) {
+                    out.set(i, true);
+                }
+            }
+            out
+        }
+
+        fn elapsed(
+            mask: &ValidityMask,
+            slice: fn(&ValidityMask, usize, usize) -> ValidityMask,
+        ) -> u128 {
+            let started = std::time::Instant::now();
+            let output = std::hint::black_box(slice(std::hint::black_box(mask), START, SLICE_LEN));
+            std::hint::black_box(output.len());
+            drop(output);
+            started.elapsed().as_nanos()
+        }
+
+        let mut packed = ValidityMask::all_valid(ROWS);
+        for position in (3..ROWS).step_by(97) {
+            packed.set(position, false);
+        }
+        let sparse = ValidityMask::from_invalid_ranges(
+            Arc::from(vec![(0, 3), (65, 2), (777, 99)].into_boxed_slice()),
+            1_024,
+        );
+        let parity_masks = [
+            ValidityMask::all_valid(0),
+            ValidityMask::all_valid(130),
+            ValidityMask::all_invalid(130),
+            packed.clone(),
+            sparse,
+        ];
+        for mask in &parity_masks {
+            for &(start, len) in &[
+                (0, 0),
+                (0, 1),
+                (0, 64),
+                (1, 65),
+                (63, 130),
+                (64, 129),
+                (65, usize::MAX),
+                (mask.len(), 1),
+                (mask.len().saturating_add(1), 5),
+            ] {
+                assert_eq!(mask.slice(start, len), former(mask, start, len));
+            }
+        }
+
+        let expected = former(&packed, START, SLICE_LEN);
+        assert_eq!(packed.slice(START, SLICE_LEN), expected);
+
+        for _ in 0..2 {
+            std::hint::black_box(elapsed(&packed, former));
+            std::hint::black_box(elapsed(&packed, ValidityMask::slice));
+        }
+        let mut former_samples = Vec::with_capacity(SAMPLES);
+        let mut candidate_samples = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_samples.push(elapsed(&packed, former));
+                candidate_samples.push(elapsed(&packed, ValidityMask::slice));
+            } else {
+                candidate_samples.push(elapsed(&packed, ValidityMask::slice));
+                former_samples.push(elapsed(&packed, former));
+            }
+        }
+        former_samples.sort_unstable();
+        candidate_samples.sort_unstable();
+        let former_p50 = former_samples[SAMPLES / 2];
+        let candidate_p50 = candidate_samples[SAMPLES / 2];
+        eprintln!(
+            "VALIDITY_SLICE_PACKED_AB rows={ROWS} start={START} len={SLICE_LEN} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} ratio={:.6}",
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("VALIDITY_SLICE_PACKED_AB former_samples_ns={former_samples:?}");
+        eprintln!("VALIDITY_SLICE_PACKED_AB candidate_samples_ns={candidate_samples:?}");
+    }
 
     #[test]
     #[ignore = "foreground release attribution harness"]

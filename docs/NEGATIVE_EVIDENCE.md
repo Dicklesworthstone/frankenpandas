@@ -17154,3 +17154,40 @@ The real `fp-python` release cdylib build and scoped `fp-python --lib --no-deps 
 strict-remote on `vmi1149989`. Direct Rustfmt and `git diff --check` passed. Scoped UBS completed with no critical finding;
 its warnings were pre-existing clone/string-allocation inventory outside the touched function. No explicit local Cargo
 or `release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were not changed.
+
+### 2026-07-15 IvoryGlacier — packed-word `ValidityMask::slice`: 180.596995x p50 WIN (`br-frankenpandas-y7i9g`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable, four blocked). Its old
+`Series.astype` and expanding-skew suggestions were already resolved or explicitly fenced by this ledger, while the
+RangeIndex and general-dedup quick wins remained assigned to other agents. The fresh `fp-columnar` seam was nullable
+validity slicing: a packed `ValidityMask` still copied a slice by calling `get` and `set` once per output bit.
+
+Attribution preceded the production edit. A test-only packed extraction prototype reconstructed each output word from
+at most two adjacent source words, then masked the tail. On a 1,000,003-bit mask with one cleared bit every 97 rows, a
+misaligned 900,001-row slice measured **3,557,851 ns** p50 for the exact former bit loop versus **19,008 ns** for the
+prototype, a **187.176505x** directional opportunity. Exact parity covered empty/all-valid/all-invalid/packed/sparse
+masks, aligned and misaligned starts, word boundaries, zero length, clamping, and out-of-range starts.
+
+The one production lever installs that packed-word extraction only when the mask uses its ordinary word backing. The
+all-valid sentinel retains its O(1) return and the sparse invalid-range representation retains the former path rather
+than being materialized. Output length, LSB-first bit order, source bounds, partial final words, and automatic
+all-valid-sentinel canonicalization are unchanged. A permanent non-ignored test exhaustively compares public slices to
+a bit-reference across source lengths straddling every 64-bit boundary.
+
+The single final foreground same-binary gate ran fail-closed on strict-remote worker `vmi1149989` with normal
+`--profile release`: 1,000,003 source bits, start 37, length 900,001, two warmups, and ten alternating samples. Before
+timing, the public production result matched the exact former body.
+
+| final arm | p50 | samples (ns) |
+| --- | ---: | --- |
+| former per-bit `get` + `set` | 3,834,616 ns | 2,965,898 / 3,162,924 / 3,385,881 / 3,784,420 / 3,810,861 / 3,834,616 / 3,899,323 / 3,974,127 / 4,015,889 / 4,289,411 |
+| public packed-word slice | 21,233 ns | 18,558 / 20,131 / 20,211 / 20,581 / 20,771 / 21,233 / 25,488 / 27,411 / 27,412 / 29,104 |
+
+The public candidate is **180.596995x faster at p50** (**99.446% lower latency**); the complete timed test body finished
+in **0.06 seconds**. RCH discarded the requested worker's nominal warm cache and rebuilt the final normal-release test
+in 49.9 seconds without a timeout; sync, compilation, and artifact retrieval remained outside every in-process sample.
+Focused normal-release slice tests are 3 passed / 0 failed. `git diff --check` and Rustfmt on both touched hunks are
+clean; whole-file Rustfmt and scoped Clippy remain blocked by the file's pre-existing broad formatting/lint inventory,
+with no diagnostic at either touched hunk. Bounded UBS entered the known broad scanner path and produced no focused
+finding before its 180-second bound. Every Cargo command used fail-closed remote RCH; no explicit local Cargo or
+`release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were not changed.
