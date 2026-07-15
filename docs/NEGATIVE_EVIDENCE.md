@@ -17221,3 +17221,35 @@ with none in either touched hunk. Bounded UBS entered the known broad scanner pa
 RCH rebuilt the final release test after a cache miss in 49.0 seconds; sync, compilation, and artifact retrieval were
 outside every in-process sample. Every Cargo command used fail-closed remote RCH; no explicit local Cargo or
 `release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were not changed.
+
+### 2026-07-15 IvoryGlacier — one-buffer timezone-aware `Timestamp::isoformat`: 1.454261x p50 WIN (`br-frankenpandas-q8g50`)
+
+Negative-ledger-first routing began with `bv --robot-triage`. Its ranked performance work was assigned to other
+agents, while the adjacent validity-bitmap family had just yielded two large keeps and was now mined. A fresh
+`fp-types` attribution found that timezone-aware `Timestamp::isoformat` first allocated the base timestamp, then
+allocated a second string and copied the entire base merely to append `+00:00` or `[timezone]`.
+
+The one production lever writes the date, time, fractional nanoseconds, and optional timezone suffix directly into
+the returned pre-sized `String`. NaT handling, floor-day behavior for negative timestamps, fractional precision,
+timezone spelling, and the timezone-free result remain byte-for-byte unchanged. A permanent non-ignored parity test
+covers 45 combinations spanning NaT, pre-epoch boundaries, zero, nanosecond and microsecond fractions, `i64::MAX`,
+no timezone, UTC, a named timezone, an empty timezone, and Unicode timezone text.
+
+The single final foreground same-binary A/B ran fail-closed through RCH with normal `--profile release`. It rendered
+8,192 timezone-aware timestamps per arm, split evenly between UTC and `America/New_York`, performed exact parity
+before timing, warmed both arms, and collected ten alternating-order samples. The in-process measurement body
+completed in 0.10 seconds.
+
+| final arm | p50 | samples (ns) |
+| --- | ---: | --- |
+| former base allocation plus suffixed allocation | 5,103,997 ns | 4,079,664 / 4,265,899 / 4,401,641 / 4,542,133 / 5,001,617 / 5,103,997 / 5,188,685 / 5,241,963 / 5,333,444 / 5,633,492 |
+| public one-buffer `isoformat` | 3,509,684 ns | 2,395,994 / 2,939,784 / 2,999,275 / 3,158,231 / 3,285,396 / 3,509,684 / 3,622,654 / 3,693,084 / 3,698,936 / 4,055,128 |
+
+The public candidate is **1.454261x faster at p50** (**31.2366% lower latency**). The requested warm worker had no
+free slot, so RCH transparently routed the final same-binary comparison to `vmi1153651`; both arms still ran inside
+one process on that worker, and its 60.7-second sync/build/artifact cycle remained outside every timed sample. Focused
+normal-release tests are 4 passed / 0 failed / 1 ignored, and crate-scoped normal-release Clippy is clean under
+`-D warnings`. Direct Rustfmt and `git diff --check` are clean. Bounded UBS completed in 22 seconds and reported only
+the file's pre-existing whole-file unwrap, test-panic, assertion, indexing, and numeric inventories, with no finding
+in the touched `Timestamp::isoformat` hunk. Every Cargo command used fail-closed remote RCH; no explicit local Cargo
+or `release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were not changed.

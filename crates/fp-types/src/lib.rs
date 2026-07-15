@@ -2695,6 +2695,8 @@ impl Timestamp {
     /// Matches `pd.Timestamp.isoformat()`. NaT returns "NaT".
     #[must_use]
     pub fn isoformat(&self) -> String {
+        use std::fmt::Write as _;
+
         if self.is_nat() {
             return "NaT".to_string();
         }
@@ -2720,21 +2722,41 @@ impl Timestamp {
         let minute = (secs_of_day % 3600) / 60;
         let second = secs_of_day % 60;
 
-        let base = if sub_nanos == 0 {
-            format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}")
+        // Build the timestamp and its optional timezone suffix in the returned
+        // allocation. The former timezone-aware path first allocated `base`,
+        // then allocated again to copy `base` into the suffixed result.
+        let suffix_capacity = self
+            .tz
+            .as_ref()
+            .map_or(0, |tz| if tz == "UTC" { 6 } else { tz.len() + 2 });
+        let mut result = String::with_capacity(29 + suffix_capacity);
+        if sub_nanos == 0 {
+            let _ = write!(
+                result,
+                "{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}"
+            );
         } else if sub_nanos.is_multiple_of(1_000) {
-            format!(
+            let _ = write!(
+                result,
                 "{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{:06}",
                 sub_nanos / 1_000
-            )
+            );
         } else {
-            format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{sub_nanos:09}")
-        };
-        match &self.tz {
-            Some(tz) if tz == "UTC" => format!("{base}+00:00"),
-            Some(tz) => format!("{base}[{tz}]"),
-            None => base,
+            let _ = write!(
+                result,
+                "{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{sub_nanos:09}"
+            );
         }
+        match &self.tz {
+            Some(tz) if tz == "UTC" => result.push_str("+00:00"),
+            Some(tz) => {
+                result.push('[');
+                result.push_str(tz);
+                result.push(']');
+            }
+            None => {}
+        }
+        result
     }
 
     /// Alias for isoformat.
@@ -10693,6 +10715,115 @@ mod tests {
             Timestamp::from_nanos_tz(1, "UTC").isoformat(),
             "1970-01-01T00:00:00.000000001+00:00"
         );
+    }
+
+    fn timestamp_isoformat_former_q8g50(timestamp: &Timestamp) -> String {
+        if timestamp.is_nat() {
+            return "NaT".to_owned();
+        }
+        let base = Timestamp::from_nanos(timestamp.nanos).isoformat();
+        match &timestamp.tz {
+            Some(tz) if tz == "UTC" => format!("{base}+00:00"),
+            Some(tz) => format!("{base}[{tz}]"),
+            None => base,
+        }
+    }
+
+    #[test]
+    fn timestamp_isoformat_one_buffer_matches_former_q8g50() {
+        let nanos = [
+            Timestamp::NAT,
+            -Timedelta::NANOS_PER_DAY - 1,
+            -Timedelta::NANOS_PER_SEC,
+            -1,
+            0,
+            1,
+            123_456_000,
+            123_456_789,
+            i64::MAX,
+        ];
+        let timezones = [
+            None,
+            Some("UTC"),
+            Some("America/New_York"),
+            Some(""),
+            Some("Etc/Γ"),
+        ];
+        for value in nanos {
+            for timezone in timezones {
+                let timestamp = Timestamp {
+                    nanos: value,
+                    tz: timezone.map(str::to_owned),
+                };
+                assert_eq!(
+                    timestamp.isoformat(),
+                    timestamp_isoformat_former_q8g50(&timestamp),
+                    "nanos={value} timezone={timezone:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release A/B only"]
+    fn timestamp_isoformat_one_buffer_ab_q8g50() {
+        use std::{hint::black_box, time::Instant};
+
+        const ITEMS: usize = 8_192;
+        const SAMPLES: usize = 10;
+
+        fn elapsed(values: &[Timestamp], render: fn(&Timestamp) -> String) -> u128 {
+            let started = Instant::now();
+            let mut checksum = 0usize;
+            for timestamp in black_box(values) {
+                checksum = checksum.wrapping_add(black_box(render(black_box(timestamp))).len());
+            }
+            black_box(checksum);
+            started.elapsed().as_nanos()
+        }
+
+        let values = (0..ITEMS)
+            .map(|idx| {
+                let nanos = (idx as i64 - ITEMS as i64 / 2) * 1_000_123_456_789;
+                let timezone = if idx.is_multiple_of(2) {
+                    "UTC"
+                } else {
+                    "America/New_York"
+                };
+                Timestamp::from_nanos_tz(nanos, timezone)
+            })
+            .collect::<Vec<_>>();
+        for timestamp in &values {
+            assert_eq!(
+                timestamp.isoformat(),
+                timestamp_isoformat_former_q8g50(timestamp)
+            );
+        }
+
+        black_box(elapsed(&values, timestamp_isoformat_former_q8g50));
+        black_box(elapsed(&values, Timestamp::isoformat));
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut one_buffer_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_ns.push(elapsed(&values, timestamp_isoformat_former_q8g50));
+                one_buffer_ns.push(elapsed(&values, Timestamp::isoformat));
+            } else {
+                one_buffer_ns.push(elapsed(&values, Timestamp::isoformat));
+                former_ns.push(elapsed(&values, timestamp_isoformat_former_q8g50));
+            }
+        }
+        former_ns.sort_unstable();
+        one_buffer_ns.sort_unstable();
+        let former_p50 = former_ns[SAMPLES / 2];
+        let one_buffer_p50 = one_buffer_ns[SAMPLES / 2];
+        println!(
+            "timestamp_isoformat_one_buffer_ab items={ITEMS} samples={SAMPLES} former_p50_ns={former_p50} one_buffer_p50_ns={one_buffer_p50} speedup={:.6}x",
+            former_p50 as f64 / one_buffer_p50 as f64
+        );
+        println!("former_samples_ns={former_ns:?}");
+        println!("one_buffer_samples_ns={one_buffer_ns:?}");
     }
 
     #[test]
