@@ -1137,6 +1137,8 @@ fn scalar_to_string_for_astype(value: Scalar) -> String {
 }
 
 pub fn float_to_string_for_astype(value: f64) -> String {
+    use std::fmt::Write as _;
+
     if value.is_nan() {
         return "nan".to_owned();
     }
@@ -1150,17 +1152,28 @@ pub fn float_to_string_for_astype(value: f64) -> String {
     // boundaries); only the exponent spelling differs (Rust "1e16"/"1e-5" vs
     // Python "1e+16"/"1e-05"), so normalize that. The old `{:.1}` whole / Display
     // decimal path lost scientific notation (1e16 -> "10000000000000000.0").
-    let s = format!("{value:?}");
-    match s.split_once('e') {
-        None => s,
-        Some((mantissa, exp)) => {
-            let (sign, digits) = match exp.strip_prefix('-') {
-                Some(d) => ('-', d),
-                None => ('+', exp.strip_prefix('+').unwrap_or(exp)),
-            };
-            format!("{mantissa}e{sign}{digits:0>2}")
+    // Leave enough spare capacity for the positive sign and one exponent pad
+    // digit, then normalize the formatter output in place. The former branch
+    // allocated a second String and copied the mantissa solely to change
+    // `e16`/`e-5` into pandas' `e+16`/`e-05` spelling.
+    let mut rendered = String::with_capacity(32);
+    let _ = write!(rendered, "{value:?}");
+    let Some(exponent_marker) = rendered.find('e') else {
+        return rendered;
+    };
+
+    let sign_position = exponent_marker + 1;
+    let digits_position = match rendered.as_bytes().get(sign_position) {
+        Some(b'+' | b'-') => sign_position + 1,
+        _ => {
+            rendered.insert(sign_position, '+');
+            sign_position + 1
         }
+    };
+    if rendered.len() - digits_position == 1 {
+        rendered.insert(digits_position, '0');
     }
+    rendered
 }
 
 /// Cast a scalar reference to a target dtype (clones only when conversion is needed).
@@ -6014,6 +6027,120 @@ mod tests {
                 "float {v} -> str"
             );
         }
+    }
+
+    fn float_to_string_for_astype_former(value: f64) -> String {
+        if value.is_nan() {
+            return "nan".to_owned();
+        }
+        if value.is_infinite() {
+            return value.to_string();
+        }
+        let rendered = format!("{value:?}");
+        match rendered.split_once('e') {
+            None => rendered,
+            Some((mantissa, exponent)) => {
+                let (sign, digits) = match exponent.strip_prefix('-') {
+                    Some(digits) => ('-', digits),
+                    None => ('+', exponent.strip_prefix('+').unwrap_or(exponent)),
+                };
+                format!("{mantissa}e{sign}{digits:0>2}")
+            }
+        }
+    }
+
+    fn scientific_astype_values(len: usize) -> Vec<f64> {
+        const EXPONENTS: [i32; 16] = [
+            -300, -200, -100, -50, -10, -7, -6, -5, 16, 17, 20, 50, 100, 200, 300, 307,
+        ];
+        (0..len)
+            .map(|position| {
+                let mantissa = 1.0 + (position % 997) as f64 / 997.0;
+                let magnitude = mantissa * 10.0_f64.powi(EXPONENTS[position % EXPONENTS.len()]);
+                if position.is_multiple_of(2) {
+                    magnitude
+                } else {
+                    -magnitude
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn float_to_string_for_astype_in_place_matches_former() {
+        let fixed = [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            -0.0,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::MIN,
+            1e16,
+            -1e16,
+            1e-5,
+            -1e-5,
+            1.234_567_890_123_456_8e20,
+            -9.876_543_210_987_654e-123,
+        ];
+        for value in fixed.into_iter().chain(scientific_astype_values(16_384)) {
+            assert_eq!(
+                super::float_to_string_for_astype(value),
+                float_to_string_for_astype_former(value),
+                "value={value:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground performance probe"]
+    fn float_to_string_for_astype_in_place_ab() {
+        use std::time::Instant;
+
+        const VALUES: usize = 16_384;
+        const SAMPLES: usize = 10;
+        let values = scientific_astype_values(VALUES);
+        for &value in &values {
+            let former = float_to_string_for_astype_former(value);
+            assert!(former.contains('e'), "benchmark value must be scientific");
+            assert_eq!(super::float_to_string_for_astype(value), former);
+        }
+
+        for _ in 0..2 {
+            for &value in &values {
+                std::hint::black_box(float_to_string_for_astype_former(value));
+                std::hint::black_box(super::float_to_string_for_astype(value));
+            }
+        }
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut public_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            let run = |formatter: fn(f64) -> String| {
+                let started = Instant::now();
+                for &value in std::hint::black_box(&values) {
+                    std::hint::black_box(formatter(std::hint::black_box(value)));
+                }
+                started.elapsed().as_nanos()
+            };
+            if sample.is_multiple_of(2) {
+                former_ns.push(run(float_to_string_for_astype_former));
+                public_ns.push(run(super::float_to_string_for_astype));
+            } else {
+                public_ns.push(run(super::float_to_string_for_astype));
+                former_ns.push(run(float_to_string_for_astype_former));
+            }
+        }
+
+        former_ns.sort_unstable();
+        public_ns.sort_unstable();
+        let former_p50 = former_ns[SAMPLES / 2];
+        let public_p50 = public_ns[SAMPLES / 2];
+        println!(
+            "float_to_string_for_astype_in_place_ab values={VALUES} former_p50_ns={former_p50} public_p50_ns={public_p50} speedup={:.6} former_samples={former_ns:?} public_samples={public_ns:?}",
+            former_p50 as f64 / public_p50 as f64
+        );
     }
 
     #[test]

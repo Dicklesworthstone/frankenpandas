@@ -17327,3 +17327,37 @@ final same-binary gate to `vmi1149989`, where its 50.0-second compile remained o
 bounded UBS completed with zero critical findings while reproducing the file's broad pre-existing scanner inventory.
 Every Cargo command used fail-closed remote RCH; no explicit local Cargo or `release-perf` command ran, unrelated
 artifact dirt was untouched, and the 70 stashes were not changed.
+
+### 2026-07-15 IvoryGlacier — in-place Float64 astype exponent normalization: 2.641387x p50 WIN (`br-frankenpandas-02aqw`)
+
+Negative-ledger-first routing began with `bv --robot-triage`. Its ranked quick wins remained assigned, stale, or
+already fenced. An initial attempt to measure the unowned `ffill_axis1` half of `br-frankenpandas-3seq1` never reached
+timing: RCH routed two untimed cold warm-ups to different workers and each `fp-frame` compile went silent for the
+two-minute dead-worker cutoff. That source and harness were reverted completely, the bead was returned open, and no
+timeout was treated as performance evidence. The fresh pivot followed the ledger's explicit remaining Float64 astype
+residual: `Column::astype(Utf8)` calls `float_to_string_for_astype` once per value, and its scientific branch allocated
+the formatter output and then allocated a second `String` solely to copy the mantissa while adding a sign and optional
+zero pad to the exponent.
+
+The one production lever formats into a 32-byte-capacity returned `String`, then inserts the missing exponent sign or
+pad digit in place. Python/pandas scientific spelling, shortest-round-trip mantissas, decimal thresholds, signed zero,
+NaN, infinities, and all non-scientific values are unchanged. A permanent exact-former guard covers 16,384 generated
+scientific values plus finite extrema, the minimum positive normal, NaN, infinities, signed zero, threshold values, and
+both exponent signs. The existing pandas-spelling and threshold-boundary tests remain green.
+
+The single final foreground same-binary A/B ran fail-closed on strict-remote worker `vmi1149989` with normal
+`--profile release`: 16,384 scientific values, two in-process warmups, and ten alternating-order samples. The complete
+generated corpus matched the exact former two-string body before timing; the in-process test body finished in 0.10
+seconds.
+
+| final arm | p50 | samples (ns) |
+| --- | ---: | --- |
+| former formatter plus second normalized `String` | 5,708,282 ns | 4,967,226 / 5,146,886 / 5,323,793 / 5,521,771 / 5,553,649 / 5,708,282 / 6,148,443 / 6,289,446 / 6,315,195 / 6,673,563 |
+| public one-buffer in-place normalization | 2,161,093 ns | 1,740,409 / 1,744,425 / 1,812,197 / 1,832,108 / 2,160,732 / 2,161,093 / 2,200,562 / 2,216,056 / 2,264,568 / 2,274,454 |
+
+The public candidate is **2.641387x faster at p50** (**62.141% lower latency**) on scientific values. Full strict-remote
+normal-release `fp-types` tests are **280 passed / 0 failed / 7 ignored**, and scoped all-target normal-release Clippy is
+clean under `-D warnings`. Direct Rustfmt and `git diff --check` are clean. Bounded UBS reproduced only the file's broad
+pre-existing test panic/assert/indexing inventory, with no finding in either touched hunk. Every Cargo invocation used
+fail-closed remote RCH; no explicit local Cargo or `release-perf` command ran, unrelated artifact dirt was untouched,
+and the 70 stashes were not changed.
