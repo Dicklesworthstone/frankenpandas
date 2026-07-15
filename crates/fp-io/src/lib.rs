@@ -3930,13 +3930,23 @@ struct DatetimeCsvFormat {
 
 /// Scan a Datetime64 column and derive its column-uniform `to_csv` format.
 fn datetime_csv_format(column: &Column) -> DatetimeCsvFormat {
+    if let Some(nanos) = column.as_datetime64_slice() {
+        return datetime_csv_format_from_nanos(nanos.iter().copied());
+    }
+
+    datetime_csv_format_from_nanos(column.values().iter().filter_map(|value| {
+        let Scalar::Datetime64(nanos) = value else {
+            return None;
+        };
+        Some(*nanos)
+    }))
+}
+
+fn datetime_csv_format_from_nanos(nanos: impl Iterator<Item = i64>) -> DatetimeCsvFormat {
     let mut date_only = true;
     let mut subsec_digits = 0u8;
-    for value in column.values() {
-        let Scalar::Datetime64(ns) = value else {
-            continue;
-        };
-        if *ns == Timestamp::NAT {
+    for ns in nanos {
+        if ns == Timestamp::NAT {
             continue;
         }
         let subsec = (ns.rem_euclid(1_000_000_000)) as u32;
@@ -16818,6 +16828,79 @@ mod tests {
         assert_eq!(
             write_csv_string(&dt_frame(&[MIDNIGHT_JAN1, i64::MIN])).expect("w"),
             "d\n2020-01-01\n\"\"\n"
+        );
+    }
+
+    #[test]
+    #[ignore = "foreground release A/B harness"]
+    fn datetime_csv_format_raw_nanos_ab_vrflh() {
+        const ROWS: usize = 131_072;
+        const BLOCKS: usize = 5;
+        const BASE: i64 = 1_577_836_800_000_000_000;
+
+        fn former(column: &Column) -> super::DatetimeCsvFormat {
+            super::datetime_csv_format_from_nanos(column.values().iter().filter_map(|value| {
+                let Scalar::Datetime64(nanos) = value else {
+                    return None;
+                };
+                Some(*nanos)
+            }))
+        }
+
+        fn elapsed(nanos: &[i64], use_candidate: bool) -> (u128, super::DatetimeCsvFormat) {
+            let column = Column::from_datetime64_values(nanos.to_vec());
+            let started = std::time::Instant::now();
+            let format = if use_candidate {
+                super::datetime_csv_format(&column)
+            } else {
+                former(&column)
+            };
+            let elapsed = started.elapsed().as_nanos();
+            std::hint::black_box((format.date_only, format.subsec_digits));
+            (elapsed, format)
+        }
+
+        fn median(mut samples: Vec<u128>) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let mut nanos = (0..ROWS)
+            .map(|row| BASE + row as i64 * 37_000_000_000)
+            .collect::<Vec<_>>();
+        nanos[ROWS / 3] += 500_000_000;
+        nanos[ROWS - 1] = Timestamp::NAT;
+
+        let (_, former_format) = elapsed(&nanos, false);
+        let (_, candidate_format) = elapsed(&nanos, true);
+        assert_eq!(candidate_format.date_only, former_format.date_only);
+        assert_eq!(candidate_format.subsec_digits, former_format.subsec_digits);
+
+        let mut former_samples = Vec::with_capacity(BLOCKS * 2);
+        let mut candidate_samples = Vec::with_capacity(BLOCKS * 2);
+        for block in 0..BLOCKS {
+            let order = if block % 2 == 0 {
+                [false, true, true, false]
+            } else {
+                [true, false, false, true]
+            };
+            for use_candidate in order {
+                let (elapsed_ns, format) = elapsed(&nanos, use_candidate);
+                assert_eq!(format.date_only, former_format.date_only);
+                assert_eq!(format.subsec_digits, former_format.subsec_digits);
+                if use_candidate {
+                    candidate_samples.push(elapsed_ns);
+                } else {
+                    former_samples.push(elapsed_ns);
+                }
+            }
+        }
+
+        let former_ns = median(former_samples);
+        let candidate_ns = median(candidate_samples);
+        println!(
+            "DATETIME_CSV_FORMAT_SCAN_AB rows={ROWS} former_ns={former_ns} candidate_ns={candidate_ns} speedup={:.6}",
+            former_ns as f64 / candidate_ns as f64
         );
     }
 

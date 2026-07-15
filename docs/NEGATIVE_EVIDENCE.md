@@ -17361,3 +17361,36 @@ clean under `-D warnings`. Direct Rustfmt and `git diff --check` are clean. Boun
 pre-existing test panic/assert/indexing inventory, with no finding in either touched hunk. Every Cargo invocation used
 fail-closed remote RCH; no explicit local Cargo or `release-perf` command ran, unrelated artifact dirt was untouched,
 and the 70 stashes were not changed.
+
+### 2026-07-15 IvoryGlacier — raw Datetime64 CSV format pre-scan: 2.282746x p50 WIN (`br-frankenpandas-vrflh`)
+
+Negative-ledger-first routing began with `bv --robot-triage` and excluded the assigned transpose work plus the already
+mined JSON, Parquet-write, HTML, temporal-join, validity, groupby-reduction, and Float64-formatter families. The fresh
+`fp-io` seam was the typed Datetime64 CSV format pre-scan: `try_write_csv_typed` had already acquired the contiguous
+nanosecond slice, but `datetime_csv_format` called `Column::values()` and materialized one `Scalar::Datetime64` per row
+before scanning the same values. The attributed opportunity score was 7 (frequent typed-CSV boundary 2, O(n)
+allocation/materialization cost 3, expected win 2, parity risk 0).
+
+The one production lever reads the existing typed nanosecond backing first and retains the exact Scalar iterator as the
+fallback for non-typed Datetime64 columns. NaT skipping, midnight detection, millisecond/microsecond/nanosecond width,
+column-uniform formatting, output ordering, index behavior, and every serialized byte remain unchanged. The permanent
+same-binary harness rebuilds a fresh typed column for each sample so the former arm cannot reuse a warmed Scalar cache,
+and it asserts both `date_only` and `subsec_digits` against the exact former iterator before recording a sample.
+
+The single valid foreground A/B ran fail-closed through RCH on `vmi1153651` with `--profile release` and explicit LTO
+disablement: 131,072 Datetime64 rows containing whole seconds, a sub-second value, and NaT; ten alternating-order
+samples per arm. The in-process body completed in 0.08 seconds.
+
+| final arm | p50 | speedup | latency reduction |
+| --- | ---: | ---: | ---: |
+| former `Column::values()` Scalar materialization and scan | 1,343,978 ns | 1.000000x | — |
+| public raw-nanosecond scan | 588,755 ns | **2.282746x** | **56.193%** |
+
+Focused public Datetime64 CSV parity tests are **2 passed / 0 failed**, and the final exact-former A/B is **1 passed /
+0 failed**. `git diff --check` and the touched Rustfmt hunk are clean. Bounded UBS reproduced only the file's broad
+pre-existing test panic/assert/indexing inventory, with no sampled finding in either touched hunk. RCH discarded its
+same-worker release cache between invocations, so each Cargo command paid a cold compile; those compile wall clocks are
+explicitly outside the in-process timing and are not performance evidence. An earlier silent `cargo run` was killed at
+the two-minute dead-worker threshold, and an exact-filter typo ran zero tests; neither is evidence. Every Cargo command
+was fail-closed remote, no explicit local Cargo or `release-perf` command ran, unrelated artifact dirt was untouched,
+and the 70 stashes were not changed.
