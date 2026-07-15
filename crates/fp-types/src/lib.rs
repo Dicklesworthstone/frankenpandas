@@ -3548,10 +3548,12 @@ pub fn nansem(values: &[Scalar], ddof: usize) -> Scalar {
     if nums.len() <= ddof {
         return Scalar::Null(NullKind::NaN);
     }
-    match nanstd(values, ddof) {
-        Scalar::Float64(s) => Scalar::Float64(s / (nums.len() as f64).sqrt()),
-        other => other,
-    }
+    let n = nums.len();
+    let mean = nums.iter().sum::<f64>() / n as f64;
+    let sum_sq = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>();
+    let var = sum_sq / (n - ddof) as f64;
+    let std = var.sqrt();
+    Scalar::Float64(std / (n as f64).sqrt())
 }
 
 /// Peak-to-peak range of non-missing values (max − min).
@@ -8583,6 +8585,180 @@ mod tests {
             return;
         };
         assert!((v - 0.7559289460184544).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nansem_single_buffer_matches_former_numeric_bits_jgwg4() {
+        fn former(values: &[Scalar], ddof: usize) -> Scalar {
+            let nums = super::collect_finite(values);
+            if nums.len() <= ddof {
+                return Scalar::Null(NullKind::NaN);
+            }
+            match super::nanstd(values, ddof) {
+                Scalar::Float64(std) => Scalar::Float64(std / (nums.len() as f64).sqrt()),
+                other => other,
+            }
+        }
+
+        fn assert_same_bits(values: &[Scalar], ddof: usize) {
+            let expected = former(values, ddof);
+            let actual = super::nansem(values, ddof);
+            match (&expected, &actual) {
+                (Scalar::Float64(expected), Scalar::Float64(actual)) => {
+                    assert_eq!(
+                        actual.to_bits(),
+                        expected.to_bits(),
+                        "values={values:?} ddof={ddof}"
+                    );
+                }
+                _ => assert!(
+                    actual.semantic_eq(&expected),
+                    "values={values:?} ddof={ddof}: expected {expected:?}, got {actual:?}"
+                ),
+            }
+        }
+
+        let mut generated = Vec::with_capacity(4_096);
+        for idx in 0..4_096_i64 {
+            generated.push(match idx % 257 {
+                0 => Scalar::Null(NullKind::NaN),
+                1 => Scalar::Float64(-0.0),
+                2 => Scalar::Float64(0.0),
+                _ if idx % 2 == 0 => Scalar::Int64(idx - 2_048),
+                _ => Scalar::Float64((idx - 2_048) as f64 / 17.0),
+            });
+        }
+
+        let cases = [
+            Vec::new(),
+            vec![Scalar::Int64(1)],
+            vec![
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(f64::NAN),
+                Scalar::Int64(i64::MIN),
+                Scalar::Int64(i64::MAX),
+                Scalar::Float64(-0.0),
+                Scalar::Float64(0.0),
+            ],
+            generated,
+        ];
+        for values in &cases {
+            for ddof in [0, 1, values.len(), values.len().saturating_add(1)] {
+                assert_same_bits(values, ddof);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release A/B harness"]
+    fn nansem_single_buffer_allocator_preconditioned_ab_jgwg4() {
+        const ROWS: usize = 262_144;
+        const BATCH: usize = 8;
+        const BLOCKS: usize = 9;
+        const PRECONDITION_CALLS: usize = 2;
+
+        fn former(values: &[Scalar], ddof: usize) -> Scalar {
+            let nums = super::collect_finite(values);
+            if nums.len() <= ddof {
+                return Scalar::Null(NullKind::NaN);
+            }
+            match super::nanstd(values, ddof) {
+                Scalar::Float64(std) => Scalar::Float64(std / (nums.len() as f64).sqrt()),
+                other => other,
+            }
+        }
+
+        fn evaluate(values: &[Scalar], candidate: bool) -> Scalar {
+            let values = std::hint::black_box(values);
+            if candidate {
+                super::nansem(values, 1)
+            } else {
+                former(values, 1)
+            }
+        }
+
+        fn elapsed_ns(values: &[Scalar], candidate: bool) -> u128 {
+            for _ in 0..PRECONDITION_CALLS {
+                std::hint::black_box(evaluate(values, candidate));
+            }
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(evaluate(values, candidate));
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn median(mut samples: Vec<u128>) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        fn spread(a: u128, b: u128) -> f64 {
+            a.abs_diff(b) as f64 / ((a + b) as f64 / 2.0)
+        }
+
+        let values = (0..ROWS)
+            .map(|idx| {
+                if idx % 257 == 0 {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Int64((idx % 8_191) as i64 - 4_095)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let expected_bits = match former(&values, 1) {
+            Scalar::Float64(value) => Some(value.to_bits()),
+            _ => None,
+        };
+        let actual_bits = match super::nansem(&values, 1) {
+            Scalar::Float64(value) => Some(value.to_bits()),
+            _ => None,
+        };
+        assert!(
+            expected_bits.is_some(),
+            "numeric nansem must return Float64"
+        );
+        assert_eq!(actual_bits, expected_bits, "A/B output bits");
+
+        std::hint::black_box(evaluate(&values, false));
+        std::hint::black_box(evaluate(&values, true));
+
+        let body_started = std::time::Instant::now();
+        let mut former_a = Vec::with_capacity(BLOCKS);
+        let mut former_b = Vec::with_capacity(BLOCKS);
+        let mut candidate_a = Vec::with_capacity(BLOCKS);
+        let mut candidate_b = Vec::with_capacity(BLOCKS);
+        for block in 0..BLOCKS {
+            let order = if block % 2 == 0 {
+                [(false, 0), (true, 0), (true, 1), (false, 1)]
+            } else {
+                [(true, 1), (false, 1), (false, 0), (true, 0)]
+            };
+            for (candidate, duplicate) in order {
+                let elapsed = elapsed_ns(&values, candidate);
+                match (candidate, duplicate) {
+                    (false, 0) => former_a.push(elapsed),
+                    (false, _) => former_b.push(elapsed),
+                    (true, 0) => candidate_a.push(elapsed),
+                    (true, _) => candidate_b.push(elapsed),
+                }
+            }
+        }
+
+        let former_a = median(former_a) / BATCH as u128;
+        let former_b = median(former_b) / BATCH as u128;
+        let candidate_a = median(candidate_a) / BATCH as u128;
+        let candidate_b = median(candidate_b) / BATCH as u128;
+        let former_mean = (former_a + former_b) as f64 / 2.0;
+        let candidate_mean = (candidate_a + candidate_b) as f64 / 2.0;
+        println!(
+            "NANSEM_SINGLE_BUFFER_AB rows={ROWS} former_a_ns={former_a} former_b_ns={former_b} candidate_a_ns={candidate_a} candidate_b_ns={candidate_b} former_spread={:.6} candidate_spread={:.6} speedup={:.6} body_seconds={:.6}",
+            spread(former_a, former_b),
+            spread(candidate_a, candidate_b),
+            former_mean / candidate_mean,
+            body_started.elapsed().as_secs_f64()
+        );
     }
 
     #[test]

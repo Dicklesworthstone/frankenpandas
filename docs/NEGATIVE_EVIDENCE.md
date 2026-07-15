@@ -17005,3 +17005,39 @@ release Clippy and `git diff --check` are green. Direct Rustfmt reproduced only 
 the touched hunk; bounded UBS reproduced the broad existing whole-file inventory with no production-hoist finding.
 Every Cargo invocation used fail-closed remote RCH; no local Cargo or `release-perf` command ran, unrelated artifact dirt
 was untouched, and the 70 stashes were unchanged.
+
+### 2026-07-14 IvoryGlacier — single-buffer numeric `nansem`: 1.847464x p50 WIN (`br-frankenpandas-jgwg4`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable, four blocked). Its ranked
+columnar, index, and GroupBy quick wins remained assigned to other agents. The strongest owned retry was
+`br-frankenpandas-xyn71`: its exact-bit single-buffer `nansem` prototype had shown a directional 1.857x win, but a
+54.28% candidate duplicate-arm spread invalidated that result and attributed the instability to allocator carry-over.
+That row's explicit retry condition was same-arm allocator preconditioning immediately before every short sample.
+
+Attribution preceded the production edit. Numeric `nansem` first collected all finite values, then delegated to
+`nanstd`, whose `nanvar` path collected the same values into a second buffer before repeating the mean and squared-error
+passes. The one lever reuses `nansem`'s existing finite-value buffer for those identical arithmetic passes. The
+operation order, `ddof` guard, floating-point bit pattern, null/NaN filtering, numeric coercion, and separate
+`Timedelta64` branch remain unchanged. A permanent exact-bit guard covers empty and singleton inputs, nulls, NaNs,
+signed zero, `i64` extrema, a 4,096-value mixed corpus, and boundary `ddof` values.
+
+The single final foreground same-binary gate ran on strict-remote worker `vmi1264463` with normal `--profile release`:
+262,144 mixed integer/null rows, eight calls per sample, two same-arm preconditioning calls immediately before every
+timed sample, and nine reversed-ABBA blocks. Before timing, the public production result matched the exact former body
+bit for bit.
+
+| final arm | duplicate p50 A / B | duplicate-p50 mean | A/A spread |
+| --- | ---: | ---: | ---: |
+| former second-buffer lifecycle | 3,994,969 / 4,360,045 ns | 4,177,507 ns | 8.7391% |
+| public single-buffer `nansem` | 2,155,109 / 2,367,313 ns | 2,261,211 ns | 9.3845% |
+
+The public candidate is **1.847464x faster at p50** (**45.873% lower latency**). The complete timed body finished in
+**1.170277 seconds**. Same-arm preconditioning reduced the invalidated candidate control spread from 54.28% to 9.38%,
+while the former duplicate spread was 8.74%, making the candidate/former separation decisive. RCH routed the final job
+away from the requested warm worker and cold-built in 20.9 seconds without a timeout; sync, compilation, and artifact
+transfer remained outside the in-process measurements. Focused strict-remote release tests are **5 passed / 0 failed /
+1 ignored A/B harness**, and the exact final A/B test passed independently. Scoped `fp-types --lib --no-deps -D
+warnings` release Clippy, direct Rustfmt, and `git diff --check` are green. Bounded UBS removed the only new touched-hunk
+finding and reproduced the file's four pre-existing test panic findings. Every explicit Cargo command used fail-closed
+remote RCH; no local Cargo or `release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were
+not changed.
