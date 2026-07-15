@@ -602,7 +602,10 @@ impl ValidityMask {
         if self.is_all_valid_sentinel() {
             return true;
         }
-        self.count_valid() > 0
+        if let Some(ranges) = &self.invalid_ranges {
+            return Self::invalid_ranges_len(ranges) < self.len;
+        }
+        self.words.iter().any(|&word| word != 0)
     }
 
     /// Whether all bits are set.
@@ -26656,6 +26659,104 @@ mod tests {
 
     #[test]
     #[ignore = "foreground release attribution harness"]
+    fn validity_mask_any_short_circuit_ab_dbtw5() {
+        const ROWS: usize = 1_000_003;
+        const BATCH: usize = 4_096;
+
+        fn former(mask: &ValidityMask) -> bool {
+            if mask.is_all_valid_sentinel() {
+                return true;
+            }
+            mask.count_valid() > 0
+        }
+
+        fn candidate(mask: &ValidityMask) -> bool {
+            mask.any()
+        }
+
+        fn elapsed(mask: &ValidityMask, check: fn(&ValidityMask) -> bool) -> u128 {
+            std::hint::black_box(check(std::hint::black_box(mask)));
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(check(std::hint::black_box(mask)));
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn median(samples: &mut [u128]) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let mut restored = ValidityMask::all_valid(70);
+        restored.set(5, false);
+        restored.set(5, true);
+        let mut early_valid = ValidityMask::all_invalid(70);
+        early_valid.set(1, true);
+        let mut late_valid = ValidityMask::all_invalid(70);
+        late_valid.set(69, true);
+        let cases = [
+            ValidityMask::all_valid(0),
+            ValidityMask::all_valid(70),
+            ValidityMask::all_invalid(70),
+            restored,
+            early_valid,
+            late_valid,
+            ValidityMask::from_invalid_ranges(Arc::from(vec![(1, 2), (65, 1)]), 70),
+            ValidityMask::from_invalid_ranges(Arc::from(vec![(0, 70)]), 70),
+        ];
+        for mask in &cases {
+            assert_eq!(former(mask), candidate(mask));
+        }
+
+        let mut mask = ValidityMask::all_invalid(ROWS);
+        mask.set(257, true);
+        assert!(former(&mask));
+        assert_eq!(former(&mask), candidate(&mask));
+
+        for _ in 0..2 {
+            std::hint::black_box(elapsed(&mask, former));
+            std::hint::black_box(elapsed(&mask, candidate));
+        }
+
+        let mut former_samples = Vec::with_capacity(18);
+        let mut candidate_samples = Vec::with_capacity(18);
+        let mut null_ratios = Vec::with_capacity(9);
+        for block in 0_usize..9 {
+            let (former_a, candidate_a, candidate_b, former_b) = if block.is_multiple_of(2) {
+                (
+                    elapsed(&mask, former),
+                    elapsed(&mask, candidate),
+                    elapsed(&mask, candidate),
+                    elapsed(&mask, former),
+                )
+            } else {
+                let candidate_a = elapsed(&mask, candidate);
+                let former_a = elapsed(&mask, former);
+                let former_b = elapsed(&mask, former);
+                let candidate_b = elapsed(&mask, candidate);
+                (former_a, candidate_a, candidate_b, former_b)
+            };
+            former_samples.extend([former_a, former_b]);
+            candidate_samples.extend([candidate_a, candidate_b]);
+            let lo = candidate_a.min(candidate_b).max(1);
+            null_ratios.push(candidate_a.max(candidate_b) as f64 / lo as f64);
+        }
+
+        let former_p50 = median(&mut former_samples);
+        let candidate_p50 = median(&mut candidate_samples);
+        null_ratios.sort_by(f64::total_cmp);
+        let null_p50 = null_ratios[null_ratios.len() / 2];
+        eprintln!(
+            "VALIDITY_ANY_SHORT_CIRCUIT_AB rows={ROWS} batch={BATCH} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} ratio={:.6} null_p50={null_p50:.6}",
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("VALIDITY_ANY_SHORT_CIRCUIT_AB former_samples_ns={former_samples:?}");
+        eprintln!("VALIDITY_ANY_SHORT_CIRCUIT_AB candidate_samples_ns={candidate_samples:?}");
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
     fn has_any_missing_first_invalid_word_ab_m32bh() {
         const ROWS: usize = 1_000_003;
         const BATCH: usize = 256;
@@ -28008,9 +28109,33 @@ mod tests {
         let mask = ValidityMask::all_invalid(100);
         assert_eq!(mask.len(), 100);
         assert_eq!(mask.count_valid(), 0);
+        assert!(!mask.any());
         for i in 0..100 {
             assert!(!mask.get(i), "bit {i} should be invalid");
         }
+    }
+
+    #[test]
+    fn validity_mask_any_covers_all_backings_dbtw5() {
+        // Preserve the historical empty-mask behavior as well as the ordinary
+        // non-empty all-valid sentinel.
+        assert!(!ValidityMask::all_valid(0).any());
+        assert!(ValidityMask::all_valid(70).any());
+
+        let mut early_valid = ValidityMask::all_invalid(130);
+        early_valid.set(1, true);
+        assert!(early_valid.any());
+
+        let mut tail_valid = ValidityMask::all_invalid(130);
+        tail_valid.set(129, true);
+        assert!(tail_valid.any());
+
+        let partly_invalid =
+            ValidityMask::from_invalid_ranges(Arc::from(vec![(0, 64), (66, 4)]), 70);
+        assert!(partly_invalid.any());
+
+        let wholly_invalid = ValidityMask::from_invalid_ranges(Arc::from(vec![(0, 70)]), 70);
+        assert!(!wholly_invalid.any());
     }
 
     #[test]

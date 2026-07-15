@@ -16900,3 +16900,41 @@ hash-fallback parity guard. Scoped `fp-index --lib --profile release --no-deps -
 are green. Direct Rustfmt shows only tracked pre-existing drift elsewhere in the file, with no delta on either touched
 hunk. Bounded UBS reports **0 critical** findings while reproducing the broad existing whole-file inventory. Every Cargo
 invocation used fail-closed remote RCH; no local Cargo or `release-perf` command ran, and the 70 stashes were unchanged.
+
+### 2026-07-14 IvoryGlacier — first-valid-word `ValidityMask::any`: 2642.271139x p50 WIN (`br-frankenpandas-dbtw5`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable, four blocked). The ranked
+GroupBy index-gather quick win remained assigned to `cc`, and the ledger showed recently mined runtime, index, join,
+groupby, and missingness lanes but no `ValidityMask::any` performance row. The packed-mask implementation answered a
+boolean existence question through `count_valid() > 0`, popcounting every validity word even when the first nonzero word
+already proved the result.
+
+Attribution preceded the production edit. A strict-remote normal-`release` run on `vmi1156319` used 1,000,003 rows,
+one valid bit at row 257, 4,096 calls per sample, two in-process warmups, and nine reversed-ABBA blocks. The exact former
+body measured **58,376,033 ns p50** versus **21,250 ns p50** for the first-nonzero-word prototype per batch
+(**2747.107435x**); the candidate A/A median was **1.257423x**. Exact parity passed before timing for empty and non-empty
+all-valid sentinels, all-invalid packed masks, early and tail valid bits, restored packed masks, partially invalid sparse
+ranges, and wholly invalid sparse ranges.
+
+The one lever now proves packed-mask existence with the first nonzero word. Sparse invalid-range masks compare their
+exact invalid span against logical length, while non-empty all-valid sentinels retain their constant-time answer. Empty
+mask behavior (`false`), packed tail handling, mask length, storage, serialization, mutation, equality, and every caller
+remain unchanged.
+
+The final foreground same-binary gate ran on `vmi1156319` with `--profile release`, with the candidate arm calling the
+shipped public `ValidityMask::any`:
+
+| final arm | p50 per 4,096-call batch |
+| --- | ---: |
+| former full validity popcount | 60,965,122 ns |
+| public first-valid-word predicate | 23,073 ns |
+
+The public candidate is **2642.271139x faster at p50** (**99.962% lower latency**), clearing the **1.260979x** candidate
+A/A control by orders of magnitude. The timed body finished in **1.26 seconds**. The first production-gate invocation
+also confirmed the speedup but exposed an incorrect new-test expectation for the pre-existing empty-mask contract; the
+assertion was corrected from `true` to the historical `false`, without changing production code, and the final focused
+release gate is **3 passed / 0 failed**. RCH missed its cache after the explicit untimed no-run warm-up and on later jobs,
+but all sync and compilation time remained outside the in-process measurements. Scoped remote release Clippy reproduced
+the crate's 23 pre-existing findings, all outside the touched primitive and tests. Direct Rustfmt and bounded UBS likewise
+reproduced broad pre-existing whole-file inventories with no finding on either touched hunk; `git diff --check` is green.
+All explicit Cargo invocations used fail-closed remote RCH, no `release-perf` command ran, and no stash was changed.
