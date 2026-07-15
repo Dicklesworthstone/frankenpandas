@@ -17116,3 +17116,41 @@ state/quantile gate and final A/B pass. Scoped `fp-groupby --lib --no-deps -D wa
 Rustfmt, and `git diff --check` are green. Bounded UBS completed with zero critical findings and only the file's broad
 pre-existing heuristic inventory. Every explicit Cargo command used fail-closed remote RCH; no explicit local Cargo or
 `release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were not changed.
+
+### 2026-07-15 IvoryGlacier — REJECT: typed Int64 `PySeries::tolist` direct `PyList` construction is only 1.035271x on the fresh-call gate (`br-frankenpandas-s2l41`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (356 open, 340 actionable, four blocked). Its ranked
+performance quick wins remained assigned to other agents, the only pre-existing in-progress lane was `cod_fp`'s
+transpose work, and the ledger contained no `fp-python` / `Series.tolist` result. The fresh boundary looked promising:
+an all-valid Int64 `PySeries::tolist` first asked the typed column for its scalar view, then allocated a second Rust
+`Vec<Py<PyAny>>`, and only then constructed the Python list.
+
+Attribution preceded the production edit. The actual Python extension was built with strict-remote normal
+`--profile release` on `vmi1149989`; a standalone Rust libtest could not link because PyO3's `extension-module` mode
+intentionally leaves CPython symbols for the importing interpreter, so that link failure was treated as a harness
+constraint, not benchmark evidence. A temporary ignored remote driver loaded the real cdylib and measured ten fresh
+100,000-row Int64 Series. The former first call was **2,876,407.5 ns** median versus **1,496,844 ns** after the same
+Series had populated its scalar cache, a directional **1.921648x** gap. The temporary driver was removed completely.
+
+The one candidate lever borrowed `Column::as_i64_slice()` and fed `values.iter().copied()` directly to `PyList::new`.
+Nullable Int64 and every other dtype retained the exact former scalar fallback. Both release cdylibs were compiled
+fail-closed through RCH on the same worker; sync, cold compilation, LTO, and artifact retrieval were outside all timed
+regions. The decisive foreground A/B reused the identical Python 3.13 process, script, input, ten-sample protocol, and
+retrieved remote-built cdylibs on one execution host. Series construction and `gc.collect()` stayed outside each timer,
+and every output was compared with the complete 100,000-element source list.
+
+| final arm | fresh-call samples (ns) | p50 |
+| --- | --- | ---: |
+| former scalar view + handle Vec | 4,757,460 / 3,587,415 / 3,680,430 / 2,727,847 / 3,120,661 / 2,636,985 / 2,533,318 / 2,524,331 / 2,536,053 / 2,536,243 | 2,682,416 |
+| typed direct `PyList::new` | 1,778,289 / 2,743,779 / 2,733,299 / 2,685,698 / 2,530,884 / 2,561,042 / 2,503,573 / 2,621,015 / 2,703,632 / 2,522,689 | 2,591,028.5 |
+
+The candidate is only **1.035271x faster** (**3.407% lower latency**) on the fresh-call gate, far below the separation
+needed to survive the observed allocator/runtime spread. Repeated calls moved from 1,139,753.5 ns to 919,116.5 ns, but
+that narrower cached lifecycle is not enough to justify a special production branch when the user-visible fresh call
+is effectively a null result. Exact parity also covered `i64::MIN`, `i64::MAX`, nullable Int64, Bool, Float64, Utf8,
+and every measured full list. The source change was reverted; this is a docs-only rejection.
+
+The real `fp-python` release cdylib build and scoped `fp-python --lib --no-deps -D warnings` normal-release Clippy passed
+strict-remote on `vmi1149989`. Direct Rustfmt and `git diff --check` passed. Scoped UBS completed with no critical finding;
+its warnings were pre-existing clone/string-allocation inventory outside the touched function. No explicit local Cargo
+or `release-perf` command ran, unrelated artifact dirt was untouched, and the 70 stashes were not changed.
