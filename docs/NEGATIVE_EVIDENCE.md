@@ -16832,3 +16832,34 @@ The touched hunk has no Rustfmt delta and `git diff --check` is green. Scoped re
 pre-existing findings, all outside the touched predicate and harness; bounded UBS likewise reproduced the tracked broad
 whole-file inventory with no finding on either touched hunk. Every Cargo invocation used fail-closed remote RCH; no local
 Cargo or `release-perf` command ran, and no stash was changed.
+
+### 2026-07-14 IvoryGlacier — one-buffer `Timedelta::format`: 1.941416x p50 WIN (`br-frankenpandas-5ro9h`)
+
+Negative-ledger-first routing found no executable unowned quick win in the triage list and moved out of the recently
+mined columnar, runtime, index, join, and groupby veins. `Timedelta::format` is called broadly by frame, groupby, index,
+IO, and conformance surfaces, but allocated an intermediate `HH:MM:SS` string and then copied it into a second returned
+string. The one lever now writes the complete pandas-compatible representation directly into one preallocated output.
+NaT, negative floor-normalization, the negative-day `+` separator, microsecond-versus-nanosecond fractional width,
+overflow edges, and every returned byte are unchanged.
+
+Attribution preceded the production edit. A strict-remote normal-`release` run on `vmi1156319` used 16,384 deterministic
+mixed integral, fractional, positive, and negative nanosecond values, two in-process warmups, and 18 reversed-ABBA
+samples per arm. The exact former body measured **7,992,621 ns p50** versus **4,239,263 ns p50** for the one-buffer
+prototype (**1.885380x**). Exact parity passed across NaT, zero, ±1 ns, ±1 day, `i64::MAX`, `i64::MIN + 1`, and the full
+generated corpus before timing.
+
+The single final foreground same-binary gate ran on `vmi1156319` with `--profile release`; the candidate arm called the
+shipped public `Timedelta::format`:
+
+| final arm | p50 per 16,384 values |
+| --- | ---: |
+| former two-allocation formatter | 8,504,138 ns |
+| public one-buffer formatter | 4,380,378 ns |
+
+The public candidate is **1.941416x faster at p50**. The timed body finished in 0.29 seconds. RCH missed its cache after
+an explicit untimed no-run warm-up, but compilation and transfer remained outside the measured body. Correctness is
+strict-remote: the full `fp-types` release library suite is **276 passed / 0 failed / 2 ignored performance probes**.
+Scoped `fp-types --all-targets --no-deps -D warnings` release Clippy, direct Rustfmt, and `git diff --check` are green.
+Bounded UBS reproduced only the pre-existing whole-file test panic/assert inventory, with no finding on the production
+formatter or A/B harness. Every Cargo invocation used fail-closed remote RCH; no local Cargo or `release-perf` command
+ran, and no stash was changed.

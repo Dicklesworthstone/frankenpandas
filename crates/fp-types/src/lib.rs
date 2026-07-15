@@ -1508,6 +1508,8 @@ impl Timedelta {
     }
 
     pub fn format(nanos: i64) -> String {
+        use std::fmt::Write as _;
+
         if nanos == Self::NAT {
             return "NaT".to_string();
         }
@@ -1524,22 +1526,26 @@ impl Timedelta {
         let seconds = (rem % Self::NANOS_PER_MIN) / Self::NANOS_PER_SEC;
         let frac = rem % Self::NANOS_PER_SEC;
 
-        let time_part = format!("{hours:02}:{minutes:02}:{seconds:02}");
+        // Build directly into the returned allocation. The former path first
+        // allocated an `HH:MM:SS` string, then copied it into the result.
+        let mut result = String::with_capacity(32);
+        let _ = write!(result, "{days} days ");
         // '+' joins the negative day count to the positive time remainder.
-        let sep = if days < 0 { "+" } else { "" };
-
+        if days < 0 {
+            result.push('+');
+        }
+        let _ = write!(result, "{hours:02}:{minutes:02}:{seconds:02}");
         if frac > 0 {
             // pandas renders the sub-second part with microsecond precision
             // (6 digits) unless a sub-microsecond (nanosecond) component is
             // present, in which case it widens to 9 digits.
             if frac % 1_000 == 0 {
-                format!("{days} days {sep}{time_part}.{:06}", frac / 1_000)
+                let _ = write!(result, ".{:06}", frac / 1_000);
             } else {
-                format!("{days} days {sep}{time_part}.{frac:09}")
+                let _ = write!(result, ".{frac:09}");
             }
-        } else {
-            format!("{days} days {sep}{time_part}")
         }
+        result
     }
 
     pub fn from_unit(value: f64, unit: &str) -> Result<i64, TimedeltaError> {
@@ -7377,6 +7383,121 @@ mod tests {
         );
         assert_eq!(Timedelta::format(-500), "-1 days +23:59:59.999999500");
         assert_eq!(Timedelta::format(-1), "-1 days +23:59:59.999999999");
+    }
+
+    #[test]
+    #[ignore = "foreground release attribution harness"]
+    fn timedelta_format_single_buffer_ab_5ro9h() {
+        use std::{hint::black_box, time::Instant};
+
+        use super::Timedelta;
+
+        fn former(nanos: i64) -> String {
+            if nanos == Timedelta::NAT {
+                return "NaT".to_string();
+            }
+
+            let days = nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+            let rem = nanos.rem_euclid(Timedelta::NANOS_PER_DAY);
+            let hours = rem / Timedelta::NANOS_PER_HOUR;
+            let minutes = (rem % Timedelta::NANOS_PER_HOUR) / Timedelta::NANOS_PER_MIN;
+            let seconds = (rem % Timedelta::NANOS_PER_MIN) / Timedelta::NANOS_PER_SEC;
+            let frac = rem % Timedelta::NANOS_PER_SEC;
+
+            let time_part = format!("{hours:02}:{minutes:02}:{seconds:02}");
+            let sep = if days < 0 { "+" } else { "" };
+            if frac > 0 {
+                if frac % 1_000 == 0 {
+                    format!("{days} days {sep}{time_part}.{:06}", frac / 1_000)
+                } else {
+                    format!("{days} days {sep}{time_part}.{frac:09}")
+                }
+            } else {
+                format!("{days} days {sep}{time_part}")
+            }
+        }
+
+        fn candidate(nanos: i64) -> String {
+            Timedelta::format(nanos)
+        }
+
+        fn elapsed(values: &[i64], format: fn(i64) -> String) -> u128 {
+            let started = Instant::now();
+            let mut digest = 0_usize;
+            for &value in values {
+                digest = digest.wrapping_add(black_box(format(black_box(value))).len());
+            }
+            black_box(digest);
+            started.elapsed().as_nanos()
+        }
+
+        fn median(samples: &mut [u128]) -> u128 {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let mut seed = 0x8f42_67a1_b3d9_c50e_u64;
+        let values: Vec<i64> = (0..16_384)
+            .map(|i| {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let magnitude = (seed & i64::MAX as u64) as i64;
+                match i % 4 {
+                    0 => magnitude - magnitude % Timedelta::NANOS_PER_SEC,
+                    1 => magnitude,
+                    2 => -(magnitude - magnitude % Timedelta::NANOS_PER_MICRO),
+                    _ => -magnitude,
+                }
+            })
+            .collect();
+
+        for &value in &[
+            Timedelta::NAT,
+            0,
+            1,
+            -1,
+            Timedelta::NANOS_PER_DAY,
+            -Timedelta::NANOS_PER_DAY,
+            i64::MAX,
+            i64::MIN + 1,
+        ] {
+            assert_eq!(former(value), candidate(value));
+        }
+        for &value in &values {
+            assert_eq!(former(value), candidate(value));
+        }
+
+        for _ in 0..2 {
+            black_box(elapsed(&values, former));
+            black_box(elapsed(&values, candidate));
+        }
+
+        let mut former_samples = Vec::with_capacity(18);
+        let mut candidate_samples = Vec::with_capacity(18);
+        for block in 0_usize..9 {
+            if block.is_multiple_of(2) {
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, candidate));
+                candidate_samples.push(elapsed(&values, candidate));
+                former_samples.push(elapsed(&values, former));
+            } else {
+                candidate_samples.push(elapsed(&values, candidate));
+                former_samples.push(elapsed(&values, former));
+                former_samples.push(elapsed(&values, former));
+                candidate_samples.push(elapsed(&values, candidate));
+            }
+        }
+
+        let former_p50 = median(&mut former_samples);
+        let candidate_p50 = median(&mut candidate_samples);
+        eprintln!(
+            "TIMEDELTA_FORMAT_SINGLE_BUFFER_AB rows={} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} ratio={:.6}",
+            values.len(),
+            former_p50 as f64 / candidate_p50 as f64,
+        );
+        eprintln!("TIMEDELTA_FORMAT_SINGLE_BUFFER_AB former_samples_ns={former_samples:?}");
+        eprintln!("TIMEDELTA_FORMAT_SINGLE_BUFFER_AB candidate_samples_ns={candidate_samples:?}");
     }
 
     #[test]
