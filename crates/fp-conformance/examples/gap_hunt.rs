@@ -729,6 +729,14 @@ fn main() {
             .mean()
             .unwrap();
     });
+    time_it("gb.ewm_mean", 1, 10, || {
+        let _ = gkeyed
+            .groupby(&["key"])
+            .unwrap()
+            .ewm(Some(10.0), None)
+            .mean()
+            .unwrap();
+    });
     time_it("gb.cumprod", 1, 10, || {
         let _ = gkeyed.groupby(&["key"]).unwrap().cumprod().unwrap();
     });
