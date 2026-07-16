@@ -2963,6 +2963,8 @@ impl Timestamp {
     /// NaT returns "NaT".
     #[must_use]
     pub fn strftime(&self, format: &str) -> String {
+        use std::fmt::Write as _;
+
         if self.is_nat() {
             return "NaT".to_string();
         }
@@ -2990,14 +2992,45 @@ impl Timestamp {
         let second = secs_of_day % 60;
         let micros = sub_nanos / 1000;
 
-        format
-            .replace("%Y", &format!("{year:04}"))
-            .replace("%m", &format!("{m:02}"))
-            .replace("%d", &format!("{d:02}"))
-            .replace("%H", &format!("{hour:02}"))
-            .replace("%M", &format!("{minute:02}"))
-            .replace("%S", &format!("{second:02}"))
-            .replace("%f", &format!("{micros:06}"))
+        // Write recognized directives directly into the returned allocation.
+        // The former seven-step replacement chain copied the whole format once
+        // per directive and allocated a temporary string for every component.
+        let mut result = String::with_capacity(format.len().saturating_add(32));
+        let mut rest = format;
+        while let Some(percent) = rest.find('%') {
+            result.push_str(&rest[..percent]);
+            let directive = &rest[percent..];
+            rest = if let Some(next) = directive.strip_prefix("%Y") {
+                let _ = write!(result, "{year:04}");
+                next
+            } else if let Some(next) = directive.strip_prefix("%m") {
+                let _ = write!(result, "{m:02}");
+                next
+            } else if let Some(next) = directive.strip_prefix("%d") {
+                let _ = write!(result, "{d:02}");
+                next
+            } else if let Some(next) = directive.strip_prefix("%H") {
+                let _ = write!(result, "{hour:02}");
+                next
+            } else if let Some(next) = directive.strip_prefix("%M") {
+                let _ = write!(result, "{minute:02}");
+                next
+            } else if let Some(next) = directive.strip_prefix("%S") {
+                let _ = write!(result, "{second:02}");
+                next
+            } else if let Some(next) = directive.strip_prefix("%f") {
+                let _ = write!(result, "{micros:06}");
+                next
+            } else {
+                // Preserve the chained `replace` behavior for unknown, escaped,
+                // and trailing percent signs; the following byte may still begin
+                // a recognized directive (for example, `%%Y` -> `%2024`).
+                result.push('%');
+                &directive[1..]
+            };
+        }
+        result.push_str(rest);
+        result
     }
 
     /// Return the day of the week as a string (e.g., "Monday").
@@ -11072,7 +11105,128 @@ mod tests {
         assert_eq!(ts.strftime("%Y-%m-%d"), "1971-01-01");
         assert_eq!(ts.strftime("%H:%M:%S"), "09:15:00");
         assert_eq!(ts.strftime("%Y/%m/%d %H:%M"), "1971/01/01 09:15");
+        assert_eq!(ts.strftime("%%Y|%%%m|%Q|%|λ"), "%1971|%%01|%Q|%|λ");
         assert_eq!(Timestamp::nat().strftime("%Y-%m-%d"), "NaT");
+    }
+
+    #[test]
+    #[ignore = "foreground normal-release attribution harness"]
+    fn timestamp_strftime_one_buffer_profile_8qzbo() {
+        use std::{hint::black_box, time::Instant};
+
+        const ITEMS: usize = 8_192;
+        const SAMPLES: usize = 10;
+        const FORMAT: &str = "%Y-%m-%d %H:%M:%S.%f|%Y%m%d|%%Y|λ%Q";
+
+        fn former(timestamp: &Timestamp, format: &str) -> String {
+            if timestamp.is_nat() {
+                return "NaT".to_string();
+            }
+            let total_secs = timestamp.nanos / Timedelta::NANOS_PER_SEC;
+            let sub_nanos = timestamp.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
+
+            let days_since_epoch = total_secs / 86400;
+            let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+            let days = days_since_epoch + 719_468;
+            let era = (if days >= 0 { days } else { days - 146_096 }) / 146_097;
+            let doe = days - era * 146_097;
+            let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+            let y = yoe + era * 400;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            let d = doy - (153 * mp + 2) / 5 + 1;
+            let m = if mp < 10 { mp + 3 } else { mp - 9 };
+            let year = if m <= 2 { y + 1 } else { y };
+            let hour = secs_of_day / 3600;
+            let minute = (secs_of_day % 3600) / 60;
+            let second = secs_of_day % 60;
+            let micros = sub_nanos / 1000;
+
+            format
+                .replace("%Y", &format!("{year:04}"))
+                .replace("%m", &format!("{m:02}"))
+                .replace("%d", &format!("{d:02}"))
+                .replace("%H", &format!("{hour:02}"))
+                .replace("%M", &format!("{minute:02}"))
+                .replace("%S", &format!("{second:02}"))
+                .replace("%f", &format!("{micros:06}"))
+        }
+
+        fn elapsed(timestamps: &[Timestamp], formatter: fn(&Timestamp, &str) -> String) -> u128 {
+            let started = Instant::now();
+            let mut digest = 0_usize;
+            for timestamp in timestamps {
+                let value = formatter(black_box(timestamp), black_box(FORMAT));
+                digest = digest.wrapping_add(value.len());
+                digest ^= usize::from(value.as_bytes().first().copied().unwrap_or_default());
+                black_box(value);
+            }
+            black_box(digest);
+            started.elapsed().as_nanos()
+        }
+
+        fn percentile(samples: &mut [u128], pct: usize) -> u128 {
+            samples.sort_unstable();
+            let rank = (samples.len() * pct).div_ceil(100).saturating_sub(1);
+            samples[rank]
+        }
+
+        let edge_timestamps = [
+            Timestamp::nat(),
+            Timestamp::from_nanos(i64::MIN + 1),
+            Timestamp::from_nanos(-1_234_567_890),
+            Timestamp::from_nanos(0),
+            Timestamp::from_nanos(1_735_732_800_123_456_789),
+            Timestamp::from_nanos(i64::MAX),
+        ];
+        let edge_formats = [
+            "",
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y%Y%m%m%d%d%H%H%M%M%S%S%f%f",
+            "%%Y|%%%m|%Q|%|λ",
+            FORMAT,
+        ];
+        for timestamp in &edge_timestamps {
+            for format in edge_formats {
+                assert_eq!(former(timestamp, format), timestamp.strftime(format));
+            }
+        }
+
+        let timestamps = (0..ITEMS)
+            .map(|index| {
+                let centered = index as i64 - ITEMS as i64 / 2;
+                Timestamp::from_nanos(centered * 987_654_321_123_456)
+            })
+            .collect::<Vec<_>>();
+        for timestamp in &timestamps {
+            assert_eq!(former(timestamp, FORMAT), timestamp.strftime(FORMAT));
+        }
+
+        black_box(elapsed(&timestamps, former));
+        black_box(elapsed(&timestamps, Timestamp::strftime));
+
+        let mut former_samples = Vec::with_capacity(SAMPLES);
+        let mut public_samples = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_samples.push(elapsed(&timestamps, former));
+                public_samples.push(elapsed(&timestamps, Timestamp::strftime));
+            } else {
+                public_samples.push(elapsed(&timestamps, Timestamp::strftime));
+                former_samples.push(elapsed(&timestamps, former));
+            }
+        }
+        let former_p50 = percentile(&mut former_samples, 50);
+        let former_p95 = percentile(&mut former_samples, 95);
+        let public_p50 = percentile(&mut public_samples, 50);
+        let public_p95 = percentile(&mut public_samples, 95);
+        println!(
+            "TIMESTAMP_STRFTIME_AB items={ITEMS} samples={SAMPLES} former_p50_ns={former_p50} former_p95_ns={former_p95} public_p50_ns={public_p50} public_p95_ns={public_p95} p50_speedup={:.6} p95_speedup={:.6}",
+            former_p50 as f64 / public_p50 as f64,
+            former_p95 as f64 / public_p95 as f64,
+        );
+        println!("TIMESTAMP_STRFTIME_AB former_samples_ns={former_samples:?}");
+        println!("TIMESTAMP_STRFTIME_AB public_samples_ns={public_samples:?}");
     }
 
     #[test]

@@ -17511,3 +17511,52 @@ invocation evicted the release cache and rebuilt; those cancelled builds are inf
 scoped remote Clippy attempt was likewise stopped when a new worker immediately redownloaded and rebuilt the dependency
 graph, so no Clippy result is claimed. Every explicit Cargo command was fail-closed remote; no explicit local Cargo,
 `force_local`, LTO, or `release-perf` command ran, unrelated artifact dirt was untouched, and all 70 stashes remain.
+
+### 2026-07-16 BlackThrush — one-buffer `Timestamp::strftime`: 2.353359x p50 WIN (`br-frankenpandas-8qzbo`)
+
+Negative-ledger-first routing began with `bv --robot-triage`. Its ranked perf work was assigned, stale, or concentrated
+in recently mined `fp-frame` lanes. The first ranked probe, `br-frankenpandas-r18qs`, exposed 216 pre-existing errors
+behind its feature-gated compile surface before timing and was returned open. A subsequent fresh `fp-expr` query-mask
+probe (`br-frankenpandas-qm012`) repeatedly lost its release target during RCH source synchronization and likewise
+never reached a timed path. Both temporary source probes were removed completely; neither a build failure nor cache
+eviction was recorded as a performance reject. The no-ceiling pivot then selected the small `fp-types` timestamp
+formatter, where the ledger's earlier `Timestamp::isoformat` and `Timedelta::format` one-buffer keeps pointed to an
+unmined sibling: `Timestamp::strftime` allocated seven formatted component strings and copied the complete format
+through seven chained `replace` calls.
+
+Profile-first attribution retained production unchanged and compared its public method with a test-local one-buffer
+candidate over 8,192 timestamps, ten alternating-order samples, repeated directives, escaped/unknown/trailing percent
+signs, Unicode literals, NaT, negative nanoseconds, and both finite `i64` extremes. Every candidate string matched the
+public former result before timing. On fail-closed worker `vmi1264463`, the former/candidate p50 was
+13,221,057 / 6,554,223 ns (**2.017181x**) and p95 was 14,003,380 / 7,483,750 ns (**1.871172x**), attributing the
+allocation chain before any production edit.
+
+The one production lever scans the format once and writes supported directives directly into a pre-sized returned
+`String`. Civil-date decomposition, negative-subsecond normalization, directive widths, NaT behavior, and supported
+directive scope are byte-for-byte unchanged. Unknown directives remain literal, and advancing one percent byte at a
+time deliberately preserves the chained-replacement overlap rule (`%%Y` becomes `%2024`, while `%%%m` becomes
+`%%01`). The permanent basic test covers that overlap plus unknown, trailing, and Unicode content; the exact-former
+release harness covers empty and repeated formats across the full timestamp edge corpus before timing.
+
+The final foreground same-binary A/B ran on the same pinned `vmi1264463` worker with normal `--profile release`,
+explicit `CARGO_PROFILE_RELEASE_LTO=false`, 8,192 timestamps, two in-process warmups, and ten alternating-order samples
+per arm. An uncapped `--no-run` warm-up with no timeout wrapper completed first. Cargo's measurement runner then applied
+`timeout --foreground 120s` only to the spawned test binary; its 54.34-second release compile was outside every sample,
+and the exact-parity test body completed in 0.27 seconds.
+
+| final arm | p50 | p95 | speedup | latency reduction |
+| --- | ---: | ---: | ---: | ---: |
+| former seven-replacement formatter | 14,712,903 ns | 23,584,397 ns | 1.000000x | — |
+| public one-buffer formatter | 6,251,874 ns | 8,717,748 ns | **2.353359x p50 / 2.705331x p95** | **57.5075% p50 / 63.0360% p95** |
+
+Former samples were 12,614,834 / 12,834,642 / 14,445,456 / 14,699,358 / 14,712,903 / 15,976,593 / 16,814,891 /
+18,195,889 / 19,689,646 / 23,584,397 ns; public samples were 5,233,609 / 5,467,284 / 5,512,519 / 5,631,790 /
+6,251,874 / 6,694,986 / 7,396,060 / 7,597,825 / 8,331,951 / 8,717,748 ns.
+
+The full strict-remote normal-release `fp-types` library suite is **280 passed / 0 failed / 9 ignored**, and scoped
+all-target normal-release Clippy is clean under `-D warnings`. Direct Rustfmt and `git diff --check` are clean. UBS
+reproduced the large file's broad pre-existing test panic/assert/indexing/allocation inventory, including four
+test-only `panic!` macros, but cited no finding in either touched hunk. RCH recompiled after each source synchronization;
+those build wall clocks are infrastructure events outside the A/B and are not rejects. Every Cargo invocation was
+fail-closed remote; no explicit local Cargo, `force_local`, LTO, or `release-perf` command ran, and unrelated work and
+stashes were untouched.
