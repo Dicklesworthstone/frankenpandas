@@ -771,4 +771,36 @@ fn main() {
             let _ = gvc.groupby(&["key"]).unwrap().value_counts().unwrap();
         });
     }
+
+    // Merge probe: 1:1 inner join of two n-row frames on a unique Int64 key, 6
+    // f64 value columns each side (overlapping names → suffixed). Right rows are
+    // key-reversed (a bijection of 0..n) so the per-column output gather is a
+    // non-identity scatter, not an identity short-circuit.
+    {
+        let make = |reverse: bool| {
+            let key_at = |i: usize| -> usize {
+                if reverse { n - 1 - i } else { i }
+            };
+            let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+            let mut cols = std::collections::BTreeMap::new();
+            let mut order = Vec::new();
+            let keys: Vec<i64> = (0..n).map(|i| key_at(i) as i64).collect();
+            cols.insert("key".to_string(), Column::from_i64_values(keys));
+            order.push("key".to_string());
+            for c in 0..6 {
+                let name = format!("v{c}");
+                let v: Vec<f64> = (0..n)
+                    .map(|i| ((key_at(i) * (c + 1)) % 9973) as f64 * 0.25)
+                    .collect();
+                cols.insert(name.clone(), Column::from_f64_values(v));
+                order.push(name);
+            }
+            DataFrame::new_with_column_order(Index::new(labels), cols, order).expect("merge frame")
+        };
+        let ml = make(false);
+        let mr = make(true);
+        time_it("merge_inner", 1, 10, || {
+            let _ = fp_join::merge_dataframes(&ml, &mr, "key", fp_join::JoinType::Inner).unwrap();
+        });
+    }
 }
