@@ -80,6 +80,28 @@ fn int_frame(n: usize, cols: usize) -> DataFrame {
     DataFrame::new_with_column_order(Index::new(labels), columns, order).expect("int frame")
 }
 
+// Frame with a scattered Int64 "key" column (`groups` distinct values) plus
+// `cols` Float64 value columns — for DataFrameGroupBy agg probing.
+fn keyed_frame(n: usize, cols: usize, groups: usize) -> DataFrame {
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let mut columns = std::collections::BTreeMap::new();
+    let mut order = Vec::new();
+    let keys: Vec<i64> = (0..n)
+        .map(|i| ((i as u64).wrapping_mul(2_654_435_761) % groups as u64) as i64)
+        .collect();
+    columns.insert("key".to_string(), Column::from_i64_values(keys));
+    order.push("key".to_string());
+    for c in 0..cols {
+        let name = format!("v{c}");
+        let v: Vec<f64> = (0..n)
+            .map(|i| ((i * (c + 1)) % 9973) as f64 * 0.25)
+            .collect();
+        columns.insert(name.clone(), Column::from_f64_values(v));
+        order.push(name);
+    }
+    DataFrame::new_with_column_order(Index::new(labels), columns, order).expect("keyed frame")
+}
+
 fn time_it<F: FnMut()>(label: &str, warmup: usize, iters: usize, mut f: F) {
     for _ in 0..warmup {
         f();
@@ -652,5 +674,40 @@ fn main() {
     });
     time_it("describe", 1, 10, || {
         let _ = f.describe().unwrap();
+    });
+
+    // Groupby probes (fresh subsystem): ~n/100 groups (moderate cardinality),
+    // 6 Float64 value columns keyed by a scattered Int64. Build the groupby once
+    // per op so each timing isolates the aggregation (not the group-build).
+    let gkeyed = keyed_frame(n, 6, (n / 100).max(2));
+    time_it("gb.sum", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().sum().unwrap();
+    });
+    time_it("gb.mean", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().mean().unwrap();
+    });
+    time_it("gb.std", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().std().unwrap();
+    });
+    time_it("gb.var", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().var().unwrap();
+    });
+    time_it("gb.median", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().median().unwrap();
+    });
+    time_it("gb.min", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().min().unwrap();
+    });
+    time_it("gb.max", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().max().unwrap();
+    });
+    time_it("gb.prod", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().prod().unwrap();
+    });
+    time_it("gb.count", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().count().unwrap();
+    });
+    time_it("gb.cumsum", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().cumsum().unwrap();
     });
 }
