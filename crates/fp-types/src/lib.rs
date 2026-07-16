@@ -4710,45 +4710,58 @@ impl Period {
     /// reachable through the current parse/cast paths).
     #[must_use]
     pub fn calendar_string(&self) -> String {
+        let mut rendered = String::new();
+        // `fmt::Write for String` is infallible.
+        let _ = self.write_calendar(&mut rendered);
+        rendered
+    }
+
+    fn write_calendar(&self, rendered: &mut impl std::fmt::Write) -> std::fmt::Result {
         if self.ordinal == i64::MIN {
-            return "NaT".to_owned();
+            return rendered.write_str("NaT");
         }
         let ord = self.ordinal;
         match self.freq {
             PeriodFreq::Annual => {
                 let year = 1970 + ord;
-                format!("{year}")
+                write!(rendered, "{year}")
             }
             PeriodFreq::Quarterly => {
                 let year = 1970 + ord.div_euclid(4);
                 let quarter = ord.rem_euclid(4) + 1;
-                format!("{year}Q{quarter}")
+                write!(rendered, "{year}Q{quarter}")
             }
             PeriodFreq::Monthly => {
                 let year = 1970 + ord.div_euclid(12);
                 let month = ord.rem_euclid(12) + 1;
-                format!("{year:04}-{month:02}")
+                write!(rendered, "{year:04}-{month:02}")
             }
             PeriodFreq::Daily | PeriodFreq::Business | PeriodFreq::Weekly => {
                 let (y, m, d) = civil_from_days(ord);
-                format!("{y:04}-{m:02}-{d:02}")
+                write!(rendered, "{y:04}-{m:02}-{d:02}")
             }
             PeriodFreq::Hourly => {
                 let (y, m, d) = civil_from_days(ord.div_euclid(24));
                 let hour = ord.rem_euclid(24);
-                format!("{y:04}-{m:02}-{d:02} {hour:02}:00")
+                write!(rendered, "{y:04}-{m:02}-{d:02} {hour:02}:00")
             }
             PeriodFreq::Minutely => {
                 let day = ord.div_euclid(1440);
                 let mins = ord.rem_euclid(1440);
                 let (y, m, d) = civil_from_days(day);
-                format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", mins / 60, mins % 60)
+                write!(
+                    rendered,
+                    "{y:04}-{m:02}-{d:02} {:02}:{:02}",
+                    mins / 60,
+                    mins % 60
+                )
             }
             PeriodFreq::Secondly => {
                 let day = ord.div_euclid(86_400);
                 let secs = ord.rem_euclid(86_400);
                 let (y, m, d) = civil_from_days(day);
-                format!(
+                write!(
+                    rendered,
                     "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
                     secs / 3600,
                     (secs % 3600) / 60,
@@ -4822,7 +4835,7 @@ impl std::fmt::Display for Period {
     /// Pandas `str(Period)` form: the calendar string (`2024`, `2024Q1`,
     /// `2024-03`, `2024-01-15`, ...). NaT (ordinal `i64::MIN`) renders `NaT`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.calendar_string())
+        self.write_calendar(f)
     }
 }
 
@@ -9953,6 +9966,98 @@ mod tests {
         assert_eq!(
             Scalar::Period(Period::new(i64::MIN, PeriodFreq::Daily)).to_string(),
             "NaT"
+        );
+    }
+
+    fn period_display_former_profile(period: &Period) -> String {
+        let calendar = period.calendar_string();
+        let mut rendered = String::new();
+        rendered.push_str(&calendar);
+        rendered
+    }
+
+    fn measure_period_renderer(periods: &[Period], render: impl Fn(&Period) -> String) -> u128 {
+        use std::{hint::black_box, time::Instant};
+
+        let started = Instant::now();
+        let mut checksum = 0usize;
+        for period in periods {
+            let rendered = render(black_box(period));
+            checksum = checksum.wrapping_add(rendered.len());
+            drop(black_box(rendered));
+        }
+        black_box(checksum);
+        started.elapsed().as_nanos()
+    }
+
+    #[test]
+    #[ignore = "release-only attribution probe for br-frankenpandas-6pqra"]
+    fn profile_period_display_direct_sink_ab_6pqra() {
+        const FREQUENCIES: [PeriodFreq; 9] = [
+            PeriodFreq::Annual,
+            PeriodFreq::Quarterly,
+            PeriodFreq::Monthly,
+            PeriodFreq::Weekly,
+            PeriodFreq::Daily,
+            PeriodFreq::Business,
+            PeriodFreq::Hourly,
+            PeriodFreq::Minutely,
+            PeriodFreq::Secondly,
+        ];
+        const SAMPLES: usize = 10;
+
+        let periods = (0..65_536)
+            .map(|index| {
+                let ordinal = if index % 4093 == 0 {
+                    i64::MIN
+                } else {
+                    ((index as i64 * 7_919) % 4_000_001) - 2_000_000
+                };
+                Period::new(ordinal, FREQUENCIES[index % FREQUENCIES.len()])
+            })
+            .collect::<Vec<_>>();
+
+        for period in &periods {
+            assert_eq!(period_display_former_profile(period), period.to_string());
+        }
+
+        for _ in 0..2 {
+            measure_period_renderer(&periods, period_display_former_profile);
+            measure_period_renderer(&periods, Period::to_string);
+        }
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut public_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                former_ns.push(measure_period_renderer(
+                    &periods,
+                    period_display_former_profile,
+                ));
+                public_ns.push(measure_period_renderer(&periods, Period::to_string));
+            } else {
+                public_ns.push(measure_period_renderer(&periods, Period::to_string));
+                former_ns.push(measure_period_renderer(
+                    &periods,
+                    period_display_former_profile,
+                ));
+            }
+        }
+        former_ns.sort_unstable();
+        public_ns.sort_unstable();
+        let former_p50 = former_ns[SAMPLES / 2];
+        let public_p50 = public_ns[SAMPLES / 2];
+        let former_p95 = former_ns[SAMPLES - 1];
+        let public_p95 = public_ns[SAMPLES - 1];
+        println!("PROFILE_PERIOD_DISPLAY_FORMER_NS={former_ns:?}");
+        println!("PROFILE_PERIOD_DISPLAY_PUBLIC_NS={public_ns:?}");
+        println!(
+            "PROFILE_PERIOD_DISPLAY_P50_RATIO={:.6}",
+            former_p50 as f64 / public_p50 as f64
+        );
+        println!(
+            "PROFILE_PERIOD_DISPLAY_P95_RATIO={:.6}",
+            former_p95 as f64 / public_p95 as f64
         );
     }
 

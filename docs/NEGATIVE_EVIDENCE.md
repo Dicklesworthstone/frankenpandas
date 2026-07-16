@@ -17597,3 +17597,48 @@ and began rebuilding the full Arrow dependency graph; it was stopped under the e
 compiler-gate result is claimed. The benchmark itself is a real exact-parity A/B, not a build-timeout verdict. Every
 explicit Cargo invocation was fail-closed remote; no explicit local Cargo, `force_local`, LTO, or `release-perf`
 command ran, and unrelated work and stashes were untouched.
+
+### 2026-07-16 BlackThrush — direct `Period` display sink: 1.279853x p50 WIN (`br-frankenpandas-6pqra`)
+
+Negative-ledger-first routing began with `bv --robot-triage`. Its advertised performance quick wins were assigned and
+already implemented on `main`, while the recent `fp-frame`, `fp-io`, timestamp, timedelta, and reduction families were
+already mined. To avoid another Arrow-heavy cold build, this pass stayed in the small `fp-types` crate and selected the
+previously unledgered `Period` display boundary. Source attribution found that `Display::fmt` first allocated the
+complete `calendar_string()`, then copied it into the formatter's returned `String`, paying two allocations for every
+`Period::to_string()` call.
+
+Profile-first attribution left production unchanged and compared the public former method with a test-local direct
+sink prototype. The corpus contained 65,536 periods spanning every frequency, negative and positive ordinals, and NaT;
+every rendered byte matched before timing. With two in-process warmups and ten alternating-order samples on fail-closed
+worker `vmi1264463`, the former/direct p50 was 17,198,808 / 11,625,320 ns (**1.479427x**) and p95 was
+18,716,389 / 13,083,048 ns (**1.430583x**), attributing the intermediate allocation before the production edit.
+
+The one production lever extracts the existing frequency-specific rendering into a private sink writer.
+`calendar_string()` still writes into and returns its own `String`, while `Display::fmt` now writes the identical fields
+directly into its caller's formatter. Frequency dispatch, civil-date arithmetic, padding widths, negative ordinal
+handling, NaT, and every rendered byte remain unchanged. The permanent release harness retains the former
+allocate-then-copy shape as an oracle and checks all 65,536 outputs before taking a sample.
+
+The final foreground same-worker A/B ran on pinned `vmi1264463` with normal `--profile release`, explicit LTO
+disablement, two in-process warmups, and ten alternating-order samples per arm. An uncapped `--no-run` warm-up with no
+timeout wrapper completed first. Cargo's target runner then applied `timeout --foreground 120s` only to the spawned test
+binary; the exact-parity measurement body completed in 0.36 seconds, and compilation/synchronization are outside every
+sample.
+
+| final arm | p50 | p95 | speedup | latency reduction |
+| --- | ---: | ---: | ---: | ---: |
+| former calendar allocation plus formatter copy | 15,629,595 ns | 18,699,701 ns | 1.000000x | — |
+| public direct formatter sink | 12,212,023 ns | 13,541,965 ns | **1.279853x p50 / 1.380871x p95** | **21.866030% p50 / 27.581917% p95** |
+
+Former samples were 14,126,101 / 14,145,185 / 14,215,357 / 15,025,994 / 15,440,744 / 15,629,595 /
+15,898,264 / 15,975,307 / 17,074,110 / 18,699,701 ns; public samples were 11,570,502 / 11,747,951 /
+11,789,029 / 11,851,765 / 12,199,871 / 12,212,023 / 12,294,778 / 12,760,574 / 13,213,816 / 13,541,965 ns.
+
+The final exact-former release A/B is **1 passed / 0 failed** and its warning-free release build completed. Direct
+Rustfmt and `git diff --check` are clean. Bounded UBS reproduced the file's broad pre-existing test panic/assert/indexing
+inventory, including four test-only `panic!` macros, but reported no finding in either touched production or harness
+hunk. `vmi1227854` discarded its just-built release pool before the first measurement, so the run switched workers;
+`vmi1264463` also rebuilt its small dependency set between invocations. Those build walls are infrastructure events,
+not benchmark evidence or rejects, and no further cold Clippy build was requested. Every explicit Cargo invocation was
+fail-closed remote; no explicit local Cargo, `force_local`, LTO, or `release-perf` command ran, unrelated artifact dirt
+was untouched, and all 70 stashes remain.
