@@ -274,6 +274,49 @@ pub struct PacketTrendSnapshot {
     pub latest_failed_cases: Option<usize>,
 }
 
+fn build_packet_trends(
+    packets: &[PacketSnapshot],
+    entries: &[PacketDriftHistoryEntry],
+) -> Vec<PacketTrendSnapshot> {
+    if packets.is_empty() {
+        return Vec::new();
+    }
+
+    let mut by_packet =
+        HashMap::<&str, (usize, Option<&PacketDriftHistoryEntry>)>::with_capacity(packets.len());
+    for packet in packets {
+        by_packet
+            .entry(packet.packet_id.as_str())
+            .or_insert((0, None));
+    }
+    for entry in entries {
+        if let Some(trend) = by_packet.get_mut(entry.packet_id.as_str()) {
+            trend.0 += 1;
+            if trend
+                .1
+                .is_none_or(|latest| entry.ts_unix_ms >= latest.ts_unix_ms)
+            {
+                trend.1 = Some(entry);
+            }
+        }
+    }
+
+    packets
+        .iter()
+        .map(|packet| {
+            let (samples, latest) = by_packet
+                .get(packet.packet_id.as_str())
+                .map_or((0, None), |(samples, latest)| (*samples, *latest));
+            PacketTrendSnapshot {
+                packet_id: packet.packet_id.clone(),
+                samples,
+                latest_gate_pass: latest.map(|entry| entry.gate_pass),
+                latest_failed_cases: latest.map(|entry| entry.failed),
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConformanceDashboardSnapshot {
     pub packets: Vec<PacketSnapshot>,
@@ -1199,27 +1242,7 @@ impl FtuiDataSource for FsFtuiDataSource {
         let total_packets = packets.len();
         let failing_packets = total_packets.saturating_sub(green_packets);
 
-        let packet_trends = packets
-            .iter()
-            .map(|packet| {
-                let mut samples = 0_usize;
-                let mut latest: Option<&PacketDriftHistoryEntry> = None;
-                for entry in &drift_history.entries {
-                    if entry.packet_id == packet.packet_id {
-                        samples += 1;
-                        if latest.is_none_or(|current| entry.ts_unix_ms >= current.ts_unix_ms) {
-                            latest = Some(entry);
-                        }
-                    }
-                }
-                PacketTrendSnapshot {
-                    packet_id: packet.packet_id.clone(),
-                    samples,
-                    latest_gate_pass: latest.map(|entry| entry.gate_pass),
-                    latest_failed_cases: latest.map(|entry| entry.failed),
-                }
-            })
-            .collect();
+        let packet_trends = build_packet_trends(&packets, &drift_history.entries);
 
         Ok(ConformanceDashboardSnapshot {
             packets,
@@ -1666,6 +1689,209 @@ mod tests {
             quantile_from_sorted(&samples_ns, 95),
             quantile_from_sorted(&samples_ns, 99),
         )
+    }
+
+    fn packet_trends_former_for_profile(
+        packets: &[super::PacketSnapshot],
+        entries: &[PacketDriftHistoryEntry],
+    ) -> Vec<super::PacketTrendSnapshot> {
+        packets
+            .iter()
+            .map(|packet| {
+                let mut samples = 0_usize;
+                let mut latest: Option<&PacketDriftHistoryEntry> = None;
+                for entry in entries {
+                    if entry.packet_id == packet.packet_id {
+                        samples += 1;
+                        if latest.is_none_or(|current| entry.ts_unix_ms >= current.ts_unix_ms) {
+                            latest = Some(entry);
+                        }
+                    }
+                }
+                super::PacketTrendSnapshot {
+                    packet_id: packet.packet_id.clone(),
+                    samples,
+                    latest_gate_pass: latest.map(|entry| entry.gate_pass),
+                    latest_failed_cases: latest.map(|entry| entry.failed),
+                }
+            })
+            .collect()
+    }
+
+    fn packet_snapshot_for_trend_test(packet_id: &str) -> super::PacketSnapshot {
+        super::PacketSnapshot {
+            packet_id: packet_id.to_owned(),
+            parity_report: None,
+            gate_result: None,
+            decode_status: None,
+            mismatch_count: None,
+            differential_report: None,
+            differential_validation: None,
+            issues: Vec::new(),
+        }
+    }
+
+    fn drift_entry_for_trend_test(
+        packet_id: &str,
+        ts_unix_ms: u64,
+        gate_pass: bool,
+        failed: usize,
+    ) -> PacketDriftHistoryEntry {
+        PacketDriftHistoryEntry {
+            ts_unix_ms,
+            packet_id: packet_id.to_owned(),
+            suite: "phase2c_packets".to_owned(),
+            fixture_count: 16,
+            passed: 16_usize.saturating_sub(failed),
+            failed,
+            strict_failed: failed,
+            hardened_failed: 0,
+            gate_pass,
+            report_hash: format!("sha256:{packet_id}:{ts_unix_ms}:{failed}"),
+        }
+    }
+
+    #[test]
+    fn packet_trends_index_preserves_former_order_and_latest_semantics() {
+        let packets = [
+            packet_snapshot_for_trend_test("FP-P2C-B"),
+            packet_snapshot_for_trend_test("FP-P2C-A"),
+            packet_snapshot_for_trend_test("FP-P2C-MISSING"),
+        ];
+        let entries = [
+            drift_entry_for_trend_test("FP-P2C-A", 10, false, 4),
+            drift_entry_for_trend_test("FP-P2C-IRRELEVANT", 999, false, 9),
+            drift_entry_for_trend_test("FP-P2C-A", 5, false, 8),
+            drift_entry_for_trend_test("FP-P2C-B", 7, false, 3),
+            drift_entry_for_trend_test("FP-P2C-A", 10, true, 1),
+        ];
+
+        let former = packet_trends_former_for_profile(&packets, &entries);
+        let indexed = super::build_packet_trends(&packets, &entries);
+        assert_eq!(indexed, former);
+        assert_eq!(
+            indexed,
+            vec![
+                super::PacketTrendSnapshot {
+                    packet_id: "FP-P2C-B".to_owned(),
+                    samples: 1,
+                    latest_gate_pass: Some(false),
+                    latest_failed_cases: Some(3),
+                },
+                super::PacketTrendSnapshot {
+                    packet_id: "FP-P2C-A".to_owned(),
+                    samples: 3,
+                    latest_gate_pass: Some(true),
+                    latest_failed_cases: Some(1),
+                },
+                super::PacketTrendSnapshot {
+                    packet_id: "FP-P2C-MISSING".to_owned(),
+                    samples: 0,
+                    latest_gate_pass: None,
+                    latest_failed_cases: None,
+                },
+            ]
+        );
+
+        let empty = super::build_packet_trends(&packets, &[]);
+        assert!(
+            empty
+                .iter()
+                .all(|trend| trend.samples == 0 && trend.latest_gate_pass.is_none())
+        );
+        assert!(super::build_packet_trends(&[], &entries).is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual normal-release performance attribution"]
+    fn packet_trends_index_profile_snapshot() {
+        const PACKETS: usize = 11;
+        const DISTINCT_HISTORY_IDS: usize = 437;
+        const HISTORY_ROWS: usize = 105_486;
+        const SAMPLES: usize = 16;
+
+        let packets = (0..PACKETS)
+            .map(|index| super::PacketSnapshot {
+                packet_id: format!("FP-P2C-{index:03}"),
+                parity_report: None,
+                gate_result: None,
+                decode_status: None,
+                mismatch_count: None,
+                differential_report: None,
+                differential_validation: None,
+                issues: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let entries = (0..HISTORY_ROWS)
+            .map(|index| PacketDriftHistoryEntry {
+                ts_unix_ms: index as u64,
+                packet_id: format!("FP-P2C-{:03}", index % DISTINCT_HISTORY_IDS),
+                suite: "phase2c_packets".to_owned(),
+                fixture_count: 16,
+                passed: 15,
+                failed: index % 7,
+                strict_failed: index % 3,
+                hardened_failed: index % 5,
+                gate_pass: index % 7 == 0,
+                report_hash: "sha256:packet-trend-profile".to_owned(),
+            })
+            .collect::<Vec<_>>();
+
+        let former = packet_trends_former_for_profile(&packets, &entries);
+        let indexed = super::build_packet_trends(&packets, &entries);
+        assert_eq!(indexed, former);
+        for _ in 0..2 {
+            black_box(packet_trends_former_for_profile(
+                black_box(&packets),
+                black_box(&entries),
+            ));
+            black_box(super::build_packet_trends(
+                black_box(&packets),
+                black_box(&entries),
+            ));
+        }
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut indexed_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            let measure_former = || {
+                let started = Instant::now();
+                black_box(packet_trends_former_for_profile(
+                    black_box(&packets),
+                    black_box(&entries),
+                ));
+                started.elapsed().as_nanos()
+            };
+            let measure_indexed = || {
+                let started = Instant::now();
+                black_box(super::build_packet_trends(
+                    black_box(&packets),
+                    black_box(&entries),
+                ));
+                started.elapsed().as_nanos()
+            };
+            if sample % 2 == 0 {
+                former_ns.push(measure_former());
+                indexed_ns.push(measure_indexed());
+            } else {
+                indexed_ns.push(measure_indexed());
+                former_ns.push(measure_former());
+            }
+        }
+
+        let former_quantiles = latency_quantiles(former_ns.clone());
+        let indexed_quantiles = latency_quantiles(indexed_ns.clone());
+        former_ns.sort_unstable();
+        indexed_ns.sort_unstable();
+        println!(
+            "packet_trends_index_profile_snapshot former_ns[p50={},p95={},p99={};samples={former_ns:?}] indexed_ns[p50={},p95={},p99={};samples={indexed_ns:?}] history_rows={HISTORY_ROWS} packets={PACKETS} distinct_history_ids={DISTINCT_HISTORY_IDS}",
+            former_quantiles.0,
+            former_quantiles.1,
+            former_quantiles.2,
+            indexed_quantiles.0,
+            indexed_quantiles.1,
+            indexed_quantiles.2,
+        );
     }
 
     fn write_packet_with_raptorq_artifacts(packet_root: &Path, packet_id: &str, gate_pass: bool) {

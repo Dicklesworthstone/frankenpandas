@@ -17469,3 +17469,45 @@ rolling-window order. A scoped remote Clippy attempt was stopped when RCH again 
 and began downloading the dependency graph, so no Clippy result is claimed. Compilation, sync, and artifact retrieval
 were outside every in-process sample. Every explicit Cargo command was fail-closed remote; no explicit local Cargo,
 `force_local`, or `release-perf` command ran, unrelated artifact dirt was untouched, and no stash was changed.
+
+### 2026-07-15 BlackThrush — single-pass dashboard drift trends: 5.299165x p50 WIN (`br-frankenpandas-926g4`)
+
+Negative-ledger-first routing began with `bv --robot-triage`. The ranked perf work was either assigned or concentrated
+in recently mined transpose, typed-conversion, and large `fp-frame` lanes, so the no-ceiling pivot selected the fresh
+`fp-frankentui` dashboard subsystem; this ledger had no prior dashboard/trend entry. Source attribution found that
+`load_conformance_dashboard` rescanned the entire drift history once for every displayed packet. The live shape was
+105,486 history rows, 437 distinct history packet IDs, and 11 displayed packets: 1,160,346 shared-prefix comparisons
+before packet-ID equality filtering.
+
+The one production lever seeds a borrowed-key table only for displayed packet IDs, scans history once, then emits
+snapshots in the original packet order. This changes the trend stage from O(P*D) to O(P+D) time with O(P) auxiliary
+space. Counts, absent-history `None` values, output order, and latest-row selection are unchanged; the `>=` timestamp
+comparison deliberately preserves the former rule that the later input row wins equal timestamps. The permanent
+same-binary harness retains the exact former nested loop and proves exact vector parity before timing. Its focused
+semantic fixture additionally covers irrelevant IDs, out-of-order timestamps, equal timestamps, missing history,
+empty history, and an empty packet set.
+
+The final foreground A/B ran fail-closed through RCH on `vmi1152480` with normal `--profile release`, explicit
+`CARGO_PROFILE_RELEASE_LTO=false`, 105,486 history rows, 437 distinct IDs, 11 packets, two in-process warmups, and 16
+alternating-order samples per arm. Cargo's target runner was `timeout 120s`, so the cold remote compilation was
+uncapped and only the spawned measurement process was capped. The build took 4m24s; the measured test body completed
+in 0.25s, and compilation is excluded from every sample.
+
+| final arm | p50 | p95 | speedup | latency reduction |
+| --- | ---: | ---: | ---: | ---: |
+| former per-packet history rescans | 8,883,377 ns | 14,603,059 ns | 1.000000x | — |
+| displayed-packet single-pass index | 1,676,373 ns | 2,253,196 ns | **5.299165x p50 / 6.481042x p95** | **81.1291% p50 / 84.5704% p95** |
+
+Former samples were 7,204,229 / 7,425,079 / 7,610,156 / 8,340,857 / 8,526,794 / 8,714,305 / 8,742,687 /
+8,883,377 / 9,031,949 / 9,807,157 / 10,060,686 / 10,066,023 / 10,077,441 / 13,690,487 / 14,603,059 /
+20,117,125 ns; indexed samples were 1,476,746 / 1,483,515 / 1,527,591 / 1,534,221 / 1,536,164 / 1,545,258 /
+1,642,163 / 1,676,373 / 1,686,920 / 1,752,517 / 1,864,124 / 1,977,654 / 2,006,807 / 2,180,507 /
+2,253,196 / 2,457,982 ns.
+
+The final exact-former release A/B is **1 passed / 0 failed**. Direct Rustfmt and `git diff --check` are clean. Bounded
+UBS exited zero with no critical finding; its broad pre-existing test unwrap/assert/formatting inventory contained no
+concrete defect in the production hunk. Cold warm-ups completed on `vmi1227854` and `vmi1264463`, but each subsequent
+invocation evicted the release cache and rebuilt; those cancelled builds are infrastructure events, not rejects. A
+scoped remote Clippy attempt was likewise stopped when a new worker immediately redownloaded and rebuilt the dependency
+graph, so no Clippy result is claimed. Every explicit Cargo command was fail-closed remote; no explicit local Cargo,
+`force_local`, LTO, or `release-perf` command ran, unrelated artifact dirt was untouched, and all 70 stashes remain.
