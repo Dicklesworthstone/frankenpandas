@@ -869,6 +869,9 @@ fn main() {
         time_it("gb.shift_i64", 1, 10, || {
             let _ = gi.groupby(&["key"]).unwrap().shift(1).unwrap();
         });
+        time_it("gb.pct_change_i64", 1, 10, || {
+            let _ = gi.groupby(&["key"]).unwrap().pct_change(1).unwrap();
+        });
     }
 
     // SeriesGroupBy cumsum on Int64 (parallel dead pattern: SeriesGroupBy's own
