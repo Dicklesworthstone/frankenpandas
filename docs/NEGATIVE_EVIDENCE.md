@@ -17841,6 +17841,53 @@ pre-existing unwrap/assert/indexing/allocation inventory; it reported no focused
 hunk. Every explicit Cargo invocation was fail-closed remote; no direct local Cargo, `force_local`, LTO, or
 `release-perf` command ran. Unrelated peer work and all 70 stashes remained untouched.
 
+### 2026-07-16 RainyGlen — direct-digit `Timestamp` fraction parsing: 1.701571x p50 WIN (`br-frankenpandas-pdiku`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (365 open, 349 actionable, four blocked, one in progress,
+and no dependency cycles). Ranked work and quick wins were assigned, stale, correctness-oriented, or already deferred.
+The prior runtime vein had just produced an exact-buffer keep, so the fresh pivot selected an unledgered primitive in
+`fp-types`: `Timestamp::parse_time` validated fractional ASCII digits, allocated a zero-padded temporary `String`, then
+parsed those same digits back into a `u64`.
+
+Profile-first attribution left production unchanged and compared an exact transcription of the former parser with a
+direct fold of at most nine digits followed by zero multiplication. Before timing, the harness asserted exact former
+and candidate `Option` equality across fractional widths one through twelve, leading and trailing zeros, overlong
+fractions, empty and alphabetic fractions, signs, full-width Unicode digits, a bad byte after digit nine, duplicate
+dots, invalid clock fields, and extra separators. Input construction was outside every sample; two untimed in-process
+warmups preceded twelve alternating-order samples per arm.
+
+| final production-path arm | p50 | p95 | p99 | speedup | latency reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| former padded `String` plus `u64` reparse | 22,279,708 ns | 22,890,205 ns | 22,890,205 ns | 1.000000x | — |
+| public direct digit fold | 13,093,607 ns | 13,495,117 ns | 13,495,117 ns | **1.701571x / 1.696184x / 1.696184x** | **41.230796% / 41.044141% / 41.044141%** |
+
+Former samples were 22,890,205 / 22,552,352 / 22,270,887 / 22,108,209 / 22,263,501 / 22,321,809 /
+22,101,131 / 22,301,740 / 22,279,708 / 22,545,077 / 22,195,404 / 22,336,472 ns; candidate samples were
+13,495,117 / 13,252,909 / 12,935,056 / 12,841,630 / 13,093,607 / 13,031,297 / 13,137,410 / 13,186,277 /
+13,053,021 / 13,105,792 / 13,004,742 / 13,384,087 ns.
+
+The one production lever keeps the full ASCII validation and folds only the first nine digits into nanoseconds,
+multiplying for every missing fractional position. This removes only the temporary allocation and second parse:
+empty/invalid rejection, validation beyond digit nine, truncation, right-zero padding, clock bounds, date/timezone
+handling, and returned nanosecond values remain unchanged. A permanent regression assertion covers an invalid tenth
+byte, while the retained ignored normal-release harness freezes the former body and routes the candidate through the
+production parser.
+
+An initial uncapped normal-release warm-up completed remotely on `ovh-b` in 34.79 seconds. The worker discarded that
+pool before the adjacent A/B, so each accepted single Cargo lifecycle compiled before invoking the capped runner; only
+the spawned test binary carried the 120-second bound, and the harness's own warmups remained outside every sample.
+The final production-path A/B completed remotely on `ovh-b` with **1 passed / 0 failed**. The focused timestamp-parser
+normal-release gate passed **11 / 11** non-ignored tests, including the seeded ISO component oracle, and focused
+normal-release `fp-types --all-targets` Clippy passed with `-D warnings`. Remote workspace `cargo check
+--workspace --all-targets` also passed; it reproduced five unrelated `fp-columnar` unused-import/unused-mut warnings.
+The required workspace Clippy attempt then discarded that just-built remote pool and began rebuilding the full Arrow
+graph, so it was stopped under the repeated-eviction rule; that canceled build is neither benchmark evidence nor a
+reject. `git diff --check` and direct Rustfmt are clean. Bounded UBS reproduced the file's broad pre-existing test
+panic/assert/indexing inventory (including four test-only `panic!` sites) and reported no focused defect in the
+production fraction-fold hunk. Every explicit Cargo invocation was fail-closed remote with explicit
+`CARGO_PROFILE_RELEASE_LTO=false`; no direct local Cargo, `force_local`, LTO, or `release-perf` command ran. Unrelated
+peer work was left untouched, and all 70 stashes remain.
+
 ### 2026-07-16 RainyGlen — exact-buffer `GalaxyBrainCard::render_plain`: 4.099256x p50 WIN (`br-frankenpandas-lzy5c`)
 
 Negative-ledger-first routing began with `bv --robot-triage` (365 open, 350 actionable, four blocked, two in progress,

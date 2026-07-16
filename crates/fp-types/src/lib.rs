@@ -2921,9 +2921,15 @@ impl Timestamp {
                 if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
                     return None;
                 }
-                let truncated = &frac[..frac.len().min(9)];
-                let padded = format!("{truncated:0<9}");
-                padded.parse::<u64>().ok()?
+                let digits = frac.len().min(9);
+                let mut nanos = 0_u64;
+                for byte in frac.bytes().take(digits) {
+                    nanos = nanos * 10 + u64::from(byte - b'0');
+                }
+                for _ in digits..9 {
+                    nanos *= 10;
+                }
+                nanos
             }
         };
 
@@ -11859,11 +11865,143 @@ mod tests {
         assert!(Timestamp::parse("2024-01-15T10:30:45.abc").is_err());
         assert!(Timestamp::parse("2024-01-15T10:30:45.-1").is_err());
         assert!(Timestamp::parse("2024-01-15T10:30:45.１２３").is_err());
+        assert!(Timestamp::parse("2024-01-15T10:30:45.123456789x").is_err());
 
         let ts = Timestamp::parse("2024-01-15T10:30:45.123456789987").unwrap();
         assert_eq!(ts.second(), Some(45));
         assert_eq!(ts.microsecond(), Some(123456));
         assert_eq!(ts.nanosecond(), Some(789));
+    }
+
+    #[test]
+    #[ignore = "foreground profile-first A/B"]
+    fn timestamp_parse_fraction_digit_fold_profile_pdiku() {
+        use std::{hint::black_box, time::Instant};
+
+        const CALLS: usize = 131_072;
+        const SAMPLES: usize = 12;
+        type ParsedTime = Option<(u32, u32, u32, u64)>;
+        const VALID: [&str; 16] = [
+            "00:00:00.0",
+            "01:02:03.1",
+            "02:03:04.01",
+            "03:04:05.001",
+            "04:05:06.0001",
+            "05:06:07.00001",
+            "06:07:08.000001",
+            "07:08:09.0000001",
+            "08:09:10.00000001",
+            "09:10:11.000000001",
+            "10:11:12.123456789",
+            "11:12:13.999999999",
+            "12:13:14.123456789987",
+            "13:14:15.000000000001",
+            "14:15:16.101010101010",
+            "23:59:59.987654321234",
+        ];
+
+        #[inline(never)]
+        fn former(s: &str) -> ParsedTime {
+            let (time_str, frac_str) = match s.split_once('.') {
+                Some((time, frac)) => (time, Some(frac)),
+                None => (s, None),
+            };
+            let parts: Vec<&str> = time_str.split(':').collect();
+            if parts.is_empty() || parts.len() > 3 {
+                return None;
+            }
+            let hour: u32 = parts.first().and_then(|p| p.parse().ok())?;
+            let minute: u32 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+            let second: u32 = parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
+
+            if hour > 23 || minute > 59 || second > 59 {
+                return None;
+            }
+
+            let nanos = match frac_str {
+                None => 0,
+                Some(frac) => {
+                    if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+                        return None;
+                    }
+                    let truncated = &frac[..frac.len().min(9)];
+                    let padded = format!("{truncated:0<9}");
+                    padded.parse::<u64>().ok()?
+                }
+            };
+
+            Some((hour, minute, second, nanos))
+        }
+
+        #[inline(never)]
+        fn candidate(s: &str) -> ParsedTime {
+            Timestamp::parse_time(s)
+        }
+
+        fn elapsed(inputs: &[&str], parser: fn(&str) -> ParsedTime) -> u128 {
+            let started = Instant::now();
+            for input in black_box(inputs) {
+                black_box(parser(black_box(*input)));
+            }
+            started.elapsed().as_nanos()
+        }
+
+        fn percentile(samples: &[u128], percent: usize) -> u128 {
+            let mut sorted = samples.to_vec();
+            sorted.sort_unstable();
+            let rank = (sorted.len() * percent).div_ceil(100).saturating_sub(1);
+            sorted[rank]
+        }
+
+        let invalid = [
+            "",
+            "24:00:00.1",
+            "12:60:00.1",
+            "12:00:60.1",
+            "12:00:00.",
+            "12:00:00.abc",
+            "12:00:00.-1",
+            "12:00:00.１２３",
+            "12:00:00.123456789x",
+            "12:00:00.1.2",
+            "12:00:00:01.1",
+        ];
+        for input in VALID.iter().chain(invalid.iter()) {
+            assert_eq!(candidate(input), former(input), "input={input:?}");
+        }
+
+        let inputs = (0..CALLS)
+            .map(|index| VALID[index % VALID.len()])
+            .collect::<Vec<_>>();
+        for _ in 0..2 {
+            black_box(elapsed(&inputs, former));
+            black_box(elapsed(&inputs, candidate));
+        }
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut candidate_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample.is_multiple_of(2) {
+                former_ns.push(elapsed(&inputs, former));
+                candidate_ns.push(elapsed(&inputs, candidate));
+            } else {
+                candidate_ns.push(elapsed(&inputs, candidate));
+                former_ns.push(elapsed(&inputs, former));
+            }
+        }
+
+        let former_p50 = percentile(&former_ns, 50);
+        let former_p95 = percentile(&former_ns, 95);
+        let former_p99 = percentile(&former_ns, 99);
+        let candidate_p50 = percentile(&candidate_ns, 50);
+        let candidate_p95 = percentile(&candidate_ns, 95);
+        let candidate_p99 = percentile(&candidate_ns, 99);
+        println!(
+            "TIMESTAMP_FRACTION_PARSE calls={CALLS} former_p50_ns={former_p50} candidate_p50_ns={candidate_p50} speedup_p50={:.6} former_p95_ns={former_p95} candidate_p95_ns={candidate_p95} speedup_p95={:.6} former_p99_ns={former_p99} candidate_p99_ns={candidate_p99} speedup_p99={:.6} former_samples={former_ns:?} candidate_samples={candidate_ns:?}",
+            former_p50 as f64 / candidate_p50 as f64,
+            former_p95 as f64 / candidate_p95 as f64,
+            former_p99 as f64 / candidate_p99 as f64,
+        );
     }
 
     #[test]
