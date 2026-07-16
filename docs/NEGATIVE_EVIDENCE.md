@@ -17687,3 +17687,6 @@ production defect was reported in the endpoint-split hunk. `vmi1264463` discarde
 lost one example during dependency preflight after repeated SSH resets; both routes were stopped or failed closed, and
 neither is performance evidence. Every explicit Cargo command was fail-closed remote; no direct local Cargo,
 `force_local`, LTO, or `release-perf` command ran. Unrelated work remained untouched, and all 70 stashes remain.
+Shared-index concurrency co-landed this reserved parser, harness, ledger, and bead bundle in `36df51406` alongside
+`br-frankenpandas-1ko71`; the dedicated provenance follow-up names `br-frankenpandas-81jjv` without rewriting the
+already-pushed peer commit.
