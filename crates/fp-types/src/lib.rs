@@ -4338,15 +4338,20 @@ impl Interval {
         };
 
         let inner = &s[1..s.len() - 1];
-        let parts: Vec<&str> = inner.split(',').collect();
-        if parts.len() != 2 {
+        let Some((left_text, right_text)) = inner.split_once(',') else {
+            return Err(TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "Interval".to_string(),
+            });
+        };
+        if right_text.contains(',') {
             return Err(TypeError::ValueNotParseable {
                 value: s.to_string(),
                 target: "Interval".to_string(),
             });
         }
 
-        let left: f64 = parts[0]
+        let left: f64 = left_text
             .trim()
             .parse()
             .map_err(|_| TypeError::ValueNotParseable {
@@ -4354,7 +4359,7 @@ impl Interval {
                 target: "Interval".to_string(),
             })?;
 
-        let right: f64 = parts[1]
+        let right: f64 = right_text
             .trim()
             .parse()
             .map_err(|_| TypeError::ValueNotParseable {
@@ -12006,5 +12011,195 @@ mod tests {
         assert!(Interval::parse("invalid").is_err());
         assert!(Interval::parse("[0]").is_err());
         assert!(Interval::parse("0, 1").is_err()); // missing brackets
+    }
+
+    fn interval_parse_error_profile(s: &str) -> super::TypeError {
+        super::TypeError::ValueNotParseable {
+            value: s.to_string(),
+            target: "Interval".to_string(),
+        }
+    }
+
+    #[inline(never)]
+    fn interval_parse_former_profile(s: &str) -> Result<Interval, super::TypeError> {
+        let s = std::hint::black_box(s).trim();
+        if s.len() < 5 {
+            return Err(interval_parse_error_profile(s));
+        }
+
+        let first_char = s.chars().next().unwrap();
+        let last_char = s.chars().last().unwrap();
+        let left_closed = match first_char {
+            '[' => true,
+            '(' => false,
+            _ => return Err(interval_parse_error_profile(s)),
+        };
+        let right_closed = match last_char {
+            ']' => true,
+            ')' => false,
+            _ => return Err(interval_parse_error_profile(s)),
+        };
+        let closed = match (left_closed, right_closed) {
+            (true, true) => IntervalClosed::Both,
+            (true, false) => IntervalClosed::Left,
+            (false, true) => IntervalClosed::Right,
+            (false, false) => IntervalClosed::Neither,
+        };
+
+        let inner = &s[1..s.len() - 1];
+        let parts: Vec<&str> = inner.split(',').collect();
+        if parts.len() != 2 {
+            return Err(interval_parse_error_profile(s));
+        }
+        let left = parts[0]
+            .trim()
+            .parse()
+            .map_err(|_| interval_parse_error_profile(s))?;
+        let right = parts[1]
+            .trim()
+            .parse()
+            .map_err(|_| interval_parse_error_profile(s))?;
+        Ok(Interval::new(left, right, closed))
+    }
+
+    #[inline(never)]
+    fn interval_parse_split_once_profile(s: &str) -> Result<Interval, super::TypeError> {
+        Interval::parse(std::hint::black_box(s))
+    }
+
+    fn assert_interval_parse_profile_parity(s: &str) {
+        match (
+            interval_parse_former_profile(s),
+            interval_parse_split_once_profile(s),
+        ) {
+            (Ok(former), Ok(candidate)) => {
+                assert_eq!(former.left.to_bits(), candidate.left.to_bits(), "left: {s}");
+                assert_eq!(
+                    former.right.to_bits(),
+                    candidate.right.to_bits(),
+                    "right: {s}"
+                );
+                assert_eq!(former.closed, candidate.closed, "closed: {s}");
+            }
+            (Err(former), Err(candidate)) => assert_eq!(former, candidate, "error: {s}"),
+            (former, candidate) => assert_eq!(
+                former.is_ok(),
+                candidate.is_ok(),
+                "parse result mismatch for {s}: {former:?} != {candidate:?}"
+            ),
+        }
+    }
+
+    #[inline(never)]
+    fn measure_interval_parser_profile(
+        parser: fn(&str) -> Result<Interval, super::TypeError>,
+        inputs: &[&str],
+        rounds: usize,
+    ) -> u128 {
+        use std::{hint::black_box, time::Instant};
+
+        let started = Instant::now();
+        let mut checksum = 0_u64;
+        for _ in 0..rounds {
+            for input in inputs {
+                let parsed = parser(black_box(input)).expect("profile input must parse");
+                let closed = match parsed.closed {
+                    IntervalClosed::Left => 1_u64,
+                    IntervalClosed::Right => 2,
+                    IntervalClosed::Both => 3,
+                    IntervalClosed::Neither => 4,
+                };
+                checksum = checksum
+                    .wrapping_add(parsed.left.to_bits().rotate_left(7))
+                    .wrapping_add(parsed.right.to_bits().rotate_right(11))
+                    .wrapping_add(closed);
+                black_box(parsed);
+            }
+        }
+        black_box(checksum);
+        started.elapsed().as_nanos()
+    }
+
+    #[test]
+    #[ignore = "release-only attribution probe for br-frankenpandas-81jjv"]
+    fn profile_interval_parse_endpoint_split_ab_81jjv() {
+        const VALID: [&str; 8] = [
+            "[0, 1]",
+            "(-0.0, 0.0]",
+            " [ -1.5e3 , 2.75E-4 ) ",
+            "(NaN, -0]",
+            "[-inf, inf)",
+            "[9.25, -7.5]",
+            "(4.9406564584124654e-324, 1.7976931348623157e308)",
+            "[-42, 17.125)",
+        ];
+        const INVALID: [&str; 12] = [
+            "invalid",
+            "[0]",
+            "0, 1",
+            "[0 1]",
+            "[0, 1, 2]",
+            "[0, 1,]",
+            "[0,,1]",
+            "[, 1]",
+            "[0, ]",
+            "{0, 1}",
+            "[0, 1}",
+            "  ⟦0, 1⟧  ",
+        ];
+        const ROUNDS: usize = 16_384;
+        const SAMPLES: usize = 10;
+
+        for input in VALID.iter().chain(INVALID.iter()) {
+            assert_interval_parse_profile_parity(input);
+        }
+        for _ in 0..2 {
+            measure_interval_parser_profile(interval_parse_former_profile, &VALID, ROUNDS);
+            measure_interval_parser_profile(interval_parse_split_once_profile, &VALID, ROUNDS);
+        }
+
+        let mut former_ns = Vec::with_capacity(SAMPLES);
+        let mut candidate_ns = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            if sample % 2 == 0 {
+                former_ns.push(measure_interval_parser_profile(
+                    interval_parse_former_profile,
+                    &VALID,
+                    ROUNDS,
+                ));
+                candidate_ns.push(measure_interval_parser_profile(
+                    interval_parse_split_once_profile,
+                    &VALID,
+                    ROUNDS,
+                ));
+            } else {
+                candidate_ns.push(measure_interval_parser_profile(
+                    interval_parse_split_once_profile,
+                    &VALID,
+                    ROUNDS,
+                ));
+                former_ns.push(measure_interval_parser_profile(
+                    interval_parse_former_profile,
+                    &VALID,
+                    ROUNDS,
+                ));
+            }
+        }
+        former_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let former_p50 = former_ns[SAMPLES / 2];
+        let candidate_p50 = candidate_ns[SAMPLES / 2];
+        let former_p95 = former_ns[SAMPLES - 1];
+        let candidate_p95 = candidate_ns[SAMPLES - 1];
+        println!("PROFILE_INTERVAL_PARSE_FORMER_NS={former_ns:?}");
+        println!("PROFILE_INTERVAL_PARSE_CANDIDATE_NS={candidate_ns:?}");
+        println!(
+            "PROFILE_INTERVAL_PARSE_P50_RATIO={:.6}",
+            former_p50 as f64 / candidate_p50 as f64
+        );
+        println!(
+            "PROFILE_INTERVAL_PARSE_P95_RATIO={:.6}",
+            former_p95 as f64 / candidate_p95 as f64
+        );
     }
 }

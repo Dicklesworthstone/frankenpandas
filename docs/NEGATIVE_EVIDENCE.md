@@ -17642,3 +17642,48 @@ hunk. `vmi1227854` discarded its just-built release pool before the first measur
 not benchmark evidence or rejects, and no further cold Clippy build was requested. Every explicit Cargo invocation was
 fail-closed remote; no explicit local Cargo, `force_local`, LTO, or `release-perf` command ran, unrelated artifact dirt
 was untouched, and all 70 stashes remain.
+
+### 2026-07-16 BlackThrush — allocation-free `Interval` endpoint split: 1.386263x p50 WIN (`br-frankenpandas-81jjv`)
+
+Negative-ledger-first routing began with `bv --robot-triage` (362 open, 346 actionable). Its advertised performance
+quick wins were stale, assigned, or already implemented, and the recent `fp-frame`/affine-index families were heavily
+mined. The fresh parser pivot stayed in the small `fp-types` crate and found no existing ledger row for
+`Interval::parse`: every successful parse collected `inner.split(',')` into a heap-backed `Vec<&str>` solely to verify
+that exactly two endpoints existed, then immediately discarded the vector. The Utf8-to-Interval cast path pays that
+allocation once per scalar.
+
+Profile-first attribution left production unchanged and compared the public former parser with a test-local
+`split_once` prototype. Before timing, eight valid inputs and twelve invalid inputs proved exact endpoint bits,
+closure, and `TypeError` parity across all bracket modes, outer/endpoint whitespace, signed zero, NaN, infinities,
+scientific notation, reversed endpoints, malformed brackets, missing commas, and extra commas. Each sample parsed
+131,072 valid intervals after two in-process warmups, with ten alternating-order samples per arm. On fail-closed worker
+`ovh-b` under normal `--profile release` with LTO disabled, former/prototype p50 was 14,467,846 / 10,087,496 ns
+(**1.434236x**) and p95 was 16,107,208 / 11,030,898 ns (**1.460190x**), attributing the allocation before the
+production edit.
+
+The one production lever replaces the endpoint vector with `split_once(',')` plus a second-comma guard. The guard
+preserves the former exactly-two-fields contract; outer trimming, endpoint trimming, closure selection, `f64` parsing,
+trimmed error payloads, and target strings are unchanged. The permanent release harness freezes the exact former Vec
+body as its oracle and calls the public parser as the candidate.
+
+The final foreground same-binary A/B ran on pinned `vmi1156319` with normal `--profile release` and explicit
+`CARGO_PROFILE_RELEASE_LTO=false`. Because RCH repeatedly discarded warmed target pools, the final route used one cold
+Cargo lifecycle: its uncapped 1m03s compile completed before Cargo invoked the target runner, and only the spawned test
+binary was capped at 120 seconds. The exact-parity measurement body completed in 0.44 seconds.
+
+| final arm | p50 | p95 | speedup | latency reduction |
+| --- | ---: | ---: | ---: | ---: |
+| former endpoint `Vec<&str>` collection | 22,979,091 ns | 23,597,253 ns | 1.000000x | — |
+| public borrowed endpoint split | 16,576,281 ns | 18,316,044 ns | **1.386263x p50 / 1.288338x p95** | **27.863635% p50 / 22.380609% p95** |
+
+Former samples were 17,350,264 / 17,902,002 / 18,098,137 / 19,706,074 / 19,950,889 / 22,979,091 /
+23,057,477 / 23,290,512 / 23,579,489 / 23,597,253 ns; public samples were 14,076,395 / 14,788,982 /
+14,956,294 / 15,609,501 / 16,295,179 / 16,576,281 / 18,164,682 / 18,220,405 / 18,307,157 / 18,316,044 ns.
+
+The final exact-former release A/B is **1 passed / 0 failed**, and its release build completed without warnings. Direct
+Rustfmt and `git diff --check` are clean. Bounded UBS reproduced the file's broad pre-existing test
+panic/unwrap/assert/indexing inventory; the profiling-only mismatch branch was expressed as an assertion, and no
+production defect was reported in the endpoint-split hunk. `vmi1264463` discarded its warmed pool, and `vmi1227854`
+lost one example during dependency preflight after repeated SSH resets; both routes were stopped or failed closed, and
+neither is performance evidence. Every explicit Cargo command was fail-closed remote; no direct local Cargo,
+`force_local`, LTO, or `release-perf` command ran. Unrelated work remained untouched, and all 70 stashes remain.
