@@ -719,4 +719,35 @@ fn main() {
     time_it("gb.cummin", 1, 10, || {
         let _ = gkeyed.groupby(&["key"]).unwrap().cummin().unwrap();
     });
+    time_it("gb.diff", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().diff(1).unwrap();
+    });
+    time_it("gb.shift", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().shift(1).unwrap();
+    });
+    time_it("gb.pct_change", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().pct_change(1).unwrap();
+    });
+    time_it("gb.rank", 1, 10, || {
+        let _ = gkeyed
+            .groupby(&["key"])
+            .unwrap()
+            .rank("average", true, "keep")
+            .unwrap();
+    });
+    time_it("gb.first", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().first().unwrap();
+    });
+    time_it("gb.last", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().last().unwrap();
+    });
+    time_it("gb.nth", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().nth(0).unwrap();
+    });
+    time_it("gb.cumcount", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().cumcount().unwrap();
+    });
+    time_it("gb.value_counts", 1, 10, || {
+        let _ = gkeyed.groupby(&["key"]).unwrap().value_counts().unwrap();
+    });
 }
