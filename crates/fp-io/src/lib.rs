@@ -4069,23 +4069,21 @@ fn push_markdown_row(out: &mut String, cells: &[String]) {
     out.push('|');
     for cell in cells {
         out.push(' ');
-        out.push_str(&escape_markdown_table_cell(cell));
+        push_escaped_markdown_table_cell(out, cell);
         out.push_str(" |");
     }
     out.push('\n');
 }
 
-fn escape_markdown_table_cell(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
+fn push_escaped_markdown_table_cell(out: &mut String, value: &str) {
     for ch in value.chars() {
         match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '|' => escaped.push_str("\\|"),
-            '\n' | '\r' => escaped.push(' '),
-            _ => escaped.push(ch),
+            '\\' => out.push_str("\\\\"),
+            '|' => out.push_str("\\|"),
+            '\n' | '\r' => out.push(' '),
+            _ => out.push(ch),
         }
     }
-    escaped
 }
 
 fn push_latex_row(out: &mut String, cells: &[String], escape: bool) {

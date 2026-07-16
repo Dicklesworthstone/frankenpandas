@@ -17560,3 +17560,40 @@ test-only `panic!` macros, but cited no finding in either touched hunk. RCH reco
 those build wall clocks are infrastructure events outside the A/B and are not rejects. Every Cargo invocation was
 fail-closed remote; no explicit local Cargo, `force_local`, LTO, or `release-perf` command ran, and unrelated work and
 stashes were untouched.
+
+### 2026-07-16 BlackThrush — streamed Markdown cell escaping: 1.769215x p50 WIN (`br-frankenpandas-se7y9`)
+
+Negative-ledger-first routing began with `bv --robot-triage`. Its quick-win recommendations were already assigned and
+implemented on `main`, while the large `fp-frame` surface had live peer dirt, so the no-ceiling search pivoted to a
+fresh subsystem. The first fresh `fp-runtime` FNV formatting probe (`br-frankenpandas-1elys`) never reached a timed
+path: cold asupersync release links on `vmi1264463` and `vmi1227854` each crossed the mandated two-minute no-output
+cutoff. Its temporary harness was removed and the bead returned open with a routing HOLD; those build interruptions are
+not a performance rejection. The successful pivot selected the previously unledgered `fp-io` Markdown writer, where
+`push_markdown_row` allocated one escaped `String` per cell and immediately copied it into the final output buffer.
+
+Profile-first attribution left production unchanged and compared the exact former row body against a test-local direct
+append prototype. The same-binary corpus rendered 2,048 rows by 12 mixed cells covering ordinary text, empty strings,
+backslashes, pipes, CR, LF, combined escapes, and multibyte Unicode. It asserted byte-for-byte row parity before timing,
+ran two in-process warmups, and collected nine alternating-order samples per arm. The foreground run was fail-closed
+remote on pinned worker `vmi1227854`, used normal `--profile release` with LTO explicitly disabled, and capped only the
+spawned ignored test binary at 120 seconds. The measured body completed in 0.02 seconds; compilation and RCH transfer
+time are outside every sample.
+
+| profiled arm | p50 | p95 | speedup | latency reduction |
+| --- | ---: | ---: | ---: | ---: |
+| former allocate-then-copy escape | 1,144,806 ns | 1,582,973 ns | 1.000000x | — |
+| direct append into Markdown output | 647,070 ns | 1,392,858 ns | **1.769215x p50 / 1.136493x p95** | **43.477760% p50 / 12.009996% p95** |
+
+The one production lever changes only the escape helper's destination: it writes the identical character mapping
+directly into the caller's existing `String`. Backslash still becomes `\\\\`, pipe still becomes `\\|`, CR/LF still
+become a single space, every other Unicode scalar is appended unchanged, and row delimiters/order are untouched. The
+temporary profiling harness was removed after the exact A/B so the landing adds no benchmark-only production surface.
+
+`git diff --check` is clean, and direct Rustfmt reports formatting drift only in pre-existing later `fp-io` test hunks,
+not the touched Markdown hunk. Bounded UBS completed and reproduced the file's broad pre-existing panic, secret-token,
+command-execution, allocation, and indexing inventories; it reported no finding in the touched Markdown hunk. A
+strict-remote release `cargo check -p fp-io` was attempted after the edit, but RCH discarded the just-built IO target
+and began rebuilding the full Arrow dependency graph; it was stopped under the explicit cache-eviction rule, so no
+compiler-gate result is claimed. The benchmark itself is a real exact-parity A/B, not a build-timeout verdict. Every
+explicit Cargo invocation was fail-closed remote; no explicit local Cargo, `force_local`, LTO, or `release-perf`
+command ran, and unrelated work and stashes were untouched.
