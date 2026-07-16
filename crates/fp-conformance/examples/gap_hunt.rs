@@ -803,4 +803,71 @@ fn main() {
             let _ = fp_join::merge_dataframes(&ml, &mr, "key", fp_join::JoinType::Inner).unwrap();
         });
     }
+
+    // Reshape probes: pivot_table (1000 index x 10 columns, f64 sum) + stack.
+    {
+        let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let mut cols = std::collections::BTreeMap::new();
+        let mut order = Vec::new();
+        cols.insert(
+            "idx".to_string(),
+            Column::from_i64_values((0..n).map(|i| (i % 1000) as i64).collect()),
+        );
+        order.push("idx".to_string());
+        cols.insert(
+            "col".to_string(),
+            Column::from_i64_values((0..n).map(|i| (i % 10) as i64).collect()),
+        );
+        order.push("col".to_string());
+        cols.insert(
+            "val".to_string(),
+            Column::from_f64_values((0..n).map(|i| ((i % 9973) as f64) * 0.25).collect()),
+        );
+        order.push("val".to_string());
+        let pt = DataFrame::new_with_column_order(Index::new(labels), cols, order)
+            .expect("pivot frame");
+        time_it("pivot_table(sum)", 1, 10, || {
+            let _ = pt.pivot_table("val", "idx", "col", "sum").unwrap();
+        });
+    }
+    time_it("stack", 1, 10, || {
+        let _ = f.stack().unwrap();
+    });
+
+    // Integer-valued groupby transforms (dead-pattern check: try_cum/diff/shift_dense
+    // gate on as_f64_slice, so Int64 value columns may fall to generic Scalar path).
+    {
+        let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let mut cols = std::collections::BTreeMap::new();
+        let mut order = Vec::new();
+        let groups = (n / 100).max(2);
+        cols.insert(
+            "key".to_string(),
+            Column::from_i64_values(
+                (0..n)
+                    .map(|i| ((i as u64).wrapping_mul(2_654_435_761) % groups as u64) as i64)
+                    .collect(),
+            ),
+        );
+        order.push("key".to_string());
+        for c in 0..6 {
+            let name = format!("v{c}");
+            cols.insert(
+                name.clone(),
+                Column::from_i64_values((0..n).map(|i| ((i * (c + 1)) % 9973) as i64).collect()),
+            );
+            order.push(name);
+        }
+        let gi = DataFrame::new_with_column_order(Index::new(labels), cols, order)
+            .expect("int keyed frame");
+        time_it("gb.cumsum_i64", 1, 10, || {
+            let _ = gi.groupby(&["key"]).unwrap().cumsum().unwrap();
+        });
+        time_it("gb.diff_i64", 1, 10, || {
+            let _ = gi.groupby(&["key"]).unwrap().diff(1).unwrap();
+        });
+        time_it("gb.shift_i64", 1, 10, || {
+            let _ = gi.groupby(&["key"]).unwrap().shift(1).unwrap();
+        });
+    }
 }
