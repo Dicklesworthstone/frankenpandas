@@ -18191,3 +18191,21 @@ df_to_dict_index_materialize float64: **1M cand p50 136 532 µs vs orig 381 688 
 full fp-frame 3179/0, clippy only the 4 pre-existing (b96kr), `git diff --check` clean. Remaining to_dict
 frontier: the serial unsorted BTreeMap bulk collect (memcmp-heavy) and per-row String label allocs — next
 candidates if the op still trails pandas in the official harness (fold measurement into adqfs).
+
+### 2026-07-22 DustySummit (cc pane 2, sixth lever) — to_dict("index") lexicographic BTreeMap bulk-collect (ledger-sanctioned retry) — REJECT (~1.0x), code reverted
+
+The old lexicographic-transfer reject's retry predicate ("unless the row-value representation changes first")
+was satisfied by the fifth lever's typed-cell reads, so this retry was permitted. Implemented: certified
+`lex_bulk_unit_range` flag on IndexMappingLazy + a digit-tree pre-order walk generating pairs in lexicographic
+key order so `BTreeMap::from_iter` receives a sorted stream. **Verdict: NO-OP (~1.0x).** Interleaved
+same-binary env-gated 1M pairs were load-storm-polluted (A/A nulls up to 2.28 — inadmissible medians), but the
+load-robust MINIMUMS agree: lex 130 075 vs no-lex 132 087 µs ≈ 1.0x. **Root cause (post-hoc, explains why the
+retry predicate was insufficient):** std's `BTreeMap::from_iter` ALWAYS sorts-then-bulk-builds regardless of
+input order, and row-ordered decimal label strings are nearly-sorted run sequences ("0".."9", "10".."99", ...)
+that pdqsort's run detection already handles in ~O(n) — there was no per-insert rebalancing tax left to
+remove. The transpose lexical-entry trick pays only where the map is built by per-entry `insert()`, not by
+`from_iter`. **Do not retry any key-ordering lever against a `from_iter`/`collect()`-built BTreeMap; only
+insert()-loop sites qualify.** Bonus finding for the graveyard: my first digit-walk recursed into child 0 of
+row 0 (0*10+0=0) → infinite recursion/stack overflow at any n — caught by the test suite SIGABRT before any
+bench; the eager transpose original avoids it by pushing row 0 directly. Code fully reverted (no residue,
+grep-verified); to_dict tests re-green. Consecutive-REJECT count: 1 (lever 5 was a WIN).
