@@ -752,3 +752,7 @@ can subsume this two-run special case without regressing construction latency.
 
 - Rechecked RangeIndex correctness beads uza04.172-.176: all are closed with prior strict-remote correctness evidence. No open child remains in that requested slice.
 - Groupby/read 10k/100k rerun produced only previously accepted wins; no admissible fresh lever. CSV high-CV and unsupported parquet remain genuine blockers; retry requires an admitted workload and both-size CV below 5%.
+
+## 2026-07-22 - candidate preflight refresh
+
+- `br-frankenpandas-wvlfh` is fenced by the existing no-profile/code-first note; `br-frankenpandas-0rhjk` is cc-owned. No cod-owned fresh groupby/read lever survives ledger and ownership preflight.

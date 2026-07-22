@@ -463,3 +463,8 @@ retry failed levers without a concrete retry predicate.
 
 - Fresh 10k/100k harness admitted only already-landed groupby wins: `groupby_sum_int64` 100k 5.819x (CV 2.12%/1.56%), `groupby_transform_mean` 10k 9.27x (4.30%/1.70%), `groupby_transform_mean_str` 10k 6.616x (2.78%/3.72%), `groupby_cumcount` 100k 6.943x (3.62%/4.49%), and `groupby_count` 10k 7.158x (1.03%/3.02%). Ledger/log search finds these families already accepted; no new lever is justified.
 - IO remains blocked: CSV rows dropped for high CV and parquet read/write remain unsupported by fp-bench. Retry only after a new admitted, profile-backed groupby/read hotspot or parquet workload clears the <5% CV gate at both sizes.
+
+## 2026-07-22 - fresh groupby candidate routing
+
+- Preflight of open candidates found `br-frankenpandas-wvlfh` (RangeIndex groupby bucket construction) explicitly recorded in `docs/NEGATIVE_EVIDENCE.md` as an older code-first item with no profile, while `br-frankenpandas-0rhjk` is cc-assigned. No candidate is eligible for a KEEP without ownership and profile-first hotspot evidence.
+- The requested harness rerun therefore confirms the existing blocker rather than authorizing speculative edits: all admissible groupby rows are already-landed wins; CSV is high-CV and parquet is unsupported. Retry predicate: an owned candidate must first show >0.1% self-time in a profile and an admitted 10k/100k A/B/null run with every CV <5%.
