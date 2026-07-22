@@ -747,3 +747,8 @@ can subsume this two-run special case without regressing construction latency.
 - Retry predicate if rejected: only revisit this family if a same-host profile
   shows `RangeIndex::asof` above 0.1% self-time and the residual cost is lookup
   positioning rather than caller-side alignment or scalar dispatch.
+
+## 2026-07-22 - cod lane frontier refresh
+
+- Rechecked RangeIndex correctness beads uza04.172-.176: all are closed with prior strict-remote correctness evidence. No open child remains in that requested slice.
+- Groupby/read 10k/100k rerun produced only previously accepted wins; no admissible fresh lever. CSV high-CV and unsupported parquet remain genuine blockers; retry requires an admitted workload and both-size CV below 5%.

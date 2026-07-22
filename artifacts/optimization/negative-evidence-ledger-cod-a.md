@@ -458,3 +458,8 @@ retry failed levers without a concrete retry predicate.
 - Rebuilt `fp-bench` at current HEAD `3ccd78f6051a09074fc6f17f5cd2ffa317d10996` with strict remote RCH on `ovh-a`; retrieved binary SHA256 `464eec7d8e9c144ea657e18b3a3df5bf38ec2d9915f72df46ca26de7a911f0b8`, size 40,654,904 bytes, timestamp `2026-07-22T19:22:25Z`.
 - Re-ran `df_transpose_materialize` Float64 at 100k. FrankenPandas p50 1357.49 us, CV 0.47%; pandas p50 1573.77 us, CV 7.40%; harness verdict `DROPPED_HIGH_CV` and ratio withheld. **Rejected as evidence**, not as a source lever: the pandas control failed the 5% admissibility gate.
 - Retry-condition predicate: retry only with an isolated/pinned worker and same-binary interleaved A/B/null control where both implementations and all null controls are below 5% CV (and the 100k row remains non-regressive).
+
+## 2026-07-22 - groupby/read frontier refresh
+
+- Fresh 10k/100k harness admitted only already-landed groupby wins: `groupby_sum_int64` 100k 5.819x (CV 2.12%/1.56%), `groupby_transform_mean` 10k 9.27x (4.30%/1.70%), `groupby_transform_mean_str` 10k 6.616x (2.78%/3.72%), `groupby_cumcount` 100k 6.943x (3.62%/4.49%), and `groupby_count` 10k 7.158x (1.03%/3.02%). Ledger/log search finds these families already accepted; no new lever is justified.
+- IO remains blocked: CSV rows dropped for high CV and parquet read/write remain unsupported by fp-bench. Retry only after a new admitted, profile-backed groupby/read hotspot or parquet workload clears the <5% CV gate at both sizes.
