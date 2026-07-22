@@ -478,3 +478,8 @@ retry failed levers without a concrete retry predicate.
 
 - Full matrix admitted only `groupby_transform_mean` 100k at 3.714x (FP/pandas p50 274.06/1017.97 us; CV 3.75%/0.95%), an already-landed family. All other cells were high-CV; no fresh lever or KEEP proof is justified.
 - Retry predicate unchanged: a new cod-owned profile hotspot plus interleaved A/B/null with every CV <5% at 10k and 100k.
+
+## 2026-07-22 - IO frontier cycle
+
+- `csv_read` 10k measured 184.739x (FP/pandas p50 43.86/8103.19 us; CV 3.90%/4.22%), but 100k remained high-CV and parquet read/write are unsupported by fp-bench. This is surface evidence only, not a KEEP: no profile-first hotspot or behavior-isomorphism proof for a single lever was established.
+- Retry predicate for a KEEP: identify an owned CSV-read hotspot in profile, then pass interleaved same-worker A/B/null with all CV <5% at both 10k and 100k plus conformance proof.

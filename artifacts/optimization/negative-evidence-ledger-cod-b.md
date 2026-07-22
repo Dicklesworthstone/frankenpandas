@@ -764,3 +764,7 @@ can subsume this two-run special case without regressing construction latency.
 ## 2026-07-22 - groupby matrix cycle
 
 - `groupby_transform_mean` 100k measured 3.714x with CV 3.75%/0.95%; already-landed. Remaining matrix cells were high-CV, so no fresh cod-owned lever cleared admission.
+
+## 2026-07-22 - IO frontier cycle
+
+- CSV read 10k surfaced a 184.739x result (CV 3.90%/4.22%), but 100k was high-CV and parquet workloads remain unsupported. No KEEP claim is made without profile-first and conformance evidence.
