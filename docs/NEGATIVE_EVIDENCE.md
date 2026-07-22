@@ -18176,3 +18176,18 @@ the `df_to_dict_index_materialize` fp-bench sibling — `df_to_dict_index` drops
 as pre-ffcd93014 `df_transpose`), exactly as the l4vzc bead's 2026-07-10 correction warned. Also measured:
 lever-relevant baseline df_to_dict_index_materialize 1M ≈ 205-224 ms — the to_dict half of the lane's wall,
 now measurable.
+
+### 2026-07-22 DustySummit (cc pane 2, fifth lever) — to_dict("index") typed-cell materialization + parallel pair-build — WIN 2.80x @1M / ~2.7x @100k
+
+Executes the fourth lever's retry predicate exactly. `materialize_index_mapping` no longer hoists
+`Column::values()` for all-valid Float64/Int64 columns (which serially materialized 10×1M `Scalar`s — the
+Amdahl wall that made the parallel-only attempt a ~1.0x NO-OP); a per-column `ToDictCellSource` reads typed
+slices and emits `Scalar::Float64(v)`/`Scalar::Int64(v)` per cell directly — bit-identical to the `values()`
+view for all-valid slots by the emission rule; nullable/non-numeric columns keep the exact `values()` read
+(NullKind untouched). With the wall gone, the fac9907ae row-range pair-build + unique-key bulk collect now
+pays. Interleaved same-binary env-gated A/B (`FP_TODICT_ORIG`, gate stripped pre-commit),
+df_to_dict_index_materialize float64: **1M cand p50 136 532 µs vs orig 381 688 µs = 2.80× (5 blocks, C≈132.9–137.3 ms
++ one 181 ms outlier, A/A nulls 0.99–1.03); 100k ≈13.5–15.3 vs ≈37.1–40.9 ms ≈ 2.7×.** Gates: to_dict 22/0,
+full fp-frame 3179/0, clippy only the 4 pre-existing (b96kr), `git diff --check` clean. Remaining to_dict
+frontier: the serial unsorted BTreeMap bulk collect (memcmp-heavy) and per-row String label allocs — next
+candidates if the op still trails pandas in the official harness (fold measurement into adqfs).
