@@ -468,3 +468,8 @@ retry failed levers without a concrete retry predicate.
 
 - Preflight of open candidates found `br-frankenpandas-wvlfh` (RangeIndex groupby bucket construction) explicitly recorded in `docs/NEGATIVE_EVIDENCE.md` as an older code-first item with no profile, while `br-frankenpandas-0rhjk` is cc-assigned. No candidate is eligible for a KEEP without ownership and profile-first hotspot evidence.
 - The requested harness rerun therefore confirms the existing blocker rather than authorizing speculative edits: all admissible groupby rows are already-landed wins; CSV is high-CV and parquet is unsupported. Retry predicate: an owned candidate must first show >0.1% self-time in a profile and an admitted 10k/100k A/B/null run with every CV <5%.
+
+## 2026-07-22 - targeted groupby/read admission refresh
+
+- Targeted rerun admitted `groupby_cumcount` 100k at 5.441x (FP/pandas p50 279.91/1523.04 us; CV 2.99%/1.21%) and `csv_write` 10k at 20.874x (4416.93/92198.28 us; CV 2.19%/4.96%). Both are already-landed families, so this is confirmation, not a fresh lever.
+- `groupby_mean_str`/`groupby_count` 100k and CSV read 10k/100k remained high-CV; CSV write 100k remained high-CV. Retry requires a new owned profile hotspot plus <5% CV at both sizes.

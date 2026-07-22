@@ -756,3 +756,7 @@ can subsume this two-run special case without regressing construction latency.
 ## 2026-07-22 - candidate preflight refresh
 
 - `br-frankenpandas-wvlfh` is fenced by the existing no-profile/code-first note; `br-frankenpandas-0rhjk` is cc-owned. No cod-owned fresh groupby/read lever survives ledger and ownership preflight.
+
+## 2026-07-22 - targeted admission refresh
+
+- Confirmed already-landed `groupby_cumcount` 100k (5.441x) and `csv_write` 10k (20.874x); unstable groupby/read cells remain inadmissible. No new cod-owned lever cleared preflight.
