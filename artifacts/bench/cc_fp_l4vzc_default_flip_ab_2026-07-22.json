@@ -1,0 +1,187 @@
+{
+  "lever": "br-frankenpandas-l4vzc lazy-transpose-view DEFAULT flip",
+  "date": "2026-07-22",
+  "agent": "DustySummit (cc pane 2)",
+  "substrate": "same host, taskset -c 2, interleaved E->L->E2 per block, 7 blocks, p50-of-25-iters per invocation, median across blocks; local release-perf builds via fresh CARGO_HOME (default ~/.cargo index stale, see ledger)",
+  "binaries": {
+    "eager_default_preflip": {
+      "path": "fp-bench-eager",
+      "sha256": "34e7626ee524275e6a39770874a135614787bfda9d005bd10f22aaf0c0b63627"
+    },
+    "lazy_default_postflip": {
+      "path": "fp-bench-lazy",
+      "sha256": "88fb3efa3e9c704b94b03de03051bdaf6c88caa83d10cddca4ecc555a536ed8c"
+    }
+  },
+  "disclosure": "per-arm CVs 5.6-8.3 pct on df_transpose_materialize exceed the 5 pct gate (shared host under swarm load); effect 5.89x vs A/A null floor 0.93; null-control workloads all ~1.00 within their own A/A floors",
+  "results": {
+    "blocks": 7,
+    "core": "2",
+    "workloads": {
+      "df_transpose_materialize": {
+        "eager_p50_us": 15441.402,
+        "lazy_p50_us": 2621.4849999999997,
+        "eager2_p50_us": 16642.86,
+        "cv_pct": {
+          "E": 8.27,
+          "L": 7.38,
+          "E2": 5.61
+        },
+        "ratio_eager_over_lazy": 5.8903,
+        "null_ratio_eager_over_eager2": 0.9278,
+        "raw_p50s": {
+          "E": [
+            15441.402,
+            15363.534,
+            15261.711000000001,
+            18884.304,
+            15959.444,
+            15109.241,
+            15714.428999999998
+          ],
+          "L": [
+            2596.147,
+            2416.826,
+            2316.686,
+            2697.208,
+            2784.875,
+            2858.204,
+            2621.4849999999997
+          ],
+          "E2": [
+            15734.257000000001,
+            16748.181,
+            17996.42,
+            16222.614,
+            17795.007,
+            16642.86,
+            15599.431
+          ]
+        }
+      },
+      "sort_values_single": {
+        "eager_p50_us": 7709.75,
+        "lazy_p50_us": 7436.832,
+        "eager2_p50_us": 7807.816000000001,
+        "cv_pct": {
+          "E": 19.44,
+          "L": 25.01,
+          "E2": 13.4
+        },
+        "ratio_eager_over_lazy": 1.0367,
+        "null_ratio_eager_over_eager2": 0.9874,
+        "raw_p50s": {
+          "E": [
+            7709.75,
+            8576.966,
+            8217.714,
+            7329.909,
+            7354.055,
+            11480.925,
+            6598.111
+          ],
+          "L": [
+            7408.97,
+            7641.04,
+            12396.554,
+            7158.744,
+            7436.832,
+            9808.783,
+            6387.65
+          ],
+          "E2": [
+            8314.117,
+            7302.047,
+            9112.742,
+            6990.325000000001,
+            6961.921,
+            9731.907,
+            7807.816000000001
+          ]
+        }
+      },
+      "df_mean_axis1": {
+        "eager_p50_us": 481.463,
+        "lazy_p50_us": 471.875,
+        "eager2_p50_us": 472.78700000000003,
+        "cv_pct": {
+          "E": 6.57,
+          "L": 7.13,
+          "E2": 6.94
+        },
+        "ratio_eager_over_lazy": 1.0203,
+        "null_ratio_eager_over_eager2": 1.0184,
+        "raw_p50s": {
+          "E": [
+            442.65999999999997,
+            451.657,
+            484.37,
+            483.377,
+            492.274,
+            481.463,
+            408.726
+          ],
+          "L": [
+            485.271,
+            443.68199999999996,
+            466.32500000000005,
+            471.875,
+            495.05999999999995,
+            406.983,
+            504.157
+          ],
+          "E2": [
+            489.68899999999996,
+            472.78700000000003,
+            469.621,
+            425.277,
+            486.303,
+            406.03999999999996,
+            473.378
+          ]
+        }
+      },
+      "cumsum": {
+        "eager_p50_us": 3129.298,
+        "lazy_p50_us": 3137.7140000000004,
+        "eager2_p50_us": 3151.27,
+        "cv_pct": {
+          "E": 7.32,
+          "L": 6.93,
+          "E2": 11.66
+        },
+        "ratio_eager_over_lazy": 0.9973,
+        "null_ratio_eager_over_eager2": 0.993,
+        "raw_p50s": {
+          "E": [
+            3129.298,
+            3213.067,
+            2612.016,
+            3032.444,
+            3135.3,
+            3252.1310000000003,
+            2892.218
+          ],
+          "L": [
+            3137.7140000000004,
+            3146.26,
+            3542.913,
+            2865.9089999999997,
+            3046.771,
+            3255.127,
+            2983.912
+          ],
+          "E2": [
+            3151.27,
+            3256.46,
+            3490.283,
+            2370.458,
+            3016.3540000000003,
+            3201.255,
+            2883.351
+          ]
+        }
+      }
+    }
+  }
+}

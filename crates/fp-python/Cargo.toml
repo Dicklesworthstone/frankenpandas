@@ -26,7 +26,7 @@ mimalloc = { workspace = true }
 pyo3 = { workspace = true }
 
 [features]
-default = []
+default = ["lazy-transpose-view"]
 lazy-transpose-view = ["fp-frame/lazy-transpose-view"]
 
 [package.metadata.docs.rs]

@@ -17988,3 +17988,83 @@ reproduces the broad pre-existing formatting backlog outside this file. Bounded 
 findings and reproduced the file's broad pre-existing test panic/assert/indexing inventory; it reported no focused
 production defect in the renderer hunk. Every Cargo invocation was fail-closed remote; no direct local Cargo,
 `force_local`, LTO, or `release-perf` command ran. Unrelated peer work and all 70 stashes remained untouched.
+
+### 2026-07-22 DustySummit (cc pane 2) — br-frankenpandas-l4vzc: `lazy-transpose-view` DEFAULT flip attempt → feature-cfg ROT found (214+ E0308) and REPAIRED; flip staged behind full gates
+
+**Lever.** The bead's named next increment: promote the certified lazy homogeneous transpose storage
+(`DataFrameColumnsStore = LazyDataFrameColumns`, per-output-column lazy slots, certified 2026-07-10 by cod_fp:
+full fp-frame lib 3136/0 green under the feature; official same-host bench 31.927x–60.074x vs pandas 2.2.3 and
+778.93x–4473.52x vs the eager path, all CV < 5%) from opt-in `--features lazy-transpose-view` to the DEFAULT
+feature set of fp-frame (+ forwarded defaults in frankenpandas, fp-bench, fp-python). Ledger-grep before coding:
+no prior verdict on the default flip exists; every prior transpose row targets construction levers or the
+feature-gated view itself. The four historical construction rejects were not retried.
+
+**FINDING 1 — the certified feature build had ROTTED at HEAD (main, 7c7d6b399).** With the feature enabled,
+`cargo check -p fp-frame --all-targets` fails with **214 reported / 345 emitted E0308 errors** (compiler caps
+hid more). Taxonomy: 100% of sites are `DataFrame { columns: <BTreeMap<String,Column>>, column_order:
+<Vec<String>>, .. }` struct literals added by ~12 days of peer commits since the 2026-07-10 certification.
+Every one compiles only under the eager cfg because the shared checkout + CI build only default features.
+Nothing here is a defect in the lazy storage itself — it is cfg-coverage decay: **an off-by-default cfg with no
+CI gate loses ~18 sites/day to compile rot in this swarm.** The certified 779x–4474x transpose win was silently
+unbuildable.
+
+**REPAIR (content-anchored, both-cfg-coherent).** All rotted sites route the literal fields through
+`From`/`Into` — `columns: X.into(), column_order: Y.into()` — which the enums already implement
+(`From<BTreeMap<String, Column>> for LazyDataFrameColumns`, `From<Vec<String>> for LazyDataFrameColumnOrder`).
+~91 struct literals / 217 inserted `.into()` lines, applied by hand via anchored exact-string replacement with
+per-pattern occurrence-count verification against the compiler's site list (every pattern's file-wide count
+matched its error-site count, or the extras were proven expression-position and therefore identity-safe).
+Under the flipped default the conversions are real (no `clippy::useless_conversion`); under
+`default-features = false` they are identity. NOTE THE COUPLING: the repair and the flip must land TOGETHER —
+with the feature off-by-default, the 91 identity conversions would trip `useless_conversion` under
+`-D warnings`. One lever, one commit.
+
+**Gate status at the time of this entry** (fresh-CARGO_HOME local substrate, see Finding 3):
+`cargo check -p fp-frame --all-targets` under the flipped default: **GREEN, 0 errors** (was 214+).
+In flight: `cargo test -p fp-frame --lib`, fp-conformance, workspace check/clippy, and an interleaved
+same-host A/B (eager-default binary vs lazy-default binary; workloads df_transpose_materialize +
+sort_values_single/df_mean_axis1/cumsum as null controls, plus an eager-vs-eager A/A floor; 7 blocks,
+taskset-pinned, CV-gated). The flip commit lands only if all gates pass; outcomes recorded in the follow-up row.
+
+**FINDING 2 — benchmark-integrity trap reproduced on myself (disclosed, corrected).** My first "lazy" bench
+binary was a STALE EAGER COPY: `cargo build | tail -N && cp ...` masks cargo's exit status behind the pipe, so
+the failed feature build silently left the previous binary in the target dir and the copy "succeeded". The
+artifact was quarantined (renamed `.INVALID-stale-eager-copy`), never measured. Same trap also produced two
+fake-green rch runs earlier in the session (`rch exec ... | tail` reporting exit 0 from `tail` while the
+underlying build failed 101). Rule reaffirmed: NEVER pipe a gating cargo/rch command's output without capturing
+`pipestatus`; verify binary freshness (`-nt` against the prior artifact) before benching.
+
+**FINDING 3 — swarm-wide local-build landmine (active since 2026-07-18).** The host's default
+`~/.cargo` sparse-index cache is stuck: it serves serde ≤ 1.0.223 while HEAD's Cargo.lock (dependabot
+da85cf65d, 2026-07-18) pins 1.0.228 (live index has 1.0.229; a stale-etag/304 cache bug — `cargo fetch`
+"Updating crates.io index" completes and still resolves against the stale snapshot). Consequence: EVERY local
+cargo invocation in the default CARGO_HOME fails at HEAD — including rch's silent local FALLBACK when the fleet
+is congested (observed: "no admissible workers ... insufficient_slots=9" → local fallback → resolution error →
+masked by pipes as fake exit 0). Workaround used here (no cache files deleted, RULE 1): a fresh
+`CARGO_HOME=<scratch>/cargo-home-cc`, which resolves and builds cleanly (fp-bench release-perf cold build
+2m47s). Peers: check `pipestatus`, and if a local/rch-fallback build errors on `serde ^1.0.228`, point
+CARGO_HOME at a fresh dir. The real fix (refreshing/removing the stale cache under `~/.cargo/registry/index/`)
+requires file-deletion permission the swarm does not have.
+
+**Process note.** fp-frame/src/lib.rs carried concurrent uncommitted peer work (a cumsum parallelization
+threshold lever) throughout; my hunks are staged selectively (`git apply --cached` of the `.into()` hunks only)
+so the peer's in-flight lever is neither committed nor disturbed.
+
+**FOLLOW-UP (same session) — ALL GATES GREEN, FLIP COMMITTED.** Substrate: fresh-CARGO_HOME local builds
+(64T host), every result exit-code-verified via `pipestatus` (not pipe-masked).
+
+| gate | result |
+| --- | --- |
+| `cargo check -p fp-frame --all-targets` (flipped default) | GREEN, 0 errors (was 214 reported / 345 emitted) |
+| `cargo check --workspace --all-targets` (flipped default) | GREEN (only pre-existing fp-columnar unused-import warnings, present pre-flip) |
+| `cargo test -p fp-frame --lib` (flipped default) | **3177 passed / 0 failed / 21 ignored** (certified 2026-07-10 baseline was 3136/0) |
+| `cargo test -p fp-conformance` (flipped default) | **ALL GREEN** — every suite 0 failed incl. the 419-test packet run |
+| `cargo clippy -p fp-frame --lib --no-deps -- -D warnings` (flipped default) | 4 errors, ALL pre-existing cfg-independent debt (`question_mark` lints fire under `--no-default-features` too → NOT flip-exposed; bead br-frankenpandas-b96kr). My 3 genuinely-useless `.into()`s (bindings already store-enum-typed) found by this gate and REMOVED — final count ~88 real-conversion sites |
+| `cargo clippy -p fp-columnar --lib -- -D warnings` | 24 errors on an UNMODIFIED fp-columnar at HEAD — pre-existing, feature-independent (bead br-frankenpandas-y1oz0) |
+| interleaved A/B, eager-default vs lazy-default binaries (7 blocks, `taskset -c 2`, E→L→E2 per block, sha256-provenanced, artifact `artifacts/bench/cc_fp_l4vzc_default_flip_ab_2026-07-22.json`) | **`df_transpose_materialize` 100k×10 f64 (FULL observation, not metadata-only): eager p50 15 441 µs → lazy p50 2 622 µs = 5.89× FP-side win**, A/A null floor 0.928. ⚠️ per-arm CVs 5.6–8.3% exceed the 5% gate (shared host under swarm load) — disclosed; effect is ~80× the null-floor deviation, direction unambiguous. **Null controls (regression check on ordinary frames): `sort_values_single` 1.037 (A/A 0.987), `df_mean_axis1` 1.020 (A/A 1.018 — same drift, no effect), `cumsum` 0.997 (A/A 0.993) — NO regression from the enum-wrapped store.** |
+| `git diff --check` / inserted-line length ≤100 | clean |
+| `timeout 180s ubs crates/fp-frame/src/lib.rs` | timeout before findings — known whole-file UBS stall, `artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md` (per AGENTS.md, cited not folded) |
+
+Headline transpose ratios remain the certified 2026-07-10 rows (31.927x–60.074x vs pandas 2.2.3 at 10k,
+778.93x–4473.52x vs the eager path, CV<5%) — now describing the DEFAULT build. Fresh official-harness rows
+under the default build: bead br-frankenpandas-adqfs.

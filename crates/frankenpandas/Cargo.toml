@@ -45,7 +45,7 @@ rusqlite = { workspace = true, optional = true }
 # - asupersync: forward fp-runtime's optional asupersync runtime
 #   integration. Off by default.
 [features]
-default = ["sql-sqlite"]
+default = ["sql-sqlite", "lazy-transpose-view"]
 hdf5 = ["fp-io/hdf5"]
 sql-sqlite = ["fp-io/sql-sqlite", "dep:rusqlite"]
 sql-postgresql = ["fp-io/sql-postgresql"]

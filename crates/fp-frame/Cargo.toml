@@ -12,15 +12,20 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = []
+default = ["lazy-transpose-view"]
 # Emit `tracing` spans/events for hot-path operations (groupby, rolling,
 # resample, IO). Off by default so users who don't attach a tracing
 # subscriber pay no dependency cost. Per br-frankenpandas-7gd4.
 tracing = ["dep:tracing"]
-# Experimental br-frankenpandas-l4vzc storage path: build a lazy homogeneous
+# br-frankenpandas-l4vzc storage path: build a lazy homogeneous
 # Float64/Int64/Bool/Datetime64/Timedelta64 transpose without constructing one
-# public String/Column/BTreeMap entry per source row. Off by default while the
-# full DataFrame storage integration lands.
+# public String/Column/BTreeMap entry per source row. DEFAULT since 2026-07-22:
+# the full DataFrame storage integration (DataFrameColumnsStore =
+# LazyDataFrameColumns with per-output-column lazy slots) landed and was
+# certified green on the full fp-frame suite + official same-host bench
+# (31.9x-60.1x vs pandas, 779x-4474x vs the eager path, all CV<5%; see
+# docs/NEGATIVE_EVIDENCE.md 2026-07-10 cod_fp rows). Opt out via
+# default-features = false.
 lazy-transpose-view = []
 
 [dependencies]

@@ -25,5 +25,9 @@ fp-types = { path = "../fp-types", version = "0.1.2" }
 mimalloc = { workspace = true }
 
 [features]
+# lazy-transpose-view is DEFAULT (matching fp-frame's default since
+# 2026-07-22) so the df_transpose workload compiles the batched
+# metadata-boundary timer arm that matches the underlying lazy storage.
+default = ["lazy-transpose-view"]
 lazy-transpose-prototype = []
 lazy-transpose-view = ["fp-frame/lazy-transpose-view"]
