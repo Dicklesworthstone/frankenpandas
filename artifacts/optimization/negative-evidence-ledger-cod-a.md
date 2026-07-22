@@ -390,3 +390,43 @@ retry failed levers without a concrete retry predicate.
 | 1M | `groupby_transform_mean_str` | FASTER | 2.178x | 2.178x | 20061.76 | 43688.75 | 1.31 | 1.34 | Accepted win |
 | 1M | `groupby_cumcount` | DROPPED_HIGH_CV | N/A | 4.957x | 10804.23 | 53559.56 | 7.91 | 9.48 | Needs stable rerun; do not cite as keep proof |
 | 1M | `groupby_count` | FASTER | 5.988x | 5.988x | 1993.46 | 11937.48 | 2.61 | 2.13 | Accepted win |
+
+## 2026-07-22 - br-frankenpandas-zjx9o - DataFrame cum* one-morsel spawn threshold
+
+- Status: **REJECT / NO-SHIP**. The candidate source and ignored timing guard
+  were removed; no production change remains.
+- Frontier/profile evidence: the mandated
+  `python3 benches/vs_pandas_harness.py --all --sizes 10k,100k` run produced
+  only four CV-valid cells out of 84. `dataframe_ops/cumsum` at 10k was a
+  valid loss: FP p50 439.28 us, mean 437.11 us, CV 3.94%; pandas p50 374.11
+  us, mean 373.62 us, CV 1.07%; ratio 0.852x. At 100k FP p50 was 980.14 us
+  versus pandas 3628.02 us, but FP CV 8.56% made that row inadmissible.
+  `strace -f -c` then attributed the small-frame fixed cost to exactly 280
+  `clone3` calls across three warmups plus 25 measurements: ten scoped OS
+  threads were created for every 10k x 10 cumulative operation.
+- Ledger/log preflight: the Series cumsum owned-buffer and arithmetic
+  parallel-threshold families are already closed. This attempt did not retry
+  either: it changed only `DataFrame::apply_cum_f64`'s total-cell gate from
+  16,384 to 131,072 so a 100k-cell frame stayed serial while the 1M-cell
+  100k-row case remained parallel.
+- Graveyard mapping and recommendation contract: Vectorized Execution plus
+  Morsel-Driven Parallelism (§8.2) says scheduling overhead must be amortized
+  by a cache-sized morsel. Opportunity score: impact 3, confidence 5, effort
+  1, score 15. The semantic invariant was exact because only independent
+  column scheduling changed; column order, prefix-fold order, dtype, null mask,
+  and output values were unchanged. The disproof threshold was any candidate
+  or null-control CV at or above 5%.
+- Strict-remote interleaved same-binary A/B on `ovh-a`, single-operation
+  samples: baseline p50 369.996 us; candidate p50 178.025 us (2.0783x);
+  null ratio 1.0030. **Rejected** because baseline CV 30.939%, candidate CV
+  9.484%, null-A CV 6.292%, and null-B CV 10.300% all exceeded the 5% gate.
+- Strict-remote batched interleaved same-binary A/B on `hz1`, 16 operations
+  per sample: baseline p50 731.915 us; candidate p50 250.651 us (2.9201x);
+  null-A/null-B p50 248.214/246.251 us, null ratio 1.0080. **Rejected** because
+  baseline CV 13.643%, candidate CV 13.337%, and null-A CV 11.553% exceeded
+  5% (only null-B cleared at 3.136%). Directional medians are not keep proof.
+- Retry-condition predicate: retry only when an isolated or pinned worker can
+  run the same in-process A/B/null harness with baseline, candidate, null-A,
+  and null-B all below 5% CV, while a 10k and 100k targeted public harness
+  rerun also clears 5% CV and shows no 100k regression. Until that predicate
+  holds, do not ship or cite the apparent 2.08-2.92x median effect.
