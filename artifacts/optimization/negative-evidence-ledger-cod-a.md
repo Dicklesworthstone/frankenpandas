@@ -452,3 +452,9 @@ retry failed levers without a concrete retry predicate.
   the admitted hotspot and preflight its exact ledger/log family before one
   lever. Until then, route to a different measured surface rather than
   inventing a parquet result.
+
+## 2026-07-22 - df_transpose_materialize SURFACE re-run remains inadmissible
+
+- Rebuilt `fp-bench` at current HEAD `3ccd78f6051a09074fc6f17f5cd2ffa317d10996` with strict remote RCH on `ovh-a`; retrieved binary SHA256 `464eec7d8e9c144ea657e18b3a3df5bf38ec2d9915f72df46ca26de7a911f0b8`, size 40,654,904 bytes, timestamp `2026-07-22T19:22:25Z`.
+- Re-ran `df_transpose_materialize` Float64 at 100k. FrankenPandas p50 1357.49 us, CV 0.47%; pandas p50 1573.77 us, CV 7.40%; harness verdict `DROPPED_HIGH_CV` and ratio withheld. **Rejected as evidence**, not as a source lever: the pandas control failed the 5% admissibility gate.
+- Retry-condition predicate: retry only with an isolated/pinned worker and same-binary interleaved A/B/null control where both implementations and all null controls are below 5% CV (and the 100k row remains non-regressive).
