@@ -760,3 +760,7 @@ can subsume this two-run special case without regressing construction latency.
 ## 2026-07-22 - targeted admission refresh
 
 - Confirmed already-landed `groupby_cumcount` 100k (5.441x) and `csv_write` 10k (20.874x); unstable groupby/read cells remain inadmissible. No new cod-owned lever cleared preflight.
+
+## 2026-07-22 - groupby matrix cycle
+
+- `groupby_transform_mean` 100k measured 3.714x with CV 3.75%/0.95%; already-landed. Remaining matrix cells were high-CV, so no fresh cod-owned lever cleared admission.

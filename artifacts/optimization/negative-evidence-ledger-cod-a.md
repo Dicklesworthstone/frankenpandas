@@ -473,3 +473,8 @@ retry failed levers without a concrete retry predicate.
 
 - Targeted rerun admitted `groupby_cumcount` 100k at 5.441x (FP/pandas p50 279.91/1523.04 us; CV 2.99%/1.21%) and `csv_write` 10k at 20.874x (4416.93/92198.28 us; CV 2.19%/4.96%). Both are already-landed families, so this is confirmation, not a fresh lever.
 - `groupby_mean_str`/`groupby_count` 100k and CSV read 10k/100k remained high-CV; CSV write 100k remained high-CV. Retry requires a new owned profile hotspot plus <5% CV at both sizes.
+
+## 2026-07-22 - groupby matrix cycle
+
+- Full matrix admitted only `groupby_transform_mean` 100k at 3.714x (FP/pandas p50 274.06/1017.97 us; CV 3.75%/0.95%), an already-landed family. All other cells were high-CV; no fresh lever or KEEP proof is justified.
+- Retry predicate unchanged: a new cod-owned profile hotspot plus interleaved A/B/null with every CV <5% at 10k and 100k.
