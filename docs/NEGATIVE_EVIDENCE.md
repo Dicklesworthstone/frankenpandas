@@ -18498,3 +18498,25 @@ not reliably do.** Reverted the whole eager-block path to HEAD (empty diff; AXPY
 residual 180 ms (0.094× vs OpenBLAS) is memory-traffic-bound and needs a register-blocked SIMD microkernel —
 an epic with real uncertainty in safe Rust, NOT an incremental lever.** Consecutive REJECTs: 2 (parallelize,
 N-block; the AXPY + A-panel wins preceded and reset them).
+
+### 2026-07-23 DustySummit — df_dot register-blocked microkernel FEASIBILITY probe → LEDGERED BLOCKER: the residual is ISA-bound (SSE2 vs AVX2), not an agent lever
+
+Profile-first before building the register-block epic: a standalone 4×8 register-tiled microkernel over PACKED
+contiguous panels (permanent `#[ignore]`d instrument `microkernel_gflops_feasibility_dustysummit`, 1000³,
+best-of-5, release). **Result: 15.6 GFLOP/s** — 1.64× the current AXPY dot (~9.5) but only 13% of OpenBLAS
+(~118). **Root cause is the build ISA:** the workspace release build emits BASELINE x86-64 (SSE2 — 2-wide, NO
+FMA), documented at br-frankenpandas-jawxr / the transpose-session ledger ("build emits SSE2, workers are
+AVX2+FMA"). Register-tiling on SSE2 caps near 15 GFLOP/s; the 8× gap to OpenBLAS is the missing AVX2+FMA
+(4-wide fused multiply-add), NOT blocking or parallelism.
+
+**DECISION: the df_dot register-block epic is NOT worth building.** Even a full BLAS-style packed +
+register-tiled + parallel kernel plateaus at ~15-20 GFLOP/s on the SSE2 build (df_dot 180 ms → ~110 ms,
+still ~0.15× vs pandas). **The residual df_dot gap is an ISA/build-policy blocker with only two openings, BOTH
+maintainer decisions outside an agent's lane:** (1) set `target-cpu = x86-64-v3` in `.cargo/config` (whole-binary
+AVX2+FMA — a global build-policy change, previously reverted at jawxr for the corr/cov Gram which was AVX-neutral;
+but the GEMM microkernel IS FMA-throughput-bound and WOULD benefit, so jawxr's rejection does not transfer); or
+(2) downgrade fp-columnar `forbid(unsafe)` → a narrow audited `#[allow(unsafe_code)]` AVX2 kernel with runtime
+dispatch + SSE2 fallback (AGENTS.md §56 permits narrow audited unsafe, but this is a safety-invariant change).
+**df_dot is CLOSED for agent levers: 2 shipped wins (AXPY 16× + A-panel 1.31× = ~19×); the residual is ISA-bound
+and needs a maintainer target-cpu/unsafe-SIMD decision.** Consecutive REJECTs remain 2 (this is a
+feasibility-probe finding + a ledgered blocker, not a code-lever reject).

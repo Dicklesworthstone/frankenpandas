@@ -29672,6 +29672,79 @@ mod tests {
         assert!(result.values()[2].is_missing());
     }
 
+    // Feasibility probe (br-frankenpandas dot GEMM epic): can safe-Rust
+    // autovectorization keep an MR×NR accumulator micro-tile in SIMD registers
+    // and hit BLAS-competitive GFLOP/s? The current AXPY dot is ~9.5 GFLOP/s
+    // (memory-traffic-bound); OpenBLAS is ~118. If a register-tiled microkernel
+    // over PACKED contiguous panels stays near 9.5, the epic is not worth
+    // building in safe Rust; if it approaches 40-70, it is. Run with:
+    //   cargo test -p fp-columnar --release microkernel_gflops_feasibility -- --ignored --nocapture
+    #[test]
+    #[ignore = "perf feasibility probe; run with --release --ignored --nocapture"]
+    fn microkernel_gflops_feasibility_dustysummit() {
+        use std::time::Instant;
+        // Square GEMM C(m×n) = A(m×k)·B(k×n), all contiguous row-major, packed
+        // so the microkernel sees unit-stride A-rows and B-rows.
+        const DIM: usize = 1000;
+        let (m, k, n) = (DIM, DIM, DIM);
+        // A row-major: a[i*k + l]. B row-major: b[l*n + c] (already "packed" for
+        // the kernel's B access b[l*n + c0..c0+NR] contiguous per l).
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let a: Vec<f64> = (0..m * k).map(|_| next()).collect();
+        let b: Vec<f64> = (0..k * n).map(|_| next()).collect();
+
+        // MR×NR = 4×8 register micro-tile. acc holds MR rows × NR cols; the NR=8
+        // inner arrays are the vectorization target (2 ymm each under AVX2).
+        const MR: usize = 4;
+        const NR: usize = 8;
+        let gemm = |c: &mut [f64]| {
+            let mut i0 = 0;
+            while i0 + MR <= m {
+                let mut c0 = 0;
+                while c0 + NR <= n {
+                    let mut acc = [[0.0f64; NR]; MR];
+                    for l in 0..k {
+                        let bl = &b[l * n + c0..l * n + c0 + NR];
+                        for ii in 0..MR {
+                            let a_il = a[(i0 + ii) * k + l];
+                            let acc_ii = &mut acc[ii];
+                            for jj in 0..NR {
+                                acc_ii[jj] += a_il * bl[jj];
+                            }
+                        }
+                    }
+                    for ii in 0..MR {
+                        let row = &mut c[(i0 + ii) * n + c0..(i0 + ii) * n + c0 + NR];
+                        row.copy_from_slice(&acc[ii]);
+                    }
+                    c0 += NR;
+                }
+                i0 += MR;
+            }
+        };
+
+        let mut c = vec![0.0f64; m * n];
+        gemm(&mut c); // warm
+        let reps = 5;
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let t = Instant::now();
+            gemm(&mut c);
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        let gflops = 2.0 * (m as f64) * (n as f64) * (k as f64) / best / 1e9;
+        println!(
+            "microkernel {MR}x{NR} {DIM}^3: best {:.2} ms = {gflops:.1} GFLOP/s (AXPY dot ~9.5, OpenBLAS ~118)",
+            best * 1e3
+        );
+        std::hint::black_box(&c);
+        assert!(gflops.is_finite());
+    }
+
     #[test]
     fn column_from_values_preserves_mixed_utf8_numeric_scalars() {
         let column = Column::from_values(vec![Scalar::Utf8("x".into()), Scalar::Int64(1)])
