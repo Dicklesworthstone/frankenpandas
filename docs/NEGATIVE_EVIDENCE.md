@@ -18435,3 +18435,31 @@ materialize-all-columns-in-parallel-on-first-touch shared plan, or an eager para
 threshold). This is a multi-commit epic vs hand-tuned assembly; pure-safe-Rust + forbid(unsafe) + autovec may
 plateau around numpy-single-thread (~59 GFLOP/s) and still trail 2-thread OpenBLAS. The two shipped levers
 captured the tractable ~19× ; the rest is a deliberate epic, not a reject.** No consecutive rejects (WIN).
+
+### 2026-07-23 DustySummit — COMPLETE vs_pandas_harness frontier map (all 9 categories): FP dominates; 3 characterized non-wins
+
+Full survey done (datetime artifact `cc_fp_datetime_profile_2026-07-23.json`; all category artifacts dated
+2026-07-23). **FrankenPandas beats pandas 2.2.3 on every common operation across all 9 harness categories,
+1.13×–554×**, with exactly THREE characterized non-win cases:
+
+| category | verdict | range |
+| --- | --- | --- |
+| dataframe_ops | ALL WIN | incl. df_transpose_materialize ~554× (lever 9) |
+| groupby (8) | ALL WIN | 2.59–6.66× |
+| indexing (6) | ALL WIN | 1.46–23.7× |
+| strings (3) | ALL WIN | 2.81–~10× |
+| joins (6) | ALL WIN | 2.62–17× |
+| io/csv | ALL WIN | 37–130× |
+| io/parquet | 1 win + 1 floor | parquet_write 1.336×; **parquet_read 1.13× (decode+alloc floor, REJECT)** |
+| rolling | WIN except 1 | **ewm_mean@100k 0.77× (divide-latency floor, REJECT); 2.18× @1M** |
+| linalg | fixed | **df_dot: 3.42 s→180 ms materialized (~19×, AXPY+A-panel); still 0.094× vs BLAS — scoped epic** |
+| datetime | ALL WIN | to_datetime 3.6–3.9×, dt_date 4.1×, dt_time 18× |
+
+**The three non-wins are all fully characterized, not open questions:** (1) parquet_read — Arrow decode + fresh
+buffer alloc floor (copy method is already memcpy-optimal); (2) ewm_mean@100k — bit-locked sequential fdiv,
+divide-latency-bound (branch hoisting is a no-op; wins at 1M); (3) df_dot — a naive column-major kernel
+disaster (3.4 s) fixed ~19× to 180 ms; the residual vs OpenBLAS is a scoped blocked+parallel-GEMM epic. **The
+"find a vs-pandas LOSS to fix" vein is EXHAUSTED — the surface is dominated and the 3 exceptions are floors or a
+ledgered epic.** Retry predicate: only a newly-added harness workload could surface a fresh loss. Session lever
+tally (2026-07-22→23): 9 transpose/to_dict WINS + df_dot AXPY(16×) + A-panel(1.31×) = 11 WINS; 3 REJECTs
+(parquet copy-method, ewm hoist, + the earlier to_dict lex/parallel), all floor/no-op with retry predicates.
