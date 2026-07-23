@@ -920,6 +920,25 @@ impl Float64DotInput {
     }
 }
 
+/// A shared left-hand (`A`) panel for `df.dot`: the `k` A-columns built once
+/// as `Float64DotInput`s and shared (`Arc`) across all `n` output columns of a
+/// single dot product, so construction is O(k) once + O(n) Arc bumps instead
+/// of O(n·k). Opaque handle over the crate-private `Float64DotInput`.
+#[derive(Clone)]
+pub struct Float64DotAPanel(Arc<[Float64DotInput]>);
+
+impl Float64DotAPanel {
+    /// Build the panel from `(buffer, start)` column views, each of `len` rows.
+    #[must_use]
+    pub fn new(a_cols: Vec<(Arc<[f64]>, usize)>, len: usize) -> Self {
+        let inputs: Vec<Float64DotInput> = a_cols
+            .into_iter()
+            .map(|(data, start)| Float64DotInput::new(data, start, len))
+            .collect();
+        Self(Arc::from(inputs))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
 pub enum PairwiseFloat64Stat {
@@ -9278,13 +9297,25 @@ impl Column {
         len: usize,
     ) -> Self {
         debug_assert_eq!(a_cols.len(), b_col.len());
-        let a_cols: Vec<Float64DotInput> = a_cols
-            .into_iter()
-            .map(|(data, start)| Float64DotInput::new(data, start, len))
-            .collect();
+        Self::from_f64_all_valid_dot_product_shared(&Float64DotAPanel::new(a_cols, len), b_col, len)
+    }
+
+    /// Build one output column of a dot product against a SHARED left-hand
+    /// (`A`) panel. `DataFrame::dot` builds the panel ONCE and clones the inner
+    /// `Arc` per output column (one refcount bump) instead of rebuilding the
+    /// `k` `Float64DotInput`s + a fresh `Arc<[..]>` for every column — the prior
+    /// `from_f64_all_valid_dot_product` did the latter `n` times, an O(n·k)
+    /// Arc-and-alloc construction tax that dominated `df.dot` construction.
+    #[must_use]
+    pub fn from_f64_all_valid_dot_product_shared(
+        a_panel: &Float64DotAPanel,
+        b_col: Arc<[f64]>,
+        len: usize,
+    ) -> Self {
+        debug_assert_eq!(a_panel.0.len(), b_col.len());
         Self {
             dtype: DType::Float64,
-            values: ScalarValues::lazy_all_valid_float64_dot(Arc::from(a_cols), b_col, len),
+            values: ScalarValues::lazy_all_valid_float64_dot(Arc::clone(&a_panel.0), b_col, len),
             validity: ValidityMask::all_valid(len),
             data: None,
         }

@@ -18412,3 +18412,26 @@ open removable costs: (1) CONSTRUCTION ~24.6 ms — `dot()` clones the full `a_v
 output column (n×k Arc ops); share ONE `Arc<[Float64DotInput]>` A-panel across all n columns → ~0. (2) COMPUTE
 211 ms is L3-bandwidth-bound (each output column re-reads all of A from L3); needs cache-blocking (L1/L2 tiles)
 + parallelizing the serial output-column loop across cores. Consecutive REJECTs reset to 0 (this is a WIN).
+
+### 2026-07-23 DustySummit (cc pane 2, eleventh lever) — df_dot shared A-panel construction — WIN 1.31× (235→180 ms @1M), + remaining GEMM epic scoped
+
+Follow-on to the AXPY kernel fix. `DataFrame::dot` rebuilt the k `Float64DotInput`s + a fresh
+`Arc<[Float64DotInput]>` for EVERY one of the n output columns (`a_views.clone()` + `Arc::from` per column =
+O(n·k) Arc-and-alloc construction tax). New `fp_columnar::Float64DotAPanel` builds the A-panel ONCE; each
+output column's lazy plan clones the inner `Arc` (one refcount bump). Bit-identical (same `Float64DotInput`
+data, shared): fp-columnar dot 4/0, fp-frame dot 16/0. Official (honest materialize bench, taskset -c 2,3,
+artifact `cc_fp_dot_panel_official_2026-07-23.json`): **@1M 235 → 179.8 ms = 1.31× (CV 3.2%, now CV-valid);
+@100k 0.15× → 0.172×.**
+
+**df_dot status after the AXPY (16×) + A-panel (1.31×) levers: fp 179.8 ms vs pandas 16.9 ms = 0.094× @1M —
+still a LOSS, but the materialized compute went from 3.42 s to 180 ms (≈19× total).** The residual 180 ms is
+the AXPY matvec: ~9.5 GFLOP/s, single-threaded, L3-bandwidth-bound (each of n output columns re-reads all of A
+from L3). **RETRY PREDICATE / SCOPED EPIC (do not attempt as an incremental lever): closing to pandas' ~118
+GFLOP/s (blocked, multi-threaded OpenBLAS) needs a BLAS-competitive eager GEMM — (a) L1/L2 cache-blocking with
+A/B panel packing + register-tiled microkernel (a register-blocked packed-panel kernel already exists at
+fp-frame:54194 for corr/cov Gram; route dot through it), AND (b) multi-threading the output-column/tile loop
+(the lazy per-column design serializes materialization when read column-by-column — needs a
+materialize-all-columns-in-parallel-on-first-touch shared plan, or an eager parallel path above a size
+threshold). This is a multi-commit epic vs hand-tuned assembly; pure-safe-Rust + forbid(unsafe) + autovec may
+plateau around numpy-single-thread (~59 GFLOP/s) and still trail 2-thread OpenBLAS. The two shipped levers
+captured the tractable ~19× ; the rest is a deliberate epic, not a reject.** No consecutive rejects (WIN).

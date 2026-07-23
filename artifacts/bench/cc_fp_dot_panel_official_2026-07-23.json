@@ -1,0 +1,102 @@
+{
+  "schema_version": "v3",
+  "timestamp": "2026-07-23T20:25:12.824886+00:00",
+  "engine_identity": {
+    "frankenpandas": {
+      "version": "0.1.0",
+      "profile": "release-perf",
+      "role": "Subject"
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "role": "Oracle"
+    }
+  },
+  "parameters": {
+    "sizes": [
+      "100k",
+      "1M"
+    ],
+    "dtypes": [
+      "float64"
+    ],
+    "categories": [
+      "linalg"
+    ],
+    "cv_threshold": 5.0,
+    "min_iterations": 10,
+    "warmup_iterations": 3
+  },
+  "results": [
+    {
+      "workload": "df_dot",
+      "category": "linalg",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 5202.43,
+        "p95_us": 5285.15,
+        "p99_us": 5302.44,
+        "mean_us": 5215.59,
+        "stddev_us": 40.16,
+        "cv_pct": 0.77,
+        "throughput_rows_sec": 19221805,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 894.85,
+        "p95_us": 910.97,
+        "p99_us": 911.21,
+        "mean_us": 896.1,
+        "stddev_us": 9.65,
+        "cv_pct": 1.08,
+        "throughput_rows_sec": 111751197,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 0.172,
+      "verdict": "SLOWER"
+    },
+    {
+      "workload": "df_dot",
+      "category": "linalg",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 179839.17,
+        "p95_us": 190419.96,
+        "p99_us": 192480.91,
+        "mean_us": 179510.46,
+        "stddev_us": 5737.31,
+        "cv_pct": 3.2,
+        "throughput_rows_sec": 5560524,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 16941.32,
+        "p95_us": 17400.82,
+        "p99_us": 17607.4,
+        "mean_us": 16994.62,
+        "stddev_us": 258.21,
+        "cv_pct": 1.52,
+        "throughput_rows_sec": 59027276,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 0.094,
+      "verdict": "SLOWER"
+    }
+  ],
+  "summary": {
+    "total_workloads": 2,
+    "valid_workloads": 2,
+    "dropped_high_cv": 0,
+    "category_scores": {
+      "linalg": 0.127
+    },
+    "weighted_score": 1.213,
+    "claim_validated": false
+  }
+}
