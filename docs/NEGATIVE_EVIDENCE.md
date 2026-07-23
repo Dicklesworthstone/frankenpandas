@@ -18361,3 +18361,24 @@ shares the Arrow decode buffer (Arc refcount bump) instead of copying it. That i
 (new backing variant + all typed-slice consumers must accept it; alignment/offset handling under
 forbid(unsafe)), justified only if parquet_read becomes a campaign priority. Until then parquet_read is
 decode+alloc floor-bound at 1.13×, still a WIN.** Consecutive REJECTs: 1 (levers 8/9 were WINS).
+
+### 2026-07-23 DustySummit — rolling frontier + ewm_mean@100k loop-invariant-branch hoist — REJECT (~0.99x), divide-latency floor confirmed
+
+Rolling profile (100k/1M, artifact `cc_fp_rolling_profile_2026-07-23.json`): FP wins everywhere EXCEPT one
+CV-valid loss — **`ewm_mean @100k` fp 723.5 vs pd 557.9 µs = 0.771× SLOWER (both CV<3%)**; at 1M it FLIPS to a
+2.181× WIN (fp 7 300 vs pd 15 920 µs). FP runs a flat ~7.2 ns/elem at both sizes; pandas is 5.6 ns/elem @100k
+but degrades to 15.9 ns/elem @1M — so this is a small-frame codegen gap, not algorithmic. rolling_std_w50@100k
+is PARITY (1.043×); everything else is a win (rolling_mean 2.5-2.7×, expanding_sum 5×, ewm@1M 2.18×).
+
+**LEVER (rejected):** the ewm mean recurrence is a bit-locked sequential fdiv; the loss can only come from
+per-element overhead around the divide. Hoisted the two loop-invariant branches out of the hot loop (element 0
+/ `nobs==1` handled before the loop; `self.adjust` field-branch lifted to pick the loop body once) —
+bit-identical (56 ewm tests green, same fdiv order, min_periods gate preserved). **A/B (FP_EWM_OLD gate, 7
+interleaved blocks, taskset): new 720.6 vs old 725.3 µs = 0.993×, A/A null 1.000 — NO-OP.** The invariant
+branches already execute in the shadow of the ~13.5-cycle Zen3 f64 divide (the recurrence's critical-path
+dependency), so removing them from the issue stream changes nothing. Reverted to exact HEAD (empty diff).
+**RETRY PREDICATE: ewm_mean@100k is divide-latency + codegen floor-bound. Do NOT retry branch/loop-shape
+micro-opts. The only paths that could move it: (a) a numerically-equivalent reformulation that shortens the
+critical dependency chain (e.g. hoisting `new_wt*x` and restructuring the fdiv operands) IF it stays
+bit-identical to pandas' aggregations.pyx recurrence — high risk to the bit-lock; (b) accept it as a
+small-frame codegen floor since @1M it already wins 2.18×.** Consecutive REJECTs: 2 (parquet copy-method, this).
