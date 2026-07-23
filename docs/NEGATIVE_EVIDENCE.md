@@ -18603,3 +18603,17 @@ agent-level fp-frame lever.** The harness coverage (d9a0901ec) quantifying the v
 a hardware/library FLOOR or a maintainer decision — df_dot (AVX2/ISA, bead ol0dw), ewm_mean@100k (f64-divide
 latency), parquet_read (Arrow decode + alloc), str-groupby aggs (hashbrown-vs-khash). No agent-level
 incremental lever remains; FP wins every other common op 1.13–554×.**
+
+### 2026-07-23 DustySummit — int-key DataFrameGroupBy aggs: coverage confirms DOMINATED (only str-key is the floor)
+
+Added 4 pandas counterparts (df_groupby_int_var/int_mean, groupby_widekey_sum, df_groupby_widekey_sum) to test
+whether any NON-factorization groupby bottleneck is beatable (int keys use the FAST dense-histogram /
+open-addressing-i64 factorization, unlike the hashbrown-bound str keys). Profile (artifact
+`cc_fp_groupby_intkey_profile_2026-07-23.json`): **ALL WINS — df_groupby_int_var ~3.4–3.6×, int_mean
+~2.8–4.8×, groupby_widekey_sum ~4–9×, df_groupby_widekey_sum ~2.5–3.8×** (DROPPED_HIGH_CV from var/sum
+variance, but fp ≪ pd directionally in every row/size). **CONFIRMS: the int-key groupby path — fast
+factorization + column-parallel dense aggs (dense-agg-column-parallel/value_counts levers) — dominates; the
+var/mean/sum computation and output are NOT bottlenecks. The ONLY groupby loss is the str-key factorization
+floor (hashbrown-vs-khash, ledgered above).** No beatable non-factorization groupby lever exists. The groupby
+lane is now fully characterized: str-key aggs floor-bound, everything else (int-key aggs, transforms, wide-key,
+cumulative) an FP win. No code lever attempted (profile + coverage only).

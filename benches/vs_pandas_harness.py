@@ -345,6 +345,44 @@ def bench_groupby_skew_str_pandas(df: pd.DataFrame) -> list[float]:
 def bench_groupby_nunique_str_pandas(df: pd.DataFrame) -> list[float]:
     return _groupby_str_op_pandas(df, lambda g: g.nunique())
 
+
+def bench_df_groupby_int_var_pandas(df: pd.DataFrame) -> list[float]:
+    # Int key (i%1000, fast dense-histogram factorization) + 3 f64 value cols,
+    # df.groupby(key).var() — matches fp-bench df_groupby_int_var. A loss here
+    # is in the var computation, NOT factorization.
+    df = df.copy()
+    df["key"] = np.arange(len(df)) % 1000
+    cols = ["col_0", "col_1", "col_2"]
+    return time_operation(lambda: df.groupby("key")[cols].var())
+
+
+def bench_df_groupby_int_mean_pandas(df: pd.DataFrame) -> list[float]:
+    df = df.copy()
+    df["key"] = np.arange(len(df)) % 1000
+    cols = ["col_0", "col_1", "col_2"]
+    return time_operation(lambda: df.groupby("key")[cols].mean())
+
+
+def _widekey(n: int) -> "np.ndarray":
+    # Matches fp-bench: (i * golden) as i64 >> 1 — ~n distinct keys, spread
+    # across the i64 range (exercises the non-dense wide-i64 factorization).
+    return (np.arange(n, dtype=np.uint64) * np.uint64(0x9E37_79B9_7F4A_7C15)).astype(
+        np.int64
+    ) >> 1
+
+
+def bench_groupby_widekey_sum_pandas(df: pd.DataFrame) -> list[float]:
+    df = df.copy()
+    df["key"] = _widekey(len(df))
+    return time_operation(lambda: df.groupby("key")["col_1"].sum())
+
+
+def bench_df_groupby_widekey_sum_pandas(df: pd.DataFrame) -> list[float]:
+    df = df.copy()
+    df["key"] = _widekey(len(df))
+    cols = ["col_0", "col_1", "col_2"]
+    return time_operation(lambda: df.groupby("key")[cols].sum())
+
 def bench_groupby_transform_mean_str_pandas(df: pd.DataFrame) -> list[float]:
     df = df.copy()
     df["key"] = ("g" + (df["col_0"] % 1000).astype("int64").map(lambda v: f"{v:04}"))
@@ -573,6 +611,10 @@ PANDAS_WORKLOADS = {
         "groupby_sem_str": bench_groupby_sem_str_pandas,
         "groupby_skew_str": bench_groupby_skew_str_pandas,
         "groupby_nunique_str": bench_groupby_nunique_str_pandas,
+        "df_groupby_int_var": bench_df_groupby_int_var_pandas,
+        "df_groupby_int_mean": bench_df_groupby_int_mean_pandas,
+        "groupby_widekey_sum": bench_groupby_widekey_sum_pandas,
+        "df_groupby_widekey_sum": bench_df_groupby_widekey_sum_pandas,
     },
     "rolling": {
         "rolling_mean_w10": bench_rolling_mean_w10_pandas,
