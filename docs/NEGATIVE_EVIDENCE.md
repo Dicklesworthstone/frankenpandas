@@ -18463,3 +18463,17 @@ disaster (3.4 s) fixed ~19× to 180 ms; the residual vs OpenBLAS is a scoped blo
 ledgered epic.** Retry predicate: only a newly-added harness workload could surface a fresh loss. Session lever
 tally (2026-07-22→23): 9 transpose/to_dict WINS + df_dot AXPY(16×) + A-panel(1.31×) = 11 WINS; 3 REJECTs
 (parquet copy-method, ewm hoist, + the earlier to_dict lex/parallel), all floor/no-op with retry predicates.
+
+### 2026-07-23 DustySummit — df_dot matvec output-row parallelization — REJECT (1.40× SLOWER), proves L3-bandwidth-bound
+
+Parallelized `materialize_float64_dot` across disjoint output-row chunks (bit-identical, dot 4/0). A/B
+(FP_DOT_SERIAL gate, 5 interleaved blocks, taskset -c 2,3, 1M): **parallel ~261 ms vs serial ~187 ms = 1.40×
+SLOWER; par/par2 A/A = 1.00.** The AXPY matvec re-reads all of A from L3 per output column — it is
+L3-BANDWIDTH-bound, and the 2 pinned cores SHARE one L3→core bus, so splitting the work gives NO compute
+speedup (both threads stall on the same memory bandwidth) while the per-output-column scoped-thread spawns
+(n=1000 columns × workers) add pure overhead → net regression. Reverted to HEAD (empty diff; AXPY + A-panel
+wins retained). **This SHARPENS the df_dot epic's retry predicate: parallelism ALONE is futile — the residual
+gap vs OpenBLAS is bandwidth, not core count. The ONLY path is CACHE-BLOCKING (pack A/B tiles into L1/L2 and a
+register-tiled microkernel so each A element is reused across many output columns/rows, cutting L3 traffic by
+the tile factor); parallelism helps only AFTER blocking makes the kernel compute-bound. That is the eager
+blocked-GEMM epic.** Consecutive REJECTs: 1 (the AXPY + A-panel df_dot wins reset the count).
