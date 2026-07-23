@@ -28813,6 +28813,56 @@ mod tests {
     }
 
     #[test]
+    fn range_index_reduction_edge_cases_match_pandas_dustysummit() {
+        use super::RangeIndex;
+        // Empty range: min/max/median None; argmin/argmax error; both
+        // monotonicity predicates True (an empty index is monotonic in pandas);
+        // nunique 0.
+        let empty = RangeIndex::new(5, 5, 1).unwrap();
+        assert_eq!(empty.len(), 0);
+        assert_eq!(empty.min(), None);
+        assert_eq!(empty.max(), None);
+        assert_eq!(empty.median(), None);
+        assert!(empty.argmin().is_err());
+        assert!(empty.argmax().is_err());
+        assert!(empty.is_monotonic_increasing());
+        assert!(empty.is_monotonic_decreasing());
+        assert_eq!(empty.nunique(), 0);
+
+        // Single element: min == max; median == the value; argmin == argmax == 0;
+        // monotonic both ways.
+        let single = RangeIndex::new(7, 8, 1).unwrap();
+        assert_eq!(single.len(), 1);
+        assert_eq!(single.min(), Some(7));
+        assert_eq!(single.max(), Some(7));
+        assert_eq!(single.median(), Some(7.0));
+        assert_eq!(single.argmin().unwrap(), 0);
+        assert_eq!(single.argmax().unwrap(), 0);
+        assert!(single.is_monotonic_increasing());
+        assert!(single.is_monotonic_decreasing());
+
+        // Descending (odd length): [10,8,6,4,2]. min=2 (pos 4), max=10 (pos 0),
+        // median=6; increasing False, decreasing True.
+        let desc = RangeIndex::new(10, 0, -2).unwrap();
+        assert_eq!(desc.len(), 5);
+        assert_eq!(desc.min(), Some(2));
+        assert_eq!(desc.max(), Some(10));
+        assert_eq!(desc.median(), Some(6.0));
+        assert_eq!(desc.argmin().unwrap(), 4);
+        assert_eq!(desc.argmax().unwrap(), 0);
+        assert!(!desc.is_monotonic_increasing());
+        assert!(desc.is_monotonic_decreasing());
+        assert_eq!(desc.nunique(), 5);
+
+        // Descending (even length): [10,8,6,4]. median = (8+6)/2 = 7; argmin = 3.
+        let desc_even = RangeIndex::new(10, 2, -2).unwrap();
+        assert_eq!(desc_even.len(), 4);
+        assert_eq!(desc_even.median(), Some(7.0));
+        assert_eq!(desc_even.argmin().unwrap(), 3);
+        assert_eq!(desc_even.argmax().unwrap(), 0);
+    }
+
+    #[test]
     fn range_index_std_var_median_closed_form_tkc0m() {
         let r = super::RangeIndex::new(1, 11, 1).unwrap();
         // 1..=10: median = 5.5; var = sum((x - 5.5)^2)/9; std = sqrt(var).
