@@ -18477,3 +18477,24 @@ gap vs OpenBLAS is bandwidth, not core count. The ONLY path is CACHE-BLOCKING (p
 register-tiled microkernel so each A element is reused across many output columns/rows, cutting L3 traffic by
 the tile factor); parallelism helps only AFTER blocking makes the kernel compute-bound. That is the eager
 blocked-GEMM epic.** Consecutive REJECTs: 1 (the AXPY + A-panel df_dot wins reset the count).
+
+### 2026-07-23 DustySummit — df_dot eager N-blocked GEMM (cache-blocking) — REJECT (~4.5%, sub-gate), only register-blocking would help
+
+After the parallelization reject proved df_dot L3-bandwidth-bound, tried the bandwidth fix: an eager N-blocked
+GEMM (`Column::dot_all_valid_float64_matrix`) that computes all n output columns at once, reusing each streamed
+A-column across an output-column tile of width NB (bit-identical — proven by a dedicated element-wise test vs
+the per-column matvec; K/j accumulated in order). Wired into `DataFrame::dot` for large all-finite frames
+(m·k·n ≥ 1<<20), lazy per-column kept for small. **Clean same-binary A/B (FP_DOT_LAZY gate, 6 interleaved
+blocks, taskset -c 2,3, 1M): NB=4 eager 177.0 ms vs lazy 185.1 ms = 0.957 (~4.5% faster), A/A null 1.00;
+NB=8 was ~4%.** Both sub-5%-gate → effectively NO-OP. **Root cause: N-blocking only moves the bottleneck.**
+The output tile (NB×m f64) is read+written K=1000 times during the streamed-K loop; at NB=8 (64 KB) it spills
+to L2, at NB=4 (32 KB) it is L1-resident — but either way that per-tile output traffic (≈16 GB from L1/L2)
+replaces the A-column L3 traffic without reducing total memory movement. **The ONLY fix is REGISTER-blocking:
+keep an MR×NR output micro-tile in SIMD registers so it has ZERO memory traffic across the K-loop (a
+hand-unrolled register-tiled microkernel, à la OpenBLAS). That is uncertain under pure-safe-Rust + forbid(unsafe)
+autovectorization — the compiler must hold an MR×NR accumulator tile in registers across K, which autovec does
+not reliably do.** Reverted the whole eager-block path to HEAD (empty diff; AXPY + A-panel wins retained).
+**df_dot is now fully characterized: 2 shipped wins (AXPY 16× + A-panel 1.31× = ~19×, 3.42 s→180 ms); the
+residual 180 ms (0.094× vs OpenBLAS) is memory-traffic-bound and needs a register-blocked SIMD microkernel —
+an epic with real uncertainty in safe Rust, NOT an incremental lever.** Consecutive REJECTs: 2 (parallelize,
+N-block; the AXPY + A-panel wins preceded and reset them).
