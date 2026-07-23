@@ -18320,3 +18320,27 @@ consistent with the 2026-07 groupby lever campaign (dense-Int64 bypass, arena pa
 value_counts group-parallel, etc.). Do NOT re-probe groupby for a vs-pandas LOSS; the surface is dominated.
 Retry predicate: only re-open if a NEW groupby workload (a currently-unbenched agg/transform/window op) is
 added to the harness and shows fp > pd. No code touched; this is a profile finding, not a reject.
+
+### 2026-07-23 DustySummit — full vs_pandas_harness frontier survey (6 categories) + parquet bench coverage: FP dominates; parquet_read is the ONE tight race
+
+Profiled the entire common harness surface at 100k/1M (load ~7.7), artifacts
+`cc_fp_{groupby,indexing,strings,joins}_profile_2026-07-23.json` + `cc_fp_io_parquet_official_2026-07-23.json`:
+
+| category | verdict | range |
+| --- | --- | --- |
+| groupby (8 ops) | ALL WIN | 2.59×–6.66× |
+| indexing (6 ops) | ALL WIN | 1.46×–23.7× (reindex@100k fp>pd but CV 28% noise; @1M 4.7× win) |
+| strings (3 ops) | ALL WIN | 2.81×–~10× |
+| joins (6 ops) | ALL WIN | 2.62×–17× |
+| io/csv | ALL WIN | csv_read ~130×, csv_write ~37× (CV-dropped, fp≪pd) |
+| io/parquet | **1 win + 1 tight** | **parquet_write CV-VALID 1.336× (fp 33 584 vs pd 44 884 µs, both CV<3%); parquet_read fp 3 594 vs pd 4 046 µs = 1.13× DROPPED (fp CV 5.44%)** |
+
+**FRONTIER FINDING: the vs_pandas_harness common surface is comprehensively FP-dominated. The single closest
+race is `parquet_read` (1.13×) — the only op where FP does not clearly beat pandas 2.2.3's Arrow-backed C
+reader.** All other rows are ≥1.34×. Coverage gap closed: fp-bench previously had NO parquet workloads
+(parquet_read/write returned INCOMPLETE vs pandas); both now wired (mirror the pandas `to_parquet`/`read_parquet`
+rows and fp-io `write_parquet_bytes`/`read_parquet_bytes`). Retry predicate for a groupby/indexing/strings/joins
+LOSS: dry — do not re-probe for a loss; only a newly-added workload could surface one. NEXT LEVER (profile-first):
+`parquet_read` is the tightest race and the honest frontier — profile the Arrow decode/gather path for a
+targeted lever (prior art: read_parquet scalar+batch e143719a2). No perf code touched in this pass; bench
+coverage only.

@@ -1874,6 +1874,22 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = fp_io::write_csv_string(&df).expect("write_csv");
             })
         }
+        ("io", "parquet_read") => {
+            // pandas: df.to_parquet(file, index=False) [setup]; time
+            // pd.read_parquet(file). FP: serialize once (setup), time
+            // read_parquet_bytes over the same Arrow bytes.
+            let bytes = fp_io::write_parquet_bytes(&df).expect("parquet serialize");
+            time_us(|| {
+                let _ = fp_io::read_parquet_bytes(&bytes).expect("read_parquet");
+            })
+        }
+        ("io", "parquet_write") => {
+            // pandas: time df.to_parquet(file, index=False). FP: time
+            // write_parquet_bytes.
+            time_us(|| {
+                let _ = fp_io::write_parquet_bytes(&df).expect("write_parquet");
+            })
+        }
         ("indexing", "reindex") => {
             // pandas: df.reindex(Index(range(0, n*2, 2)))
             let new_labels: Vec<IndexLabel> = (0..(rows * 2) as i64)
