@@ -18234,3 +18234,28 @@ Float64/Int64/Bool/Datetime64/Timedelta64, mixed all-valid Int64+Float64 (46.3×
 (69.8×), and nullable/mixed-validity Int64 (43.7×). Still eager: nullable Float64/temporal (trap-documented),
 Eager-Utf8 sources, Bool/temporal/Utf8 mixes, duplicate-label indexes (correctly rejected). to_dict side:
 typed-cell + parallel materialization landed (2.80×); from_iter key-ordering RULE ledgered.
+
+### 2026-07-22 DustySummit (cc pane 2, eighth lever) — canonical nullable-Float64 lazy transpose view arm — WIN ~38x @100k
+
+The last big eligible shape: NaN-bearing / nullable Float64 frames. The documented Float64 trap
+(non-single-valued missing rep) is closed by GATING, not assumption: new fp-columnar accessor
+`Column::as_canonical_nullable_f64` returns `(data, validity)` ONLY for lazy typed backings whose Scalar
+emission is fully determined by the pair via the shared rule (`valid || data[i].is_nan()` → `Float64(data[i])`,
+else `Null(NaN)`): `LazyNullableFloat64` (0.0 sentinels → `Null(NaN)`) AND the `LazyAllValidFloat64` family
+carrying NaN-derived validity (missing slots hold NaN → the `is_nan` escape preserves the present
+`Float64(NaN)` identity — the family `from_f64_values` actually produces for NaN input, found when the first
+test run showed my LazyNullableFloat64-only gate rejecting it). Eager nullable Float64 (mixed NullKinds:
+Null(Null)/NaT) returns None and keeps the eager fallback — a dedicated test proves the decline. Materialized
+rows route through `Column::from_values` (the identical eager constructor). Mixed-validity f64 frames
+(all-valid + nullable columns) are admitted too — both families share the rule.
+
+Gates: transpose set 17/0 incl. new NaN-aware scalar-identity parity test (Float64(NaN) vs Null(NaN)
+distinguished per cell; IEEE assert_eq unusable); full fp-frame **3181/0**; fp-columnar **591/0** (new
+accessor); clippy only the 4 pre-existing; env gate `FP_TV_NO_NULLF64` stripped pre-commit. Perf (ONE binary,
+env-gated arms, 5 interleaved blocks, `taskset -c 2`, new fp-bench dtype `float64_nullable` = every-7th-cell
+NaN): **100k×10 lazy median 1 357 µs vs eager median 51 867 µs = 38.2×; every block >27× at worst pairing.**
+
+Lane coverage: default lazy `df.T` now serves homogeneous Float64/Int64/Bool/Datetime64/Timedelta64,
+mixed all-valid numeric (46.3×), contiguous-Utf8 (69.8×), nullable Int64 (43.7×), canonical nullable/
+mixed-validity Float64 (38.2×). Remaining eager: Eager-backed nullable columns (unreconstructible NullKinds —
+correct), Eager-Utf8, Bool/temporal/Utf8 mixes, nullable temporals (NaT trap), duplicate-label indexes.

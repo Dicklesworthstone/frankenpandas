@@ -152,6 +152,18 @@ fn build_frame(rows: usize, cols: usize, dtype: &str) -> (DataFrame, Vec<Vec<f64
                     ),
                 );
             }
+            // Canonical nullable Float64: every 7th cell NaN (from_f64_values
+            // marks NaN missing -> LazyNullableFloat64 backing).
+            "float64_nullable" => {
+                let mut data = gen_f64_column(&mut rng, rows, "float64");
+                for (i, value) in data.iter_mut().enumerate() {
+                    if i % 7 == 0 {
+                        *value = f64::NAN;
+                    }
+                }
+                raw.push(data.clone());
+                columns.insert(name.clone(), Column::from_f64_values(data));
+            }
             // Nullable Int64: every 7th cell is Null. Exercises the
             // single-valued-missing nullable transpose shape.
             "int64_nullable" => {

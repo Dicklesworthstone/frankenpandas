@@ -9674,6 +9674,37 @@ impl Column {
     /// datum (0.0 by the nullable convention); the validity bit is authoritative.
     /// Returns `None` for view/run-length/strided backings that are not a single
     /// contiguous `[f64]`.
+    /// Typed view of a CANONICAL nullable-Float64 column: `Some((data,
+    /// validity))` only for lazy typed backings whose Scalar emission is
+    /// fully determined by the pair via the shared rule
+    /// (`validity.get(i) || data[i].is_nan()` → `Float64(data[i])`, else
+    /// `Null(NaN)`). That covers `LazyNullableFloat64` (0.0 sentinels at
+    /// missing slots → `Null(NaN)`) and the `LazyAllValidFloat64` family
+    /// carrying NaN-derived validity (missing slots hold NaN → the `is_nan`
+    /// escape emits the present `Float64(NaN)` identity). Eager/cached
+    /// nullable Float64 columns return `None`: their per-slot `NullKind`
+    /// (Null/NaT vs NaN) is not reconstructible from a raw buffer plus mask.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn as_canonical_nullable_f64(&self) -> Option<(&[f64], &ValidityMask)> {
+        if self.dtype != DType::Float64 {
+            return None;
+        }
+        let data: &[f64] = match &self.values {
+            ScalarValues::LazyNullableFloat64 { data, .. } => data.as_slice(),
+            ScalarValues::LazyAllValidFloat64 { data, .. } => data.as_ref(),
+            ScalarValues::LazyAllValidFloat64Vec { data, .. } => &data[..],
+            ScalarValues::LazyAllValidFloat64Slice {
+                data, start, len, ..
+            } => &data[*start..*start + *len],
+            _ => return None,
+        };
+        if data.len() != self.validity.len() {
+            return None;
+        }
+        Some((data, &self.validity))
+    }
+
     pub fn as_f64_slice_with_validity(&self) -> Option<(&[f64], &ValidityMask)> {
         if self.dtype != DType::Float64 {
             return None;
