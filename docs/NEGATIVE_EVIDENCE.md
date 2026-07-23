@@ -18344,3 +18344,20 @@ LOSS: dry — do not re-probe for a loss; only a newly-added workload could surf
 `parquet_read` is the tightest race and the honest frontier — profile the Arrow decode/gather path for a
 targeted lever (prior art: read_parquet scalar+batch e143719a2). No perf code touched in this pass; bench
 coverage only.
+
+### 2026-07-23 DustySummit — parquet_read conversion copy-method (to_vec vs iter-map-collect) — REJECT (~1.0x), Arrow-decode + fresh-alloc floor confirmed
+
+Profile-first on the harness's tightest race (parquet_read 1.13× @100k). Env-gated decode-only split
+(FP_PARQUET_DECODE_ONLY, 7 blocks, taskset): **full ~3542 µs vs decode-only ~2174 µs → the Arrow→fp conversion
+is ~1368 µs = 38% of the read** (decode ~2.17 ms is the Arrow floor). Hypothesized the 8 MB of per-column
+`t.values().iter().map(|&v| v as f64).collect()` copies (~5.8 GB/s, sub-memcpy) weren't vectorizing for the
+identity cast; swapped Int64/Float64 to `.values().to_vec()`. **A/B (FP_PARQUET_OLDCOPY, 7 interleaved blocks):
+new median 3419 µs vs old 3447 µs = ~0.99×, A/A null 0.99 — NO-OP. LLVM already lowers the identity-cast
+map-collect to a memcpy; the copy is at hardware speed.** The 1.37 ms conversion is the irreducible cost of
+allocating + writing ~8 MB across 10 fresh page-faulted buffers, not a slow copy. Reverted to exact HEAD (empty
+diff verified). **RETRY PREDICATE: the only lever that removes this cost is a zero-copy Arrow bridge — an
+fp-columnar `ScalarValues` variant backed by `arrow::buffer::ScalarBuffer<f64>`/`<i64>` so the fp Column
+shares the Arrow decode buffer (Arc refcount bump) instead of copying it. That is a scoped fp-columnar epic
+(new backing variant + all typed-slice consumers must accept it; alignment/offset handling under
+forbid(unsafe)), justified only if parquet_read becomes a campaign priority. Until then parquet_read is
+decode+alloc floor-bound at 1.13×, still a WIN.** Consecutive REJECTs: 1 (levers 8/9 were WINS).
