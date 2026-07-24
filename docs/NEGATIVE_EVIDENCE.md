@@ -18968,3 +18968,44 @@ Artifacts:
 - `artifacts/bench/cod_fp_uza04_216_groupby_rank_str_10k_100k.json`
 - `artifacts/bench/cod_fp_uza04_216_groupby_rank_str_control_10k_100k.json`
 - `artifacts/perf/cod_fp_uza04_216_groupby_rank_scorecard_2026-07-23.md`
+
+### 2026-07-23 DustyMarsh — remaining scalar string-groupby coverage — KEEP; all rows dominated
+
+`br-frankenpandas-uza04.217` completed the fp-bench-only scalar
+SeriesGroupBy rows after exact ledger/log preflight: kurtosis, median
+quantile, Float64 unique, and Int64 unique. Each pandas operation constructs
+its grouper inside the timed closure. Pandas 2.2.3 has no direct
+`SeriesGroupBy.kurt`, so that row explicitly uses the public behavioral
+counterpart `groupby(...).apply(pd.Series.kurt)`; its large ratio reflects the
+public apply path and is not used to propose a source lever.
+
+Pinned CPU 56, exact-current remote-built binary, control pass:
+
+| Workload | Size | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---|---:|---:|---:|---:|---:|
+| `groupby_kurt_str` | 10k | 183.70 | 38741.56 | 210.898x | 2.55 / 0.89 |
+| `groupby_kurt_str` | 100k | 1461.38 | 42159.50 | 28.849x | 1.02 / 0.53 |
+| `groupby_quantile_str` | 10k | 485.80 | 1955.65 | 4.026x | 3.37 / 0.65 |
+| `groupby_quantile_str` | 100k | 3348.72 | 5418.62 | 1.618x | 0.77 / 0.71 |
+| `groupby_unique_str` | 10k | 601.80 | 22500.00 | 37.388x | 3.01 / 0.75 |
+| `groupby_unique_str` | 100k | 5003.82 | 26720.57 | 5.340x | 0.41 / 0.41 |
+| `groupby_unique_i64` | 10k | 583.66 | 21473.19 | 36.791x | 2.64 / 0.76 |
+| `groupby_unique_i64` | 100k | 4898.67 | 25157.90 | 5.136x | 0.63 / 1.34 |
+
+The unchanged `groupby_mean_str` null control remained 5.413x/3.269x at
+10k/100k with every CV below 5%. An independent pass also admitted every new
+row as a win.
+
+**Verdict: KEEP coverage; no source lever.** All rows are CV-valid wins, and
+the strict-remote groupby conformance run on the identical Rust tree included
+kurt/quantile/unique tests in its 207 passed / 0 failed result.
+
+Retry predicate: revisit any scalar family only after an inline full-call
+CV-valid loss appears; then profile before editing and require same-worker
+A/B/null with every deciding CV below 5% plus focused conformance.
+
+Artifacts:
+
+- `artifacts/bench/cod_fp_uza04_217_groupby_scalar_remaining_10k_100k.json`
+- `artifacts/bench/cod_fp_uza04_217_groupby_scalar_remaining_control_10k_100k.json`
+- `artifacts/perf/cod_fp_uza04_217_groupby_scalar_scorecard_2026-07-23.md`

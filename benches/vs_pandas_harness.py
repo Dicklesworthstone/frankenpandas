@@ -401,6 +401,27 @@ def bench_groupby_rank_str_pandas(df: pd.DataFrame) -> list[float]:
     )
 
 
+def bench_groupby_kurt_str_pandas(df: pd.DataFrame) -> list[float]:
+    # pandas 2.2.3 has no direct SeriesGroupBy.kurt method; public apply with
+    # Series.kurt is its behavior-equivalent full-call counterpart.
+    return _groupby_str_op_pandas(df, lambda g: g.apply(pd.Series.kurt))
+
+
+def bench_groupby_quantile_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(df, lambda g: g.quantile(0.5))
+
+
+def bench_groupby_unique_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(df, lambda g: g.unique())
+
+
+def bench_groupby_unique_i64_pandas(df: pd.DataFrame) -> list[float]:
+    df = df.copy()
+    df["key"] = ("g" + (df["col_0"] % 1000).astype("int64").map(lambda v: f"{v:04}"))
+    values = df["col_1"].astype("int64") % 50_000
+    return time_operation(lambda: values.groupby(df["key"]).unique())
+
+
 def bench_df_groupby_int_var_pandas(df: pd.DataFrame) -> list[float]:
     # Int key (i%1000, fast dense-histogram factorization) + 3 f64 value cols,
     # df.groupby(key).var() — matches fp-bench df_groupby_int_var. A loss here
@@ -673,6 +694,10 @@ PANDAS_WORKLOADS = {
         "groupby_nunique_str": bench_groupby_nunique_str_pandas,
         "groupby_all_str": bench_groupby_all_str_pandas,
         "groupby_rank_str": bench_groupby_rank_str_pandas,
+        "groupby_kurt_str": bench_groupby_kurt_str_pandas,
+        "groupby_quantile_str": bench_groupby_quantile_str_pandas,
+        "groupby_unique_str": bench_groupby_unique_str_pandas,
+        "groupby_unique_i64": bench_groupby_unique_i64_pandas,
         "df_groupby_int_var": bench_df_groupby_int_var_pandas,
         "df_groupby_int_mean": bench_df_groupby_int_mean_pandas,
         "groupby_widekey_sum": bench_groupby_widekey_sum_pandas,

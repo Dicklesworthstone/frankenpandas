@@ -860,3 +860,12 @@ b7nxg/un6on/k1xts) fully closed on fp-index 540/0.
   (0.50%/0.64%). The unchanged mean 100k null control remained a 3.279x win.
 - KEEP coverage; no source lever. Retry only after a new CV-valid loss, then
   profile and require same-worker A/B/null plus rank conformance.
+
+## 2026-07-23 - remaining scalar groupby coverage (`uza04.217`)
+
+- Added inline pandas coverage for kurt, quantile, and Float64/Int64 unique.
+- All 10k/100k rows are CV-valid wins: kurt 210.898x/28.849x, quantile
+  4.026x/1.618x, Float64 unique 37.388x/5.340x, and Int64 unique
+  36.791x/5.136x. Mean null control remained 5.413x/3.269x.
+- KEEP coverage; source work stays closed unless a new inline full-call loss
+  clears the 5% CV gate and profile-first A/B/null plus conformance.

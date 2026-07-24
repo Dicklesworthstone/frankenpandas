@@ -590,3 +590,15 @@ b7nxg/un6on/k1xts) fully closed on fp-index 540/0.
   below 1%. KEEP coverage; no source lever is justified.
 - Retry only on a new inline full-call CV-valid loss, followed by profile-first
   same-worker A/B/null with every deciding CV below 5% and rank conformance.
+
+## 2026-07-23 - remaining scalar groupby coverage (`uza04.217`)
+
+- Added inline full-call pandas counterparts for kurt, quantile(0.5),
+  Float64 unique, and Int64 unique. Pandas 2.2.3 kurt uses the public
+  behavior-equivalent `GroupBy.apply(Series.kurt)` path because no direct
+  SeriesGroupBy method exists.
+- CV-valid 10k/100k wins: kurt 210.898x/28.849x, quantile 4.026x/1.618x,
+  Float64 unique 37.388x/5.340x, Int64 unique 36.791x/5.136x. The unchanged
+  mean null control remained 5.413x/3.269x; every deciding CV is below 5%.
+- KEEP coverage; no source lever. Retry only on a new inline full-call loss,
+  followed by profile-first same-worker A/B/null and focused conformance.
