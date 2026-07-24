@@ -18772,3 +18772,52 @@ parallelize (same pattern) — it took the same mimalloc bet; its per-row work m
 non-generalizability caveat applies to it. **Retry predicate:** revisit ONLY if fp-frame adopts mimalloc (or
 another per-thread-arena allocator) as a library-default global allocator, which would make the parallel row
 build generalize; a bench-only win here is not shippable value.
+
+### 2026-07-23 DustyMarsh — JSON columns read harness coverage — KEEP coverage, no perf lever
+
+Ledger and Git-log preflight reconfirmed that RangeIndex beads
+`br-frankenpandas-uza04.172` through `.176` are closed with their current-main
+strict-remote correctness evidence. The only admitted groupby loss remains the
+string-key factorization path; five alternatives already lost and the ledger
+forbids a sixth hash-table variant without a new upstream short-string
+primitive or an approved khash-class dependency.
+
+The read frontier was rebuilt from current `main` (`774c7146f`) on RCH worker
+`hz1`. RCH compiled successfully but synchronized only dependency metadata, so
+the executable was retrieved from the worker-scoped target per the RCH
+runbook. Remote and local SHA-256 matched:
+`609f6ce2b4e757d242cc048bcc3e83762c5263159f393f40d6bc5f96091d20d5`.
+Pinned CPU 56 baseline results admitted only wins:
+
+| Workload | Size | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---|---:|---:|---:|---:|---:|
+| `csv_read` | 100k | 850.66 | 99350.27 | 116.79x | 4.85 / 0.50 |
+| `json_read_records` | 10k | 10500.61 | 21616.33 | 2.06x | 1.33 / 3.06 |
+| `parquet_read` | 100k | 3161.81 | 4969.99 | 1.57x | 2.90 / 4.86 |
+
+The 10k CSV and Parquet rows and 100k JSON-records row were invalid for high
+CV, but every directional median still favored FrankenPandas. No implementation
+hotspot was therefore eligible for a source lever.
+
+`br-frankenpandas-uza04.213` adds the previously uncovered
+`json_read_columns` comparison, keeping payload construction outside the timed
+region for both implementations. Its strict-remote binary had matching
+remote/local SHA-256
+`f72e319e099dec46aa06481e39d653124334c2b29d202901adf2d2a57e9218bb`.
+At 10k, FrankenPandas measured 16353.98 us versus pandas 31255.99 us:
+**1.911x faster**, with CV 2.93% / 1.43%. At 100k the medians remained
+directionally 1.944x faster (191187.58 / 371553.31 us), but FP CV 6.93%
+invalidated the row.
+
+**Verdict: KEEP the benchmark coverage; SURFACE/REJECT a performance-source
+lever.** There is no admitted loss to profile, and groupby is already behind a
+ledgered architectural blocker. Retry the 100k JSON-columns row only on an
+isolated/pinned worker where both CVs are below 5%; source work is authorized
+only if that admitted row becomes slower than pandas, followed by profile-first
+same-worker A/B/null control and JSON conformance.
+
+Artifacts:
+
+- `artifacts/bench/cod_frontier_read_hz1_10k_100k_2026-07-23.json`
+- `artifacts/bench/cod_frontier_json_read_columns_hz1_10k_100k_2026-07-23.json`
+- `artifacts/perf/cod_frontier_read_hz1_scorecard_2026-07-23.md`

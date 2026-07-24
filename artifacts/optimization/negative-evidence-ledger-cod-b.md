@@ -804,3 +804,18 @@ b7nxg/un6on/k1xts) fully closed on fp-index 540/0.
   CVs below 5%; only an admitted loss authorizes a subsequent profile.
 - See the dated `cod_restart_*_2026-07-23` benchmark artifacts and generated
   scorecards, with the full evidence table in `docs/NEGATIVE_EVIDENCE.md`.
+
+## 2026-07-23 - JSON columns read frontier coverage (DustyMarsh)
+
+- RangeIndex `uza04.172-.176` remains closed and groupby remains behind the
+  five-reject string-factorization blocker; no sixth hash-table variant is
+  permitted.
+- Exact-current strict-remote `hz1` binary
+  `609f6ce2b4e757d242cc048bcc3e83762c5263159f393f40d6bc5f96091d20d5`
+  admitted CSV read 100k at 116.79x, JSON records 10k at 2.06x, and Parquet
+  read 100k at 1.57x. All other rows were directionally faster but high-CV.
+- `uza04.213` adds `json_read_columns`: 10k is a CV-valid 1.911x win
+  (16353.98/31255.99 us, CV 2.93%/1.43%); 100k is directionally 1.944x faster
+  but invalid at FP CV 6.93%.
+- **KEEP coverage; SURFACE/REJECT source work.** Retry 100k only with both CVs
+  below 5%; profile a source lever only if the admitted row becomes a loss.

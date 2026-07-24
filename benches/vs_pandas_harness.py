@@ -221,6 +221,14 @@ def bench_json_read_records_pandas(df: pd.DataFrame, tmp_path: Path) -> list[flo
     )
 
 
+def bench_json_read_columns_pandas(df: pd.DataFrame, tmp_path: Path) -> list[float]:
+    del tmp_path
+    payload = df.to_json(orient="columns")
+    return time_operation(
+        lambda: pd.read_json(StringIO(payload), orient="columns")
+    )
+
+
 def bench_parquet_read_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
     pq_path = tmp_path / "bench.parquet"
     df.to_parquet(pq_path, index=False)
@@ -589,6 +597,7 @@ PANDAS_WORKLOADS = {
         "csv_read": bench_csv_read_pandas,
         "csv_write": bench_csv_write_pandas,
         "json_read_records": bench_json_read_records_pandas,
+        "json_read_columns": bench_json_read_columns_pandas,
         "parquet_read": bench_parquet_read_pandas,
         "parquet_write": bench_parquet_write_pandas,
     },

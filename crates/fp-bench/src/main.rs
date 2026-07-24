@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::{collections::BTreeMap, hint::black_box, time::Instant};
 
 use fp_columnar::{Column, ValidityMask};
-use fp_types::{DType, NullKind, Scalar};
 use fp_frame::{DataFrame, Series, to_datetime};
 use fp_index::{DuplicateKeep, Index, IndexLabel, RangeIndex};
 use fp_join::{JoinType, merge_dataframes_on_with};
+use fp_types::{DType, NullKind, Scalar};
 use mimalloc::MiMalloc;
 
 #[global_allocator]
@@ -2297,6 +2297,13 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             let json = df.to_json("records").expect("to_json setup");
             time_us(|| {
                 let _ = fp_io::read_json_str(&json, fp_io::JsonOrient::Records).expect("read_json");
+            })
+        }
+        ("io", "json_read_columns") => {
+            // pandas: pd.read_json(json, orient="columns"); parse a column-map JSON.
+            let json = df.to_json("columns").expect("to_json setup");
+            time_us(|| {
+                let _ = fp_io::read_json_str(&json, fp_io::JsonOrient::Columns).expect("read_json");
             })
         }
         ("io", "json_write_records") => {
