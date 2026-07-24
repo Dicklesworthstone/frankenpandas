@@ -131,6 +131,16 @@
 - **Tests affected:** `conformance_series::conformance_series_add_duplicate_labels` (passing).
 - **Review date:** 2026-06-01
 
+### DISC-016: RangeIndex set-operation result ordering (union/difference/symmetric_difference FIXED; intersection sort=False divergence ACCEPTED)
+- **Reference:** pandas 2.2.3 `RangeIndex` set operations use different default `sort` semantics: `union`, `difference`, and `symmetric_difference` default to `sort=None` (result is ascending-sorted EXCEPT when an operand is empty or the two operands are value-equal, where the surviving operand passes through unchanged with its order preserved); `intersection` defaults to `sort=False` (result is NOT sorted — it follows pandas' closed-form RangeIndex intersection direction, which for descending operands is typically descending).
+- **Our impl:**
+  - `union` / `difference` / `symmetric_difference`: RESOLVED — previously fp returned these in self/discovery order (matching only where the affine fast paths happened to be ascending), diverging from pandas for both-non-empty operands with descending or non-aligned (interleaving) lattices. fp now normalizes both operands to their ascending equivalent and sorts the interleaving fallbacks, so it matches pandas exactly (empty-operand and value-equal passthrough preserved). The lazy affine / two-affine-run backing is retained for the aligned-ascending common case; only the reordered (descending / interleaved) cases materialize.
+  - `intersection`: ACCEPTED divergence — fp approximates pandas' `sort=False` intersection with self-order membership. This matches pandas for many lattices (incl. the descending cases in the fp-index unit tests) but is NOT guaranteed to match pandas' closed-form intersection direction for every step/offset combination (e.g. `RangeIndex(10,0,-1) ∩ RangeIndex(3,5)` gives fp `[4,3]` vs pandas `[3,4]`). Exact replication of pandas' extended-Euclid intersection direction is deferred.
+- **Impact:** union/difference/symmetric_difference now bit-match pandas across a 263-case randomized differential (descending, non-aligned, empty, value-equal, disjoint, subset). Intersection value SET always matches; only the element ORDER may differ from pandas for some lattices.
+- **Resolution:** union/diff/symdiff FIXED (DustySummit, br-frankenpandas). Intersection ordering ACCEPTED as a documented divergence pending a closed-form direction implementation.
+- **Tests affected:** `range_index_set_ops_match_pandas_2_2_3_differential_dustysummit` (new, data-driven from `testdata_rangeset_pandas_cases.rs`); `range_index_set_ops_use_direct_values_b7nxg`, `range_index_set_ops_closed_form_membership_preserves_order_iatnc`, `range_index_set_ops_return_affine_spans_iatnc` (refreshed to pandas-correct ordering).
+- **Review date:** 2026-07-23
+
 ## Rules
 
 1. Every divergence gets a sequential ID (DISC-NNN)
