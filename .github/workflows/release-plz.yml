@@ -9,10 +9,34 @@ name: release-plz
 # Publish is gated by the CARGO_REGISTRY_TOKEN secret; without it,
 # the release step still tags + pushes GitHub Releases but skips
 # cargo publish. Safe default for pre-0.1.0.
+#
+# TRIGGER SPLIT (do not collapse these back into one `on: push`)
+#
+# The two jobs below have very different branch side effects:
+#
+#   release-plz-release  tags and publishes. Creates NO branch. Safe on push.
+#   release-plz-pr       opens the Release PR. Creates a NEW branch named
+#                        `release-plz-<RFC3339 timestamp>` on every run, and
+#                        ABANDONS the previous one (it supersedes rather than
+#                        force-updates). Nothing ever deletes those.
+#
+# When release-plz-pr ran on every push to main it produced one branch per
+# push. With an agent swarm pushing continuously that meant a new branch every
+# ~4 minutes: 415 `release-plz-*` branches accumulated between 2026-04-23 and
+# 2026-07-24, none of them merged. They were archived and deleted on
+# 2026-07-24.
+#
+# So: release stays on push (it must, to tag what just landed), while the PR
+# job moves to a weekly schedule plus manual dispatch, and prunes its own
+# superseded branches afterwards.
 
 on:
   push:
     branches: [main]
+  schedule:
+    # Mondays 07:00 UTC — refresh the pending-release view once a week.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
 
 permissions:
   pull-requests: write
@@ -26,7 +50,9 @@ jobs:
   release-plz-release:
     name: Release-plz release
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'Dicklesworthstone' }}
+    # Only on push: this job tags/publishes whatever just landed on main.
+    # Running it on the weekly cron would re-tag an unchanged tree.
+    if: ${{ github.repository_owner == 'Dicklesworthstone' && github.event_name == 'push' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -60,7 +86,8 @@ jobs:
   release-plz-pr:
     name: Release-plz PR
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'Dicklesworthstone' }}
+    # NOT on push — see the trigger-split note at the top of this file.
+    if: ${{ github.repository_owner == 'Dicklesworthstone' && github.event_name != 'push' }}
     concurrency:
       group: release-plz-pr-${{ github.ref }}
       cancel-in-progress: false
@@ -93,3 +120,48 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      # release-plz supersedes its own branch on every run rather than
+      # force-updating it, and never deletes the one it walked away from.
+      # `delete_branch_on_merge` does not help: these PRs are superseded
+      # (closed), not merged. Without this step the branches accumulate
+      # forever — that is exactly how 415 of them piled up.
+      #
+      # Deletes every `release-plz-*` branch that no OPEN pull request points
+      # at, so the branch backing the current Release PR always survives.
+      # Runs even if the step above fails, so a broken release-pr run cannot
+      # strand branches.
+      - name: Prune superseded release-plz branches
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Branches backing an open PR — never delete these.
+          gh pr list --repo "$REPO" --state open --limit 200 \
+            --json headRefName --jq '.[].headRefName' | sort -u > keep.txt
+
+          gh api "repos/$REPO/branches" --paginate --jq '.[].name' \
+            | grep -E '^release-plz-' | sort -u > candidates.txt || true
+
+          # Guard: never touch the default branch or master, whatever happens.
+          deleted=0
+          while read -r br; do
+            [ -z "$br" ] && continue
+            case "$br" in main|master) continue ;; esac
+            if grep -qxF "$br" keep.txt; then
+              echo "keep   $br (open PR)"
+              continue
+            fi
+            if gh api -X DELETE "repos/$REPO/git/refs/heads/$br" --silent; then
+              echo "delete $br"
+              deleted=$((deleted + 1))
+            else
+              echo "WARN: could not delete $br" >&2
+            fi
+          done < candidates.txt
+
+          echo "Pruned $deleted superseded release-plz branch(es)."
