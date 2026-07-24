@@ -18635,3 +18635,43 @@ hash, no bounds checks) NOT reachable by any safe-Rust hash-table variant. **The
 is a HARD LEDGERED BLOCKER: closing it needs an upstream faster short-string hasher in hashbrown/rustc-hash or a
 khash-class C dependency — not an agent-level fp-frame lever. Do NOT attempt a 6th factorization variant.** The
 harness coverage (d9a0901ec, fdaf551c6) quantifying the whole groupby lane stands as the deliverable.
+
+### 2026-07-23 DustySummit — to_numpy/values 2D-materialization block-storage wall — LEDGERED BLOCKER (non-incremental architectural gap; eager path already competitive)
+
+Profiled the transpose/block-storage lane's remaining piece — the row-major 2D materializers
+`DataFrame::to_numpy() -> Vec<Vec<f64>>` and `values() -> Vec<Vec<Scalar>>` (`.T` itself is already solved by
+the lazy-transpose-view: `df_transpose_materialize` = 1.7 µs/4.1 µs at 100k/1M via per-output-column
+`OnceLock` slots). Fresh `release-perf/fp-bench` on 100k/1M × 10 f64 (dataframe_ops):
+
+- `df_to_numpy`: **2588 µs (100k) / 31606 µs (1M)** — builds n owned `Vec<f64>` rows (n heap allocations).
+- `df_to_records`: 8245 µs / 61435 µs (worse; `Vec<Vec<Scalar>>`, wider cells).
+
+pandas 2.2.3 same shape:
+- `df.to_numpy()` (default) = **1.2 µs / 0.8 µs — O(1), n-independent**: a homogeneous frame is ONE 2D block,
+  so `to_numpy` returns a zero-copy (non-contiguous) VIEW. This is the block-storage advantage fp lacks.
+- `df.to_numpy(copy=True)` = **227 µs / 54032 µs**; `np.ascontiguousarray(...)` = 505 µs / 56987 µs.
+
+KEY NUANCE (why this is a blocker, not a bounded lever): the 1400–17000× headline is fp's EAGER owned
+materialization vs pandas' LAZY view — a CONTRACT difference, not an fp deficiency. Against the fair comparison
+(pandas EAGER copy), fp's 31 ms at 1M is FASTER than pandas' 54 ms `copy=True`, and ~11× slower only at 100k
+(2.6 ms vs 227 µs). fp's eager `to_numpy` is already in pandas' eager-copy ballpark. The `Vec<Vec<f64>>`
+n-allocation shape is the only within-contract weakness, and it cannot be fixed without changing the owned
+return type (a contiguous flat `Vec<f64>` + shape would be one alloc, but that is a new API, not the benched
+method).
+
+Matching pandas' O(1) `to_numpy` requires (a) block-backed homogeneous storage as a primary/optional DataFrame
+representation AND (b) a view-returning API — a large, non-incremental change beyond the bounded-lever mandate,
+whose only beneficiary is zero-copy numpy/BLAS interop (high value in the Python/ML ecosystem, LOW value for a
+Rust library where callers hold typed columns directly). The existing `PrototypeF64Block` (fp-bench,
+`lazy-transpose-prototype`) already validates that a contiguous block gives O(1) transpose/2D views.
+
+**VERDICT: LEDGERED BLOCKER.** The transpose/block-storage wall's addressable, incremental win was captured by
+the lazy-transpose-view (`.T` = 554×, per-column lazy slots, typed materialization, default-flipped). The
+remaining to_numpy/values O(1)-view piece is a non-incremental block-storage representation change with
+marginal value for fp's use case; fp's eager 2D materialization is already competitive with pandas' eager copy.
+No bounded fp-frame lever exists here. **Retry predicate:** revisit ONLY if (1) a concrete zero-copy
+numpy/Arrow-interop requirement lands that needs O(1) `to_numpy`, or (2) an operator greenlights the
+block-backed-storage representation as a multi-commit architectural project (then start from the validated
+`PrototypeF64Block`). Do NOT attempt to "optimize" `to_numpy`'s `Vec<Vec<f64>>` — it is within-contract
+competitive and allocation-bound; parallelizing n small allocs is allocator-contention-bound and would not
+change the strategic picture.
