@@ -27,6 +27,14 @@ tracing = ["dep:tracing"]
 # docs/NEGATIVE_EVIDENCE.md 2026-07-10 cod_fp rows). Opt out via
 # default-features = false.
 lazy-transpose-view = []
+# block-storage: O(1) `.values`/`.to_numpy` view backed by a single
+# column-major `Arc<[f64]>` block, matching pandas' zero-copy homogeneous-float
+# `.values` (which is F-contiguous). Default-OFF: this is an architectural
+# storage path wired through construction over several commits, so the default
+# build/tests are unaffected until it is complete. Implies `lazy-transpose-view`
+# because it adds a variant to the `LazyDataFrameColumns` column store, which
+# only exists under that feature.
+block-storage = ["lazy-transpose-view"]
 
 [dependencies]
 chrono = { workspace = true }
