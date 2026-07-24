@@ -422,6 +422,61 @@ def bench_groupby_unique_i64_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: values.groupby(df["key"]).unique())
 
 
+def bench_groupby_multi_str_pandas(df: pd.DataFrame) -> list[float]:
+    # One grouper per timed iteration, reused for three reductions, matching
+    # fp-bench's cached-within-call SeriesGroupBy shape.
+    return _groupby_str_op_pandas(df, lambda g: (g.mean(), g.std(), g.var()))
+
+
+def bench_groupby_agg3_str_pandas(df: pd.DataFrame) -> list[float]:
+    return _groupby_str_op_pandas(df, lambda g: g.agg(["mean", "std", "max"]))
+
+
+def bench_df_groupby_str_sum_pandas(df: pd.DataFrame) -> list[float]:
+    n = len(df)
+    gdf = pd.DataFrame(
+        {
+            "key": pd.Series(np.arange(n) % 1000).map(lambda v: f"g{v:04}"),
+            "v0": df["col_0"],
+            "v1": df["col_1"],
+            "v2": df["col_2"],
+        }
+    )
+    return time_operation(lambda: gdf.groupby("key")[["v0", "v1", "v2"]].sum())
+
+
+def bench_df_groupby_2key_sum_pandas(df: pd.DataFrame) -> list[float]:
+    n = len(df)
+    rows = np.arange(n)
+    value_cols = ["v0", "v1", "v2"]
+    gdf = pd.DataFrame(
+        {
+            "k1": rows % 100,
+            "k2": (rows // 100) % 50,
+            "v0": df["col_0"],
+            "v1": df["col_1"],
+            "v2": df["col_2"],
+        }
+    )
+    return time_operation(lambda: gdf.groupby(["k1", "k2"])[value_cols].sum())
+
+
+def bench_df_groupby_2strkey_sum_pandas(df: pd.DataFrame) -> list[float]:
+    n = len(df)
+    rows = np.arange(n)
+    value_cols = ["v0", "v1", "v2"]
+    gdf = pd.DataFrame(
+        {
+            "k1": pd.Series(rows % 100).map(lambda v: f"a{v:03}"),
+            "k2": pd.Series((rows // 100) % 50).map(lambda v: f"b{v:03}"),
+            "v0": df["col_0"],
+            "v1": df["col_1"],
+            "v2": df["col_2"],
+        }
+    )
+    return time_operation(lambda: gdf.groupby(["k1", "k2"])[value_cols].sum())
+
+
 def bench_df_groupby_int_var_pandas(df: pd.DataFrame) -> list[float]:
     # Int key (i%1000, fast dense-histogram factorization) + 3 f64 value cols,
     # df.groupby(key).var() — matches fp-bench df_groupby_int_var. A loss here
@@ -698,6 +753,11 @@ PANDAS_WORKLOADS = {
         "groupby_quantile_str": bench_groupby_quantile_str_pandas,
         "groupby_unique_str": bench_groupby_unique_str_pandas,
         "groupby_unique_i64": bench_groupby_unique_i64_pandas,
+        "groupby_multi_str": bench_groupby_multi_str_pandas,
+        "groupby_agg3_str": bench_groupby_agg3_str_pandas,
+        "df_groupby_str_sum": bench_df_groupby_str_sum_pandas,
+        "df_groupby_2key_sum": bench_df_groupby_2key_sum_pandas,
+        "df_groupby_2strkey_sum": bench_df_groupby_2strkey_sum_pandas,
         "df_groupby_int_var": bench_df_groupby_int_var_pandas,
         "df_groupby_int_mean": bench_df_groupby_int_mean_pandas,
         "groupby_widekey_sum": bench_groupby_widekey_sum_pandas,
