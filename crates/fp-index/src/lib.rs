@@ -12867,15 +12867,26 @@ impl RangeIndex {
     }
 
     /// Values present in both ranges, matching
-    /// `pd.RangeIndex.intersection(other)`. Returns flat Index because
-    /// the result may not be a contiguous range. NB: pandas uses `sort=False`
-    /// for intersection (unlike union/difference/symmetric_difference, which
-    /// default to `sort=None`), so the result is NOT ascending-sorted — it
-    /// follows pandas' RangeIndex intersection direction. fp approximates that
-    /// direction with self-order; exact-match with pandas' closed-form
-    /// intersection remains a documented divergence.
+    /// `pd.RangeIndex.intersection(other)`. Returns flat Index because the
+    /// result may not be a contiguous range. NB: pandas uses `sort=False` for
+    /// intersection (unlike union/difference/symmetric_difference, which default
+    /// to `sort=None`). Its result is ascending EXCEPT when BOTH operands are
+    /// descending (`step < 0`), where it is descending. (Verified against pandas
+    /// 2.2.3 over 150k random pairs.) The self-order scan below already yields
+    /// descending order over a descending range, so both-descending goes through
+    /// the operands as-is; every other case is routed through ascending-
+    /// normalized operands so the fast paths and fallback produce ascending.
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Index {
+        if self.step < 0 && other.step < 0 {
+            self.intersection_selforder(other)
+        } else {
+            self.ascending_normalized()
+                .intersection_selforder(&other.ascending_normalized())
+        }
+    }
+
+    fn intersection_selforder(&self, other: &Self) -> Index {
         let shared_name = self.name().filter(|_| self.name() == other.name());
         if let Some(overlap) = self.same_lattice_overlap_positions(other) {
             let (first, len) = match overlap {
@@ -28913,20 +28924,15 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn range_index_set_ops_match_pandas_2_2_3_differential_dustysummit() {
         use super::RangeIndex;
-        // Data-driven differential vs pandas 2.2.3 for union / difference /
-        // symmetric_difference (all default sort=None). pandas returns these
-        // ASCENDING-sorted EXCEPT when an operand is empty or the two operands
-        // are value-equal, where the surviving operand passes through unchanged
-        // (order preserved). Cases cover descending operands, non-aligned step
-        // lattices, empty operands, value-equal operands, disjoint / overlapping
-        // / subset overlaps. Expected values were computed by real pandas; see
+        // Data-driven differential vs pandas 2.2.3 for all four set operations.
+        // intersection uses sort=False (result ascending EXCEPT both operands
+        // descending -> descending); union/difference/symmetric_difference use
+        // sort=None (ascending EXCEPT empty-operand or value-equal passthrough).
+        // Cases cover descending operands, non-aligned step lattices, empty
+        // operands, value-equal operands, disjoint / overlapping / subset
+        // overlaps. Expected values were computed by real pandas; see
         // testdata_rangeset_pandas_cases.rs.
-        //
-        // NB: intersection is intentionally EXCLUDED — pandas uses sort=False
-        // for intersection, so its result is not ascending-sorted and follows
-        // pandas' closed-form RangeIndex intersection direction (a documented
-        // divergence; fp approximates it with self-order).
-        let cases: &[((i64, i64, i64), (i64, i64, i64), &[i64], &[i64], &[i64])] =
+        let cases: &[((i64, i64, i64), (i64, i64, i64), &[i64], &[i64], &[i64], &[i64])] =
             &include!("testdata_rangeset_pandas_cases.rs");
 
         let vals = |idx: &super::Index| -> Vec<i64> {
@@ -28941,11 +28947,15 @@ mod tests {
         let r = |(s, e, st): (i64, i64, i64)| RangeIndex::new(s, e, st).unwrap();
 
         let mut fails: Vec<String> = Vec::new();
-        for (i, (a, b, want_u, want_d, want_s)) in cases.iter().enumerate() {
+        for (i, (a, b, want_i, want_u, want_d, want_s)) in cases.iter().enumerate() {
             let (ra, rb) = (r(*a), r(*b));
+            let got_i = vals(&ra.intersection(&rb));
             let got_u = vals(&ra.union(&rb));
             let got_d = vals(&ra.difference(&rb));
             let got_s = vals(&ra.symmetric_difference(&rb));
+            if got_i != *want_i {
+                fails.push(format!("#{i} inter {a:?}∩{b:?}: got {got_i:?} want {want_i:?}"));
+            }
             if got_u != *want_u {
                 fails.push(format!("#{i} union {a:?}∪{b:?}: got {got_u:?} want {want_u:?}"));
             }
