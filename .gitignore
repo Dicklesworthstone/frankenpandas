@@ -150,6 +150,8 @@ crates/*/target/
 .rch-target/
 .rch-target-*/
 .rch-targets-*/
+# The shared pool has no suffix at all, so the three patterns above miss it.
+.rch-targets/
 .rch-deploy-root/
 
 # cargo-fuzz output
