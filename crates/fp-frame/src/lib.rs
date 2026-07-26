@@ -71408,7 +71408,7 @@ impl DataFrame {
     /// independent rows, so variance/std/sem remain bit-identical.
     fn reduce_rows_moment_f64<F>(&self, finish: F, name: &str) -> Result<Option<Series>, FrameError>
     where
-        F: Fn(f64, f64) -> f64,
+        F: Fn(f64, f64) -> f64 + Sync,
     {
         let numeric_cols = self.numeric_row_reduction_columns();
         if numeric_cols.is_empty() {
@@ -71432,36 +71432,68 @@ impl DataFrame {
         const TILE: usize = 4096;
         let count = f64_cols.len() as f64;
         let mut moments = vec![0.0_f64; self.len()];
-        let mut means = vec![0.0_f64; TILE.min(self.len())];
-        let mut start = 0;
-        while start < self.len() {
-            let end = (start + TILE).min(self.len());
-            let tile_len = end - start;
-            let tile_means = &mut means[..tile_len];
-            tile_means.fill(0.0);
-            for column in &f64_cols {
-                for (mean, value) in tile_means.iter_mut().zip(&column[start..end]) {
-                    *mean += *value;
+        let reduce_range = |global_start: usize, output: &mut [f64]| {
+            let mut means = vec![0.0_f64; TILE.min(output.len())];
+            let mut local_start = 0;
+            while local_start < output.len() {
+                let local_end = (local_start + TILE).min(output.len());
+                let global_end = global_start + local_end;
+                let tile_means = &mut means[..local_end - local_start];
+                tile_means.fill(0.0);
+                for column in &f64_cols {
+                    for (mean, value) in tile_means
+                        .iter_mut()
+                        .zip(&column[global_start + local_start..global_end])
+                    {
+                        *mean += *value;
+                    }
                 }
-            }
-            for mean in tile_means.iter_mut() {
-                *mean /= count;
-            }
+                for mean in tile_means.iter_mut() {
+                    *mean /= count;
+                }
 
-            let tile_moments = &mut moments[start..end];
-            for column in &f64_cols {
-                for ((m2, mean), value) in tile_moments
-                    .iter_mut()
-                    .zip(tile_means.iter())
-                    .zip(&column[start..end])
-                {
-                    *m2 += (*value - *mean).powi(2);
+                let tile_moments = &mut output[local_start..local_end];
+                for column in &f64_cols {
+                    for ((m2, mean), value) in tile_moments
+                        .iter_mut()
+                        .zip(tile_means.iter())
+                        .zip(&column[global_start + local_start..global_end])
+                    {
+                        *m2 += (*value - *mean).powi(2);
+                    }
                 }
+                for moment in tile_moments {
+                    *moment = finish(*moment, count);
+                }
+                local_start = local_end;
             }
-            for moment in tile_moments {
-                *moment = finish(*moment, count);
-            }
-            start = end;
+        };
+
+        // Rows are independent, while each worker retains the exact serial
+        // left-to-right column folds within its disjoint output range. Moments
+        // are light enough that thread launch only pays on large frames.
+        const PAR_MIN_ROWS: usize = 200_000;
+        const PAR_MIN_PER_WORKER: usize = 65_536;
+        let workers = if self.len() >= PAR_MIN_ROWS {
+            std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(16)
+                .min(self.len() / PAR_MIN_PER_WORKER)
+                .max(1)
+        } else {
+            1
+        };
+        if workers >= 2 {
+            let chunk = self.len().div_ceil(workers);
+            let reduce_range = &reduce_range;
+            std::thread::scope(|scope| {
+                for (worker, output) in moments.chunks_mut(chunk).enumerate() {
+                    let global_start = worker * chunk;
+                    scope.spawn(move || reduce_range(global_start, output));
+                }
+            });
+        } else {
+            reduce_range(0, &mut moments);
         }
 
         let index = self.index.clone();
@@ -135172,8 +135204,8 @@ mod tests {
     }
 
     #[test]
-    fn df_axis1_fused_tile_moments_preserve_exact_float_bits() {
-        const ROWS: usize = 4097;
+    fn df_axis1_parallel_fused_tile_moments_preserve_exact_float_bits() {
+        const ROWS: usize = 200_003;
         let a: Vec<f64> = (0..ROWS)
             .map(|row| (row as f64).mul_add(0.25, -17.0))
             .collect();
@@ -181968,6 +182000,88 @@ mod axis1_moment_void_audit_cod_fp {
         Series::new("var", df.index.clone(), Column::from_f64_values(variances))
     }
 
+    /// Profile-directed successor to the shipped fused-tile path: each worker
+    /// owns a disjoint contiguous row range and retains the identical
+    /// left-to-right column folds within every row.
+    #[inline(never)]
+    fn parallel_fused_tile_var_candidate_cod_fp(df: &DataFrame) -> Result<Series, FrameError> {
+        let columns: Vec<&[f64]> = df
+            .column_order
+            .iter()
+            .map(|name| {
+                df.columns
+                    .get(name)
+                    .expect("column order entry")
+                    .as_f64_slice()
+                    .expect("all-valid Float64 fixture")
+            })
+            .collect();
+        let count = columns.len() as f64;
+        let mut variances = vec![0.0_f64; df.len()];
+        let reduce_range = |global_start: usize, output: &mut [f64]| {
+            let mut means = vec![0.0_f64; TILE.min(output.len())];
+            let mut local_start = 0;
+            while local_start < output.len() {
+                let local_end = (local_start + TILE).min(output.len());
+                let global_end = global_start + local_end;
+                let tile_means = &mut means[..local_end - local_start];
+                tile_means.fill(0.0);
+                for column in &columns {
+                    for (sum, value) in tile_means
+                        .iter_mut()
+                        .zip(&column[global_start + local_start..global_end])
+                    {
+                        *sum += *value;
+                    }
+                }
+                for mean in tile_means.iter_mut() {
+                    *mean /= count;
+                }
+
+                let tile_variances = &mut output[local_start..local_end];
+                for column in &columns {
+                    for ((m2, mean), value) in tile_variances
+                        .iter_mut()
+                        .zip(tile_means.iter())
+                        .zip(&column[global_start + local_start..global_end])
+                    {
+                        *m2 += (*value - *mean).powi(2);
+                    }
+                }
+                for variance in tile_variances {
+                    *variance /= count - 1.0;
+                }
+                local_start = local_end;
+            }
+        };
+
+        const PAR_MIN_ROWS: usize = 200_000;
+        const PAR_MIN_PER_WORKER: usize = 65_536;
+        let workers = if df.len() >= PAR_MIN_ROWS {
+            std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(16)
+                .min(df.len() / PAR_MIN_PER_WORKER)
+                .max(1)
+        } else {
+            1
+        };
+        if workers >= 2 {
+            let chunk = df.len().div_ceil(workers);
+            let reduce_range = &reduce_range;
+            std::thread::scope(|scope| {
+                for (worker, output) in variances.chunks_mut(chunk).enumerate() {
+                    let global_start = worker * chunk;
+                    scope.spawn(move || reduce_range(global_start, output));
+                }
+            });
+        } else {
+            reduce_range(0, &mut variances);
+        }
+
+        Series::new("var", df.index.clone(), Column::from_f64_values(variances))
+    }
+
     fn observe(series: &Series) -> u64 {
         let values = series
             .column()
@@ -182162,6 +182276,77 @@ mod axis1_moment_void_audit_cod_fp {
             &public_null,
             &candidate_ship,
         );
+
+        let self_pct = profile_current_test(TEST_NAME, CHILD_ENV, SENTINEL);
+        println!("CANDIDATE_SELF_PCT {self_pct:.6}");
+        assert!(
+            self_pct >= 0.1,
+            "candidate self-time must be at least 0.1%; got {self_pct:.6}%"
+        );
+    }
+
+    #[test]
+    #[ignore = "profile-attributed row-parallel axis1 frontier; run explicitly"]
+    fn audit_parallel_fused_tile_var_frontier_cod_fp() {
+        const TEST_NAME: &str =
+            "axis1_moment_void_audit_cod_fp::audit_parallel_fused_tile_var_frontier_cod_fp";
+        const CHILD_ENV: &str = "FP_AXIS1_PARALLEL_TILE_PROFILE_CHILD";
+        const SENTINEL: &str = "parallel_fused_tile_var_candidate_cod_fp";
+
+        let df = build_frame();
+        let public = public_var_axis1(&df).expect("public parity");
+        let orig = fused_tile_var_candidate_cod_fp(&df).expect("serial fused-tile parity");
+        let candidate =
+            parallel_fused_tile_var_candidate_cod_fp(&df).expect("parallel candidate parity");
+        let public_values = public.column().as_f64_slice().expect("public f64");
+        let orig_values = orig.column().as_f64_slice().expect("serial f64");
+        let candidate_values = candidate.column().as_f64_slice().expect("candidate f64");
+        assert!(
+            public_values
+                .iter()
+                .zip(orig_values)
+                .zip(candidate_values)
+                .all(|((public, orig), candidate)| {
+                    public.to_bits() == orig.to_bits() && public.to_bits() == candidate.to_bits()
+                }),
+            "public row-parallel fused tiles must preserve exact serial float bits"
+        );
+        assert_eq!(observe(&orig), observe(&candidate), "observable checksum");
+        drop((public, orig, candidate));
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            for _ in 0..PROFILE_LOOPS {
+                black_box(
+                    parallel_fused_tile_var_candidate_cod_fp(black_box(&df))
+                        .expect("profile parallel candidate"),
+                );
+            }
+            return;
+        }
+
+        let (orig, null, candidate) = run_pairs(
+            &df,
+            fused_tile_var_candidate_cod_fp,
+            parallel_fused_tile_var_candidate_cod_fp,
+        );
+        println!("AUDIT axis1 row-parallel fused tiles; rows={ROWS}; cols={COLS}");
+        println!("WORKER {}", worker_hostname());
+        println!("BINARY_SHA256 {}", binary_sha256());
+        println!("SERIAL_FUSED_TILE_MS {orig:?}");
+        println!("PARALLEL_FUSED_TILE_MS {candidate:?}");
+        println!(
+            "SERIAL median={:.6} p95={:.6} cv_pct={:.4}",
+            median(&orig),
+            p95(&orig),
+            cv_pct(&orig)
+        );
+        println!(
+            "PARALLEL median={:.6} p95={:.6} cv_pct={:.4}",
+            median(&candidate),
+            p95(&candidate),
+            cv_pct(&candidate)
+        );
+        report_contract("axis1_parallel_fused_tile", &orig, &null, &candidate);
 
         let self_pct = profile_current_test(TEST_NAME, CHILD_ENV, SENTINEL);
         println!("CANDIDATE_SELF_PCT {self_pct:.6}");

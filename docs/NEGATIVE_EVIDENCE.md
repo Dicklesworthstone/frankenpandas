@@ -19253,3 +19253,65 @@ rustfmt passes `fp-bench` and the campaign hunks match rustfmt while the large l
 whole-file drift. Bounded fp-frame UBS reproduces the known 180-second inventory stall documented in
 `artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md`; other focused UBS findings are pre-existing or
 false positives outside the touched hunks.
+
+### 2026-07-25 CrimsonGate — exact-order row-parallel axis=1 moments KEEP 1.955356× (br-frankenpandas-bybyw)
+
+This is the next profile-attributed frontier lever after the tile-local axis=1 moment keep above.
+The required pre-proposal ledger grep found no earlier attempt to parallelize the moment family by
+disjoint row ranges. Existing axis=1 rank/arg-extrema evidence establishes the relevant semantic
+boundary: rows may execute independently provided every row retains its exact left-to-right column
+fold. This lever does exactly that; it is not an output-constructor change or a string-groupby hash
+variant.
+
+**Lever.** For all-valid Float64 `var(axis=1)`, `std(axis=1)`, and `sem(axis=1)`, frames with at
+least 200,000 rows split the output into scoped, disjoint row chunks. Each worker retains the exact
+serial mean fold, M2 fold, and finish operation for every row. Thread count is capped at 16 and at
+one worker per 65,536 rows; smaller inputs retain the serial tile-local path. Nullable, NaN-bearing,
+Int64, mixed, Bool, and generic inputs retain their previous fallbacks.
+
+Two strict-remote invocations separate the evidence cleanly:
+
+| proof | worker / running test ELF SHA-256 | serial median | parallel median | paired serial÷parallel | A/A median 95% CI | verdict |
+|---|---|---:|---:|---:|---:|---|
+| pre-ship candidate + symbol profile | `hetzner1` / `d896354be0f720a1c3a41084a48499ab9a31a34e7aae42c3f2b78d2942c5166e` | 11.685248 ms | 5.709939 ms | **2.012495×** | `[0.970443, 1.023018]` | **KEEP** |
+| final production-tree timed gate | `hetzner2` / `ec6e77d7a97d147682b10fb35268ca64ff77cfaaee9a89e518a64070aec55bdd` | 10.267212 ms | 5.389046 ms | **1.955356×** | `[0.939517, 1.009987]` | **KEEP** |
+
+Both invocations used 25 order-alternating `SERIAL / identical SERIAL null / PARALLEL` triplets in
+one process and decided only on the bootstrap median-CI gate. The pre-ship serial/parallel CVs were
+9.52% / 47.48%; the final serial/parallel CVs were 29.44% / 19.82%. Those high CVs are provenance,
+not votes: the paired effect clears the required log margin in both invocations. This is a direct
+demonstration of why the campaign forbids CV gating.
+
+The pre-ship profile attributed **29.77% self-time** to
+`parallel_fused_tile_var_candidate_cod_fp::{closure#1}`; the candidate therefore reached the intended
+primitive. The final `hetzner2` invocation emitted its complete timed KEEP and then exited 101 only
+when the post-timing attribution step discovered that `perf` was absent on that worker. That is an
+infrastructure failure after the timed path, not a code or timing REJECT. A fail-closed pinned retry
+to the already-profiled `hz1` worker was refused before execution because that worker was
+disk-critical. No local fallback and no third measurement were used.
+
+Final production-tree raw milliseconds:
+
+- serial:
+  `[9.835359, 10.102949, 9.96938, 18.845243, 11.285686, 10.310991, 10.10003, 18.388321, 12.15072, 17.973409, 12.174851, 10.189401, 10.11426, 18.01471, 11.251846, 10.237871, 10.244101, 10.22769, 10.267212, 10.15381, 10.615723, 9.98571, 10.20856, 20.520892, 19.934369]`
+- identical-serial null:
+  `[9.953969, 10.706743, 9.946419, 21.713238, 10.02578, 13.328076, 10.000159, 21.266275, 10.09483, 19.816418, 10.082769, 10.897743, 10.05957, 19.603527, 10.231781, 10.859053, 10.201941, 10.842903, 10.24289, 10.807484, 10.15338, 10.695312, 10.312981, 20.003908, 14.838113]`
+- parallel:
+  `[5.141856, 6.01865, 5.95316, 6.459391, 6.394172, 4.771963, 7.459987, 4.883565, 5.389046, 4.578253, 6.226411, 5.547568, 5.230285, 4.668983, 5.008794, 4.805023, 4.997814, 5.9079, 5.261406, 9.859739, 7.434816, 5.296927, 4.995765, 5.490228, 5.395887]`
+
+**Correctness and gates.** Before each timing run, all 1,000,000 public, serial-reference, and
+parallel variance outputs matched bit-for-bit. A production regression test covers 200,003 rows
+(parallel threshold, worker-chunk tails, and the 4,096-row tile boundary) and proves exact bits for
+all three public APIs. Strict-remote workspace check passed; touched-package clippy passed; the
+`fp-frame` library suite passed 3,186 / 0 with 24 ignored; and `fp-conformance` passed 1,596 / 0.
+`git diff --check` passed. Bounded fp-frame UBS reproduced the known 180-second inventory stall
+documented in `artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md`; no focused finding was emitted.
+
+**Concrete retry predicate.** Do not measure this lane again while FrankenPandas is in BUILD/FIX
+allocation. Once a Lane-M window is explicitly granted, re-open the same row-parallel primitive only
+if (a) a current profile still attributes more than 20% self-time to its worker closure and (b) a new
+row/column shape either shows a decisive regression outside its same-invocation A/A median CI or
+justifies a different threshold. Any successor attacking `Column::from_f64_values` or page
+initialization is a separate lever and requires that component above 5% self. A worker used for
+symbol attribution must first prove `perf` is installed; missing `perf` is an infrastructure result,
+never a performance verdict.
