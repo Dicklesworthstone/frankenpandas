@@ -6,6 +6,31 @@
 > (br-frankenpandas-fgpx3 dedup hashing, -2a6ln gather, -uxkvh dense sort,
 > -sfysu dense gather). Numbers re-measured per br-frankenpandas-a5dwk.
 
+## 2026-07-26 Lane M Median-CI Re-adjudication — GroupBy
+
+This section supersedes only the “16 high-CV diagnostics” admission gap in the 2026-06-19 Cod-a
+section. All 16 were rerun on strict-remote worker `vmi1149989` under schema v4: executing-ELF
+SHA-256, per-arm A/A null in the same invocation, and bootstrap median-CI gating. CV had no vote.
+
+| re-adjudicated rows | `FASTER` | `NULL-UNDECIDABLE` | rejected on CV | decidable geomean vs pandas |
+|---:|---:|---:|---:|---:|
+| 16 / 16 | **14** | 2 | **0** | **5.7333x faster** |
+
+The two honest nulls are `groupby_agg_median_utf8_float64` at 1M with NaN every 37th and the first
+independent `groupby_agg_std_utf8_float64` 2M repeat. The second exact `std` repeat is decisively
+3.044x faster, so the noisy repeat is not a rejection. The 14 decisive ratios span
+1.946x–19.486x. This closes the old high-CV queue; the two null rows retain batching-based retry
+predicates.
+
+Canonical evidence:
+
+- `artifacts/bench/cod_lane_m_gauntlet_original_100k_median_ci_20260726.json`
+- `artifacts/bench/cod_lane_m_gauntlet_original_1m_median_ci_20260726.json`
+- `artifacts/bench/cod_lane_m_gauntlet_nunique_median_ci_20260726.json`
+- `artifacts/bench/cod_lane_m_gauntlet_median_median_ci_20260726.json`
+- `artifacts/bench/cod_lane_m_gauntlet_std_repeat_a_median_ci_20260726.json`
+- `artifacts/bench/cod_lane_m_gauntlet_std_repeat_b_median_ci_20260726.json`
+
 ## 2026-06-19 Cod-a Gauntlet Refresh - GroupBy
 
 Scope: `br-frankenpandas-2qb1i`, latest cod-a clone-free `fp-groupby`
@@ -33,6 +58,10 @@ wins for `br-frankenpandas-uza04.202`. The category is still not fully
 validated because 11 of the original 16 harness rows were rejected by the
 high-CV filter and focused diagnostics still include dropped rows. Overall
 release readiness remains **PARTIAL / NOT FULLY VALIDATED**.
+
+**2026-07-26 correction:** the 16 high-CV diagnostics above have now all been rerun under the
+median-CI contract. Fourteen are `FASTER`, two are `NULL-UNDECIDABLE`, and none is rejected on CV.
+Use the Lane M section above for current admission status.
 
 ## 2026-06-20 Cod-b Gauntlet Refresh - RangeIndex Set Ops
 

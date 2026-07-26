@@ -14,7 +14,14 @@
 
 #[cfg(feature = "lazy-transpose-prototype")]
 use std::sync::Arc;
-use std::{collections::BTreeMap, fmt::Write as _, hint::black_box, time::Instant};
+use std::{
+    collections::BTreeMap,
+    fmt::Write as _,
+    hint::black_box,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::Instant,
+};
 
 use fp_columnar::{Column, ValidityMask};
 use fp_frame::{DataFrame, Series, to_datetime};
@@ -57,6 +64,110 @@ fn self_identity() -> String {
     format!("{hex} ({} bytes) {}", bytes.len(), path.display())
 }
 
+fn same_worker_python(target_dir: &Path, harness_script: &Path) -> (PathBuf, PathBuf) {
+    let python = PathBuf::from("python3");
+    let site_packages = target_dir.join("lane-m-python-site");
+    let pinned_packages = [
+        ["numpy", "2.4.3"].join("=="),
+        ["pandas", "2.2.3"].join("=="),
+    ];
+    let import_is_ready = Command::new(&python)
+        .arg(harness_script)
+        .arg("--help")
+        .env("PYTHONNOUSERSITE", "1")
+        .env("PYTHONPATH", &site_packages)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if import_is_ready {
+        return (python, site_packages);
+    }
+
+    let pip_status = Command::new(&python)
+        .args([
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--target",
+        ])
+        .arg(&site_packages)
+        .args(&pinned_packages)
+        .status()
+        .is_ok_and(|status| status.success());
+    let install_status = pip_status
+        || ["uv", "/root/.local/bin/uv", "/root/.cargo/bin/uv"]
+            .iter()
+            .any(|uv| {
+                Command::new(uv)
+                    .args(["pip", "install", "--python", "python3", "--target"])
+                    .arg(&site_packages)
+                    .args(&pinned_packages)
+                    .status()
+                    .is_ok_and(|status| status.success())
+            });
+    assert!(
+        install_status,
+        "failed to install pinned same-worker benchmark dependencies"
+    );
+    let import_status = Command::new(&python)
+        .arg(harness_script)
+        .arg("--help")
+        .env("PYTHONNOUSERSITE", "1")
+        .env("PYTHONPATH", &site_packages)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("verify same-worker benchmark dependencies");
+    assert!(
+        import_status.success(),
+        "pinned same-worker benchmark dependencies are not importable"
+    );
+    (python, site_packages)
+}
+
+/// Run the Python half of the harness on the same host as this ELF.
+///
+/// RCH accepts `cargo run` as a remote compilation command but deliberately
+/// refuses arbitrary remote Python commands. This bridge lets a strict-remote
+/// invocation keep pandas, the Rust child process, and both A/A controls on
+/// one worker without copying a target directory back to the coordinator.
+fn run_remote_python_harness(args: &[String]) -> Option<i32> {
+    let marker = args
+        .iter()
+        .position(|argument| argument == "--remote-python-harness")?;
+    let executable = std::env::current_exe().expect("resolve running fp-bench executable");
+    let profile_dir = executable
+        .parent()
+        .expect("fp-bench executable has a profile directory");
+    let target_dir = profile_dir
+        .parent()
+        .expect("fp-bench profile has a target directory");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../benches/vs_pandas_harness.py")
+        .canonicalize()
+        .expect("resolve vs_pandas_harness.py");
+    let (python, site_packages) = same_worker_python(target_dir, &script);
+    for harness_args in args[marker + 1..]
+        .split(|argument| argument == "--next-python-harness")
+        .filter(|segment| !segment.is_empty())
+    {
+        let status = Command::new(&python)
+            .arg(&script)
+            .args(harness_args)
+            .env("CARGO_TARGET_DIR", target_dir)
+            .env("PYTHONNOUSERSITE", "1")
+            .env("PYTHONPATH", &site_packages)
+            .status()
+            .expect("run same-worker Python benchmark harness");
+        if !status.success() {
+            return Some(status.code().unwrap_or(1));
+        }
+    }
+    Some(0)
+}
+
 /// splitmix64 — deterministic, seed-stable uniform stream. We only need a
 /// fair-distribution data set for TIMING (not bit-identity with numpy's PCG64),
 /// so a cheap reproducible generator suffices.
@@ -87,6 +198,7 @@ fn size_rows_cols(size: &str) -> (usize, usize) {
         "10k" => (10_000, 10),
         "100k" => (100_000, 10),
         "1M" => (1_000_000, 10),
+        "2M" => (2_000_000, 10),
         _ => (100_000, 10),
     }
 }
@@ -185,6 +297,20 @@ fn build_frame(rows: usize, cols: usize, dtype: &str) -> (DataFrame, Vec<Vec<f64
                 let mut data = gen_f64_column(&mut rng, rows, "float64");
                 for (i, value) in data.iter_mut().enumerate() {
                     if i % 7 == 0 {
+                        *value = f64::NAN;
+                    }
+                }
+                raw.push(data.clone());
+                columns.insert(name.clone(), Column::from_f64_values(data));
+            }
+            // Historical Cod-a GroupBy gauntlet shape: deterministic missing
+            // value every 37th row. Kept as an explicit dtype so resurrection
+            // runs can reproduce that nullable workload under the v4
+            // A/A + median-CI contract.
+            "float64_nan37" => {
+                let mut data = gen_f64_column(&mut rng, rows, "float64");
+                for (i, value) in data.iter_mut().enumerate() {
+                    if i % 37 == 0 {
                         *value = f64::NAN;
                     }
                 }
@@ -2699,6 +2825,9 @@ fn main() {
     println!("bench_elf_sha256={}", self_identity());
 
     let args: Vec<String> = std::env::args().collect();
+    if let Some(status) = run_remote_python_harness(&args) {
+        std::process::exit(status);
+    }
     let category = arg(&args, "--category").unwrap_or("dataframe_ops");
     let workload = arg(&args, "--workload").unwrap_or("sort_single");
     let size = arg(&args, "--size").unwrap_or("100k");

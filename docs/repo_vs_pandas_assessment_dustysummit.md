@@ -27,30 +27,25 @@ bounded lever).
 2. **str-key groupby factorization** — hashbrown ~10.5 ns/row vs khash ~2.5 ns/row.
    cod's 5 rejected hashtable variants + my ledger: "do NOT attempt a 6th." Terminal.
 
-3. **df_dot GEMM** — ISA/kernel floor, NOT threading. **Fair single-thread
-   comparison** (2026-07-24): pandas 316×316 `df.dot` single-thread (OMP=1) = 1229µs
-   vs fp single-thread 5426µs = **4.4x**, purely the per-core ISA gap (fp SSE2 vs
-   pandas AVX2/FMA + OpenBLAS blocking). For 316×316, pandas all-cores (1109µs) ≈
+3. **df_dot GEMM** — microkernel-quality floor, NOT threading. **Fair single-thread
+   comparison**: pandas 316×316 `df.dot` single-thread (OMP=1) = 1229µs.
+   A 2026-07-26 strict-remote, same-worker whole-binary A/B measured fp default at
+   5239.1µs and `-C target-cpu=x86-64-v3` at 5071.3µs = **1.0327x**, bootstrap
+   95% CI `[1.0240, 1.0376]` outside the ±0.24% A/A floor. The two executing ELFs
+   self-reported different SHA-256 values and identical numeric checksums, proving
+   that the flag changed codegen without changing output. The v3 arm is still
+   **4.1x slower** than pandas. For 316×316, pandas all-cores (1109µs) ≈
    single-thread (1229µs) — too small for BLAS threading to help.
    **REJECT — df_dot multi-threading:** parallelizing fp's GEMM across cores would
    (a) regress the `-c 2` single-core bench with thread overhead (reindex already
    shows column-parallel is -c2-slower: 1520µs vs pandas 1144µs, but 8-core 832µs),
-   and (b) leave the 4.4x per-core gap untouched. The real fix is enabling the AVX2
-   target-feature (auto-vectorizes the existing kernel to AVX2/FMA) — a Cargo/build
-   maintainer decision (bead ol0dw), not agent code. My prior single-thread work
-   (AXPY reorder + register-blocking, 15.6 GFLOP/s SSE2) already hit the SSE2 ceiling.
-   **REJECT #2 — AVX2 target-feature (2026-07-24):** built fp-bench with
-   `RUSTFLAGS=-C target-feature=+avx2,+fma` and measured. df_dot AVX2=3850us vs
-   SSE2=5426us = only **1.4x** (not the 2-4x expected), STILL 3.1x slower than
-   pandas single-thread (1229us). Everything else neutral (df_values 9913~9967,
-   rolling_std 1444~1443, groupby_mean_str 1169~1147 — memory/alloc/factorization
-   bound, matching the prior jawxr corr/cov result). AVX2 gives a marginal
-   df_dot-only gain that does NOT close the gap; the residual is OpenBLAS's
-   hand-tuned assembly GEMM microkernel vs fp's auto-vectorized Rust GEMM. Enabling
-   AVX2 globally (1.4x on one op, neutral elsewhere, at a portability cost) is not
-   worth it. The df_dot floor is OpenBLAS-kernel-quality-bound — closable only by a
-   hand-tuned assembly/intrinsics GEMM microkernel (large specialized effort).
-   **Retry predicate:** only if a hand-tuned GEMM microkernel is explicitly greenlit.
+   and (b) leave the per-core gap untouched. **Correction to the 2026-07-24 ISA
+   claim:** the recorded cross-worker “AVX2=3850µs vs SSE2=5426µs = 1.4x” does not
+   reproduce and is withdrawn. The admissible same-worker result is 1.0327x; a
+   `df_abs` control was null at 1.0071x with CI `[0.9870, 1.0261]`. The residual is
+   OpenBLAS's hand-tuned assembly GEMM microkernel versus fp's auto-vectorized Rust
+   GEMM, not the compiler ISA flag. **Retry predicate:** only a hand-written,
+   register-blocked and packed-panel GEMM microkernel; no further build-flag sweep.
 
 ## Conclusion
 

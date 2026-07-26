@@ -607,3 +607,47 @@ The three Criterion executables are descriptive microbench runners, not the cano
 A/B decision harness. Their self-report closes provenance; any KEEP/REJECT comparison still has to
 route through the schema-v4 `fp-bench` harness, which already supplies same-invocation order-alternating
 A/A and median-CI gating. Criterion CV or point estimates alone cannot create a ledger verdict.
+
+## 12. Lane M follow-through: the 16 Cod-a CV drops and `df_dot`
+
+### 12.1 All 16 high-CV GroupBy diagnostics were re-adjudicated
+
+The 2026-06-19 scorecard had accepted 14 of 26 GroupBy rows and dropped 16 diagnostics solely because
+the old harness required CV below 5%. Lane M reconstructed every one of those 16 exact rows under
+schema v4 on one worker (`vmi1149989`), with an executing-ELF self-report, an A/A null for each arm in
+the same invocation, and the bootstrap median-CI gate. CV was retained only as metadata.
+
+Hand adjudication produced:
+
+| outcome | count | disposition |
+|---|---:|---|
+| `FASTER` | 14 | Decidable outside the measured null interval; geometric mean 5.7333x versus pandas |
+| `NULL-UNDECIDABLE` | 2 | `median` 1M NaN/37 and the first independent `std` 2M NaN/37 repeat |
+| `SLOWER`, contract-invalid, or CV reject | 0 | None |
+
+The second independent `std` repeat is among the 14 `FASTER` rows, so the noisy first repeat is not
+misrepresented as a surface-level rejection. The complete 16-row table, six artifact hashes, four
+executing-ELF hashes, and a concrete retry predicate for every row are in the 2026-07-26 BoldFrog
+entry of `docs/NEGATIVE_EVIDENCE.md`. The two null rows remain undecidable until batching first drives
+their measured required log effects below the recorded claim effects; rerunning merely to obtain a
+lower CV is forbidden.
+
+This closes the scorecard's 16-row high-CV queue: 14 resurrect into valid wins and 2 remain honest
+nulls. It does not rewrite the historic measurement; it supersedes the historic admission rule.
+
+### 12.2 Append-only correction to the `df_dot` audit row
+
+Section 9 row 6 said that the historical `1.4x` AVX2 measurement stood while only its portability
+rationale had become void. The new same-worker whole-binary A/B proves that statement wrong:
+
+- default ELF `bdc765dd38ce7bca09c7575dfe8546ec316e0d7ad4f5a4260082349ca836d6dc`;
+- x86-64-v3 ELF `ae9cfc41b9e3861b7ad301de72790af4845ca7d690d41eb3d3290c9efffa3d98`;
+- both on `ovh-a`, identical numeric checksum;
+- wall effect **1.0327x**, bootstrap 95% CI `[1.0240, 1.0376]`, A/A floor ±0.24%;
+- `df_abs` control 1.0071x with CI `[0.9870, 1.0261]`, therefore null.
+
+The flag now reaches a strict-remote compiler and the effect is a valid A/B result outside its null,
+but the historical cross-worker `1.4x` number is withdrawn. The remaining `df_dot` gap is not
+explained by the ISA flag. The retry predicate is a hand-written register-blocked, packed-panel GEMM
+microkernel; another compiler-flag sweep is barred. Full evidence is banked in
+`artifacts/bench/quiet_lane_m_df_dot_isa_20260726.md`.

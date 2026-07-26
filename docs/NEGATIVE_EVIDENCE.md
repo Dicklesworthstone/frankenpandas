@@ -19574,3 +19574,130 @@ the ~733 universal frame-construction sites. Reopen the default flip only after 
 homogeneous all-valid-f64 IO (`br-frankenpandas-l6uyi`) clears its existing fresh-frame-per-iteration
 plus same-invocation A/A predicate. Reopen shared materialized-map cloning
 (`br-frankenpandas-4kszu`) only when its existing wide-frame clone harness predicate is satisfied.
+
+### 2026-07-26 QuietHarbor — df_dot ISA re-decision (Lane M, whole-binary A/B): instrument blocker RESOLVED, the recorded 1.4x does NOT reproduce, measured 1.0327x — premise corrected, CONCLUSION STRENGTHENED
+
+Lane M re-decision of the df_dot LEDGERED BLOCKER after `ovh-b` (2012 Ivy Bridge, no AVX2/FMA) was
+removed from the rust pool, making the fleet ISA floor x86-64-v3. Verified independently in
+`~/.config/rch/workers.toml`: that worker is now tagged `["bun","go","no-avx2"]`; every remaining
+worker carries `rust`.
+
+**Protocol (campaign §2.6 whole-binary A/B).** Two arms, both built AND run remotely via
+`RCH_REQUIRE_REMOTE=1 RUSTFLAGS=… env -u CARGO_TARGET_DIR rch exec -- cargo run --profile
+release-perf -p fp-bench`. Arm A = default target; arm B = `-C target-cpu=x86-64-v3`. `fp-bench`
+self-reports its own ELF SHA-256 from `std::env::current_exe()` (in-process, so it proves which ELF
+actually ran — not a shell-side hash). Same-worker pairs only. Gated on **wall**, never instruction
+count. 50 samples/arm, plus the in-invocation interleaved A/A null control; decision statistic is the
+median of per-round ratios with a deterministic 10,000-resample bootstrap 95% CI.
+
+**⭐ THE HISTORICAL INSTRUMENT BLOCKER IS RESOLVED.** Row `:90` (2026-07-04) recorded that
+`+sse4.1,+avx` builds could not be A/B'd at all: *"both `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`
+candidate builds fell open locally"*, `no admissible workers`. Under strict remote that no longer
+happens — the flag reached the remote compiler and provably changed codegen:
+
+| arm | worker | executing ELF SHA-256 | ELF bytes |
+|---|---|---|---|
+| A default | `ovh-a` | `bdc765dd38ce7bca09c7575dfe8546ec316e0d7ad4f5a4260082349ca836d6dc` | 69,714,072 |
+| B x86-64-v3 | `ovh-a` | `ae9cfc41b9e3861b7ad301de72790af4845ca7d690d41eb3d3290c9efffa3d98` | 69,714,112 |
+
+Same source + same worker + different sha ⇒ codegen changed. Output `checksum` identical
+(`4957dea0fe3e2ed1` both arms) ⇒ numeric parity.
+
+**Results.**
+
+| workload | size | A median | B median | effect (A/B, >1 = v3 faster) | 95% CI | A/A null floor | verdict |
+|---|---|---:|---:|---:|---|---:|---|
+| `df_dot` | 100k | 5239.1 us | 5071.3 us | **1.0327x** | [1.0240, 1.0376] | ±0.24% | **DECIDABLE** (clears floor ~6.6x, CI excludes 1.0) |
+| `df_abs` | 1M | 6709.9 us | 6452.5 us | 1.0071x | [0.9870, 1.0261] | ±0.81% | **NOT decidable** (CI includes 1.0) — neutral |
+
+The first `df_abs` pair was discarded before analysis: arm A landed on `hz2` and arm B on `ovh-a`.
+Cross-worker pairs are invalid (`:92`); arm A was re-run until it matched `ovh-a`.
+
+**⚠️ THE RECORDED 1.4x DOES NOT REPRODUCE.** `docs/repo_vs_pandas_assessment_dustysummit.md:42`
+records *"df_dot AVX2=3850us vs SSE2=5426us = only 1.4x"*. This measurement puts the same comparison
+at **1.033x** (5239 → 5071 us). Our arm A (5239 us) closely matches that row's SSE2 figure (5426 us),
+but its AVX2 figure (3850 us) is not reachable here. The most likely explanation is the documented
+build-variance trap (`:92`): *"rch distributes cargo build across heterogeneous workers with differing
+target-cpu, so autovectorization-sensitive kernels swing ~2.6x in wall-time on byte-identical
+source"* — i.e. the historical 3850 us was probably a different worker, not a different ISA. **Treat
+the 1.4x figure as withdrawn.**
+
+**VERDICT: the blocker's PREMISE is corrected; its CONCLUSION is strengthened, not overturned.**
+"ISA-bound therefore not an agent lever" was an unfalsifiable excuse while the flag could not be
+measured — that objection was fair. Now that it IS measurable, the answer is that ISA is worth
+**3.3% on df_dot and nothing measurable elsewhere**. fp df_dot at 5071 us against pandas
+single-thread 1229 us is still ~4.1x slower. The residual is the OpenBLAS hand-tuned assembly GEMM
+microkernel, exactly as that row's own retry predicate stated. **ISA was never the missing 4x.**
+
+**⚠️ Recommendation on enabling x86-64-v3 globally — do NOT infer it from the fleet change.** Removing
+`ovh-b` changed our *measurement* fleet, not our *users'* CPUs. frankenpandas is a library shipped to
+third parties; a global `-C target-cpu=x86-64-v3` would SIGILL on any pre-2015 consumer CPU. The
+portability cost that the original row weighed is unchanged for shipped artifacts. A 3.3%
+single-workload gain does not justify it. If v3 is wanted for *benchmark* builds only, that is a
+separate, defensible change and should be argued as harness policy, not as a perf lever.
+
+Retry predicate: re-open df_dot only for a hand-written GEMM microkernel (register-blocked, packed
+panels) benchmarked same-worker against the current kernel — not for another build-flag sweep. Do not
+re-run the ISA A/B: it is now measured, decidable, and small.
+
+### 2026-07-26 BoldFrog — Lane M median-CI re-adjudication of all 16 Cod-a GroupBy rows previously dropped by the high-CV filter: 14 FASTER, 2 NULL-UNDECIDABLE
+
+This is the promised re-adjudication of the **16 of 26** rows listed as “Dropped high-CV” in
+`artifacts/perf/SCORECARD.md` on 2026-06-19. It is not a new hash-table attempt: no GroupBy
+implementation changed. The only source changes extend the canonical schema-v4 harness so the exact
+historical `2M` and deterministic `NaN every 37th` fixtures can run on one strict-remote worker.
+
+**Contract.** Every row ran on `vmi1149989`; each executing `fp-bench` process self-reported the ELF
+SHA-256 before measurement. Each Rust and pandas arm carried its own order-alternating A/A null in
+the same invocation. The decision is `abs(log(pandas_p50 / fp_p50)) >
+required_log_effect`, where `required_log_effect` is twice the wider bootstrap-median A/A log-CI
+half-width. CV remains recorded in the JSON as provenance only and has no vote. pandas is pinned to
+2.2.3. All six JSONs use schema v4 and contain the raw 50-sample vectors, both A/A vectors, both
+bootstrap CIs, executable identities, and checksums.
+
+| row | historical shape | wall p50, fp / pandas (µs) | pandas/fp | claim log / required log | verdict | artifact | retry |
+|---:|---|---:|---:|---:|---|---|---|
+| 1 | `groupby_sum_int64`, 100k | 249.64 / 1499.12 | 6.005x | 1.79261467 / 0.21503464 | **FASTER** | G1 | P1 |
+| 2 | `groupby_mean_float64`, 100k | 277.99 / 1376.56 | 4.952x | 1.59973977 / 0.18040086 | **FASTER** | G1 | P1 |
+| 3 | `groupby_agg_multi`, 100k | 618.29 / 3330.97 | 5.387x | 1.68405811 / 0.25680189 | **FASTER** | G1 | P1 |
+| 4 | `groupby_mean_str`, 100k | 1058.42 / 4992.70 | 4.717x | 1.55120133 / 0.15358846 | **FASTER** | G1 | P1 |
+| 5 | `groupby_transform_mean_str`, 100k | 1295.94 / 4972.38 | 3.837x | 1.34466559 / 0.15185907 | **FASTER** | G1 | P1 |
+| 6 | `groupby_cumcount`, 100k | 270.00 / 1787.36 | 6.620x | 1.89008585 / 0.13836041 | **FASTER** | G1 | P1 |
+| 7 | `groupby_sum_int64`, 1M | 2719.85 / 32775.40 | 12.050x | 2.48910284 / 0.47694698 | **FASTER** | G2 | P1 |
+| 8 | `groupby_mean_float64`, 1M | 2727.26 / 53143.95 | 19.486x | 2.96970775 / 0.26809165 | **FASTER** | G2 | P1 |
+| 9 | `groupby_mean_str`, 1M | 13474.02 / 98081.74 | 7.279x | 1.98503775 / 0.22482883 | **FASTER** | G2 | P1 |
+| 10 | `groupby_transform_mean_str`, 1M | 2941.91 / 15748.29 | 5.353x | 1.67767087 / 0.14424907 | **FASTER** | G2 | P1 |
+| 11 | `groupby_cumcount`, 1M | 3211.32 / 37693.06 | 11.738x | 2.46279352 / 0.40651557 | **FASTER** | G2 | P1 |
+| 12 | `groupby_agg_nunique_utf8_float64`, 100k, NaN/37 | 5357.76 / 10424.86 | 1.946x | 0.66564675 / 0.12645281 | **FASTER** | G3 | P1 |
+| 13 | `groupby_agg_nunique_utf8_float64`, 1M, NaN/37 | 49178.06 / 167008.55 | 3.396x | 1.22259754 / 0.15869725 | **FASTER** | G3 | P1 |
+| 14 | `groupby_agg_median_utf8_float64`, 1M, NaN/37 | 64126.03 / 88834.15 | 1.385x | 0.32592080 / 1.26326750 | **NULL-UNDECIDABLE** | G4 | P2 |
+| 15 | `groupby_agg_std_utf8_float64`, 2M, NaN/37, repeat A | 65020.83 / 115773.51 | 1.781x | 0.57692812 / 1.16046331 | **NULL-UNDECIDABLE** | G5 | P3 |
+| 16 | `groupby_agg_std_utf8_float64`, 2M, NaN/37, repeat B | 36398.51 / 110784.87 | 3.044x | 1.11306232 / 0.40835085 | **FASTER** | G6 | P1 |
+
+The 14 decidable rows have a 5.7333x geometric-mean advantage versus pandas (range
+1.946x–19.486x). Row 15 is not converted into a reject merely because its independent repeat is
+noisy; row 16 shows that the exact same surface is independently decidable and faster.
+
+Artifact and executing-ELF identities:
+
+| id | artifact (SHA-256) | executing `fp-bench` SHA-256 (bytes) |
+|---|---|---|
+| G1 | `cod_lane_m_gauntlet_original_100k_median_ci_20260726.json` (`f19dc51f765348eaa2ed0d61db0e0d109b45e5a9dcaf0fa42fc30129221e6ecf`) | `4f230dc44ad4e04e20d7af15513dbfea845a3a7491c55f4f57608cba4b981654` (70,220,816) |
+| G2 | `cod_lane_m_gauntlet_original_1m_median_ci_20260726.json` (`7e5210ec330dbe1e1b9e4d301cc6810e8e3e5731c404edbacf35d86870e0c465`) | `795322dc33fe838189401a62b0f8ed7dbf5f2357980ca31385f0baed45d8498e` (70,220,656) |
+| G3 | `cod_lane_m_gauntlet_nunique_median_ci_20260726.json` (`f9afdd05a8d40d5413f5cab8f1da792129ed1f8c8761abfff063bb8f11d0f1a9`) | `a8583afb4cf50f00dc1e729dfdce0fd1428b42af4ecc01bcfb84ee5a55fec819` (70,222,512) |
+| G4 | `cod_lane_m_gauntlet_median_median_ci_20260726.json` (`7e5a751ba68bf427b332cea2e401f9b2708c0ec7f5df718b4101343a518ac70a`) | `a8583afb4cf50f00dc1e729dfdce0fd1428b42af4ecc01bcfb84ee5a55fec819` (70,222,512) |
+| G5 | `cod_lane_m_gauntlet_std_repeat_a_median_ci_20260726.json` (`413136529a476c3e1bc8e7c33cbad3a9679cb9be484db32bf464086165007a7f`) | `a8583afb4cf50f00dc1e729dfdce0fd1428b42af4ecc01bcfb84ee5a55fec819` (70,222,512) |
+| G6 | `cod_lane_m_gauntlet_std_repeat_b_median_ci_20260726.json` (`fc3e9d1986555885fd54b7dac48605374f1c93144eeda6f4b8dd5aa0247ca985`) | `a8583afb4cf50f00dc1e729dfdce0fd1428b42af4ecc01bcfb84ee5a55fec819` (70,222,512) |
+
+Concrete retry predicates, referenced by every row above:
+
+- **P1 (decidable FASTER):** reopen only after code on that row's named GroupBy operation changes or
+  the pandas pin moves from 2.2.3, and demote it only if **two** new same-worker schema-v4
+  invocations with the exact size/dtype both fail `claim_log_effect > required_log_effect`.
+- **P2 (median NULL-UNDECIDABLE):** rerun only with repeated-per-arm batching that first demonstrates,
+  in the exact 1M NaN/37 shape and same executing ELF, `required_log_effect < 0.32592080`; require
+  two independent invocations before assigning a directional verdict.
+- **P3 (std repeat-A NULL-UNDECIDABLE):** do not call repeat A a reject and do not rerun it merely to
+  chase CV. Rerun the exact 2M NaN/37 shape only if a batched same-worker invocation can first drive
+  `required_log_effect < 0.57692812`; reconcile it with an independent repeat such as G6 before
+  changing the surface-level FASTER conclusion.

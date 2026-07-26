@@ -61,6 +61,7 @@ SIZE_CONFIGS = {
     "10k": {"rows": 10_000, "cols": 10},
     "100k": {"rows": 100_000, "cols": 10},
     "1M": {"rows": 1_000_000, "cols": 10},
+    "2M": {"rows": 2_000_000, "cols": 10},
 }
 
 PAIRED_ROUNDS = 25
@@ -245,6 +246,12 @@ def generate_test_data(rows: int, cols: int, dtype: str, seed: int = 42) -> pd.D
             arr = rng.random(rows) * 1_000_000
             mask = rng.random(rows) < 0.50
             arr[mask] = np.nan
+            data[f"col_{i}"] = arr
+    elif dtype == "float64_nan37":
+        data = {}
+        for i in range(cols):
+            arr = rng.random(rows) * 1_000_000
+            arr[::37] = np.nan
             data[f"col_{i}"] = arr
     else:
         raise ValueError(f"Unknown dtype: {dtype}")
@@ -481,7 +488,8 @@ def _groupby_str_op_pandas(df: pd.DataFrame, op):
     """Shared setup for str-keyed groupby aggregation benches: key =
     'g{col_0 % 1000:04}' (~1000 distinct), value = col_1 (matches fp-bench)."""
     df = df.copy()
-    df["key"] = ("g" + (df["col_0"] % 1000).astype("int64").map(lambda v: f"{v:04}"))
+    key_codes = (df["col_0"] % 1000).fillna(0).astype("int64")
+    df["key"] = "g" + key_codes.map(lambda v: f"{v:04}")
     # fp-bench constructs SeriesGroupBy inside every timed iteration. Keep the
     # pandas call inline too: reusing `g` would cache its grouper after warmup
     # and compare reduction-only pandas against factorize-plus-reduce Rust.
@@ -1185,7 +1193,7 @@ def main():
                         help="Run specific category")
     parser.add_argument("--all", action="store_true", help="Run all categories")
     parser.add_argument("--sizes", default="10k,100k,1M",
-                        help="Comma-separated sizes (10k,100k,1M)")
+                        help="Comma-separated sizes (10k,100k,1M,2M)")
     parser.add_argument("--dtypes", default="float64",
                         help="Comma-separated dtypes")
     parser.add_argument("--workloads",
