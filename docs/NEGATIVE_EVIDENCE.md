@@ -19542,3 +19542,35 @@ never a real gate. The remaining prerequisites are unchanged and both are alread
 `LazyDataFrameColumns::clone` per-column `String` residual (`br-frankenpandas-4kszu`) and block-born
 IO (`br-frankenpandas-l6uyi`). No ratio is claimed here; this row is correctness and API-surface
 evidence only, and no benchmark was run for it.
+
+### 2026-07-26 CrimsonGate — Lane B block-storage public-feature reachability — LANDED CODE-ONLY
+
+Ledger preflight was clear for target surface `Cargo feature forwarding:
+fp-frame/block-storage`. The `fp-frame` crate already exposed the opt-in `block-storage` feature and
+its `Float64BlockView` return type, but users of the unified `frankenpandas` crate could neither
+enable that inner feature through the umbrella feature graph nor name the view type through the
+umbrella API.
+
+`br-frankenpandas-1iupo` adds the non-default
+`block-storage = ["fp-frame/block-storage"]` forwarding edge and a cfg-gated
+`frankenpandas::Float64BlockView` re-export. This changes no default feature set, constructor, storage
+choice, or runtime behavior. It is API/build plumbing toward the eventual default-on state, not the
+rejected universal-consolidation design.
+
+**Build evidence.** With 627G free on `/data`, the exact fail-closed invocation
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo check --locked -p frankenpandas
+--all-targets --features block-storage` completed on remote worker `hz2` with exit 0. No per-task
+local target directory was created. The required workspace-wide check with
+`--features frankenpandas/block-storage` also completed remotely with exit 0. Workspace Clippy with
+`-D warnings` was attempted remotely and stopped in the inherited `fp-columnar` backlog before
+reaching this crate (25 lib errors plus 66 lib-test errors, including the already-visible duplicate
+`must_use`, dead `Float64DotInput::value_at`, and current-toolchain style lints). Focused
+`frankenpandas` Clippy with `--no-deps -D warnings`, all targets, and `block-storage` then completed
+remotely with exit 0; dependency compilation still printed the same two non-fatal warnings. No
+benchmark ran, so there is no timing verdict or executing-ELF claim.
+
+**Concrete retry predicate.** Do not add `block-storage` to any default feature set and do not wire
+the ~733 universal frame-construction sites. Reopen the default flip only after block-born
+homogeneous all-valid-f64 IO (`br-frankenpandas-l6uyi`) clears its existing fresh-frame-per-iteration
+plus same-invocation A/A predicate. Reopen shared materialized-map cloning
+(`br-frankenpandas-4kszu`) only when its existing wide-frame clone harness predicate is satisfied.
