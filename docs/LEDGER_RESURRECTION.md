@@ -384,3 +384,77 @@ fewer instructions is the mechanism, not a neutral proxy).
 
 **Not queued:** the str-groupby factorization floor. It is hash-table-bound, not ISA-bound, and the
 standing "no 6th hash-table attempt" prohibition is unaffected by the ISA change.
+
+---
+
+## 10. Institutionalization — the ratchet (the decay lesson)
+
+Fleet broadcast 2 supplied the decisive data point: **frankensqlite sits at a 1.7% void rate (10/583)
+not because it audited leniently, but because it ran this audit four months ago and then
+*mechanically enforced* it** — `sql_pipeline_candidate_preflight`, exit 2 = BLOCKED, greps the ledger
+before any source mutation. Repos that audited once and stopped sit at 25–91%.
+
+**Ledger integrity is not a cleanup, it is a ratchet.** Ours:
+
+### `scripts/perf_candidate_preflight.py` (exit 2 = BLOCKED)
+
+**Mode 1 — `--candidate "<keywords>"`.** Grep the ledger *before* writing a lever; blocks if a prior
+REJECT covers the surface. Verified against the case this repo actually needs it for:
+
+```
+$ python3 scripts/perf_candidate_preflight.py --candidate "str-groupby factorization"
+preflight: BLOCKED — 4 prior REJECT row(s) match ['str-groupby', 'factorization']
+  docs/NEGATIVE_EVIDENCE.md:18541  … open-addressing table — REJECT (worse than FxHashMap)
+  docs/NEGATIVE_EVIDENCE.md:18559  … fibonacci open-addressing — REJECT, FxHashMap is the floor
+  docs/NEGATIVE_EVIDENCE.md:18583  … cache-resident growing table (4th attempt) — REJECT
+  docs/NEGATIVE_EVIDENCE.md:18621  … packed-u64 FxHashMap (5th attempt) — REJECT, ABSOLUTELY CONCLUSIVE
+exit=2
+```
+
+That is the "do not attempt a 6th hash-table variant" prohibition made **mechanical** instead of
+merely written down.
+
+**Mode 2 — `--check-new-rejects`.** Every newly added `###` REJECT section must record at least one of:
+
+| basis | why it is sufficient |
+|---|---|
+| an **A/A null control** | the effect was decided against a measured floor |
+| a **counted mechanism unchanged** (instructions / cycles / syscalls / allocations / page-branch-cache misses / `perf stat`) | a null control cannot change the fact that no work was removed |
+| **~0% target self-time** | the bench never executed the candidate |
+
+A row with none of these cannot separate the lever from the harness — `VOID-NONULL`, 90.2% of our
+void rows. Verified on synthetic rows:
+
+| row | verdict |
+|---|---|
+| near-1.0×, no null, no mechanism, *but says "bit-identical, 0 diffs over 5M"* | **BLOCKED** |
+| A/A controls span 1.08%, candidate inside the null | passes |
+| `perf stat` instructions unchanged (4.11e9 vs 4.11e9) | passes |
+| target frame 0.000% self-time | passes |
+
+Note the first row: **"bit-identical" does not buy passage.** Parity ≠ mechanism. That distinction is
+the whole ballgame — it is what took our own `VALID-MECHANISM` count from 102 to 3 (§8.2).
+
+The three rows this session's work added to `NEGATIVE_EVIDENCE.md` were run through the gate and pass.
+
+### Enforcement
+
+`scripts/install_perf_preflight_hook.sh` installs it as a **pre-commit hook**, additively into the
+mcp-agent-mail chain-runner (`.git/hooks/hooks.d/pre-commit/60-perf-ledger-preflight.sh`) so it
+composes with the file-reservation guard rather than replacing it. It gates only commits that touch
+`docs/NEGATIVE_EVIDENCE.md`, so it costs nothing on ordinary commits.
+
+`.git/hooks/` is not version-controlled, so **every fresh checkout must run the installer once** —
+that is the one weak link, and it is why the installer is committed and idempotent rather than the
+hook being hand-written per clone.
+
+**Emergency override:** `PERF_PREFLIGHT_OVERRIDE=1 git commit …`. It exists because a hard block with
+no escape hatch gets disabled wholesale the first time it is wrong; an override that must be typed
+explicitly leaves a trace in shell history and is a deliberate act.
+
+### What this does not do
+
+It cannot verify that a claimed null control was *honest* — only that one was recorded. It is a
+ratchet against the dominant failure (writing a REJECT with nothing falsifiable in it), not a proof
+system. The `VALID-MECHANISM` detector deliberately errs toward blocking: it accepts a counted
+quantity shown unchanged and nothing else.
