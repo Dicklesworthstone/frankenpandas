@@ -283,3 +283,104 @@ component without changing float order.
 *Generated 2026-07-25 by QuietHarbor (cc / STRUCTURAL) and completed by CrimsonGate
 (cod / HARNESS+FRONTIER). No ledger row was deleted. Classifier: `audit_ledger.py`, retained in the
 session scratchpad; corrected re-runs live as ignored tests in their owning crates.*
+
+---
+
+## 8. Re-classification under the fleet-standard taxonomy (frankenfs, adopted 2026-07-25)
+
+The orchestrator broadcast adopted frankenfs's six-class taxonomy fleet-wide, superseding the
+V1–V5 criteria used in §2. §2–§4 are **retained unchanged** as the record of what was decided
+and why; this section re-scores the same 261 REJECT-bearing entries under the standard classes.
+Nothing above is withdrawn — §4's hand-adjudicated head is unaffected, because every row in it was
+read in full.
+
+| Class | Count | Share |
+|---|---:|---:|
+| `VOID-NONULL` | 92 | 35.2% |
+| `DECIDABLE-LARGE` (ratio far outside any plausible null; not a fleet class — see below) | 88 | 33.7% |
+| `VALID-AB` | 39 | 14.9% |
+| `UNCLASSIFIED` (screen could not assign; hand-read required) | 28 | 10.7% |
+| `VOID-ZEROSELF` | 7 | 2.7% |
+| `VALID-MECHANISM` | 3 | 1.1% |
+| `VOID-CV` | 3 | 1.1% |
+| `VALID-PROFILE` | 1 | 0.4% |
+| **VOID total** | **102** | **39.1%** |
+| Rows carrying a binary sha256 | 33 | **12.6%** |
+
+### 8.1 This independently reproduces frankenfs's correction
+
+The broadcast's key finding — *the CV gate is **not** the dominant void class; `VOID-NONULL` is* —
+reproduces here without tuning:
+
+| | frankenpandas | frankenfs |
+|---|---:|---:|
+| `VOID-NONULL` share of VOID | 92 / 102 = **90.2%** | 214 / 219 = **97.7%** |
+| `VOID-CV` | **3** | **4** |
+| rows with a binary sha256 | **12.6%** | 10.9% |
+
+Two repos, independent ledgers, same shape. The CV gate is a real defect (it cost this repo three
+rows, and cost `.218` three of four mutually-agreeing runs — §5) but it is a *rounding error* next
+to the epidemic: **an A/B ran, the row was killed on a near-1.0 wall ratio, and neither an A/A null
+nor a counted mechanism was written down.**
+
+### 8.2 Two honesty notes on applying the taxonomy
+
+**`VALID-MECHANISM` must not be inflated.** My first screen scored **102** rows `VALID-MECHANISM`
+because the regex matched *"bit-identical"* / *"byte-identical"* / *"0 diffs"*. Those are **parity
+proofs** (the output is unchanged), **not** mechanism refutations (the *work* is unchanged). This
+ledger says "bit-identical" in almost every row, because parity is a landing requirement here.
+Tightening the detector to require a **counted quantity shown unchanged** (instructions, cycles,
+syscalls, allocations, page/branch/cache misses, `perf stat`) dropped it from 102 to **3**. The
+broadcast warns this class "cuts BOTH ways"; conflating parity with mechanism silently rescues ~100
+rows that were never refuted on a count. **Anyone porting the screen should check this first.**
+
+**`DECIDABLE-LARGE` is a screening bucket, not a verdict.** 88 rows recorded a ratio far outside any
+plausible null floor (e.g. 0.17×, 0.36×, 3.5× worse) with no null control. A null control cannot
+rescue a 3.5× regression, so these are *not* `VOID-NONULL` — but they are not `VALID-AB` either.
+They need hand-adjudication into `VALID-MECHANISM` (if the mechanism was counted) or `VOID-NONULL`
+(if the large ratio was cross-worker — see §8.3, which makes several of them suspect).
+
+### 8.3 ⚠️ The build-variance blocker that makes marginal rows undecidable is now REMOVED
+
+`NEGATIVE_EVIDENCE.md:92` is a standing methodology BLOCKER, and it is the single most important
+context for this whole audit:
+
+> *"`rch` distributes `cargo build` across heterogeneous workers (ovh-a/hz2/…) with differing
+> `target-cpu`, so … autovectorization-sensitive kernels (the where/mask f64 branchless bit-select)
+> swing ~2.6× in wall-time on **byte-identical source**. CONSEQUENCE: any A/B whose two binaries
+> were built on DIFFERENT workers is invalid; only LARGE deltas (≳2× and structural) survive."*
+
+Per the orchestrator survey (2026-07-25), **`ovh-b` (Xeon E3-1245 v2, Ivy Bridge 2012) was the only
+worker lacking avx2+fma and has been removed from the rust tag**; 73 rust slots remain across 11
+AVX2+FMA workers. The heterogeneity that produced the 2.6× same-source swing — and the 1-ULP acosh
+golden flips — is therefore **substantially reduced**. That blocker's own retry predicate ("pin
+`-Ctarget-cpu=x86-64-v3` … then re-A/B the suspect items") is now satisfiable by default.
+
+## 9. ISA-shaped rejections — VOID candidates queued for Lane M
+
+Per the orchestrator: the premise *"the residual is ISA-bound (SSE2 vs AVX2) and therefore not an
+agent lever"* is now **false**. Every row resting on it is a VOID candidate. **frankenpandas is Lane
+B — none of these were re-run. They are queued for our Lane M rotation.**
+
+| # | Row | Rejected because | Why the premise is now void | Class |
+|---|---|---|---|---|
+| 1 | `:90` Float64 comparison `+sse4.1,+avx` build-policy probe | **BLOCKED** — "no admissible workers: `critical_pressure=1,insufficient_slots=11`"; every flagged build fell open locally, so no remote same-worker A/B was obtainable | Pure **worker-admission** failure, not a lever failure. Local signal was **1.16×–2.38× vs pandas** against remote main's 0.71×–1.10×, checksum unchanged (`49999550`). 73 AVX2 slots now available. | **VOID — highest ISA rank** |
+| 2 | `:183` `Series.round()` `round_ties_even` intrinsic | 3.40 → 11.9 ms, **3.5× WORSE** | Explicitly ISA-caused: *"on the BASELINE x86-64 target (SSE2, no `+sse4.1`) the intrinsic lowers to a libm `roundeven` CALL per element (**no `roundpd`**), un-vectorizable."* `roundpd` is SSE4.1; every remaining worker has it. The measurement is sound *for SSE2* and says nothing about the shipped ISA. | **VOID-ISA** |
+| 3 | `:222` max/min portable-SIMD `i64x4` (uza04.207) | 0.17× / 0.16× — "AVX2-width `std::simd` variant was 3.1× slower than the manual accumulator" | An **AVX2-width** vector type compiled for a **baseline** target lowers to scalar/SSE2 emulation — the reject measured the emulation, not the lever. | **VOID-ISA** |
+| 4 | `:788` explicit AVX2 via `#[target_feature(enable="avx2")]` + runtime dispatch | Reverted — requires `unsafe`, and the crate is `#![forbid(unsafe_code)]` (cf. `:571`) | The *unsafe* objection stands and is a real repo constraint. But the **safe** alternative it was weighed against — a global target-feature build — was rejected on **portability**, which is the premise now removed. Re-decide the safe build-flag path, **not** the unsafe intrinsic. | **VOID (partial)** |
+| 5 | `:5235` `.cargo/config.toml` "intentionally empty — a `+fma,+avx2` … deliberately-reverted build decision" | Deliberate portability choice | Same premise. The fleet no longer contains a non-AVX2 rust worker. | **VOID (policy)** |
+| 6 | `docs/repo_vs_pandas_assessment_dustysummit.md:42` `df_dot` **AVX2 REJECT #2** | Measured AVX2 = 3850 µs vs SSE2 5426 µs = **1.4×**, "still 3.1× slower than pandas single-thread… **not worth it at a portability cost**" | ⚠️ **Only PARTLY void — state this honestly.** Unlike rows 1–5 this one *did* build with `+avx2,+fma` and measure. **The 1.4× measurement stands.** What is void is only the *cost/benefit* half of the conclusion ("at a portability cost"), since there is no longer a portability cost. It does **not** become a 2–4× win. | **VALID measurement / VOID rationale** |
+
+**Ranking for the Lane M rotation** (campaign rule: by target-frame self-time, tie-broken toward
+levers whose design work is already done): **1 → 2 → 3 → 6 → 4 → 5.** Row 1 outranks the rest
+because it is the only one that was never measured *at all* and it already has a positive local
+signal; rows 2–3 are cheap re-runs of existing reverted patches; row 6 needs only a re-decision, not
+a re-measurement.
+
+**Gate when Lane M opens:** same worker for both arms, ELF sha recorded per arm (same source +
+different sha ⇒ codegen changed, per campaign §2.6), A/A null in the same invocation, median-CI gate,
+and **wall/cycles — never instruction count** (an ISA change retires more work per instruction, so
+fewer instructions is the mechanism, not a neutral proxy).
+
+**Not queued:** the str-groupby factorization floor. It is hash-table-bound, not ISA-bound, and the
+standing "no 6th hash-table attempt" prohibition is unaffected by the ISA change.

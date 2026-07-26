@@ -3056,7 +3056,12 @@ impl Timestamp {
         if self.is_nat() {
             return "NaT".to_string();
         }
-        let days_since_epoch = self.nanos / Timedelta::NANOS_PER_DAY;
+        // Floor days for pre-1970 (br-frankenpandas-wkjtw); == `/` for positive.
+        // Truncating `/` rounds a negative, non-midnight instant TOWARD zero, so
+        // it lands on the following day and names the wrong weekday: pandas 2.2.3
+        // gives 1969-07-20T20:17:40 -> "Sunday", truncation gave "Monday". The
+        // wkjtw fix was applied to `dayofweek` but never here.
+        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
         let dow = ((days_since_epoch % 7) + 7) % 7;
         NAMES[dow as usize].to_string()
     }
