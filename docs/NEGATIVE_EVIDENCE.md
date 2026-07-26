@@ -19009,3 +19009,113 @@ Artifacts:
 - `artifacts/bench/cod_fp_uza04_217_groupby_scalar_remaining_10k_100k.json`
 - `artifacts/bench/cod_fp_uza04_217_groupby_scalar_remaining_control_10k_100k.json`
 - `artifacts/perf/cod_fp_uza04_217_groupby_scalar_scorecard_2026-07-23.md`
+
+### 2026-07-25 QuietHarbor — uza04.218 groupby harness matrix CLOSED: 5/5 rows covered, ONE real loss (df_groupby_2strkey_sum @10k 0.86x), and the cv gate was discarding decidable rows
+
+Completed `br-frankenpandas-uza04.218`. The five remaining fp-bench groupby rows (`groupby_multi_str`,
+`groupby_agg3_str`, `df_groupby_str_sum`, `df_groupby_2key_sum`, `df_groupby_2strkey_sum`) got their pandas
+counterparts in `974cc3680`; each preserves the full-call shape (population/grouper construction OUTSIDE the
+timed closure on both engines, verified by reading both sides).
+
+Substrate: release-perf `fp-bench` rebuilt at HEAD (2026-07-25 20:34:05Z) after confirming `crates/fp-frame/
+src/lib.rs` was newer than the previous binary; freshness re-verified with an `-nt` sweep over `crates/**/*.rs`
+(no source newer than the binary at run time). `taskset -c 48-63`, shared 64-thread host. **No ELF sha256 —
+harness-contract §2.1 is not adopted in this repo; that is a provenance gap on every row below.**
+
+Primary run (`artifacts/bench/cod_fp_uza04_218_groupby_matrix_remaining_10k_100k.json`), 9/10 rows admitted:
+
+| Workload | Size | FP p50 us | pandas p50 us | Ratio | Verdict |
+|---|---:|---:|---:|---:|---|
+| `groupby_multi_str` | 10k | 211.84 | 876.08 | 4.136x | FASTER |
+| `groupby_multi_str` | 100k | 1627.80 | 4603.07 | 2.828x | FASTER |
+| `groupby_agg3_str` | 10k | 186.26 | 1027.59 | 5.517x | FASTER |
+| `groupby_agg3_str` | 100k | 1654.23 | 3931.55 | — | DROPPED_HIGH_CV (fp cv 5.30) |
+| `df_groupby_str_sum` | 10k | 328.89 | 830.29 | 2.524x | FASTER |
+| `df_groupby_str_sum` | 100k | 1004.39 | 3192.28 | 3.178x | FASTER |
+| `df_groupby_2key_sum` | 10k | 745.00 | 900.50 | 1.209x | FASTER |
+| `df_groupby_2key_sum` | 100k | 1803.40 | 2713.90 | 1.505x | FASTER |
+| `df_groupby_2strkey_sum` | 10k | 1553.90 | 1289.50 | **0.830x** | **SLOWER** |
+| `df_groupby_2strkey_sum` | 100k | 4375.50 | 6134.30 | 1.402x | FASTER |
+
+**The cv gate is discarding decidable rows (campaign §2.3, measured here).** Both unsettled rows were re-run
+four times each (`artifacts/bench/cod_fp_uza04_218_groupby_matrix_retry_10k_100k.json`, which records EVERY
+attempt, admitted or not):
+
+| Workload | Size | p50 ratio per run | median | range | cv-admitted |
+|---|---|---|---:|---|---:|
+| `groupby_agg3_str` | 100k | 3.01 / 3.03 / 2.99 / 2.81 | **2.998x** | 2.81–3.03 | 1 of 4 |
+| `df_groupby_2strkey_sum` | 10k | 0.872 / 0.850 / 0.837 / 0.862 | **0.856x** | 0.837–0.872 | 1 of 4 |
+
+Four runs agree to within 3% on each row, and the cv gate admitted exactly one of each. A ~15% deficit is far
+outside any plausible A/A floor on this host; `df_groupby_2strkey_sum @10k` is a REAL, reproducible loss and
+`groupby_agg3_str @100k` is a real ~3x win. Gating on cv rejected the harness, not the effect — exactly the
+failure mode the campaign names. **Rows are decided here on the median of per-run p50 ratios; cv is retained
+as provenance only.**
+
+**Attribution of the one loss (arithmetic on the measured rows, not a symbolized profile).** The int-key
+sibling `df_groupby_2key_sum` has the SAME 100x50=5000 group combos and wins (1.209x @10k, 1.505x @100k), so
+the deficit is specific to the string keys. fp str-minus-int delta: 809 us @10k, 2572 us @100k over the same
+5000 groups. Marginal per-row str cost = (2572-809)/90000 = 19.6 ns/row; the residual ~613 us at 10k is
+per-group/fixed. At 10k there are 5000 groups over 10k rows — **2 rows per group** — so per-group overhead is
+~40% of fp's total and the workload is in a many-tiny-groups regime that 100k amortizes away. This is
+consistent with the already-ledgered str-key factorization floor (hashbrown ~10.5 ns/row vs khash ~2.5 ns).
+
+**Verdict: KEEP coverage. The loss is NOT a new vein** — it is the known str-key factorization floor sampled
+at a small-n/many-groups shape that the previous 100k/1M coverage hid. No source lever attempted.
+
+Retry predicate: retry `df_groupby_2strkey_sum @10k` ONLY after (1) a symbolized profile attributes >5% exact
+self-time to a frame OTHER than `compute_dense_group_ids`' Utf8 factorization at the 10k/5000-group shape, or
+(2) the str-key factorization floor itself is attacked by a non-hash primitive (MPH / ART / radix-partition
+per campaign §5) — NOT by a 6th hash-table variant, which the ledger closes as conclusive.
+
+Artifacts:
+
+- `artifacts/bench/cod_fp_uza04_218_groupby_matrix_remaining_10k_100k.json`
+- `artifacts/bench/cod_fp_uza04_218_groupby_matrix_retry_10k_100k.json`
+- `artifacts/perf/cod_fp_uza04_218_groupby_matrix_scorecard_2026-07-25.md`
+
+### 2026-07-25 QuietHarbor — block-storage default-flip: the NAIVE Commit-3 wiring is REJECTED BY DESIGN (733 construction sites pay an O(n*m) copy to benefit `.values` only); correct primitive is lazy consolidation + block-born IO
+
+Campaign cc/STRUCTURAL assignment: "finish the block-storage foundation and make it the default." Preflight
+state, verified: the `block-storage` feature (default-OFF, implies `lazy-transpose-view`) is in-tree from
+`c7559eb35`; Commits 1 and 2 of the `docs/repo_vs_pandas_assessment_dustysummit.md` plan are DONE —
+`Float64BlockStore` holds one column-major `Arc<[f64]>`, and `materialize_column` is already zero-copy
+(`Column::from_f64_all_valid_chunks` borrowing the shared block, per-column `OnceLock` slot cache).
+**Feature build is GREEN at HEAD** (`RCH_REQUIRE_REMOTE=1 ... cargo check -p fp-frame --features block-storage
+--all-targets`, remote worker `ovh-a`, 0 errors) — no cfg rot yet, unlike the 214-site `lazy-transpose-view`
+rot of 2026-07-22.
+
+The remaining planned step (Commit 3) is "wire construction paths to PRODUCE block-backed frames when all
+columns are all-valid f64". **Measured objection to doing that at the universal chokepoint:** every
+construction funnels through `DataFrame::new_with_axes`, and the call-site census is **659
+`new_with_column_order` + 74 `DataFrame::new` = ~733 sites**. Building the block eagerly there is a full
+column-major copy of the frame's data (8 MB for a 100k x 10 f64 frame) added to EVERY homogeneous-f64 frame
+produced anywhere in the library — including every intermediate frame of every op that currently returns
+columns by moving `Arc`s. That trades fp's broad 2–18x surface win for the narrow `.values`/`to_numpy` win.
+**REJECT the naive universal wiring** — it is not a conservative default-flip, it is a whole-surface
+regression wearing a feature flag.
+
+Root asymmetry (this is the actual structural finding): pandas' `.values` is O(1) because its frames are
+**born** as 2-D blocks (read_csv builds a block), not because its `.values` is clever. fp's frames are born
+columnar — which is exactly WHY fp wins nearly everywhere else. Consolidating at construction imports pandas'
+cost model along with its `.values` benefit.
+
+**Correct primitive, split in two (neither is the rejected wiring):**
+1. **Lazy consolidation** — keep per-column storage; build the block on FIRST `.values`/`to_numpy` and cache
+   it in a frame-level `OnceLock`. Repeat access becomes O(1) at zero construction cost. This is campaign
+   §6.1 self-adjusting computation. **Honest limit: first-call cost is unchanged**, so this only pays where a
+   caller touches `.values` on the same frame more than once — it must NOT be benchmarked with a repeated-
+   `.values` loop and reported as a `.values` win, which would be harness-gaming.
+2. **Block-born IO** — have `read_csv`/`read_parquet` parse a homogeneous all-valid f64 result directly into
+   the column-major block. This is the arm that actually matches pandas on FIRST call, it is narrow (a
+   handful of sites, not 733), and it adds no copy because the parser is writing the buffer anyway.
+
+**LEDGERED BLOCKER (scoped, not a ceiling):** the default-flip is blocked on arm 2 being built first; arm 1
+alone cannot honestly be claimed as `.values` parity. Neither arm was implemented this session — this entry
+is a design rejection with a call-site census, not a measured A/B, and it claims no ratio.
+
+Retry predicate: proceed with arm 2 (block-born `read_csv`) when (1) a `df_to_numpy`/`df_values` bench exists
+that constructs a FRESH frame per iteration (the current `df_values` bench reuses one frame and would report
+arm 1's cache as a win it has not earned), and (2) an A/A null control on the target worker establishes the
+floor. Do NOT re-propose eager consolidation in `new_with_axes` without first showing, on that same fresh-frame
+bench, that the ~733-site copy tax is under the null floor for the ordinary op surface.
