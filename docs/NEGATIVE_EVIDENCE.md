@@ -19119,3 +19119,59 @@ that constructs a FRESH frame per iteration (the current `df_values` bench reuse
 arm 1's cache as a win it has not earned), and (2) an A/A null control on the target worker establishes the
 floor. Do NOT re-propose eager consolidation in `new_with_axes` without first showing, on that same fresh-frame
 bench, that the ~733-site copy tax is under the null floor for the ordinary op surface.
+
+### 2026-07-25 QuietHarbor — str-groupby "stop hashing": all THREE campaign alternatives checked against this repo's own evidence; two are refuted, and all three converge on REUSE, not a better table
+
+The campaign's cc/STRUCTURAL direction for the str-groupby floor is "the answer to hashbrown-bound is **not**
+a faster hash map — stop hashing: §7.15 minimal perfect hashing, §7.5 ART over an interned dictionary, or
+§8.14 radix-partition so the probe fits in L2." Before proposing any lever I checked each against the four
+factorization rejects already in this ledger (2026-07-23 DustySummit). **Two of the three are already refuted
+by those rejects; the third is inapplicable in the shape it was suggested.** No code was written.
+
+1. **§8.14 radix-partition (make the probe fit in L2) — ALREADY SATISFIED, and already lost.** The premise is
+   that the probe table is too big for cache. It is not: there are ~1000 distinct keys, and hashbrown
+   dynamically sizes to the GROUP count, not the row count, so the table is already L1/L2-resident. The 4th
+   reject built precisely this — a cache-resident table growing from 1024 slots to the group count, with
+   inline `(u64,len)` keys and Fibonacci hashing — and measured **~21% SLOWER** (1400 vs 1160 us). Partitioning
+   cannot help a probe that already fits.
+2. **§7.15 MPH — inapplicable to a ONE-SHOT factorization.** Minimal perfect hashing must see the whole key
+   set before it can build the function. For a groupby that factorizes fresh on every call, MPH construction
+   is strictly more work than the single hashbrown pass it would replace. MPH pays only when the key set is
+   REUSED across many lookups.
+3. **§7.5 ART over an interned dictionary — same precondition.** Interning is only a win if the interned
+   dictionary outlives the call that built it. A trie built per call is one more per-call pass.
+
+**The convergent finding: all three admissible moves require the factorization to be REUSED across calls
+rather than recomputed. That — not a better table — is the actual structural lever, and it is a CACHING lever,
+so it does not violate the "do not attempt a 6th hash-table variant" prohibition.**
+
+**The primitive already exists in-tree and is already proven on a sibling path.** `fp-columnar`'s
+`Column::utf8_default_factorize_columns` (`crates/fp-columnar/src/lib.rs:10171`) is a CACHED first-seen
+factorize witness over an all-valid contiguous-Utf8 column, gated to `sort=false, use_na_sentinel=true` — the
+exact semantics groupby needs. `Series::factorize` already routes through it (witness x8mdu,
+`crates/fp-frame/src/lib.rs:19193`). **`DataFrameGroupBy::compute_dense_group_ids` does not**: its
+contiguous-Utf8 arm (`crates/fp-frame/src/lib.rs:34265`) and Scalar-backed-Utf8 arm (`:34287`) each rebuild an
+`FxHashMap<&[u8], usize>` from scratch on every call, at the ledgered ~10.5 ns/row that is ~90% of str-groupby
+cost (1050 us of ~1140 us @100k / 1000 groups).
+
+Semantics check (why this is expected to be bit-identical, not merely close): the witness returns FIRST-SEEN
+codes, and `dense_group_labels` reads `ks[i]` at each `g == order.len()`, i.e. every dense consumer
+(sum/mean/max/min/var/std/count/cum*/transform) depends on first-seen gid numbering — the same contract the
+wide-i64 open-addressing arm documents. The witness is all-valid-gated, so `dropna` cannot change the result.
+
+**HONESTY PRECONDITION — this must not be measured on the current bench.** The win is on the SECOND and later
+groupby of the same key column; the first call still pays full factorization. `fp-bench`'s groupby rows build
+the frame once and time the call repeatedly, so this lever would post a large number there that it has not
+earned as a *factorization* win. It must be reported as a REPEAT-GROUPBY win and measured with BOTH arms: a
+fresh-frame-per-iteration arm (must show no regression) and a repeat arm (the claim). Anything else is
+harness-gaming of exactly the kind §1 of the campaign exists to catch.
+
+**Status: specified, NOT implemented, NOT measured. No ratio is claimed.** Filed as a bead. This entry's
+contribution is to retire the standing "NOT an agent-level fp-frame lever / no agent-level incremental lever
+remains" blocker: an admissible lever with an existing in-tree primitive does remain, it was simply not the
+kind of lever the previous four attempts were looking for.
+
+Retry predicate for the REFUTED arms: do not re-propose §8.14 radix-partition or a group-count-sized table for
+str-groupby factorization unless a symbolized profile first shows the factorization table exceeding L2 —
+which requires a workload with a group count large enough to matter, not the ~1000-group shape all current
+benches use. The 4th reject already covers everything below that.
