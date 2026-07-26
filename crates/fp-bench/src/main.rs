@@ -14,7 +14,7 @@
 
 #[cfg(feature = "lazy-transpose-prototype")]
 use std::sync::Arc;
-use std::{collections::BTreeMap, hint::black_box, time::Instant};
+use std::{collections::BTreeMap, fmt::Write as _, hint::black_box, time::Instant};
 
 use fp_columnar::{Column, ValidityMask};
 use fp_frame::{DataFrame, Series, to_datetime};
@@ -22,6 +22,7 @@ use fp_index::{DuplicateKeep, Index, IndexLabel, RangeIndex};
 use fp_join::{JoinType, merge_dataframes_on_with};
 use fp_types::{DType, NullKind, Scalar};
 use mimalloc::MiMalloc;
+use sha2::{Digest, Sha256};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -29,6 +30,32 @@ static GLOBAL: MiMalloc = MiMalloc;
 const WARMUP: usize = 3;
 const ITERS: usize = 25;
 const TAKE_BATCH: usize = 256;
+
+#[derive(Debug)]
+struct PairedSamples {
+    times_us: Vec<f64>,
+    null_arm_a_us: Vec<f64>,
+    null_arm_b_us: Vec<f64>,
+    null_ratios: Vec<f64>,
+    checksum: u64,
+}
+
+/// SHA-256 of this executable, computed by the process that is actually
+/// running. This is deliberately emitted before any benchmark output.
+fn self_identity() -> String {
+    let Ok(path) = std::env::current_exe() else {
+        return "unavailable".to_string();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return "unavailable".to_string();
+    };
+    let digest = Sha256::digest(&bytes);
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{hex} ({} bytes) {}", bytes.len(), path.display())
+}
 
 /// splitmix64 — deterministic, seed-stable uniform stream. We only need a
 /// fair-distribution data set for TIMING (not bit-identity with numpy's PCG64),
@@ -385,57 +412,157 @@ fn build_square_f64_frame(dim: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, column_order).expect("fp-bench square frame")
 }
 
-/// Time a closure `ITERS` times after `WARMUP` warmups; return per-iter µs.
-fn time_us<F: FnMut()>(mut op: F) -> Vec<f64> {
+fn timed_batch_us<F, T>(
+    op: &mut F,
+    repeat: usize,
+    divide_by_repeat: bool,
+    checksum: &mut u64,
+) -> f64
+where
+    F: FnMut() -> T,
+{
+    debug_assert!(repeat > 0);
+    let started = Instant::now();
+    let mut last_result = None;
+    for _ in 0..repeat {
+        last_result = Some(black_box(op()));
+    }
+    let mut elapsed_us = started.elapsed().as_secs_f64() * 1e6;
+    if divide_by_repeat {
+        elapsed_us /= repeat as f64;
+    }
+
+    let result = last_result.expect("repeat is non-zero");
+    *checksum =
+        checksum.rotate_left(9) ^ (std::mem::size_of_val(&result) as u64) ^ 0x9e37_79b9_7f4a_7c15;
+    black_box(result);
+    elapsed_us
+}
+
+/// Measure an identical arm twice inside every round. Order alternates so
+/// first-mover cache and scheduler bias cancel. The median of `null_ratios` is
+/// the A/A point estimate; the caller gates on its bootstrap median CI.
+fn paired_time_us<F, T>(mut op: F, repeat: usize, divide_by_repeat: bool) -> PairedSamples
+where
+    F: FnMut() -> T,
+{
     for _ in 0..WARMUP {
-        op();
+        for _ in 0..repeat {
+            black_box(op());
+        }
     }
-    let mut out = Vec::with_capacity(ITERS);
-    for _ in 0..ITERS {
-        let t = Instant::now();
-        op();
-        out.push(t.elapsed().as_secs_f64() * 1e6);
+
+    let mut times_us = Vec::with_capacity(ITERS * 2);
+    let mut null_arm_a_us = Vec::with_capacity(ITERS);
+    let mut null_arm_b_us = Vec::with_capacity(ITERS);
+    let mut null_ratios = Vec::with_capacity(ITERS);
+    let mut checksum = 0_u64;
+    for round in 0..ITERS {
+        let (arm_a_us, arm_b_us) = if round % 2 == 0 {
+            let arm_a_us = timed_batch_us(&mut op, repeat, divide_by_repeat, &mut checksum);
+            let arm_b_us = timed_batch_us(&mut op, repeat, divide_by_repeat, &mut checksum);
+            (arm_a_us, arm_b_us)
+        } else {
+            let arm_b_us = timed_batch_us(&mut op, repeat, divide_by_repeat, &mut checksum);
+            let arm_a_us = timed_batch_us(&mut op, repeat, divide_by_repeat, &mut checksum);
+            (arm_a_us, arm_b_us)
+        };
+        times_us.extend([arm_a_us, arm_b_us]);
+        null_arm_a_us.push(arm_a_us);
+        null_arm_b_us.push(arm_b_us);
+        null_ratios.push(arm_a_us / arm_b_us);
     }
-    out
+    PairedSamples {
+        times_us,
+        null_arm_a_us,
+        null_arm_b_us,
+        null_ratios,
+        checksum,
+    }
+}
+
+/// Variant for cache-populating APIs: build a fresh subject before each arm,
+/// outside the timed region, so arm B cannot inherit arm A's materialization.
+fn paired_time_us_with_setup<Setup, Subject, Op, Output>(
+    mut setup: Setup,
+    mut op: Op,
+) -> PairedSamples
+where
+    Setup: FnMut() -> Subject,
+    Op: FnMut(&Subject) -> Output,
+{
+    let mut checksum = 0_u64;
+    let (times_us, null_arm_a_us, null_arm_b_us, null_ratios) = {
+        let mut time_arm = || {
+            let subject = black_box(setup());
+            let started = Instant::now();
+            let result = black_box(op(black_box(&subject)));
+            let elapsed_us = started.elapsed().as_secs_f64() * 1e6;
+            checksum = checksum.rotate_left(9)
+                ^ (std::mem::size_of_val(&result) as u64)
+                ^ 0x9e37_79b9_7f4a_7c15;
+            black_box(result);
+            elapsed_us
+        };
+
+        for _ in 0..WARMUP {
+            black_box(time_arm());
+        }
+
+        let mut times_us = Vec::with_capacity(ITERS * 2);
+        let mut null_arm_a_us = Vec::with_capacity(ITERS);
+        let mut null_arm_b_us = Vec::with_capacity(ITERS);
+        let mut null_ratios = Vec::with_capacity(ITERS);
+        for round in 0..ITERS {
+            let (arm_a_us, arm_b_us) = if round % 2 == 0 {
+                (time_arm(), time_arm())
+            } else {
+                let arm_b_us = time_arm();
+                let arm_a_us = time_arm();
+                (arm_a_us, arm_b_us)
+            };
+            times_us.extend([arm_a_us, arm_b_us]);
+            null_arm_a_us.push(arm_a_us);
+            null_arm_b_us.push(arm_b_us);
+            null_ratios.push(arm_a_us / arm_b_us);
+        }
+        (times_us, null_arm_a_us, null_arm_b_us, null_ratios)
+    };
+
+    PairedSamples {
+        times_us,
+        null_arm_a_us,
+        null_arm_b_us,
+        null_ratios,
+        checksum,
+    }
+}
+
+/// Time a closure after warmup and emit a same-invocation A/A control.
+fn time_us<F, T>(op: F) -> PairedSamples
+where
+    F: FnMut() -> T,
+{
+    paired_time_us(op, 1, false)
 }
 
 #[cfg(feature = "lazy-transpose-prototype")]
-fn time_us_repeated<F: FnMut()>(repeat: usize, mut op: F) -> Vec<f64> {
-    for _ in 0..WARMUP {
-        for _ in 0..repeat {
-            op();
-        }
-    }
-    let mut out = Vec::with_capacity(ITERS);
-    for _ in 0..ITERS {
-        let t = Instant::now();
-        for _ in 0..repeat {
-            op();
-        }
-        out.push(t.elapsed().as_secs_f64() * 1e6 / repeat as f64);
-    }
-    out
+fn time_us_repeated<F, T>(repeat: usize, op: F) -> PairedSamples
+where
+    F: FnMut() -> T,
+{
+    paired_time_us(op, repeat, true)
 }
 
 #[cfg(feature = "lazy-transpose-view")]
-fn time_us_repeated_total<F: FnMut()>(repeat: usize, mut op: F) -> Vec<f64> {
-    for _ in 0..WARMUP {
-        for _ in 0..repeat {
-            op();
-        }
-    }
-    let mut out = Vec::with_capacity(ITERS);
-    for _ in 0..ITERS {
-        let t = Instant::now();
-        for _ in 0..repeat {
-            op();
-        }
-        out.push(t.elapsed().as_secs_f64() * 1e6);
-    }
-    out
+fn time_us_repeated_total<F, T>(repeat: usize, op: F) -> PairedSamples
+where
+    F: FnMut() -> T,
+{
+    paired_time_us(op, repeat, false)
 }
 
-fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f64>> {
+fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<PairedSamples> {
     let (rows, cols) = size_rows_cols(size);
     let (df, raw) = build_frame(rows, cols, dtype);
     #[cfg(feature = "lazy-transpose-prototype")]
@@ -853,14 +980,23 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.count()
             let _ = df.count().expect("count");
         }),
-        ("dataframe_ops", "df_to_numpy") => time_us(|| {
-            // pandas: df.to_numpy()
-            let _ = df.to_numpy();
-        }),
-        ("dataframe_ops", "df_values") => time_us(|| {
-            // pandas: df.values (Vec<Vec<Scalar>> row-major materialization).
-            let _ = df.values();
-        }),
+        ("dataframe_ops", "df_to_numpy") => paired_time_us_with_setup(
+            || build_frame(rows, cols, dtype).0,
+            |fresh| {
+                // pandas: df.to_numpy(). Fresh construction is outside the
+                // timer, preventing a cached consolidation from posing as a
+                // first-call materialization win.
+                fresh.to_numpy()
+            },
+        ),
+        ("dataframe_ops", "df_values") => paired_time_us_with_setup(
+            || build_frame(rows, cols, dtype).0,
+            |fresh| {
+                // pandas: df.values (Vec<Vec<Scalar>> row-major materialization).
+                // Each arm gets a fresh frame outside the timed boundary.
+                fresh.values()
+            },
+        ),
         ("dataframe_ops", "df_iterrows") => time_us(|| {
             // pandas: list(df.iterrows())
             let _ = df.iterrows();
@@ -2560,6 +2696,8 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
 }
 
 fn main() {
+    println!("bench_elf_sha256={}", self_identity());
+
     let args: Vec<String> = std::env::args().collect();
     let category = arg(&args, "--category").unwrap_or("dataframe_ops");
     let workload = arg(&args, "--workload").unwrap_or("sort_single");
@@ -2567,9 +2705,36 @@ fn main() {
     let dtype = arg(&args, "--dtype").unwrap_or("float64");
 
     match run(category, workload, size, dtype) {
-        Some(times) => {
-            let body: Vec<String> = times.iter().map(|t| format!("{t}")).collect();
-            println!("{{\"times_us\": [{}]}}", body.join(", "));
+        Some(samples) => {
+            let times: Vec<String> = samples.times_us.iter().map(|t| format!("{t}")).collect();
+            let null_arm_a: Vec<String> = samples
+                .null_arm_a_us
+                .iter()
+                .map(|t| format!("{t}"))
+                .collect();
+            let null_arm_b: Vec<String> = samples
+                .null_arm_b_us
+                .iter()
+                .map(|t| format!("{t}"))
+                .collect();
+            let null_ratios: Vec<String> = samples
+                .null_ratios
+                .iter()
+                .map(|ratio| format!("{ratio}"))
+                .collect();
+            println!(
+                concat!(
+                    "{{\"times_us\":[{}],",
+                    "\"null_control\":{{\"arm_a_times_us\":[{}],",
+                    "\"arm_b_times_us\":[{}],\"ratios\":[{}]}},",
+                    "\"checksum\":\"{:016x}\"}}"
+                ),
+                times.join(","),
+                null_arm_a.join(","),
+                null_arm_b.join(","),
+                null_ratios.join(","),
+                samples.checksum,
+            );
         }
         None => {
             eprintln!(
@@ -2577,6 +2742,48 @@ fn main() {
             );
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod harness_contract_tests {
+    use super::{ITERS, paired_time_us, self_identity};
+
+    #[test]
+    fn executable_identity_is_a_lowercase_sha256() {
+        let identity = self_identity();
+        let digest = identity.split_whitespace().next().expect("identity digest");
+        assert_eq!(digest.len(), 64);
+        assert!(
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        assert!(identity.contains(" bytes) "));
+    }
+
+    #[test]
+    fn paired_timing_emits_one_interleaved_null_ratio_per_round() {
+        let mut value = 0_u64;
+        let samples = paired_time_us(
+            || {
+                value = value.wrapping_add(1);
+                value
+            },
+            1,
+            false,
+        );
+        assert_eq!(samples.times_us.len(), ITERS * 2);
+        assert_eq!(samples.null_arm_a_us.len(), ITERS);
+        assert_eq!(samples.null_arm_b_us.len(), ITERS);
+        assert_eq!(samples.null_ratios.len(), ITERS);
+        assert!(
+            samples
+                .null_ratios
+                .iter()
+                .all(|ratio| ratio.is_finite() && *ratio > 0.0)
+        );
+        assert_ne!(samples.checksum, 0);
     }
 }
 

@@ -19175,3 +19175,81 @@ Retry predicate for the REFUTED arms: do not re-propose §8.14 radix-partition o
 str-groupby factorization unless a symbolized profile first shows the factorization table exceeding L2 —
 which requires a workload with a group count large enough to matter, not the ~1000-group shape all current
 benches use. The 4th reject already covers everything below that.
+
+### 2026-07-25 CrimsonGate — PERF_CAMPAIGN HARNESS+FRONTIER: contract adopted, VOID top five corrected, and all-valid Float64 axis=1 moments KEEP 1.584547×
+
+Campaign lane: `cod / HARNESS+FRONTIER`, bead `br-frankenpandas-elptw`. The full audit, corrected
+reconstruction details, raw result arrays, and methodology are in `docs/LEDGER_RESURRECTION.md`; this is the
+canonical verdict row. No historical ledger row was deleted or rewritten.
+
+**Meta-Lever 2 contract parts 1–3 are now the harness contract.**
+
+- `fp-bench` hashes its own `env::current_exe()` and prints the running ELF SHA-256, byte length, and path on
+  stdout line 1. The Python/pandas process likewise reports the interpreter ELF that actually hosted it.
+- Every engine invocation emits 25 order-alternating A/A pairs from the same process. Cache-populating
+  `df_to_numpy` / `df_values` arms receive a fresh frame outside each timed region.
+- Schema v4 bootstraps the median A/A ratio with 10,000 deterministic resamples (95% CI). A claim votes only
+  when its absolute log effect clears 2× the widest null-CI log half-width. CV is provenance only: it never
+  keeps, rejects, drops, quarantines, or updates a baseline. The ratchet excludes
+  `NULL_UNDECIDABLE`/invalid rows from comparisons and quarantines them.
+
+**Meta-Lever 1 VOID audit.** Snapshot: 19,011 lines / 843 headings; 256 REJECT-bearing entries audited.
+Automated criteria raised 31 flags; hand review found 16 genuine VOID lever-rejects, 177 WEAK provenance-gap
+rows, 48 decisions that STAND, and 15 classifier false positives. Two previously resurrected lanes had
+already banked yield (`to_flat_index` and the lazy transpose-view family). The corrected top five were
+reconstructed benchmark-only and run strict-remote with exact parity before timing:
+
+| rank | resurrected row | worker / running test ELF SHA-256 | paired ORIG÷candidate | A/A median 95% CI | corrected verdict |
+|---:|---|---|---:|---:|---|
+| 1 | `:9510` axis=1 historical two-full-buffer moment kernel @1M×10 | `vmi1227854` / `26a8b6eac09669fbc30d3e7fcb4d4c6ed2a26c8e8075a5fcf2372b1de9ceafac` | 0.998099× | `[0.843831, 1.006400]` | **NULL_UNDECIDABLE**; candidate 43.26% self |
+| 2a | `:11362` `to_flat_index`, serial 49k | `vmi1227854` / `ea3eb63687ad151744a3f563a9cd1edc35e362e11e143ed564badbd6955873eb` | 3.097997× | `[0.974225, 1.048136]` | **KEEP confirmed**, exact parity |
+| 2b | same ELF, parallel 1M | same | 1.741439× | `[0.763136, 1.057655]` | **KEEP confirmed**, exact parity |
+| 3 | `:10452` eager transpose row constructor | `vmi1264463` / `714a503ccc907f761cc3d214b140efd21a51f25ca503d56ccc78500562180fa2` | current route A/A only | `[0.963400, 1.010678]` | **MOOT**; current lazy route never executes the old eager target |
+| 4 | `:12050` sorted sequential insert | `vmi1227854` / `9e583d86a2225e9c297647fa6858eaa3c6657f07b19f1c4d050f43ff0df9c7c1` | 0.593669× | `[0.944538, 1.021580]` | **REJECT**; candidate wrapper 0.01% self, `BTreeMap::insert` 5.98% |
+| 5 | `:12364` `to_dict(index)` row shards | `vmi1227854` / `e4306216bb6293f83148e6bf75534fe20834bf19ba34aad542e187bd2dcdba2c` | 1.862427× | `[0.939331, 1.039169]` | **KEEP confirmed but superseded** by the current stronger typed pair-build |
+
+The first bounded rank-1 attempt expired on an overloaded worker before reaching the timed path, so it is an
+invalid attempt with no ratio and no verdict; the completed pinned rerun above is the only rank-1 result.
+
+**Profile-attributed frontier continuation: KEEP.** Rank 1's admissible profile named the real target despite
+its NULL result: the candidate itself carried 43.26% self and its output-sized means buffer incurred page
+clearing. The next primitive completes both mean and M2 for one 4096-row tile before advancing, reducing the
+means scratch from 1,000,000 f64s to 4,096 without changing either float fold's column order.
+
+Final strict-remote production-path ELF
+`d6488b2980459e896153f0bf3a1f35711371213664ee5c83a75546d3b960a59f` on `vmi1227854`:
+
+| comparison @1M×10 Float64 | paired ratio | A/A median 95% CI | verdict |
+|---|---:|---:|---|
+| resurrected two-full-buffer → tile-local means | **1.645242×** | `[0.990203, 1.218106]` | **KEEP** |
+| explicit legacy public row-gather → shipped public tile-local route | **1.584547×** | `[0.852740, 1.044968]` | **KEEP** |
+
+All 1,000,000 variance outputs matched both reference arms bit-for-bit before timing. Production
+`var(axis=1)`, `std(axis=1)`, and `sem(axis=1)` use the new path only when every numeric input column is
+all-valid Float64; nullable, NaN-bearing, Int64, mixed, Bool, and generic cases retain their previous
+fallbacks. A 4,097-row exact-bit regression test crosses the tile boundary for all three public APIs.
+Alignment and null/NaN semantics are unchanged.
+
+**Concrete retry predicates.**
+
+- Axis=1 moments: re-open only when a current profile again attributes >20% self to this moment primitive
+  and a different shape removes a measured component without changing float-operation order.
+- `to_flat_index`: re-open only if `core::fmt` returns above 5% self on the contiguous tuple-label build.
+- Eager transpose constructor: re-open only if the public route again eagerly constructs every output row
+  and profiles that constructor above 5% self.
+- Sorted insert: re-open only after a representation removes incremental `BTreeMap::insert` (or profiles it
+  below 1% self); repeating sequential insertion against lexical bulk collect is closed.
+- Old `to_dict(index)` shards: never reintroduce this superseded implementation; compare successors against
+  the current typed pair-build, and retry only after a >5% regression outside its own A/A median CI.
+- Any WEAK ledger row: promote it only after its target independently appears above 5% self in a current
+  profile. From this row forward, a REJECT without same-invocation A/A, running-binary identity, and a
+  median-CI decision is VOID by construction.
+
+Verification: strict-remote workspace check PASS; `fp-frame --lib` 3,186 passed / 0 failed / 23 ignored;
+`fp-conformance --lib` 1,596 passed / 0 failed (remote live-oracle checkout absent, documented smoke skip);
+`fp-bench` 2 passed / 0 failed; touched-package clippy PASS. Full workspace clippy stops in inherited
+`fp-columnar` warnings. Strict RCH refuses `cargo fmt --check` as non-compilation (`RCH-E301`); direct
+rustfmt passes `fp-bench` and the campaign hunks match rustfmt while the large library files retain inherited
+whole-file drift. Bounded fp-frame UBS reproduces the known 180-second inventory stall documented in
+`artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md`; other focused UBS findings are pre-existing or
+false positives outside the touched hunks.

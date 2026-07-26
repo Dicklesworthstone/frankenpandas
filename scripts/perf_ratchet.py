@@ -14,7 +14,9 @@ Thresholds:
 Verdicts:
   - ALLOW: All thresholds pass, update baseline
   - BLOCK: Regression beyond threshold, fail CI
-  - QUARANTINE: Some measurements have high cv, manual review needed
+  - QUARANTINE: Some measurements are contract-invalid or median-CI undecidable
+
+CV is retained as provenance only. It never decides a ratchet verdict.
 
 Usage:
     python scripts/perf_ratchet.py --baseline .bench-history/latest.json --new artifacts/bench/current.json
@@ -50,6 +52,14 @@ CATEGORIES = {
     "indexing": 0.10,
 }
 
+UNCERTAIN_VERDICTS = {
+    "NULL_UNDECIDABLE",
+    "CONTRACT_INVALID",
+    "INCOMPLETE",
+    # Historical v3 artifact; retained only as legacy uncertainty.
+    "DROPPED_HIGH_CV",
+}
+
 
 def load_json(path: Path) -> dict[str, Any]:
     with open(path) as f:
@@ -71,16 +81,41 @@ def compute_geomean(values: list[float]) -> float:
     return math.exp(sum(math.log(v) for v in values) / len(values))
 
 
+def fp_metric(result: dict[str, Any], metric: str) -> float:
+    """Read harness v4 nested metrics, with the historical flat-field fallback."""
+    nested = result.get("frankenpandas")
+    if isinstance(nested, dict):
+        value = nested.get(metric, 0)
+        if isinstance(value, int | float):
+            return float(value)
+    legacy_name = {
+        "p50_us": "fp_p50_us",
+        "p95_us": "fp_p95_us",
+        "throughput_rows_sec": "fp_throughput",
+    }[metric]
+    value = result.get(legacy_name, 0)
+    return float(value) if isinstance(value, int | float) else 0.0
+
+
+def workload_key(result: dict[str, Any]) -> tuple[Any, Any, Any]:
+    return result.get("workload"), result.get("size"), result.get("dtype")
+
+
+def is_decidable(result: dict[str, Any]) -> bool:
+    """Only median-CI-decided rows may vote in the regression ratchet."""
+    return result.get("verdict") not in UNCERTAIN_VERDICTS
+
+
 def compare_workload(baseline: dict, new: dict) -> dict[str, Any]:
     """Compare a single workload against baseline."""
-    b_p50 = baseline.get("fp_p50_us", 0)
-    n_p50 = new.get("fp_p50_us", 0)
+    b_p50 = fp_metric(baseline, "p50_us")
+    n_p50 = fp_metric(new, "p50_us")
 
-    b_p90 = baseline.get("fp_p95_us", 0)
-    n_p90 = new.get("fp_p95_us", 0)
+    b_p90 = fp_metric(baseline, "p95_us")
+    n_p90 = fp_metric(new, "p95_us")
 
-    b_throughput = baseline.get("fp_throughput", 0)
-    n_throughput = new.get("fp_throughput", 0)
+    b_throughput = fp_metric(baseline, "throughput_rows_sec")
+    n_throughput = fp_metric(new, "throughput_rows_sec")
 
     p50_change = ((n_p50 - b_p50) / b_p50 * 100) if b_p50 > 0 else 0
     p90_change = ((n_p90 - b_p90) / b_p90 * 100) if b_p90 > 0 else 0
@@ -113,18 +148,27 @@ def compare_workload(baseline: dict, new: dict) -> dict[str, Any]:
 def compare_category(baseline_results: list, new_results: list, category: str) -> dict[str, Any]:
     """Compare category-level geomean."""
     baseline_by_key = {
-        (r.get("workload"), r.get("size")): r
+        workload_key(r): r
         for r in baseline_results
         if r.get("category") == category
     }
     new_by_key = {
-        (r.get("workload"), r.get("size")): r
+        workload_key(r): r
         for r in new_results
         if r.get("category") == category
     }
+    comparable_keys = baseline_by_key.keys() & new_by_key.keys()
 
-    baseline_p50s = [r.get("fp_p50_us", 0) for r in baseline_by_key.values() if r.get("fp_p50_us", 0) > 0]
-    new_p50s = [r.get("fp_p50_us", 0) for r in new_by_key.values() if r.get("fp_p50_us", 0) > 0]
+    baseline_p50s = [
+        fp_metric(baseline_by_key[key], "p50_us")
+        for key in comparable_keys
+        if fp_metric(baseline_by_key[key], "p50_us") > 0
+    ]
+    new_p50s = [
+        fp_metric(new_by_key[key], "p50_us")
+        for key in comparable_keys
+        if fp_metric(new_by_key[key], "p50_us") > 0
+    ]
 
     b_geomean = compute_geomean(baseline_p50s)
     n_geomean = compute_geomean(new_p50s)
@@ -154,14 +198,15 @@ def run_ratchet(baseline_path: Path, new_path: Path) -> tuple[str, dict[str, Any
 
     baseline_results = baseline.get("results", [])
     new_results = new.get("results", [])
+    decidable_new_results = [result for result in new_results if is_decidable(result)]
 
     baseline_by_key = {
-        (r.get("workload"), r.get("size")): r for r in baseline_results
+        workload_key(r): r for r in baseline_results
     }
 
     workload_comparisons = []
-    for nr in new_results:
-        key = (nr.get("workload"), nr.get("size"))
+    for nr in decidable_new_results:
+        key = workload_key(nr)
         br = baseline_by_key.get(key)
         if br:
             cmp = compare_workload(br, nr)
@@ -169,19 +214,21 @@ def run_ratchet(baseline_path: Path, new_path: Path) -> tuple[str, dict[str, Any
 
     category_comparisons = []
     for cat in CATEGORIES:
-        cmp = compare_category(baseline_results, new_results, cat)
-        category_comparisons.append(cmp)
+        if any(result.get("category") == cat for result in decidable_new_results):
+            cmp = compare_category(baseline_results, decidable_new_results, cat)
+            category_comparisons.append(cmp)
 
     all_workload_passed = all(c["passed"] for c in workload_comparisons)
     all_category_passed = all(c["passed"] for c in category_comparisons)
 
-    high_cv_count = sum(
-        1 for r in new_results
-        if r.get("verdict") == "DROPPED_HIGH_CV" or r.get("fp_cv_pct", 0) > 5.0
+    uncertain_count = sum(
+        1
+        for result in new_results
+        if not is_decidable(result)
     )
 
     if all_workload_passed and all_category_passed:
-        if high_cv_count > 0:
+        if uncertain_count > 0:
             verdict = "QUARANTINE"
         else:
             verdict = "ALLOW"
@@ -202,7 +249,8 @@ def run_ratchet(baseline_path: Path, new_path: Path) -> tuple[str, dict[str, Any
             "workloads_failed": sum(1 for c in workload_comparisons if not c["passed"]),
             "categories_passed": sum(1 for c in category_comparisons if c["passed"]),
             "categories_failed": sum(1 for c in category_comparisons if not c["passed"]),
-            "high_cv_count": high_cv_count,
+            "uncertain_measurement_count": uncertain_count,
+            "cv_is_provenance_only": True,
         },
         "failed_workloads": [c for c in workload_comparisons if not c["passed"]],
         "failed_categories": [c for c in category_comparisons if not c["passed"]],
@@ -255,8 +303,11 @@ def main():
 
         summary = report["summary"]
         print(f"Workloads: {summary['workloads_passed']}/{summary['total_workloads']} passed")
-        print(f"Categories: {summary['categories_passed']}/6 passed")
-        print(f"High CV measurements: {summary['high_cv_count']}")
+        print(
+            f"Categories: {summary['categories_passed']}/"
+            f"{len(report['category_comparisons'])} passed"
+        )
+        print(f"Median-CI/contract uncertain measurements: {summary['uncertain_measurement_count']}")
 
         if report["failed_workloads"]:
             print(f"\nFailed workloads:")

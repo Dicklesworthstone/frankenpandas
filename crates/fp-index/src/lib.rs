@@ -34279,9 +34279,15 @@ mod tests {
 ///        -- --ignored --nocapture ab_to_flat_index`
 #[cfg(test)]
 mod ab_to_flat_index_ccfp {
-    use std::time::Instant;
+    use std::{fmt::Write as _, time::Instant};
+
+    use sha2::{Digest, Sha256};
 
     use super::{IndexLabel, MultiIndex};
+
+    const BLOCKS: usize = 25;
+    const BOOTSTRAP_RESAMPLES: usize = 10_000;
+    const DECIDABILITY_MARGIN: f64 = 2.0;
 
     fn build_mi(n: usize) -> MultiIndex {
         // Two levels of the shape wide_to_long / set_index_multi actually produce:
@@ -34295,14 +34301,70 @@ mod ab_to_flat_index_ccfp {
         MultiIndex::from_arrays(vec![lvl0, lvl1]).expect("multiindex")
     }
 
-    fn stats(xs: &[f64]) -> (f64, f64, f64) {
-        let min = xs.iter().copied().fold(f64::INFINITY, f64::min);
-        let mean = xs.iter().sum::<f64>() / xs.len() as f64;
-        let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / xs.len() as f64;
-        (min, mean, 100.0 * var.sqrt() / mean)
+    fn median(xs: &[f64]) -> f64 {
+        let mut sorted = xs.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        sorted[sorted.len() / 2]
     }
 
-    fn ab_regime(label: &str, n: usize, blocks: usize, reps: usize) -> (f64, f64, f64, f64) {
+    fn stats(xs: &[f64]) -> (f64, f64) {
+        let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+        let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / xs.len() as f64;
+        (mean, 100.0 * var.sqrt() / mean)
+    }
+
+    fn bootstrap_median_ci(values: &[f64]) -> (f64, f64) {
+        let mut state = 0xf2a2_0260_725d_1ce5_u64;
+        let mut medians = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+        let mut sample = vec![0.0; values.len()];
+        for _ in 0..BOOTSTRAP_RESAMPLES {
+            for slot in &mut sample {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                *slot = values[(state as usize) % values.len()];
+            }
+            medians.push(median(&sample));
+        }
+        medians.sort_by(f64::total_cmp);
+        (
+            medians[BOOTSTRAP_RESAMPLES / 40],
+            medians[(BOOTSTRAP_RESAMPLES * 39 / 40).min(BOOTSTRAP_RESAMPLES - 1)],
+        )
+    }
+
+    fn binary_sha256() -> String {
+        let path = std::env::current_exe().expect("current test binary");
+        let bytes = std::fs::read(path).expect("read current test binary");
+        let digest = Sha256::digest(&bytes);
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        hex
+    }
+
+    fn time_orig(mi: &MultiIndex, reps: usize) -> f64 {
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let started = Instant::now();
+            std::hint::black_box(mi.to_flat_index_ref_write_fmt("_"));
+            best = best.min(started.elapsed().as_secs_f64() * 1e3);
+        }
+        best
+    }
+
+    fn time_candidate(mi: &MultiIndex, reps: usize) -> f64 {
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let started = Instant::now();
+            std::hint::black_box(mi.to_flat_index("_"));
+            best = best.min(started.elapsed().as_secs_f64() * 1e3);
+        }
+        best
+    }
+
+    fn ab_regime(label: &str, n: usize, reps: usize) {
         let mi = build_mi(n);
         // Parity in this same binary: the arms must be bit-identical.
         assert_eq!(
@@ -34312,44 +34374,72 @@ mod ab_to_flat_index_ccfp {
         );
         for _ in 0..2 {
             std::hint::black_box(mi.to_flat_index_ref_write_fmt("_"));
+            std::hint::black_box(mi.to_flat_index_ref_write_fmt("_"));
             std::hint::black_box(mi.to_flat_index("_"));
         }
-        let mut orig_ms: Vec<f64> = Vec::with_capacity(blocks);
-        let mut cand_ms: Vec<f64> = Vec::with_capacity(blocks);
-        for _ in 0..blocks {
-            let mut o = f64::INFINITY;
-            let mut c = f64::INFINITY;
-            for _ in 0..reps {
-                // Alternate ORIG/CAND so drift cancels pairwise.
-                let t = Instant::now();
-                std::hint::black_box(mi.to_flat_index_ref_write_fmt("_"));
-                o = o.min(t.elapsed().as_secs_f64() * 1e3);
-
-                let t = Instant::now();
-                std::hint::black_box(mi.to_flat_index("_"));
-                c = c.min(t.elapsed().as_secs_f64() * 1e3);
+        let mut orig_ms = Vec::with_capacity(BLOCKS);
+        let mut null_ms = Vec::with_capacity(BLOCKS);
+        let mut candidate_ms = Vec::with_capacity(BLOCKS);
+        for block in 0..BLOCKS {
+            if block % 2 == 0 {
+                orig_ms.push(time_orig(&mi, reps));
+                null_ms.push(time_orig(&mi, reps));
+                candidate_ms.push(time_candidate(&mi, reps));
+            } else {
+                candidate_ms.push(time_candidate(&mi, reps));
+                null_ms.push(time_orig(&mi, reps));
+                orig_ms.push(time_orig(&mi, reps));
             }
-            orig_ms.push(o);
-            cand_ms.push(c);
         }
-        let (o_min, _, o_cv) = stats(&orig_ms);
-        let (c_min, _, c_cv) = stats(&cand_ms);
-        println!("[{label}] n={n} blocks={blocks} reps={reps}");
-        println!("  ORIG write!      min={o_min:9.4} ms  cv={o_cv:5.2}%");
-        println!("  CAND variant-fmt min={c_min:9.4} ms  cv={c_cv:5.2}%");
-        println!("  fp-side ratio (min-of-blocks) = {:.3}x", o_min / c_min);
-        println!("  cv<5% both arms: orig={} cand={}", o_cv < 5.0, c_cv < 5.0);
-        (o_min, c_min, o_cv, c_cv)
+        let null_ratios: Vec<f64> = orig_ms
+            .iter()
+            .zip(&null_ms)
+            .map(|(arm_a, arm_b)| arm_a / arm_b)
+            .collect();
+        let candidate_ratios: Vec<f64> = orig_ms
+            .iter()
+            .zip(&candidate_ms)
+            .map(|(arm_a, arm_b)| arm_a / arm_b)
+            .collect();
+        let (orig_mean, orig_cv) = stats(&orig_ms);
+        let (candidate_mean, candidate_cv) = stats(&candidate_ms);
+        let null_median = median(&null_ratios);
+        let (ci_low, ci_high) = bootstrap_median_ci(&null_ratios);
+        let ratio = median(&candidate_ratios);
+        let required_log_effect = DECIDABILITY_MARGIN * ci_low.ln().abs().max(ci_high.ln().abs());
+        let decidable = ratio.ln().abs() >= required_log_effect;
+        let verdict = if !decidable {
+            "NULL_UNDECIDABLE"
+        } else if ratio > 1.0 {
+            "KEEP"
+        } else {
+            "REJECT"
+        };
+
+        println!("[{label}] n={n} blocks={BLOCKS} reps={reps}");
+        println!("  ORIG_MS {orig_ms:?}");
+        println!("  NULL_MS {null_ms:?}");
+        println!("  CANDIDATE_MS {candidate_ms:?}");
+        println!("  NULL_RATIOS {null_ratios:?}");
+        println!("  CANDIDATE_RATIOS {candidate_ratios:?}");
+        println!("  ORIG mean={orig_mean:9.4} ms cv={orig_cv:5.2}%");
+        println!("  CAND variant-fmt mean={candidate_mean:9.4} ms cv={candidate_cv:5.2}%");
+        println!("  NULL_MEDIAN_CI median={null_median:.6} low={ci_low:.6} high={ci_high:.6}");
+        println!(
+            "  MEDIAN_CI_GATE ratio={ratio:.6} required_log_effect={required_log_effect:.8} \
+             cv_is_provenance_only=true verdict={verdict}"
+        );
     }
 
     #[test]
     #[ignore = "perf A/B; run with --ignored --nocapture"]
     fn ab_to_flat_index_core_fmt() {
         println!("AB to_flat_index (ONE binary, ONE rch invocation; arms alternate in-block)");
+        println!("BINARY_SHA256 {}", binary_sha256());
         // SERIAL regime: n below FLATIDX_PAR_MIN_ROWS (50_000) so neither arm spawns
         // threads. Isolates the per-row formatting cost with no scheduler noise.
-        ab_regime("serial", 49_000, 9, 60);
+        ab_regime("serial", 49_000, 60);
         // PARALLEL regime: the shipped path at reshape scale.
-        ab_regime("parallel", 1_000_000, 9, 5);
+        ab_regime("parallel", 1_000_000, 5);
     }
 }

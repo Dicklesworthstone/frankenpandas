@@ -71399,6 +71399,76 @@ impl DataFrame {
         Series::new(name, index, column).map(Some)
     }
 
+    /// All-valid Float64 fast path for the two-pass axis=1 moment family.
+    ///
+    /// Finish one 4096-row tile before advancing, so the row means stay
+    /// L1-sized instead of occupying a second output-sized buffer. For each
+    /// row, both the mean fold and the M2 fold retain the exact left-to-right
+    /// column order used by `row_sample_var`; SIMD lanes operate only across
+    /// independent rows, so variance/std/sem remain bit-identical.
+    fn reduce_rows_moment_f64<F>(&self, finish: F, name: &str) -> Result<Option<Series>, FrameError>
+    where
+        F: Fn(f64, f64) -> f64,
+    {
+        let numeric_cols = self.numeric_row_reduction_columns();
+        if numeric_cols.is_empty() {
+            return Ok(None);
+        }
+        let Some(f64_cols) = numeric_cols
+            .iter()
+            .map(|&column_name| {
+                let column = &self.columns[column_name];
+                if column.dtype() == DType::Float64 {
+                    column.as_f64_slice()
+                } else {
+                    None
+                }
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Ok(None);
+        };
+
+        const TILE: usize = 4096;
+        let count = f64_cols.len() as f64;
+        let mut moments = vec![0.0_f64; self.len()];
+        let mut means = vec![0.0_f64; TILE.min(self.len())];
+        let mut start = 0;
+        while start < self.len() {
+            let end = (start + TILE).min(self.len());
+            let tile_len = end - start;
+            let tile_means = &mut means[..tile_len];
+            tile_means.fill(0.0);
+            for column in &f64_cols {
+                for (mean, value) in tile_means.iter_mut().zip(&column[start..end]) {
+                    *mean += *value;
+                }
+            }
+            for mean in tile_means.iter_mut() {
+                *mean /= count;
+            }
+
+            let tile_moments = &mut moments[start..end];
+            for column in &f64_cols {
+                for ((m2, mean), value) in tile_moments
+                    .iter_mut()
+                    .zip(tile_means.iter())
+                    .zip(&column[start..end])
+                {
+                    *m2 += (*value - *mean).powi(2);
+                }
+            }
+            for moment in tile_moments {
+                *moment = finish(*moment, count);
+            }
+            start = end;
+        }
+
+        let index = self.index.clone();
+        let column = Column::from_f64_values(moments);
+        Series::new(name, index, column).map(Some)
+    }
+
     /// Internal: reduce each row across numeric columns using a closure.
     fn reduce_rows<F>(&self, func: F, name: &str, empty: Scalar) -> Result<Series, FrameError>
     where
@@ -71833,6 +71903,9 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.std(axis=1)`.
     pub fn std_axis1(&self) -> Result<Series, FrameError> {
+        if let Some(s) = self.reduce_rows_moment_f64(|m2, n| (m2 / (n - 1.0)).sqrt(), "std")? {
+            return Ok(s);
+        }
         if let Some(s) =
             self.reduce_rows_func_f64(|vals| Self::row_sample_var(vals).sqrt(), "std")?
         {
@@ -71849,6 +71922,9 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.var(axis=1)`.
     pub fn var_axis1(&self) -> Result<Series, FrameError> {
+        if let Some(s) = self.reduce_rows_moment_f64(|m2, n| m2 / (n - 1.0), "var")? {
+            return Ok(s);
+        }
         if let Some(s) = self.reduce_rows_func_f64(Self::row_sample_var, "var")? {
             return Ok(s);
         }
@@ -71859,6 +71935,11 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.sem(axis=1)`.
     pub fn sem_axis1(&self) -> Result<Series, FrameError> {
+        if let Some(s) =
+            self.reduce_rows_moment_f64(|m2, n| (m2 / (n - 1.0)).sqrt() / n.sqrt(), "sem")?
+        {
+            return Ok(s);
+        }
         if let Some(s) = self.reduce_rows_func_f64(Self::row_sem, "sem")? {
             return Ok(s);
         }
@@ -135091,6 +135172,73 @@ mod tests {
     }
 
     #[test]
+    fn df_axis1_fused_tile_moments_preserve_exact_float_bits() {
+        const ROWS: usize = 4097;
+        let a: Vec<f64> = (0..ROWS)
+            .map(|row| (row as f64).mul_add(0.25, -17.0))
+            .collect();
+        let b: Vec<f64> = (0..ROWS)
+            .map(|row| ((row * 17) % 997) as f64 / 13.0)
+            .collect();
+        let c: Vec<f64> = (0..ROWS)
+            .map(|row| -(((row * 29) % 991) as f64) / 11.0)
+            .collect();
+        let columns = BTreeMap::from([
+            ("a".to_owned(), Column::from_f64_values(a.clone())),
+            ("b".to_owned(), Column::from_f64_values(b.clone())),
+            ("c".to_owned(), Column::from_f64_values(c.clone())),
+        ]);
+        let df = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, ROWS),
+            columns,
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+        )
+        .unwrap();
+
+        let variances = df
+            .var_axis1()
+            .unwrap()
+            .column()
+            .as_f64_slice()
+            .unwrap()
+            .to_vec();
+        let standard_deviations = df
+            .std_axis1()
+            .unwrap()
+            .column()
+            .as_f64_slice()
+            .unwrap()
+            .to_vec();
+        let standard_errors = df
+            .sem_axis1()
+            .unwrap()
+            .column()
+            .as_f64_slice()
+            .unwrap()
+            .to_vec();
+
+        for row in 0..ROWS {
+            let values = [a[row], b[row], c[row]];
+            let n = values.len() as f64;
+            let mean = values.iter().sum::<f64>() / n;
+            let m2 = values
+                .iter()
+                .map(|value| (*value - mean).powi(2))
+                .sum::<f64>();
+            let variance = m2 / (n - 1.0);
+            assert_eq!(variances[row].to_bits(), variance.to_bits());
+            assert_eq!(
+                standard_deviations[row].to_bits(),
+                variance.sqrt().to_bits()
+            );
+            assert_eq!(
+                standard_errors[row].to_bits(),
+                (variance.sqrt() / n.sqrt()).to_bits()
+            );
+        }
+    }
+
+    #[test]
     fn df_skew_axis1() {
         let df = DataFrame::from_dict(
             &["a", "b", "c"],
@@ -180490,18 +180638,23 @@ mod ab_transpose_materialize_ccfp {
 /// routine by re-executing the current test binary under `perf` on the RCH worker.
 #[cfg(test)]
 mod transpose_reject_reaudit_cod_fp {
-    use std::{collections::BTreeMap, hint::black_box, process::Command, time::Instant};
+    use std::{
+        collections::BTreeMap, fmt::Write as _, hint::black_box, process::Command, time::Instant,
+    };
 
     use fp_columnar::{Column, Float64TransposeRows};
     use fp_index::{Index, IndexLabel};
     use fp_types::Scalar;
+    use sha2::{Digest, Sha256};
 
     use super::{DataFrame, DataFrameDictResult, FrameError};
 
     const ROWS: usize = 100_000;
     const COLS: usize = 10;
-    const BLOCKS: usize = 15;
+    const BLOCKS: usize = 25;
     const REPEATS_PER_SAMPLE: usize = 4;
+    const BOOTSTRAP_RESAMPLES: usize = 10_000;
+    const DECIDABILITY_MARGIN: f64 = 2.0;
 
     fn build_f64_frame() -> DataFrame {
         let index = Index::new_known_unique_int64_unit_range(0, ROWS);
@@ -180635,19 +180788,19 @@ mod transpose_reject_reaudit_cod_fp {
         values.iter().sum::<f64>() / values.len() as f64
     }
 
-    fn median(values: &[f64]) -> f64 {
+    pub(super) fn median(values: &[f64]) -> f64 {
         let mut sorted = values.to_vec();
         sorted.sort_by(f64::total_cmp);
         sorted[sorted.len() / 2]
     }
 
-    fn p95(values: &[f64]) -> f64 {
+    pub(super) fn p95(values: &[f64]) -> f64 {
         let mut sorted = values.to_vec();
         sorted.sort_by(f64::total_cmp);
         sorted[((sorted.len() as f64 * 0.95).ceil() as usize).saturating_sub(1)]
     }
 
-    fn cv_pct(values: &[f64]) -> f64 {
+    pub(super) fn cv_pct(values: &[f64]) -> f64 {
         let avg = mean(values);
         let variance = values
             .iter()
@@ -180657,47 +180810,104 @@ mod transpose_reject_reaudit_cod_fp {
         100.0 * variance.sqrt() / avg
     }
 
-    fn run_sorted_insert_pairs(df: &DataFrame) -> (Vec<f64>, Vec<f64>) {
+    fn bootstrap_median_ci(values: &[f64]) -> (f64, f64) {
+        assert!(!values.is_empty(), "bootstrap input");
+        let mut state = 0xf2a2_0260_725d_1ce5_u64;
+        let mut medians = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+        let mut sample = vec![0.0; values.len()];
+        for _ in 0..BOOTSTRAP_RESAMPLES {
+            for slot in &mut sample {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                *slot = values[(state as usize) % values.len()];
+            }
+            medians.push(median(&sample));
+        }
+        medians.sort_by(f64::total_cmp);
+        let low = medians[BOOTSTRAP_RESAMPLES / 40];
+        let high = medians[(BOOTSTRAP_RESAMPLES * 39 / 40).min(BOOTSTRAP_RESAMPLES - 1)];
+        (low, high)
+    }
+
+    pub(super) fn report_contract(label: &str, orig: &[f64], null: &[f64], candidate: &[f64]) {
+        let null_ratios: Vec<f64> = orig
+            .iter()
+            .zip(null)
+            .map(|(arm_a, arm_b)| arm_a / arm_b)
+            .collect();
+        let candidate_ratios: Vec<f64> = orig
+            .iter()
+            .zip(candidate)
+            .map(|(arm_a, arm_b)| arm_a / arm_b)
+            .collect();
+        let null_median = median(&null_ratios);
+        let (ci_low, ci_high) = bootstrap_median_ci(&null_ratios);
+        let ratio = median(&candidate_ratios);
+        let null_log_half_width = ci_low.ln().abs().max(ci_high.ln().abs());
+        let required_log_effect = DECIDABILITY_MARGIN * null_log_half_width;
+        let decidable = ratio.ln().abs() >= required_log_effect;
+        let verdict = if !decidable {
+            "NULL_UNDECIDABLE"
+        } else if ratio > 1.0 {
+            "KEEP"
+        } else {
+            "REJECT"
+        };
+
+        println!("CONTRACT {label}");
+        println!("NULL_MS {null:?}");
+        println!("NULL_RATIOS {null_ratios:?}");
+        println!("CANDIDATE_RATIOS {candidate_ratios:?}");
+        println!("NULL_MEDIAN_CI median={null_median:.6} low={ci_low:.6} high={ci_high:.6}");
+        println!(
+            "MEDIAN_CI_GATE ratio={ratio:.6} required_log_effect={required_log_effect:.8} \
+             cv_is_provenance_only=true verdict={verdict}"
+        );
+    }
+
+    fn run_sorted_insert_pairs(df: &DataFrame) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         for order in 0..4 {
             if order % 2 == 0 {
+                black_box(time_arm(df, sorted_insert_orig_cod_fp));
                 black_box(time_arm(df, sorted_insert_orig_cod_fp));
                 black_box(time_arm(df, sorted_insert_candidate_cod_fp));
             } else {
                 black_box(time_arm(df, sorted_insert_candidate_cod_fp));
+                black_box(time_arm(df, sorted_insert_orig_cod_fp));
                 black_box(time_arm(df, sorted_insert_orig_cod_fp));
             }
         }
 
         let mut orig = Vec::with_capacity(BLOCKS);
+        let mut null = Vec::with_capacity(BLOCKS);
         let mut candidate = Vec::with_capacity(BLOCKS);
         for block in 0..BLOCKS {
             if block % 2 == 0 {
                 orig.push(time_arm(df, sorted_insert_orig_cod_fp));
+                null.push(time_arm(df, sorted_insert_orig_cod_fp));
                 candidate.push(time_arm(df, sorted_insert_candidate_cod_fp));
             } else {
                 candidate.push(time_arm(df, sorted_insert_candidate_cod_fp));
+                null.push(time_arm(df, sorted_insert_orig_cod_fp));
                 orig.push(time_arm(df, sorted_insert_orig_cod_fp));
             }
         }
-        (orig, candidate)
+        (orig, null, candidate)
     }
 
-    fn binary_sha256() -> String {
+    pub(super) fn binary_sha256() -> String {
         let exe = std::env::current_exe().expect("current test binary");
-        let output = Command::new("sha256sum")
-            .arg(&exe)
-            .output()
-            .expect("sha256sum must be installed on the RCH worker");
-        assert!(output.status.success(), "sha256sum failed");
-        String::from_utf8(output.stdout)
-            .expect("sha256sum utf8")
-            .split_whitespace()
-            .next()
-            .expect("sha256sum digest")
-            .to_owned()
+        let bytes = std::fs::read(exe).expect("read current test binary");
+        let digest = Sha256::digest(&bytes);
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        hex
     }
 
-    fn worker_hostname() -> String {
+    pub(super) fn worker_hostname() -> String {
         let output = Command::new("hostname")
             .output()
             .expect("hostname must be installed on the RCH worker");
@@ -180708,7 +180918,7 @@ mod transpose_reject_reaudit_cod_fp {
             .to_owned()
     }
 
-    fn profile_current_test(test_name: &str, child_env: &str, sentinel: &str) -> f64 {
+    pub(super) fn profile_current_test(test_name: &str, child_env: &str, sentinel: &str) -> f64 {
         let exe = std::env::current_exe().expect("current test binary");
         let profile_path = format!(
             "/tmp/frankenpandas_cod_fp_{}_{}.data",
@@ -180850,8 +181060,9 @@ mod transpose_reject_reaudit_cod_fp {
         );
         drop((orig, candidate));
 
-        let (orig, candidate) = run_sorted_insert_pairs(&df);
+        let (orig, null, candidate) = run_sorted_insert_pairs(&df);
         let orig_cv = cv_pct(&orig);
+        let null_cv = cv_pct(&null);
         let candidate_cv = cv_pct(&candidate);
         println!("AUDIT sorted sequential BTree insert; rows={ROWS}; cols={COLS}");
         println!("WORKER {}", worker_hostname());
@@ -180869,15 +181080,15 @@ mod transpose_reject_reaudit_cod_fp {
             p95(&candidate)
         );
         println!(
-            "RATIO_ORIG_OVER_CANDIDATE {:.6}",
-            median(&orig) / median(&candidate)
+            "NULL median={:.6} p95={:.6} cv_pct={null_cv:.4}",
+            median(&null),
+            p95(&null)
         );
+        report_contract("sorted_insert", &orig, &null, &candidate);
         let profile_child = std::env::var_os(CHILD_ENV).is_some();
         if !profile_child {
             let self_pct = profile_current_test(TEST_NAME, CHILD_ENV, SENTINEL);
             println!("CANDIDATE_SELF_PCT {self_pct:.6}");
-            assert!(orig_cv < 5.0, "ORIG cv_pct must be below 5");
-            assert!(candidate_cv < 5.0, "candidate cv_pct must be below 5");
         }
     }
 
@@ -181255,9 +181466,10 @@ mod transpose_reject_reaudit_cod_fp {
         started.elapsed().as_secs_f64() * 1e3 / REPEATS_PER_SAMPLE as f64
     }
 
-    fn run_to_dict_index_row_shard_pairs(df: &DataFrame) -> (Vec<f64>, Vec<f64>) {
+    fn run_to_dict_index_row_shard_pairs(df: &DataFrame) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         for order in 0..4 {
             if order % 2 == 0 {
+                black_box(time_to_dict_index_arm(df, to_dict_index_serial_orig_cod_fp));
                 black_box(time_to_dict_index_arm(df, to_dict_index_serial_orig_cod_fp));
                 black_box(time_to_dict_index_arm(
                     df,
@@ -181268,15 +181480,18 @@ mod transpose_reject_reaudit_cod_fp {
                     df,
                     to_dict_index_row_shards_candidate_cod_fp,
                 ));
+                black_box(time_to_dict_index_arm(df, to_dict_index_serial_orig_cod_fp));
                 black_box(time_to_dict_index_arm(df, to_dict_index_serial_orig_cod_fp));
             }
         }
 
         let mut orig = Vec::with_capacity(BLOCKS);
+        let mut null = Vec::with_capacity(BLOCKS);
         let mut candidate = Vec::with_capacity(BLOCKS);
         for block in 0..BLOCKS {
             if block % 2 == 0 {
                 orig.push(time_to_dict_index_arm(df, to_dict_index_serial_orig_cod_fp));
+                null.push(time_to_dict_index_arm(df, to_dict_index_serial_orig_cod_fp));
                 candidate.push(time_to_dict_index_arm(
                     df,
                     to_dict_index_row_shards_candidate_cod_fp,
@@ -181286,10 +181501,11 @@ mod transpose_reject_reaudit_cod_fp {
                     df,
                     to_dict_index_row_shards_candidate_cod_fp,
                 ));
+                null.push(time_to_dict_index_arm(df, to_dict_index_serial_orig_cod_fp));
                 orig.push(time_to_dict_index_arm(df, to_dict_index_serial_orig_cod_fp));
             }
         }
-        (orig, candidate)
+        (orig, null, candidate)
     }
 
     #[test]
@@ -181331,8 +181547,9 @@ mod transpose_reject_reaudit_cod_fp {
         );
         drop((orig, candidate, public));
 
-        let (orig, candidate) = run_to_dict_index_row_shard_pairs(&df);
+        let (orig, null, candidate) = run_to_dict_index_row_shard_pairs(&df);
         let orig_cv = cv_pct(&orig);
+        let null_cv = cv_pct(&null);
         let candidate_cv = cv_pct(&candidate);
 
         println!("AUDIT to_dict(index) BTreeMap row shards; rows={ROWS}; cols={COLS}");
@@ -181351,15 +181568,15 @@ mod transpose_reject_reaudit_cod_fp {
             p95(&candidate)
         );
         println!(
-            "RATIO_ORIG_OVER_CANDIDATE {:.6}",
-            median(&orig) / median(&candidate)
+            "NULL median={:.6} p95={:.6} cv_pct={null_cv:.4}",
+            median(&null),
+            p95(&null)
         );
+        report_contract("to_dict_index_row_shards", &orig, &null, &candidate);
 
         if std::env::var_os(CHILD_ENV).is_none() {
             let self_pct = profile_current_test(TEST_NAME, CHILD_ENV, SENTINEL);
             println!("CANDIDATE_SELF_PCT {self_pct:.6}");
-            assert!(orig_cv < 5.0, "ORIG cv_pct must be below 5");
-            assert!(candidate_cv < 5.0, "candidate cv_pct must be below 5");
         }
     }
 
@@ -181584,6 +181801,373 @@ mod transpose_reject_reaudit_cod_fp {
             } else {
                 "INVALID_INSIDE_NULL_FLOOR"
             }
+        );
+    }
+}
+
+/// Corrected Meta-Lever #1 rerun for the historical axis=1 moment VOID.
+///
+/// The candidate is the reverted 4096-row tiled two-pass kernel: one
+/// column-streaming pass builds row means and a second builds M2. ORIG, an
+/// identical ORIG null arm, and CANDIDATE alternate inside one test-process
+/// invocation. CV is emitted only as provenance; `report_contract` decides
+/// solely from the bootstrap median CI of the A/A ratios.
+#[cfg(test)]
+mod axis1_moment_void_audit_cod_fp {
+    use std::{collections::BTreeMap, hint::black_box, time::Instant};
+
+    use fp_columnar::Column;
+    use fp_index::Index;
+
+    use super::{
+        DataFrame, FrameError, Series,
+        transpose_reject_reaudit_cod_fp::{
+            binary_sha256, cv_pct, median, p95, profile_current_test, report_contract,
+            worker_hostname,
+        },
+    };
+
+    const ROWS: usize = 1_000_000;
+    const COLS: usize = 10;
+    const BLOCKS: usize = 25;
+    const TILE: usize = 4096;
+    const PROFILE_LOOPS: usize = 5;
+
+    fn build_frame() -> DataFrame {
+        let index = Index::new_known_unique_int64_unit_range(0, ROWS);
+        let columns: BTreeMap<String, Column> = (0..COLS)
+            .map(|column| {
+                let values = (0..ROWS)
+                    .map(|row| {
+                        let mixed = (row as u64)
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(column as u64 * 0x9e37_79b9);
+                        (mixed >> 11) as f64 * (1.0 / ((1_u64 << 53) as f64))
+                    })
+                    .collect();
+                (format!("col_{column}"), Column::from_f64_values(values))
+            })
+            .collect();
+        DataFrame::new(index, columns).expect("axis1 moment fixture")
+    }
+
+    #[inline(never)]
+    fn orig_var_axis1(df: &DataFrame) -> Result<Series, FrameError> {
+        Ok(df
+            .reduce_rows_func_f64(DataFrame::row_sample_var, "var")?
+            .expect("audit fixture must route through the legacy row-gather path"))
+    }
+
+    #[inline(never)]
+    fn public_var_axis1(df: &DataFrame) -> Result<Series, FrameError> {
+        df.var_axis1()
+    }
+
+    #[inline(never)]
+    fn tiled_two_pass_var_candidate_cod_fp(df: &DataFrame) -> Result<Series, FrameError> {
+        let columns: Vec<&[f64]> = df
+            .column_order
+            .iter()
+            .map(|name| {
+                df.columns
+                    .get(name)
+                    .expect("column order entry")
+                    .as_f64_slice()
+                    .expect("all-valid Float64 fixture")
+            })
+            .collect();
+        let count = columns.len() as f64;
+        let mut means = vec![0.0_f64; df.len()];
+        let mut start = 0;
+        while start < df.len() {
+            let end = (start + TILE).min(df.len());
+            for column in &columns {
+                for (sum, value) in means[start..end].iter_mut().zip(&column[start..end]) {
+                    *sum += *value;
+                }
+            }
+            for mean in &mut means[start..end] {
+                *mean /= count;
+            }
+            start = end;
+        }
+
+        let mut variances = vec![0.0_f64; df.len()];
+        start = 0;
+        while start < df.len() {
+            let end = (start + TILE).min(df.len());
+            for column in &columns {
+                for ((m2, mean), value) in variances[start..end]
+                    .iter_mut()
+                    .zip(&means[start..end])
+                    .zip(&column[start..end])
+                {
+                    *m2 += (*value - *mean).powi(2);
+                }
+            }
+            for variance in &mut variances[start..end] {
+                *variance /= count - 1.0;
+            }
+            start = end;
+        }
+
+        Series::new("var", df.index.clone(), Column::from_f64_values(variances))
+    }
+
+    /// Frontier follow-up to the resurrected candidate: finish both passes for
+    /// one tile before advancing. This keeps only `TILE` means live instead of
+    /// a second output-sized buffer, while retaining the exact column order and
+    /// float-operation order of `tiled_two_pass_var_candidate_cod_fp`.
+    #[inline(never)]
+    fn fused_tile_var_candidate_cod_fp(df: &DataFrame) -> Result<Series, FrameError> {
+        let columns: Vec<&[f64]> = df
+            .column_order
+            .iter()
+            .map(|name| {
+                df.columns
+                    .get(name)
+                    .expect("column order entry")
+                    .as_f64_slice()
+                    .expect("all-valid Float64 fixture")
+            })
+            .collect();
+        let count = columns.len() as f64;
+        let mut variances = vec![0.0_f64; df.len()];
+        let mut means = vec![0.0_f64; TILE];
+        let mut start = 0;
+        while start < df.len() {
+            let end = (start + TILE).min(df.len());
+            let tile_len = end - start;
+            let tile_means = &mut means[..tile_len];
+            tile_means.fill(0.0);
+            for column in &columns {
+                for (sum, value) in tile_means.iter_mut().zip(&column[start..end]) {
+                    *sum += *value;
+                }
+            }
+            for mean in tile_means.iter_mut() {
+                *mean /= count;
+            }
+
+            let tile_variances = &mut variances[start..end];
+            for column in &columns {
+                for ((m2, mean), value) in tile_variances
+                    .iter_mut()
+                    .zip(tile_means.iter())
+                    .zip(&column[start..end])
+                {
+                    *m2 += (*value - *mean).powi(2);
+                }
+            }
+            for variance in tile_variances {
+                *variance /= count - 1.0;
+            }
+            start = end;
+        }
+
+        Series::new("var", df.index.clone(), Column::from_f64_values(variances))
+    }
+
+    fn observe(series: &Series) -> u64 {
+        let values = series
+            .column()
+            .as_f64_slice()
+            .expect("axis1 var output must be Float64");
+        let mut checksum = values.len() as u64;
+        for index in [0, values.len() / 2, values.len() - 1] {
+            checksum = checksum.rotate_left(11) ^ values[index].to_bits();
+        }
+        black_box(checksum)
+    }
+
+    fn time_arm(df: &DataFrame, arm: fn(&DataFrame) -> Result<Series, FrameError>) -> f64 {
+        let started = Instant::now();
+        let result = arm(black_box(df)).expect("axis1 moment arm");
+        black_box((observe(&result), &result));
+        started.elapsed().as_secs_f64() * 1e3
+    }
+
+    fn run_pairs(
+        df: &DataFrame,
+        orig_arm: fn(&DataFrame) -> Result<Series, FrameError>,
+        candidate_arm: fn(&DataFrame) -> Result<Series, FrameError>,
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        for warmup in 0..4 {
+            if warmup % 2 == 0 {
+                black_box(time_arm(df, orig_arm));
+                black_box(time_arm(df, orig_arm));
+                black_box(time_arm(df, candidate_arm));
+            } else {
+                black_box(time_arm(df, candidate_arm));
+                black_box(time_arm(df, orig_arm));
+                black_box(time_arm(df, orig_arm));
+            }
+        }
+
+        let mut orig = Vec::with_capacity(BLOCKS);
+        let mut null = Vec::with_capacity(BLOCKS);
+        let mut candidate = Vec::with_capacity(BLOCKS);
+        for block in 0..BLOCKS {
+            if block % 2 == 0 {
+                orig.push(time_arm(df, orig_arm));
+                null.push(time_arm(df, orig_arm));
+                candidate.push(time_arm(df, candidate_arm));
+            } else {
+                candidate.push(time_arm(df, candidate_arm));
+                null.push(time_arm(df, orig_arm));
+                orig.push(time_arm(df, orig_arm));
+            }
+        }
+        (orig, null, candidate)
+    }
+
+    #[test]
+    #[ignore = "corrected median-CI VOID rerun; run explicitly"]
+    fn audit_tiled_two_pass_var_cod_fp() {
+        const TEST_NAME: &str = "axis1_moment_void_audit_cod_fp::audit_tiled_two_pass_var_cod_fp";
+        const CHILD_ENV: &str = "FP_AXIS1_MOMENT_PROFILE_CHILD";
+        const SENTINEL: &str = "tiled_two_pass_var_candidate_cod_fp";
+
+        let df = build_frame();
+        let orig = orig_var_axis1(&df).expect("orig parity");
+        let candidate = tiled_two_pass_var_candidate_cod_fp(&df).expect("candidate parity");
+        let orig_values = orig.column().as_f64_slice().expect("orig f64");
+        let candidate_values = candidate.column().as_f64_slice().expect("candidate f64");
+        assert_eq!(orig_values.len(), candidate_values.len(), "output length");
+        assert!(
+            orig_values
+                .iter()
+                .zip(candidate_values)
+                .all(|(left, right)| left.to_bits() == right.to_bits()),
+            "candidate must be bit-identical to the current row-wise formula"
+        );
+        assert_eq!(observe(&orig), observe(&candidate), "observable checksum");
+        drop((orig, candidate));
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            for _ in 0..PROFILE_LOOPS {
+                black_box(
+                    tiled_two_pass_var_candidate_cod_fp(black_box(&df)).expect("profile candidate"),
+                );
+            }
+            return;
+        }
+
+        let (orig, null, candidate) =
+            run_pairs(&df, orig_var_axis1, tiled_two_pass_var_candidate_cod_fp);
+
+        println!("AUDIT axis1 tiled two-pass var; rows={ROWS}; cols={COLS}");
+        println!("WORKER {}", worker_hostname());
+        println!("BINARY_SHA256 {}", binary_sha256());
+        println!("ORIG_MS {orig:?}");
+        println!("CANDIDATE_MS {candidate:?}");
+        println!(
+            "ORIG median={:.6} p95={:.6} cv_pct={:.4}",
+            median(&orig),
+            p95(&orig),
+            cv_pct(&orig)
+        );
+        println!(
+            "CANDIDATE median={:.6} p95={:.6} cv_pct={:.4}",
+            median(&candidate),
+            p95(&candidate),
+            cv_pct(&candidate)
+        );
+        report_contract("axis1_tiled_two_pass_var", &orig, &null, &candidate);
+
+        let self_pct = profile_current_test(TEST_NAME, CHILD_ENV, SENTINEL);
+        println!("CANDIDATE_SELF_PCT {self_pct:.6}");
+        assert!(
+            self_pct >= 0.1,
+            "candidate self-time must be at least 0.1%; got {self_pct:.6}%"
+        );
+    }
+
+    #[test]
+    #[ignore = "profile-attributed axis1 frontier; run explicitly"]
+    fn audit_fused_tile_var_frontier_cod_fp() {
+        const TEST_NAME: &str =
+            "axis1_moment_void_audit_cod_fp::audit_fused_tile_var_frontier_cod_fp";
+        const CHILD_ENV: &str = "FP_AXIS1_FUSED_TILE_PROFILE_CHILD";
+        const SENTINEL: &str = "fused_tile_var_candidate_cod_fp";
+
+        let df = build_frame();
+        let public = public_var_axis1(&df).expect("public parity");
+        let resurrected = tiled_two_pass_var_candidate_cod_fp(&df).expect("resurrected parity");
+        let candidate = fused_tile_var_candidate_cod_fp(&df).expect("candidate parity");
+        let public_values = public.column().as_f64_slice().expect("public f64");
+        let resurrected_values = resurrected
+            .column()
+            .as_f64_slice()
+            .expect("resurrected f64");
+        let candidate_values = candidate.column().as_f64_slice().expect("candidate f64");
+        assert!(
+            public_values
+                .iter()
+                .zip(resurrected_values)
+                .zip(candidate_values)
+                .all(|((public, resurrected), candidate)| {
+                    public.to_bits() == resurrected.to_bits()
+                        && public.to_bits() == candidate.to_bits()
+                }),
+            "fused tile candidate must preserve exact public float bits"
+        );
+        drop((public, resurrected, candidate));
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            for _ in 0..PROFILE_LOOPS {
+                black_box(
+                    fused_tile_var_candidate_cod_fp(black_box(&df)).expect("profile candidate"),
+                );
+            }
+            return;
+        }
+
+        let (resurrected, resurrected_null, candidate_incremental) = run_pairs(
+            &df,
+            tiled_two_pass_var_candidate_cod_fp,
+            fused_tile_var_candidate_cod_fp,
+        );
+        println!("AUDIT axis1 fused-tile frontier; rows={ROWS}; cols={COLS}");
+        println!("WORKER {}", worker_hostname());
+        println!("BINARY_SHA256 {}", binary_sha256());
+        println!("RESURRECTED_MS {resurrected:?}");
+        println!("FUSED_TILE_INCREMENTAL_MS {candidate_incremental:?}");
+        report_contract(
+            "axis1_fused_tile_incremental",
+            &resurrected,
+            &resurrected_null,
+            &candidate_incremental,
+        );
+
+        let (public_orig, public_null, candidate_ship) =
+            run_pairs(&df, orig_var_axis1, public_var_axis1);
+        println!("LEGACY_PUBLIC_MS {public_orig:?}");
+        println!("FUSED_TILE_PUBLIC_MS {candidate_ship:?}");
+        println!(
+            "LEGACY_PUBLIC median={:.6} p95={:.6} cv_pct={:.4}",
+            median(&public_orig),
+            p95(&public_orig),
+            cv_pct(&public_orig)
+        );
+        println!(
+            "FUSED_TILE_PUBLIC median={:.6} p95={:.6} cv_pct={:.4}",
+            median(&candidate_ship),
+            p95(&candidate_ship),
+            cv_pct(&candidate_ship)
+        );
+        report_contract(
+            "axis1_fused_tile_ship",
+            &public_orig,
+            &public_null,
+            &candidate_ship,
+        );
+
+        let self_pct = profile_current_test(TEST_NAME, CHILD_ENV, SENTINEL);
+        println!("CANDIDATE_SELF_PCT {self_pct:.6}");
+        assert!(
+            self_pct >= 0.1,
+            "candidate self-time must be at least 0.1%; got {self_pct:.6}%"
         );
     }
 }

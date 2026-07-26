@@ -6,8 +6,9 @@ pandas 2.2.3, capturing p50/p95/p99 + cv_pct + throughput per engine.
 
 Per BENCH_MATRIX_SPEC.md:
 - Uses release-perf profile for FP (not --release)
-- Wraps BOTH engines in identical retry shells
-- Drops results with cv > 5% (noise)
+- Emits executable SHA-256 provenance for both engines
+- Measures an interleaved A/A null control inside each engine invocation
+- Gates claims on the null-median bootstrap 95% CI, never on cv
 - Population/setup OUTSIDE the timed window
 - EngineIdentity Subject!=Oracle on every artifact
 
@@ -18,8 +19,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -59,12 +63,56 @@ SIZE_CONFIGS = {
     "1M": {"rows": 1_000_000, "cols": 10},
 }
 
-CV_THRESHOLD = 5.0  # Drop results with cv > 5%
-MIN_ITERATIONS = 10
-MAX_ITERATIONS = 100
+PAIRED_ROUNDS = 25
+BOOTSTRAP_RESAMPLES = 10_000
+NULL_CI_CONFIDENCE = 0.95
+DECIDABILITY_MARGIN = 2.0
 WARMUP_ITERATIONS = 3
 TAKE_BATCH = 256
 TRANSPOSE_BATCH = 8192
+
+
+@dataclass
+class PairedSamples:
+    """One engine's timings plus its same-invocation A/A null control."""
+    times_us: list[float] = field(default_factory=list)
+    null_arm_a_us: list[float] = field(default_factory=list)
+    null_arm_b_us: list[float] = field(default_factory=list)
+    null_ratios: list[float] = field(default_factory=list)
+    checksum: int = 0
+
+
+def executable_identity(path: Path) -> dict[str, Any]:
+    """Hash the executable that actually hosts this engine."""
+    resolved = path.resolve(strict=True)
+    digest = hashlib.sha256()
+    byte_count = 0
+    with resolved.open("rb") as executable:
+        while chunk := executable.read(1024 * 1024):
+            digest.update(chunk)
+            byte_count += len(chunk)
+    return {
+        "sha256": digest.hexdigest(),
+        "bytes": byte_count,
+        "path": str(resolved),
+    }
+
+
+def bootstrap_median_ci(values: list[float]) -> tuple[float, float]:
+    """Deterministic percentile-bootstrap CI for the sample median."""
+    if not values:
+        raise ValueError("cannot bootstrap an empty null-control sample")
+    sample = np.asarray(values, dtype=np.float64)
+    rng = np.random.default_rng(0xF2A_2026_0725)
+    indices = rng.integers(
+        0,
+        len(sample),
+        size=(BOOTSTRAP_RESAMPLES, len(sample)),
+    )
+    medians = np.median(sample[indices], axis=1)
+    tail_pct = (1.0 - NULL_CI_CONFIDENCE) * 50.0
+    low, high = np.percentile(medians, [tail_pct, 100.0 - tail_pct])
+    return float(low), float(high)
 
 
 @dataclass
@@ -76,6 +124,11 @@ class TimingResult:
     dtype: str
     engine: str
     times_us: list[float] = field(default_factory=list)
+    null_ratios: list[float] = field(default_factory=list)
+    checksum: str | None = None
+    executable_sha256: str | None = None
+    executable_bytes: int | None = None
+    executable_path: str | None = None
 
     @property
     def p50_us(self) -> float:
@@ -102,10 +155,33 @@ class TimingResult:
         return (self.stddev_us / self.mean_us * 100) if self.mean_us > 0 else 0.0
 
     @property
+    def null_median_ratio(self) -> float:
+        return float(np.median(self.null_ratios))
+
+    @property
+    def null_median_ci(self) -> tuple[float, float]:
+        return bootstrap_median_ci(self.null_ratios)
+
+    @property
+    def null_log_half_width(self) -> float:
+        low, high = self.null_median_ci
+        if low <= 0.0 or high <= 0.0:
+            return math.inf
+        return max(abs(math.log(low)), abs(math.log(high)))
+
+    @property
     def is_valid(self) -> bool:
-        return self.cv_pct <= CV_THRESHOLD
+        """Contract-valid measurement; cv is provenance, never a gate."""
+        return bool(
+            self.times_us
+            and self.null_ratios
+            and self.checksum
+            and self.executable_sha256
+        )
 
     def to_metrics(self, rows: int) -> dict[str, Any]:
+        null_ci_low, null_ci_high = self.null_median_ci
+        null_log_half_width = self.null_log_half_width
         return {
             "p50_us": round(self.p50_us, 2),
             "p95_us": round(self.p95_us, 2),
@@ -114,6 +190,25 @@ class TimingResult:
             "stddev_us": round(self.stddev_us, 2),
             "cv_pct": round(self.cv_pct, 2),
             "throughput_rows_sec": round(rows / (self.p50_us / 1_000_000)),
+            "checksum": self.checksum,
+            "executable": {
+                "sha256": self.executable_sha256,
+                "bytes": self.executable_bytes,
+                "path": self.executable_path,
+            },
+            "null_control": {
+                "rounds": len(self.null_ratios),
+                "median_ratio": round(self.null_median_ratio, 6),
+                "median_ci_95": [
+                    round(null_ci_low, 6),
+                    round(null_ci_high, 6),
+                ],
+                "log_half_width": round(null_log_half_width, 8),
+                "two_x_decidable_interval": [
+                    round(math.exp(-DECIDABILITY_MARGIN * null_log_half_width), 6),
+                    round(math.exp(DECIDABILITY_MARGIN * null_log_half_width), 6),
+                ],
+            },
         }
 
 
@@ -157,49 +252,88 @@ def generate_test_data(rows: int, cols: int, dtype: str, seed: int = 42) -> pd.D
     return pd.DataFrame(data)
 
 
-def time_operation(func, warmup: int = WARMUP_ITERATIONS,
-                   min_iters: int = MIN_ITERATIONS,
-                   max_iters: int = MAX_ITERATIONS) -> list[float]:
-    """Time an operation with warmup and adaptive iterations."""
-    for _ in range(warmup):
-        func()
+def _observation_token(result: Any) -> tuple[Any, ...]:
+    """Small deterministic observation folded outside the measured region."""
+    shape = getattr(result, "shape", None)
+    dtype = getattr(result, "dtype", None)
+    dtypes = getattr(result, "dtypes", None)
+    if dtypes is not None:
+        try:
+            dtype_token: Any = tuple(str(item) for item in dtypes)
+        except TypeError:
+            dtype_token = str(dtypes)
+    else:
+        dtype_token = str(dtype) if dtype is not None else None
+    try:
+        length = len(result)
+    except TypeError:
+        length = None
+    return (
+        type(result).__qualname__,
+        tuple(shape) if shape is not None else None,
+        dtype_token,
+        length,
+    )
 
-    times = []
-    for _ in range(max_iters):
-        start = time.perf_counter_ns()
-        func()
-        elapsed_us = (time.perf_counter_ns() - start) / 1000
-        times.append(elapsed_us)
 
-        if len(times) >= min_iters:
-            cv = (stdev(times) / mean(times) * 100) if mean(times) > 0 else 0
-            if cv <= CV_THRESHOLD:
-                break
+def _fold_checksum(checksum: int, result: Any) -> int:
+    encoded = repr(_observation_token(result)).encode("utf-8")
+    observed = int.from_bytes(hashlib.sha256(encoded).digest()[:8], "little")
+    rotated = ((checksum << 9) | (checksum >> 55)) & ((1 << 64) - 1)
+    return rotated ^ observed
 
-    return times
 
-def time_operation_repeated(func, repeat: int, warmup: int = WARMUP_ITERATIONS,
-                            min_iters: int = MIN_ITERATIONS,
-                            max_iters: int = MAX_ITERATIONS) -> list[float]:
-    """Time a tiny operation as a fixed-size batch and return batch microseconds."""
+def paired_operation(func, repeat: int = 1,
+                     warmup: int = WARMUP_ITERATIONS,
+                     rounds: int = PAIRED_ROUNDS) -> PairedSamples:
+    """Time identical arms back-to-back, alternating order every round."""
     for _ in range(warmup):
         for _ in range(repeat):
             func()
 
-    times = []
-    for _ in range(max_iters):
+    def time_arm(checksum: int) -> tuple[float, int]:
         start = time.perf_counter_ns()
+        result = None
         for _ in range(repeat):
-            func()
+            result = func()
         elapsed_us = (time.perf_counter_ns() - start) / 1000
-        times.append(elapsed_us)
+        return elapsed_us, _fold_checksum(checksum, result)
 
-        if len(times) >= min_iters:
-            cv = (stdev(times) / mean(times) * 100) if mean(times) > 0 else 0
-            if cv <= CV_THRESHOLD:
-                break
+    times_us: list[float] = []
+    null_arm_a_us: list[float] = []
+    null_arm_b_us: list[float] = []
+    null_ratios: list[float] = []
+    checksum = 0
+    for round_index in range(rounds):
+        if round_index % 2 == 0:
+            arm_a_us, checksum = time_arm(checksum)
+            arm_b_us, checksum = time_arm(checksum)
+        else:
+            arm_b_us, checksum = time_arm(checksum)
+            arm_a_us, checksum = time_arm(checksum)
+        times_us.extend((arm_a_us, arm_b_us))
+        null_arm_a_us.append(arm_a_us)
+        null_arm_b_us.append(arm_b_us)
+        null_ratios.append(arm_a_us / arm_b_us)
 
-    return times
+    return PairedSamples(
+        times_us=times_us,
+        null_arm_a_us=null_arm_a_us,
+        null_arm_b_us=null_arm_b_us,
+        null_ratios=null_ratios,
+        checksum=checksum,
+    )
+
+
+def time_operation(func, warmup: int = WARMUP_ITERATIONS) -> PairedSamples:
+    """Time an operation with an interleaved same-invocation A/A control."""
+    return paired_operation(func, warmup=warmup)
+
+
+def time_operation_repeated(func, repeat: int,
+                            warmup: int = WARMUP_ITERATIONS) -> PairedSamples:
+    """Time a fixed-size batch with an interleaved A/A null control."""
+    return paired_operation(func, repeat=repeat, warmup=warmup)
 
 
 # IO Workloads (pandas)
@@ -808,9 +942,13 @@ def run_pandas_workload(category: str, workload: str, size: str,
     bench_func = PANDAS_WORKLOADS[category][workload]
 
     if category == "io":
-        times = bench_func(df, tmp_path)
+        samples = bench_func(df, tmp_path)
     else:
-        times = bench_func(df)
+        samples = bench_func(df)
+
+    if not isinstance(samples, PairedSamples):
+        raise TypeError(f"{category}/{workload} did not use the paired timing contract")
+    identity = executable_identity(Path(sys.executable))
 
     return TimingResult(
         workload=workload,
@@ -818,7 +956,12 @@ def run_pandas_workload(category: str, workload: str, size: str,
         size=size,
         dtype=dtype,
         engine="pandas",
-        times_us=times,
+        times_us=samples.times_us,
+        null_ratios=samples.null_ratios,
+        checksum=f"{samples.checksum:016x}",
+        executable_sha256=identity["sha256"],
+        executable_bytes=identity["bytes"],
+        executable_path=identity["path"],
     )
 
 
@@ -844,11 +987,19 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
         )
 
     bench_binary = bench_binary.resolve(strict=True)
+    project_root = PROJECT_ROOT.resolve(strict=True)
+    try:
+        bench_binary.relative_to(project_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Refusing fp-bench executable outside project root: {bench_binary}"
+        ) from exc
     if bench_binary.name != "fp-bench":
         raise ValueError(f"Unexpected fp-bench executable path: {bench_binary}")
 
-    # nosec B603: fp-bench is resolved and name-checked above; shell=False and
-    # category/workload values are selected from the static workload matrix.
+    # nosec B603: fp-bench is resolved, confined to the project root, and
+    # name-checked above; shell=False and category/workload values are selected
+    # from the static workload matrix.
     result = subprocess.run(
         [str(bench_binary), "--category", category, "--workload", workload,
          "--size", size, "--dtype", dtype, "--json"],
@@ -869,8 +1020,38 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
             times_us=[],
         )
 
+    output_lines = result.stdout.splitlines()
+    if not output_lines:
+        print("[WARN] fp-bench emitted no stdout", file=sys.stderr)
+        return TimingResult(
+            workload=workload,
+            category=category,
+            size=size,
+            dtype=dtype,
+            engine="frankenpandas",
+            times_us=[],
+        )
+
+    identity_match = re.fullmatch(
+        r"bench_elf_sha256=([0-9a-f]{64}) \((\d+) bytes\) (.+)",
+        output_lines[0],
+    )
+    if identity_match is None:
+        print(
+            f"[WARN] fp-bench missing line-1 ELF identity: {output_lines[0]!r}",
+            file=sys.stderr,
+        )
+        return TimingResult(
+            workload=workload,
+            category=category,
+            size=size,
+            dtype=dtype,
+            engine="frankenpandas",
+            times_us=[],
+        )
+
     try:
-        data = json.loads(result.stdout)
+        data = json.loads("\n".join(output_lines[1:]))
     except JSONDecodeError as exc:
         print(f"[WARN] fp-bench emitted invalid JSON: {exc}", file=sys.stderr)
         return TimingResult(
@@ -882,6 +1063,7 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
             times_us=[],
         )
 
+    null_control = data.get("null_control", {})
     return TimingResult(
         workload=workload,
         category=category,
@@ -889,6 +1071,11 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
         dtype=dtype,
         engine="frankenpandas",
         times_us=data["times_us"],
+        null_ratios=null_control.get("ratios", []),
+        checksum=data.get("checksum"),
+        executable_sha256=identity_match.group(1),
+        executable_bytes=int(identity_match.group(2)),
+        executable_path=identity_match.group(3),
     )
 
 
@@ -902,32 +1089,50 @@ def compute_comparison(fp_result: TimingResult, pd_result: TimingResult,
         "dtype": fp_result.dtype,
     }
 
-    if fp_result.times_us:
+    if fp_result.is_valid:
         result["frankenpandas"] = fp_result.to_metrics(rows)
         result["frankenpandas"]["iterations"] = len(fp_result.times_us)
-        result["frankenpandas"]["valid"] = fp_result.is_valid
+        result["frankenpandas"]["valid"] = True
     else:
-        result["frankenpandas"] = {"error": "no_data"}
+        result["frankenpandas"] = {"error": "contract_invalid_or_no_data"}
 
-    if pd_result.times_us:
+    if pd_result.is_valid:
         result["pandas"] = pd_result.to_metrics(rows)
         result["pandas"]["iterations"] = len(pd_result.times_us)
-        result["pandas"]["valid"] = pd_result.is_valid
+        result["pandas"]["valid"] = True
     else:
-        result["pandas"] = {"error": "no_data"}
+        result["pandas"] = {"error": "contract_invalid_or_no_data"}
 
     if fp_result.times_us and pd_result.times_us:
         if fp_result.is_valid and pd_result.is_valid:
             ratio = pd_result.p50_us / fp_result.p50_us if fp_result.p50_us > 0 else 0
+            combined_null_log_half_width = max(
+                fp_result.null_log_half_width,
+                pd_result.null_log_half_width,
+            )
+            claim_log_effect = abs(math.log(ratio)) if ratio > 0.0 else math.inf
+            required_log_effect = DECIDABILITY_MARGIN * combined_null_log_half_width
+            decidable = claim_log_effect >= required_log_effect
             result["ratio"] = round(ratio, 3)
+            result["median_ci_gate"] = {
+                "decidable": decidable,
+                "margin_multiplier": DECIDABILITY_MARGIN,
+                "claim_log_effect": round(claim_log_effect, 8),
+                "required_log_effect": round(required_log_effect, 8),
+                "combined_two_x_null_interval": [
+                    round(math.exp(-required_log_effect), 6),
+                    round(math.exp(required_log_effect), 6),
+                ],
+                "cv_is_provenance_only": True,
+            }
             result["verdict"] = (
-                "FASTER" if ratio > 1.05 else
-                "PARITY" if ratio >= 0.95 else
-                "SLOWER"
+                "FASTER" if decidable and ratio > 1.0 else
+                "SLOWER" if decidable else
+                "NULL_UNDECIDABLE"
             )
         else:
             result["ratio"] = None
-            result["verdict"] = "DROPPED_HIGH_CV"
+            result["verdict"] = "CONTRACT_INVALID"
     else:
         result["ratio"] = None
         result["verdict"] = "INCOMPLETE"
@@ -967,6 +1172,14 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
 
 
 def main():
+    harness_identity = executable_identity(Path(sys.executable))
+    print(
+        "bench_harness_elf_sha256="
+        f"{harness_identity['sha256']} "
+        f"({harness_identity['bytes']} bytes) "
+        f"{harness_identity['path']}"
+    )
+
     parser = argparse.ArgumentParser(description="vs-pandas head-to-head timing harness")
     parser.add_argument("--category", choices=list(CATEGORIES.keys()),
                         help="Run specific category")
@@ -1019,26 +1232,31 @@ def main():
             all_results.extend(results)
 
         output = {
-            "schema_version": "v3",
+            "schema_version": "v4",
             "timestamp": timestamp,
             "engine_identity": {
                 "frankenpandas": {
-                    "version": "0.1.0",
+                    "version": "0.1.2",
                     "profile": "release-perf",
                     "role": "Subject",
                 },
                 "pandas": {
                     "version": pd.__version__,
                     "role": "Oracle",
+                    "executable": harness_identity,
                 },
             },
             "parameters": {
                 "sizes": sizes,
                 "dtypes": dtypes,
                 "categories": categories,
-                "cv_threshold": CV_THRESHOLD,
-                "min_iterations": MIN_ITERATIONS,
+                "paired_rounds": PAIRED_ROUNDS,
                 "warmup_iterations": WARMUP_ITERATIONS,
+                "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
+                "null_ci_confidence": NULL_CI_CONFIDENCE,
+                "decidability_margin": DECIDABILITY_MARGIN,
+                "gate": "median_bootstrap_ci",
+                "cv_role": "provenance_only",
             },
             "results": all_results,
             "summary": compute_summary(all_results),
@@ -1062,7 +1280,7 @@ def compute_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
 
     by_category = defaultdict(list)
     for r in results:
-        if r.get("ratio") is not None:
+        if r.get("verdict") in ("FASTER", "SLOWER"):
             by_category[r["category"]].append(r["ratio"])
 
     category_scores = {}
@@ -1076,13 +1294,23 @@ def compute_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         for cat, weight in CATEGORIES.items()
     )
 
-    valid_count = sum(1 for r in results if r.get("verdict") not in ("DROPPED_HIGH_CV", "INCOMPLETE"))
-    dropped_count = sum(1 for r in results if r.get("verdict") == "DROPPED_HIGH_CV")
+    contract_valid_count = sum(
+        1
+        for r in results
+        if r.get("verdict") not in ("CONTRACT_INVALID", "INCOMPLETE")
+    )
+    decidable_count = sum(
+        1 for r in results if r.get("verdict") in ("FASTER", "SLOWER")
+    )
+    null_count = sum(
+        1 for r in results if r.get("verdict") == "NULL_UNDECIDABLE"
+    )
 
     return {
         "total_workloads": len(results),
-        "valid_workloads": valid_count,
-        "dropped_high_cv": dropped_count,
+        "contract_valid_workloads": contract_valid_count,
+        "decidable_workloads": decidable_count,
+        "null_undecidable_workloads": null_count,
         "category_scores": category_scores,
         "weighted_score": round(weighted_score, 3),
         "claim_validated": all(
