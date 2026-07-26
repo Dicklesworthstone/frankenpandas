@@ -19502,3 +19502,43 @@ stall without emitting a touched-hunk finding.
 - Do not re-enter string-groupby factorization. Its five hash-table attempts remain the ranked
   high-self VOID head, but the standing predicate requires an upstream short-string hash primitive
   or approved khash-class dependency—not a sixth in-repo table.
+
+### 2026-07-26 QuietHarbor — CORRECTION to my own block-storage CoW blocker: the invariant is enforced by VALUE SEMANTICS, not convention; tripwire test landed
+
+Correcting the 2026-07-26 primitive-transfer row above (co-landed in `4eb983bcf`). That row said the
+copy-on-write invariant on the shared `Arc<[f64]>` block was **"currently unenforced (no
+`Arc::get_mut`/`make_mut` exists today, but nothing prevents one)"** and listed it as a prerequisite
+that **"must be guarded before block-storage is considered for default-on."**
+
+**That understated the guarantee, and the correction removes a blocker I put in the way of my own
+lane.** Source audit of the whole crate: `fp-frame` exposes **exactly ONE `pub fn` taking `&mut self`**
+— `OnlineEwm::update` (`crates/fp-frame/src/lib.rs:29099`), an EWM accumulator with no relationship to
+frame storage. `DataFrame` and `Series` have **no in-place mutation surface at all**: `with_column`,
+`drop_column`, `rename`, `rename_columns` and the rest all take `&self` and return a new value.
+
+So the shared block cannot be aliased-and-mutated for a structural reason, not a conventional one: a
+frame cannot be mutated. Absence of `Arc::get_mut`/`make_mut` (the weaker fact I originally cited) is a
+consequence of that, not the guarantee itself.
+
+**The residual risk is real but narrower than stated:** it is a *future* `&mut self` method being added
+to `DataFrame`/`Series` that writes through a shared block. Guarded now by
+`crates/fp-frame/tests/block_storage_sharing_conformance.rs` (feature-gated on `block-storage`, 4/4
+green on remote worker):
+
+| test | what it pins |
+|---|---|
+| `block_backed_frame_exposes_an_o1_view` | reachability — the fixture really is block-backed, and the column-major `block[col*rows+row]` layout contract holds |
+| `clone_shares_the_block_rather_than_copying_it` | **`Arc::ptr_eq` on the backing allocation.** Pointer identity is the actual claim; comparing contents would also pass for a deep copy and would test nothing |
+| `transforming_one_frame_does_not_disturb_a_sharing_sibling` | the independence proof — `with_column`/`drop_column`/`rename` on one frame leave a sharing sibling's block byte-for-byte identical |
+| `per_column_reads_agree_with_the_block_layout` | the per-column borrow is a correct span of the shared block |
+
+This is the mirror of franken_networkx's proof obligation on the same primitive: they proved
+*refreshing one shared clone leaves its sibling stale*; we prove *transforming one frame leaves a
+sharing sibling unchanged*. Sharing an `Arc` without an independence proof is just aliasing, in either
+direction.
+
+**Net effect on the lane:** the CoW item is **struck from the default-on prerequisite list**. It was
+never a real gate. The remaining prerequisites are unchanged and both are already tracked — the
+`LazyDataFrameColumns::clone` per-column `String` residual (`br-frankenpandas-4kszu`) and block-born
+IO (`br-frankenpandas-l6uyi`). No ratio is claimed here; this row is correctness and API-surface
+evidence only, and no benchmark was run for it.
