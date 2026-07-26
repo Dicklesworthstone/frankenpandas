@@ -39,10 +39,10 @@ block-storage = ["lazy-transpose-view"]
 [dependencies]
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
-fp-columnar = { path = "../fp-columnar", version = "0.1.2" }
-fp-index = { path = "../fp-index", version = "0.1.2" }
-fp-runtime = { path = "../fp-runtime", version = "0.1.2" }
-fp-types = { path = "../fp-types", version = "0.1.2" }
+fp-columnar = { path = "../fp-columnar", version = "0.2.0" }
+fp-index = { path = "../fp-index", version = "0.2.0" }
+fp-runtime = { path = "../fp-runtime", version = "0.2.0" }
+fp-types = { path = "../fp-types", version = "0.2.0" }
 regex = { workspace = true }
 rustc-hash = "2"
 serde = { workspace = true }

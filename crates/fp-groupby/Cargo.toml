@@ -13,11 +13,11 @@ categories.workspace = true
 
 [dependencies]
 bumpalo = { workspace = true }
-fp-columnar = { path = "../fp-columnar", version = "0.1.2" }
-fp-frame = { path = "../fp-frame", version = "0.1.2" }
-fp-index = { path = "../fp-index", version = "0.1.2" }
-fp-runtime = { path = "../fp-runtime", version = "0.1.2" }
-fp-types = { path = "../fp-types", version = "0.1.2" }
+fp-columnar = { path = "../fp-columnar", version = "0.2.0" }
+fp-frame = { path = "../fp-frame", version = "0.2.0" }
+fp-index = { path = "../fp-index", version = "0.2.0" }
+fp-runtime = { path = "../fp-runtime", version = "0.2.0" }
+fp-types = { path = "../fp-types", version = "0.2.0" }
 rustc-hash = "2"
 thiserror = { workspace = true }
 

@@ -12,15 +12,15 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-fp-columnar = { path = "../fp-columnar", version = "0.1.2" }
-fp-expr = { path = "../fp-expr", version = "0.1.2" }
-fp-frame = { path = "../fp-frame", version = "0.1.2" }
-fp-groupby = { path = "../fp-groupby", version = "0.1.2" }
-fp-index = { path = "../fp-index", version = "0.1.2" }
-fp-io = { path = "../fp-io", version = "0.1.2", default-features = false }
-fp-join = { path = "../fp-join", version = "0.1.2" }
-fp-runtime = { path = "../fp-runtime", version = "0.1.2" }
-fp-types = { path = "../fp-types", version = "0.1.2" }
+fp-columnar = { path = "../fp-columnar", version = "0.2.0" }
+fp-expr = { path = "../fp-expr", version = "0.2.0" }
+fp-frame = { path = "../fp-frame", version = "0.2.0" }
+fp-groupby = { path = "../fp-groupby", version = "0.2.0" }
+fp-index = { path = "../fp-index", version = "0.2.0" }
+fp-io = { path = "../fp-io", version = "0.2.0", default-features = false }
+fp-join = { path = "../fp-join", version = "0.2.0" }
+fp-runtime = { path = "../fp-runtime", version = "0.2.0" }
+fp-types = { path = "../fp-types", version = "0.2.0" }
 
 # Re-exported under the sql-sqlite feature so README Quick Start can call
 # rusqlite::Connection::open_in_memory()? without users adding rusqlite as

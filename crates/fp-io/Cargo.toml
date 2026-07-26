@@ -19,10 +19,10 @@ calamine = { workspace = true }
 csv = { workspace = true }
 dta = { workspace = true }
 fast-float2 = { workspace = true }
-fp-columnar = { path = "../fp-columnar", version = "0.1.2" }
-fp-frame = { path = "../fp-frame", version = "0.1.2" }
-fp-index = { path = "../fp-index", version = "0.1.2" }
-fp-types = { path = "../fp-types", version = "0.1.2" }
+fp-columnar = { path = "../fp-columnar", version = "0.2.0" }
+fp-frame = { path = "../fp-frame", version = "0.2.0" }
+fp-index = { path = "../fp-index", version = "0.2.0" }
+fp-types = { path = "../fp-types", version = "0.2.0" }
 hdf5 = { workspace = true, optional = true }
 parquet = { workspace = true }
 quick-xml = { workspace = true }
