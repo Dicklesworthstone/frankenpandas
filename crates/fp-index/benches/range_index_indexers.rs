@@ -1,9 +1,30 @@
 use std::hint::black_box;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group};
 use fp_index::{IndexLabel, RangeIndex};
+use sha2::{Digest, Sha256};
 
 const SIZES: &[usize] = &[100_000, 1_000_000];
+
+/// SHA-256 of the executable that is about to run the benchmark.
+fn self_identity() -> String {
+    use std::fmt::Write as _;
+
+    let Ok(path) = std::env::current_exe() else {
+        return "unavailable".to_string();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return "unavailable".to_string();
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    let mut sha256 = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(sha256, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{} ({} bytes) {}", sha256, bytes.len(), path.display())
+}
 
 fn build_source(size: usize) -> RangeIndex {
     RangeIndex::new(0, (size as i64) * 2, 2).expect("valid source range")
@@ -209,4 +230,9 @@ criterion_group!(
     bench_range_index_values,
     bench_range_index_prod
 );
-criterion_main!(benches);
+
+fn main() {
+    println!("bench_elf_sha256={}", self_identity());
+    benches();
+    Criterion::default().configure_from_args().final_summary();
+}

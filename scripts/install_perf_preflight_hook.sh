@@ -20,23 +20,23 @@ chmod +x "$SRC_DOC"
 read -r -d '' HOOK_BODY <<'EOF' || true
 #!/usr/bin/env bash
 # Perf-ledger preflight (campaign perf-campaign-20260725, Meta-Lever #1 ratchet).
-# Refuses a commit adding a REJECT row to docs/NEGATIVE_EVIDENCE.md without an A/A
-# null control, a counted mechanism, or a zero-self-time attribution.
+# Refuses an undecidable REJECT or an unprovenanced KEEP in NEGATIVE_EVIDENCE.md.
 set -uo pipefail
 REPO="$(git rev-parse --show-toplevel)"
 PREFLIGHT="$REPO/scripts/perf_candidate_preflight.py"
-[ -x "$PREFLIGHT" ] || exit 0
+[ -x "$PREFLIGHT" ] || {
+  echo "pre-commit: BLOCKED — required perf-ledger preflight is missing or non-executable: $PREFLIGHT" >&2
+  exit 1
+}
 if ! git diff --cached --name-only | grep -q '^docs/NEGATIVE_EVIDENCE\.md$'; then
   exit 0
 fi
-python3 "$PREFLIGHT" --check-new-rejects --base HEAD
+python3 "$PREFLIGHT" --check-new-rows --cached --base HEAD
 rc=$?
-if [ "$rc" -eq 2 ]; then
+if [ "$rc" -ne 0 ]; then
   echo ""
   echo "pre-commit: BLOCKED by perf-ledger preflight."
-  echo "Add an A/A null control, a counted mechanism, or a zero-self-time attribution."
-  echo "Emergency override: PERF_PREFLIGHT_OVERRIDE=1 git commit ..."
-  [ "${PERF_PREFLIGHT_OVERRIDE:-0}" = "1" ] && { echo "(overridden)"; exit 0; }
+  echo "REJECT requires A/A or a counted mechanism; KEEP requires an in-process ELF SHA-256."
   exit 1
 fi
 exit 0
@@ -58,4 +58,4 @@ else
   echo "installed: $HOOK"
 fi
 
-echo "verify with: python3 scripts/perf_candidate_preflight.py --check-new-rejects --base HEAD~1"
+echo "verify with: python3 scripts/perf_candidate_preflight.py --self-test"

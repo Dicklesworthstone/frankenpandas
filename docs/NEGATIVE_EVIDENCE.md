@@ -19315,3 +19315,190 @@ justifies a different threshold. Any successor attacking `Column::from_f64_value
 initialization is a separate lever and requires that component above 5% self. A worker used for
 symbol attribution must first prove `perf` is installed; missing `perf` is an infrastructure result,
 never a performance verdict.
+
+### 2026-07-26 QuietHarbor — PRIMITIVE TRANSFER (franken_networkx CachedSnapshotView 77,795x): block-storage Clone audit — NO deep-copy pathology here (counted mechanism), but a wide-frame String residual in the materialized-map clone
+
+Campaign primitive-transfer bus. frankenpandas is a named consumer of the zero-copy view primitive;
+franken_networkx owns it. Their **77,795.5146x** KEEP (`franken_networkx/docs/NEGATIVE_EVIDENCE.md:279`,
+`br-r37-c1-04z53.9176`) came from discovering that cloning a view **deep-copied an owned
+`GraphSnapshot`** — 32 clones of a 2,048-node/8,192-edge graph = **589,824 fresh `String` allocations,
+5,308,416 bytes copied, 24,669,654 ns** — and putting the immutable snapshot behind an `Arc` so
+derived `Clone` shares it. ACK with the full transfers/does-not-transfer analysis sent on thread
+`perf-campaign-20260725-primitives` (msg 3670). NOTE: that thread carried **no** zero-copy-view design
+from anyone at read time (only frankenredis's io_uring handoff), so the vein was reconstructed from
+their ledger row and CloudyTurtle's 03:32Z Lane M note rather than from a posted design.
+
+**The transferred bug hunt, run here. Result: the pathology does NOT exist on the block-storage path.**
+Traced `DataFrame` clone of a block-backed frame end to end (Lane B, source reading only — no
+benchmark, no worker):
+
+1. `LazyDataFrameColumns::Float64Block { store, .. }` clone does `Arc::clone(store)` — the
+   `Float64BlockStore` (and therefore `block: Arc<[f64]>`) is shared, not copied.
+2. Each block column is built by `Column::from_f64_all_valid_chunks`, which stores
+   `values: ScalarValues::lazy_all_valid_float64_chunks(Arc<[Float64Chunk]>, len)` with `data: None`,
+   each `Float64Chunk` being a `(Arc<[f64]>, start, len)` **borrow of the shared block**.
+3. `Column::clone` therefore gets `None` from `clone_dense_values_from_cache` (it matches on
+   `self.data`, which is `None` here) and falls through to `ScalarValues::clone`.
+4. `ScalarValues::clone` for `LazyAllValidFloat64Chunks` does **`Arc::clone(chunks)`** and carries the
+   `all_finite` memo across.
+
+**COUNTED MECHANISM (why this is a valid negative, not an unmeasured guess): the clone path executes
+`Arc::clone` only — refcount increments, ZERO f64 bytes copied and ZERO allocations for the block
+payload, by construction of the types involved.** No null control is required to establish that no
+work was removed, because no work was being done: there is nothing here for the primitive to fix.
+`Arc<[f64]>` also has no safe interior mutability and neither `Arc::get_mut` nor `Arc::make_mut`
+appears anywhere in the block-storage code, so the shared block is copy-on-write **by construction**
+today — an unenforced invariant, not a guarantee (see the retry predicate).
+
+**RESIDUAL FOUND (not fixed — tracked as `br-frankenpandas-4kszu`).**
+`LazyDataFrameColumns::clone` for both the
+`Float64Block` and `HomogeneousTranspose` arms does:
+
+```rust
+if let Some(columns) = materialized.get() { let _ = cloned.set(columns.clone()); }
+```
+
+Once the `OnceLock<BTreeMap<String, Column>>` is populated, each clone deep-copies that map. The
+`Column` values are O(1) `Arc` bumps per (4) above, but the **`String` keys are re-allocated: n
+allocations per DataFrame clone, where n = column count.** That is franken_networkx's exact
+"589,824 fresh `String` allocations" shape at a different scale. It is negligible for a 10-column
+frame and material for a WIDE frame — and wide frames are precisely what the transpose/block lane
+produces (transposing a tall frame yields an n-column output). Fix shape:
+`OnceLock<Arc<BTreeMap<String, Column>>>` so the map is shared rather than copied; this touches all
+three `LazyDataFrameColumns` arms plus `into_materialized`/`make_eager`.
+
+**NOT IMPLEMENTED.** `crates/fp-frame/src/lib.rs` is under an exclusive Agent Mail lease held by
+CrimsonGate. No source edit attempted. Lane B forbids benchmarking, so no ratio is claimed for the
+residual either — its cost is asserted only as an allocation count (n Strings/clone), which is a
+structural property of `BTreeMap<String, _>::clone`, not a timing.
+
+**Retry predicate.** Implement the `Arc<BTreeMap<..>>` share when (1) `crates/fp-frame/src/lib.rs` is
+free, AND (2) a bench exists that clones a WIDE (>=1k column) block-backed or transposed frame — the
+current `df_transpose_materialize`/`df_values` benches do not clone in the timed region, so the
+residual is unobservable there and shipping it would be an unmeasured change. Separately, enforce the
+CoW invariant with a compile-time or test-time guard before block-storage is considered for
+default-on: today nothing prevents a future in-place mutation path from aliasing a shared block, and
+that would be a silent correctness bug, not a perf regression.
+
+### 2026-07-26 CrimsonGate — Lane B adjudication: all 31 disk-critical code-only commits retained after the already-landed compile repair; typed pre-epoch `dt.day_name` correctness bug fixed; executing-ELF coverage 4/4
+
+Allocation-addendum lane: **B / BUILD+FIX** (`br-frankenpandas-89ia0` and
+`br-frankenpandas-ic0q5`). No benchmark and no RCH worker was used. Each historical snapshot was
+checked in its own detached worktree with the same local command and dependency graph:
+
+```text
+CARGO_TARGET_DIR=/data/projects/.local-targets/frankenpandas-codeonly-audit-20260725
+cargo check --locked --offline -p fp-frame --all-targets --quiet
+```
+
+The first twelve snapshots compile raw. Snapshot 13 (`d45ebfb6c`) introduces a duplicate
+`iso_weeks_in_year` definition and therefore fails with E0592; snapshots 14–31 inherit that single
+failure. The exact already-landed repair `8390ac792` removes the duplicate. Applying only that repair
+diff to each red historical worktree makes all nineteen compile. The repair snapshot itself also
+compiles. There is no additional latent compile failure in the stack.
+
+| # | commit | raw snapshot | with exact `8390ac792` repair | verdict |
+|---:|---|---|---|---|
+| 1 | `3be88c6b3` | PASS | PASS | KEEP |
+| 2 | `bb5ec58a9` | PASS | PASS | KEEP |
+| 3 | `8f0fb9644` | PASS | PASS | KEEP |
+| 4 | `9f80ff589` | PASS | PASS | KEEP |
+| 5 | `db4a5dfe5` | PASS | PASS | KEEP |
+| 6 | `bd1287168` | PASS | PASS | KEEP |
+| 7 | `cc8bf0638` | PASS | PASS | KEEP |
+| 8 | `c93fc9aa9` | PASS | PASS | KEEP |
+| 9 | `a383f9721` | PASS | PASS | KEEP |
+| 10 | `f45f23570` | PASS | PASS | KEEP |
+| 11 | `407523a0f` | PASS | PASS | KEEP |
+| 12 | `6114a6231` | PASS | PASS | KEEP |
+| 13 | `d45ebfb6c` | E0592 duplicate `iso_weeks_in_year` | PASS | KEEP with landed repair |
+| 14 | `32cc6fb73` | inherited E0592 | PASS | KEEP with landed repair |
+| 15 | `379ad7ca7` | inherited E0592 | PASS | KEEP with landed repair |
+| 16 | `6d2f5bdef` | inherited E0592 | PASS | KEEP with landed repair |
+| 17 | `9d9d62d6b` | inherited E0592 | PASS | KEEP with landed repair |
+| 18 | `ede53476b` | inherited E0592 | PASS | KEEP with landed repair |
+| 19 | `78adb6c01` | inherited E0592 | PASS | KEEP with landed repair |
+| 20 | `858d342fc` | inherited E0592 | PASS | KEEP with landed repair |
+| 21 | `9e97e25aa` | inherited E0592 | PASS | KEEP with landed repair |
+| 22 | `2dc9138c2` | inherited E0592 | PASS | KEEP with landed repair |
+| 23 | `a42887262` | inherited E0592 | PASS | KEEP with landed repair |
+| 24 | `fa2a83e59` | inherited E0592 | PASS | KEEP with landed repair |
+| 25 | `56ac240dd` | inherited E0592 | PASS | KEEP with landed repair |
+| 26 | `071273d50` | inherited E0592 | PASS | KEEP with landed repair |
+| 27 | `2faf6756c` | inherited E0592 | PASS | KEEP with landed repair |
+| 28 | `71441bdd4` | inherited E0592 | PASS | KEEP with landed repair |
+| 29 | `6beed343d` | inherited E0592 | PASS | KEEP with landed repair |
+| 30 | `1fa4d09ac` | inherited E0592 | PASS | KEEP with landed repair |
+| 31 | `aa8f32668` | inherited E0592 | PASS | KEEP with landed repair |
+| repair | `8390ac792` | PASS | n/a | KEEP |
+
+**Adjudication: KEEP every commit; revert none.** The raw red boundary is real, but it was repaired
+in the same historical sequence. Reverting any of the later commits would discard code that now
+compiles without addressing the actual duplicate-method cause.
+
+**Disk accounting and guardrail.** The first audit closeout check reported 198 GiB free; the latest
+pre-landing compile guard reports **168 GiB free**, still above the new 120 GiB stop threshold. The shared
+Cargo target was 642 MiB after the historical sweep and is **3.8 GiB** after the current-workspace
+quality gates. The unexpected **146 GiB** is the 32 simultaneous detached worktrees: each checkout
+materialized roughly **4.5 GiB of tracked `tests/` artifacts**. `/data/tmp/cargo-target` is a
+separate idle **391 GiB** tree. Therefore the audit did reuse one target directory, but still chose
+the wrong snapshot topology. Future sweeps must use one detached worktree and move it through
+commits sequentially (or an equivalent sparse checkout), never one full checkout per commit. Before
+every compile:
+
+```text
+python3 scripts/perf_candidate_preflight.py \
+  --target-dir /data/projects/.local-targets/frankenpandas-codeonly-audit-20260725 \
+  --run-compile cargo check --locked --offline -p fp-frame --all-targets
+```
+
+That wrapper prints `df -h /data`, exits 2 below 120 GiB free, and refuses to compile without one
+explicit/shared target directory. The 146 GiB audit tree is idle but was not deleted: repository
+policy requires separate explicit file-deletion authorization.
+
+The audit's typed-vs-generic conformance test exposed one live correctness defect in commit
+`cc8bf0638`: typed `dt.day_name()` used truncating division for negative nanoseconds, mapping a
+pre-1970 non-midnight instant to the following civil day. The fast path now uses
+`div_euclid(Timedelta::NANOS_PER_DAY)`, matching every sibling civil-date path. The two deliberately
+ignored tests are enabled; the integration target passes **8 / 8**, including pandas-pinned weekday
+fixtures and typed-vs-generic coverage across 25 datetime accessors.
+
+The harness provenance gap is also closed without timing anything. Before this change, only
+`fp-bench` self-reported its executing ELF. All three formal Criterion bench mains now hash
+`std::env::current_exe()` and print
+`bench_elf_sha256=<sha> (<bytes> bytes) <path>` as their first statement. The formal target inventory
+is exactly `vs_pandas`, `range_index_asof`, and `range_index_indexers`; all three compile together
+under `cargo check --locked --offline -p fp-index -p fp-conformance --benches`. Existing `sha2 =
+0.11.0` pins were reused. Each explicit main preserves Criterion's generated group execution and
+trailing `final_summary()` behavior. The two stale `cv < 5` assertions in the ignored
+transpose-reject audit were removed; CV remains printed provenance and never gates a verdict.
+
+**Closeout gates.** Every Cargo command was local and passed through the shared-target disk wrapper;
+no RCH worker and no benchmark ran. `cargo check --workspace --all-targets` passes. The required
+workspace Clippy attempt reaches unrelated pre-existing `fp-columnar` warnings and stops there
+before any lane file; focused `fp-index` + `fp-conformance` bench Clippy with `--no-deps -D warnings`
+passes. The typed datetime integration target passes **8 / 8, 0 ignored**. Direct Rustfmt checking
+passes all three formal bench sources and the datetime integration test; workspace
+`cargo fmt --check` reproduces broad inherited whole-tree drift, so no unrelated rewrite was taken.
+`git diff --check`, Python byte-compilation, shell syntax checking, and the preflight's twelve
+deterministic policy tests pass. A live sixth-table proposal is mechanically blocked with exit 2
+and prints the existing upstream-primitive retry predicates. Focused UBS on the preflight reports
+**0 critical / 0 warning**. The four small Rust bench/test files reproduce existing fixture
+panic/assert/cast/allocation inventory (the sole scanner-critical is the pre-existing impossible-label
+panic in `range_index_indexers.rs`, outside both ELF-identity hunks); no finding lands on a changed
+hunk. Bounded `timeout 180s ubs crates/fp-frame/src/lib.rs` reproduces the documented whole-file
+stall without emitting a touched-hunk finding.
+
+**Concrete retry predicates.**
+
+- Reopen a historical code-only commit only if a current semantic/conformance failure can be
+  bisected to that commit with `8390ac792` present. A raw E0592 from snapshots 13–31 is not such
+  evidence; it means the repair was omitted.
+- Reopen `dt.day_name` only if a typed Datetime64 fixture disagrees with pandas or the generic path
+  after floor division, especially at a negative-day boundary.
+- Any new executable benchmark target must add the same line-one executing-ELF report before it can
+  supply ledger evidence. Criterion point estimates or CV alone cannot write a KEEP/REJECT; candidate
+  decisions must use the central same-invocation A/A plus median-CI harness.
+- Do not re-enter string-groupby factorization. Its five hash-table attempts remain the ranked
+  high-self VOID head, but the standing predicate requires an upstream short-string hash primitive
+  or approved khash-class dependency—not a sixth in-repo table.

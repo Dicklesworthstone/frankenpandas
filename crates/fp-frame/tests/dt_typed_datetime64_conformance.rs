@@ -136,12 +136,6 @@ fn dt_boolean_predicates_match_generic_path() {
 }
 
 #[test]
-#[ignore = "FAILS on purpose: live bug br-frankenpandas-ic0q5. dt.day_name is wrong for \
-pre-1970 non-midnight instants -- crates/fp-frame/src/lib.rs:46522 uses truncating \
-`ns / Timedelta::NANOS_PER_DAY` instead of `div_euclid`. That file is held under an \
-exclusive Agent Mail lease by another agent, so the one-token fix could not be applied \
-here. Un-ignore when it lands. Run with: cargo test -p fp-frame --test \
-dt_typed_datetime64_conformance -- --ignored"]
 fn dt_string_and_struct_components_match_generic_path() {
     assert_dt_paths_agree!(month_name);
     assert_dt_paths_agree!(day_name);
@@ -169,10 +163,6 @@ const PANDAS_DAY_NAME: &[&str] = &[
 const PANDAS_DAYOFWEEK: &[i64] = &[0, 3, 6, 3, 6, 0, 6, 1, 3];
 
 #[test]
-#[ignore = "FAILS on purpose: same live bug br-frankenpandas-ic0q5 (fp-frame/src/lib.rs:46522 \
-truncating division). The fp-types twin (Timestamp::day_name) IS fixed in this commit; the \
-fp-frame typed closure is a separate inlined copy of the same formula and is leased by \
-another agent. Un-ignore when it lands."]
 fn dt_weekday_family_matches_pandas_oracle() {
     for series in [utf8_series(), datetime64_series()] {
         let names = series.dt().day_name().expect("day_name");

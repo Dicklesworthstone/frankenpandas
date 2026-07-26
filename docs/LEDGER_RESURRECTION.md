@@ -398,44 +398,63 @@ before any source mutation. Repos that audited once and stopped sit at 25–91%.
 
 ### `scripts/perf_candidate_preflight.py` (exit 2 = BLOCKED)
 
-**Mode 1 — `--candidate "<keywords>"`.** Grep the ledger *before* writing a lever; blocks if a prior
-REJECT covers the surface. Verified against the case this repo actually needs it for:
+**Mode 1 — `--candidate "<lever>" --surface "<target>"`.** Grep the ledger *before* writing a
+lever; blocks if a prior REJECT covers the surface and prints the recorded retry predicate, matching
+frankensqlite's `retry_condition=` contract. Verified against the case this repo actually needs:
 
 ```
-$ python3 scripts/perf_candidate_preflight.py --candidate "str-groupby factorization"
-preflight: BLOCKED — 4 prior REJECT row(s) match ['str-groupby', 'factorization']
-  docs/NEGATIVE_EVIDENCE.md:18541  … open-addressing table — REJECT (worse than FxHashMap)
-  docs/NEGATIVE_EVIDENCE.md:18559  … fibonacci open-addressing — REJECT, FxHashMap is the floor
-  docs/NEGATIVE_EVIDENCE.md:18583  … cache-resident growing table (4th attempt) — REJECT
-  docs/NEGATIVE_EVIDENCE.md:18621  … packed-u64 FxHashMap (5th attempt) — REJECT, ABSOLUTELY CONCLUSIVE
+$ python3 scripts/perf_candidate_preflight.py \
+    --candidate "sixth open-addressing table" --surface "str-groupby factorization"
+preflight: BLOCKED — 4 prior REJECT row(s) match target_surface='str-groupby factorization'
+match decision=REJECT ledger=docs/NEGATIVE_EVIDENCE.md:...
+  retry_condition=... upstream faster short-string primitive or approved khash-class dependency ...
 exit=2
 ```
 
 That is the "do not attempt a 6th hash-table variant" prohibition made **mechanical** instead of
 merely written down.
 
-**Mode 2 — `--check-new-rejects`.** Every newly added `###` REJECT section must record at least one of:
+**Mode 2 — `--check-new-rows`.** Every newly added `###` REJECT section must record at least one of:
 
 | basis | why it is sufficient |
 |---|---|
 | an **A/A null control** | the effect was decided against a measured floor |
 | a **counted mechanism unchanged** (instructions / cycles / syscalls / allocations / page-branch-cache misses / `perf stat`) | a null control cannot change the fact that no work was removed |
-| **~0% target self-time** | the bench never executed the candidate |
 
-A row with none of these cannot separate the lever from the harness — `VOID-NONULL`, 90.2% of our
-void rows. Verified on synthetic rows:
+A row with neither cannot separate the lever from the harness — `VOID-NONULL`, 97.4% of our
+hand-adjudicated void rows. `~0% self` is useful profile evidence, but it is not accepted as a
+substitute in a row titled REJECT: record it as profile/routing evidence rather than laundering it
+through an A/B verdict.
+
+Every newly added `###` KEEP/WIN/SHIPPED section must also contain a 64-hex SHA-256 **and** an
+in-process executing-ELF marker (`bench_elf_sha256`, `current_exe`, or equivalent). A neighboring
+shell hash is deliberately rejected.
+
+Deterministic self-tests:
 
 | row | verdict |
 |---|---|
 | near-1.0×, no null, no mechanism, *but says "bit-identical, 0 diffs over 5M"* | **BLOCKED** |
+| explicitly says "no A/A null control recorded" | **BLOCKED** |
+| merely mentions an A/A control but records no numeric result | **BLOCKED** |
+| mentions `perf stat` but records no unchanged count | **BLOCKED** |
 | A/A controls span 1.08%, candidate inside the null | passes |
 | `perf stat` instructions unchanged (4.11e9 vs 4.11e9) | passes |
-| target frame 0.000% self-time | passes |
+| target frame 0.000% self-time, no A/A/count | **BLOCKED** |
+| KEEP with a shell-computed SHA | **BLOCKED** |
+| KEEP with `bench_elf_sha256=unavailable` plus an unrelated shell SHA | **BLOCKED** |
+| KEEP with `bench_elf_sha256=<64 hex>` | passes |
 
 Note the first row: **"bit-identical" does not buy passage.** Parity ≠ mechanism. That distinction is
-the whole ballgame — it is what took our own `VALID-MECHANISM` count from 102 to 3 (§8.2).
+the whole ballgame — it is what took our own mechanical `VALID-MECHANISM` count from 102 to two
+after hand review (§11).
 
-The three rows this session's work added to `NEGATIVE_EVIDENCE.md` were run through the gate and pass.
+**Mode 3 — disk/compile guard.** `--check-disk` prints `df -h /data` and exits 2 below 120 GiB
+free. `--run-compile` performs that check and then executes one `cargo`/`rustc` command only when one
+explicit/shared `CARGO_TARGET_DIR` is present. The historical audit uses
+`/data/projects/.local-targets/frankenpandas-codeonly-audit-20260725`; it does not create a target
+per snapshot. Git and `df` subprocesses are bounded at 30 and 10 seconds respectively; guarded
+compiles default to a configurable 3,600-second ceiling and exit 2 on timeout.
 
 ### Enforcement
 
@@ -448,13 +467,143 @@ composes with the file-reservation guard rather than replacing it. It gates only
 that is the one weak link, and it is why the installer is committed and idempotent rather than the
 hook being hand-written per clone.
 
-**Emergency override:** `PERF_PREFLIGHT_OVERRIDE=1 git commit …`. It exists because a hard block with
-no escape hatch gets disabled wholesale the first time it is wrong; an override that must be typed
-explicitly leaves a trace in shell history and is a deliberate act.
+The hook fails closed if the preflight executable is absent. There is **no environment override**:
+fix the row or the gate. That is what makes undecidable REJECTs and unprovenanced KEEPs impossible
+through the normal commit path rather than merely discouraged.
 
 ### What this does not do
 
-It cannot verify that a claimed null control was *honest* — only that one was recorded. It is a
-ratchet against the dominant failure (writing a REJECT with nothing falsifiable in it), not a proof
-system. The `VALID-MECHANISM` detector deliberately errs toward blocking: it accepts a counted
-quantity shown unchanged and nothing else.
+It cannot verify that a claimed null control or SHA value is honest — only that the required
+evidence is recorded with the in-process marker. It is a ratchet against the dominant failures, not
+a proof system. The `VALID-MECHANISM` detector deliberately errs toward blocking: it accepts a
+counted quantity shown unchanged and nothing else.
+
+---
+
+## 11. Definitive hand audit under the frankenfs six-class taxonomy
+
+**This section supersedes the classifier counts in §8 and the non-standard `VOID-ISA` labels in
+§9.** Those sections remain as append-only history of the mechanical screen and the subsequent ISA
+survey; neither supplies the final ledger verdict. The fleet broadcast required the frankenfs
+method verbatim: regex builds a queue, then a human reads and adjudicates every row.
+
+The complete `docs/NEGATIVE_EVIDENCE.md` screen produced 261 `###` sections (including the
+preamble pseudo-section) containing a reject-like token. Every one was read in full. Hand review
+excluded 174 sections that were KEEPs, surveys, corrections, blockers, unmeasured attempts,
+superseded implementations, or otherwise not a rejected A/B/profile lever. One section at
+`:14686` contains two independently decided arms, so the 261 sections yield 262 hand
+dispositions and 88 actual six-class decisions.
+
+| Fleet class | Hand count | Share of classified decisions |
+|---|---:|---:|
+| `VALID-PROFILE` | 0 | 0.0% |
+| `VALID-MECHANISM` | 2 | 2.3% |
+| `VALID-AB` | 10 | 11.4% |
+| `VOID-CV` | 2 | 2.3% |
+| `VOID-ZEROSELF` | 0 | 0.0% |
+| `VOID-NONULL` | 74 | 84.1% |
+| **VOID total** | **76 / 88** | **86.4%** |
+
+`VOID-NONULL` is **74 / 76 = 97.4% of VOID**. The corrected result therefore reproduces the
+frankenfs finding more strongly than the §8 regex did: CV killed two rows, while missing null
+controls and missing counted mechanisms killed seventy-four. A mechanical SHA-token screen finds
+only 7 of 88 classified decisions mentioning a binary SHA (7.9%); before this Lane B repair, only
+the `fp-bench` executable actually self-reported the identity of the ELF it was running.
+
+### 11.1 Complete class map
+
+Line anchors below are the `docs/NEGATIVE_EVIDENCE.md` section starts used during hand review.
+`:14686` appears twice because its radix-tally arm is `VOID-NONULL`, while its counting-sort pivot
+is `VALID-AB`.
+
+- `VALID-PROFILE`: none.
+- `VALID-MECHANISM`: `:13046`, `:13090`.
+- `VALID-AB`: `:12786`, `:14438`, `:14509`, `:14686` (counting-sort arm), `:15909`,
+  `:16363`, `:17328`, `:17412`, `:17588`, `:17663`.
+- `VOID-CV`: `:11068`, `:12050`.
+- `VOID-ZEROSELF`: none.
+- `VOID-NONULL`: `:514`, `:643`, `:779`, `:813`, `:946`, `:967`, `:1028`, `:1051`,
+  `:1856`, `:1984`, `:2365`, `:2455`, `:2514`, `:2798`, `:2809`, `:3161`, `:4145`,
+  `:4448`, `:4471`, `:4855`, `:4967`, `:5058`, `:5073`, `:5127`, `:5139`, `:5317`,
+  `:5336`, `:5376`, `:5400`, `:5422`, `:5674`, `:5805`, `:5827`, `:5963`, `:6369`,
+  `:6703`, `:7288`, `:7397`, `:7714`, `:8614`, `:8846`, `:8917`, `:9041`, `:9147`,
+  `:9222`, `:9270`, `:9309`, `:9324`, `:9349`, `:9374`, `:9423`, `:9447`, `:9510`,
+  `:9689`, `:9787`, `:9949`, `:10179`, `:10375`, `:10452`, `:10721`, `:10861`,
+  `:11765`, `:12151`, `:12328`, `:12364`, `:12400`, `:12545`, `:14686`
+  (radix-tally arm), `:16742`, `:18179`, `:18244`, `:18289`, `:18331`, `:18436`.
+
+For completeness, the 174 mechanical false positives/non-population sections were:
+`:1`, `:376`, `:386`, `:397`, `:729`, `:887`, `:1092`, `:1447`, `:1788`, `:1995`,
+`:2021`, `:2120`, `:2176`, `:2228`, `:2287`, `:3274`, `:3290`, `:3496`, `:3530`,
+`:3583`, `:3624`, `:3922`, `:4537`, `:4655`, `:4696`, `:4985`, `:5226`, `:5356`,
+`:5611`, `:5633`, `:5720`, `:6046`, `:6194`, `:6218`, `:6238`, `:6264`, `:6284`,
+`:6407`, `:6545`, `:6602`, `:6624`, `:6650`, `:6663`, `:6715`, `:6773`, `:7140`,
+`:7349`, `:7897`, `:8164`, `:8401`, `:8583`, `:8593`, `:8626`, `:9024`, `:9074`,
+`:9078`, `:9241`, `:9250`, `:9257`, `:9294`, `:9314`, `:9615`, `:9717`, `:9753`,
+`:9816`, `:9981`, `:10044`, `:10076`, `:10104`, `:10212`, `:10333`, `:10412`,
+`:10492`, `:10541`, `:10588`, `:10624`, `:10697`, `:10755`, `:10821`, `:10933`,
+`:10979`, `:11128`, `:11184`, `:11202`, `:11362`, `:11433`, `:11472`, `:11538`,
+`:11636`, `:11700`, `:11834`, `:11896`, `:11962`, `:12083`, `:12180`, `:12246`,
+`:12474`, `:12574`, `:12600`, `:12662`, `:12826`, `:12877`, `:13342`, `:13761`,
+`:13798`, `:14066`, `:14094`, `:14277`, `:14388`, `:14413`, `:14546`, `:14593`,
+`:14650`, `:14746`, `:14793`, `:15131`, `:15210`, `:15241`, `:15295`, `:15391`,
+`:15430`, `:15463`, `:15499`, `:15541`, `:15583`, `:15622`, `:15662`, `:15703`,
+`:15743`, `:15782`, `:15822`, `:15860`, `:15949`, `:16003`, `:16070`, `:16139`,
+`:16208`, `:16261`, `:16312`, `:16492`, `:16518`, `:16572`, `:16611`, `:16652`,
+`:16692`, `:16786`, `:16829`, `:16872`, `:16915`, `:16958`, `:17001`, `:17044`,
+`:17087`, `:17130`, `:17228`, `:17278`, `:17472`, `:17522`, `:17737`, `:17814`,
+`:17898`, `:17951`, `:18020`, `:18081`, `:18126`, `:18375`, `:18517`, `:18556`,
+`:18603`, `:18655`, `:18748`, `:18822`, `:18918`, `:19222`.
+
+Three exclusions are worth making explicit because a regex would otherwise invent evidence:
+
+1. `:4537` and `:9024` are design analyses that say no source candidate was run.
+2. `:10212` and `:10588` never produced a candidate timing vector.
+3. `:7140` was held on a broken correctness build and later re-landed; `:10697` was superseded
+   by a stronger current-main implementation. Neither is a rejected performance lever.
+
+Likewise, `:17951` is a decisive 1.40x regression outside its 1.00 A/A null, and `:18020`
+is a measured 4.5% improvement declined by a separate keep policy. Neither is an ambiguous null-floor
+rejection, so neither is forced into a seventh class.
+
+### 11.2 Target-self ranking and the top-five disposition
+
+Ranked strictly by the highest target-frame self-time recorded in the ledger or its append-only
+correction:
+
+| rank | VOID row | target attribution | Lane B disposition |
+|---:|---|---:|---|
+| 1 | `:18179` first short-string open-addressing section | `dense_group_ids` later measured at ~90% | **BARRED** — part of the five-attempt str-groupby hash-table family |
+| 2 | `:18244` Fibonacci open-addressing | ~90% | **BARRED** — same family |
+| 3 | `:18289` cache-resident growing table | ~90% | **BARRED** — same family |
+| 4 | `:18331` packed-`u64` `FxHashMap` | ~90% | **BARRED** — fifth attempt; no sixth hash-table attempt |
+| 5 | `:9510` two-full-buffer axis=1 moments | candidate later profiled at **43.26% self** | **ALREADY RE-RUN** under harness v4; NULL result routed the shipped tile-local and exact-order parallel KEEPs |
+
+This is not an excuse to evade the ranked head. It is the collision between two explicit rules: the
+first four ranks are the same already-exhausted five-attempt hash-table family, and the allocation
+addendum says no sixth attempt. Re-running or redesigning that family is prohibited. Rank 5 was already
+reconstructed and run before Lane B took effect; §5 and §7 record the exact ELF, A/A CI, profile, and
+the two resulting KEEPs. Lane B prohibits benchmarks, so this audit issued no new timing command.
+
+Concrete retry predicates:
+
+- For ranks 1–4, reopen only after an upstream `hashbrown`/`rustc-hash` short-string primitive or an
+  approved khash-class dependency changes the implementation floor. Profile again first; do not write
+  a sixth in-repo hash-table variant.
+- For rank 5, reopen only if a current profile again places the shipped exact-order moment worker
+  above 20% self and a new shape removes a counted component without changing floating-point order.
+- For every other `VOID-NONULL`, promotion into a future Lane M queue requires a current named target
+  frame above 5% self. The rerun must use the executing ELF self-report, same-invocation A/A, and a
+  median bootstrap-CI decision. A CV threshold has no vote.
+
+### 11.3 Executing-ELF coverage closed in Lane B
+
+The repository has four executable benchmark entry points: the `fp-bench` binary plus three formal
+Criterion benches (`vs_pandas`, `range_index_asof`, and `range_index_indexers`). All four now compute
+SHA-256 from `std::env::current_exe()` and print
+`bench_elf_sha256=<sha> (<bytes> bytes) <path>` as the first statement in `main`.
+
+The three Criterion executables are descriptive microbench runners, not the canonical candidate
+A/B decision harness. Their self-report closes provenance; any KEEP/REJECT comparison still has to
+route through the schema-v4 `fp-bench` harness, which already supplies same-invocation order-alternating
+A/A and median-CI gating. Criterion CV or point estimates alone cannot create a ledger verdict.
