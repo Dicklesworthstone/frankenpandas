@@ -449,6 +449,40 @@ def bench_df_to_dict_index_materialize_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(op)
 
 
+def bench_df_iterrows_pandas(df: pd.DataFrame) -> list[float]:
+    # Counterpart to fp-bench dataframe_ops/df_iterrows, whose comment specifies
+    # `list(df.iterrows())`. Class-1 structural shape: pandas constructs a Series
+    # object per row, so the cost is per-element interpreter work rather than
+    # kernel work. `list(...)` forces the generator so both sides do the full
+    # materialization the Rust row does.
+    def op():
+        return len(list(df.iterrows()))
+
+    return time_operation(op)
+
+
+def bench_df_itertuples_pandas(df: pd.DataFrame) -> list[float]:
+    # Counterpart to fp-bench dataframe_ops/df_itertuples (`list(df.itertuples())`).
+    # itertuples is pandas' *fast* row iterator -- a namedtuple per row instead of
+    # a Series -- so it is the conservative member of this family and the fairer
+    # headline of the two.
+    def op():
+        return len(list(df.itertuples()))
+
+    return time_operation(op)
+
+
+def bench_df_apply_row_pandas(df: pd.DataFrame) -> list[float]:
+    # Counterpart to fp-bench dataframe_ops/df_apply_row. The Rust row sums the
+    # Float64 cells of each row via apply_fn(.., axis=1); the pandas expression of
+    # the same user intent is df.apply(<row sum>, axis=1), which invokes a Python
+    # callable per row.
+    def op():
+        return len(df.apply(lambda row: row.sum(), axis=1))
+
+    return time_operation(op)
+
+
 def bench_astype_str_f64_pandas(df: pd.DataFrame) -> list[float]:
     # Mirrors fp-bench dataframe_ops/astype_str_f64 exactly: a Float64 column
     # holding i * 1.5 for i in 0..rows, cast to str. Built here (not taken from
@@ -870,6 +904,9 @@ PANDAS_WORKLOADS = {
         "df_transpose_materialize": bench_df_transpose_materialize_pandas,
         "df_to_dict_index_materialize": bench_df_to_dict_index_materialize_pandas,
         "astype_str_f64": bench_astype_str_f64_pandas,
+        "df_iterrows": bench_df_iterrows_pandas,
+        "df_itertuples": bench_df_itertuples_pandas,
+        "df_apply_row": bench_df_apply_row_pandas,
     },
     "groupby": {
         "groupby_sum_int64": bench_groupby_sum_pandas,
@@ -995,13 +1032,26 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
         )
 
     bench_binary = bench_binary.resolve(strict=True)
-    project_root = PROJECT_ROOT.resolve(strict=True)
-    try:
-        bench_binary.relative_to(project_root)
-    except ValueError as exc:
+    # Confine the executable to a trusted root. The project root is one; the
+    # configured CARGO_TARGET_DIR is the other, and it is trusted for the same
+    # reason this function honours it three lines above -- rch/remote builds and
+    # the shared-target-dir disk policy both point it outside the repo, and the
+    # in-tree ./target/release-perf/fp-bench is itself a symlink into it. Checking
+    # the project root ALONE rejects every valid configuration on this host
+    # (CARGO_TARGET_DIR=/data/tmp/cargo-target is set session-wide), which blocks
+    # all vs-incumbent measurement. Arbitrary paths are still refused.
+    trusted_roots = [PROJECT_ROOT.resolve(strict=True)]
+    configured_target = os.environ.get("CARGO_TARGET_DIR")
+    if configured_target:
+        try:
+            trusted_roots.append(Path(configured_target).resolve(strict=True))
+        except OSError:
+            pass
+    if not any(bench_binary.is_relative_to(root) for root in trusted_roots):
         raise ValueError(
-            f"Refusing fp-bench executable outside project root: {bench_binary}"
-        ) from exc
+            "Refusing fp-bench executable outside the project root and the "
+            f"configured CARGO_TARGET_DIR: {bench_binary}"
+        )
     if bench_binary.name != "fp-bench":
         raise ValueError(f"Unexpected fp-bench executable path: {bench_binary}")
 
