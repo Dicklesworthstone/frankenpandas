@@ -52,6 +52,37 @@ REJECT_MARK = re.compile(
     re.IGNORECASE,
 )
 KEEP_MARK = re.compile(r"\bKEEP\b|\bSHIPPED\b|\bWIN\b", re.IGNORECASE)
+
+# --- Campaign policy 2 (2026-07-27): self-speedup vs vs-incumbent -------------
+# A self-speedup (our own code before vs after) is MAINTENANCE. A campaign WIN
+# requires a ratio against the ACTUAL incumbent, produced by a harness that runs
+# the incumbent side by side IN THE SAME INVOCATION. Across 369 campaign commits
+# ~60 self-speedups were produced but only 3 new vs-incumbent wins, all from repos
+# with a live incumbent arm. Self-speedups may still land and be ledgered -- they
+# just must be LABELLED, and never quoted as competitive claims.
+#
+# A row is admissible if it either declares itself a self-speedup, or shows a
+# same-invocation incumbent arm. `SELF_SPEEDUP_LABEL` is the cheap, explicit way
+# to comply.
+SELF_SPEEDUP_LABEL = re.compile(
+    r"\bself-?speedup\b|\bfp-side\b|\bmaintenance\b|\bnot a competitive claim\b|"
+    r"\bno incumbent arm\b|\binternal (?:only|speedup)\b",
+    re.IGNORECASE,
+)
+# Evidence that the legacy incumbent actually ran alongside us in this measurement.
+INCUMBENT_ARM = re.compile(
+    r"(?:pandas|numpy|redis|sqlite|networkx|tantivy|lucene|glibc|whisper\.cpp|"
+    r"mermaid-js|scipy|openblas)\s*[0-9]|"
+    r"vs[_-]pandas_harness|side[- ]by[- ]side|same invocation|"
+    r"incumbent arm|oracle arm|legacy arm",
+    re.IGNORECASE,
+)
+# A competitive-sounding ratio claim, e.g. "3.2x faster than pandas".
+COMPETITIVE_RATIO = re.compile(
+    r"\d+(?:\.\d+)?\s*[x×]\s*(?:faster|slower|vs\.?|against|over)\b|"
+    r"\bvs\.?\s+(?:pandas|numpy|redis|sqlite|networkx|glibc|scipy)\b",
+    re.IGNORECASE,
+)
 ZERO_VERDICT_COUNT = re.compile(
     r"\b(?:0|zero|no)\s+(?:new\s+)?"
     r"(?:REJECT(?:ED|S)?|NOSHIP|NO-SHIP|SLOWER|LOSS(?:ES)?|"
@@ -146,9 +177,10 @@ def added_ledger_sections(base: str, *, cached: bool) -> list[tuple[str, str]]:
 
 def validate_new_rows(
     sections: list[tuple[str, str]],
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     blocked_rejects: list[str] = []
     blocked_keeps: list[str] = []
+    blocked_unlabelled: list[str] = []
     for title, body in sections:
         blob = f"{title}\n{body}"
         verdict_title = ZERO_VERDICT_COUNT.sub("", title)
@@ -160,7 +192,15 @@ def validate_new_rows(
             blocked_rejects.append(title)
         if KEEP_MARK.search(verdict_title) and not IN_PROCESS_SHA256.search(blob):
             blocked_keeps.append(title)
-    return blocked_rejects, blocked_keeps
+        # Policy 2: a row making a competitive ratio claim must either show a
+        # same-invocation incumbent arm or declare itself a self-speedup.
+        if (
+            COMPETITIVE_RATIO.search(blob)
+            and not INCUMBENT_ARM.search(blob)
+            and not SELF_SPEEDUP_LABEL.search(blob)
+        ):
+            blocked_unlabelled.append(title)
+    return blocked_rejects, blocked_keeps, blocked_unlabelled
 
 
 def has_positive_null_control(blob: str) -> bool:
@@ -174,13 +214,26 @@ def check_new_rows(base: str, *, cached: bool) -> int:
         print(f"preflight: no new {source} ledger sections vs {base} — OK")
         return 0
 
-    blocked_rejects, blocked_keeps = validate_new_rows(sections)
-    if blocked_rejects or blocked_keeps:
+    blocked_rejects, blocked_keeps, blocked_unlabelled = validate_new_rows(sections)
+    if blocked_rejects or blocked_keeps or blocked_unlabelled:
         print("preflight: BLOCKED — inadmissible new performance ledger row(s)\n")
         for title in blocked_rejects:
             print(f"  ✗ REJECT without A/A or counted mechanism: {title[:150]}")
         for title in blocked_keeps:
             print(f"  ✗ KEEP without executing-ELF SHA-256: {title[:150]}")
+        for title in blocked_unlabelled:
+            print(f"  ✗ competitive ratio without an incumbent arm or self-speedup label: {title[:150]}")
+        if blocked_unlabelled:
+            print(
+                "\nCampaign policy 2: a self-speedup (our code before vs after) is "
+                "MAINTENANCE, not campaign output.\nA row quoting a competitive ratio "
+                "must EITHER:\n"
+                "  (a) show a same-invocation incumbent arm (vs_pandas_harness, "
+                "'side by side', a versioned incumbent), OR\n"
+                "  (b) label itself a self-speedup / fp-side / maintenance.\n"
+                "Self-speedups may land and be ledgered — they may never be quoted as "
+                "competitive claims."
+            )
         if blocked_rejects:
             print(
                 "\nEvery REJECT must record ONE of:\n"

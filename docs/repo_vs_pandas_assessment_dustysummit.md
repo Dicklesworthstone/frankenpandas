@@ -39,13 +39,16 @@ bounded lever).
    **REJECT — df_dot multi-threading:** parallelizing fp's GEMM across cores would
    (a) regress the `-c 2` single-core bench with thread overhead (reindex already
    shows column-parallel is -c2-slower: 1520µs vs pandas 1144µs, but 8-core 832µs),
-   and (b) leave the per-core gap untouched. **Correction to the 2026-07-24 ISA
-   claim:** the recorded cross-worker “AVX2=3850µs vs SSE2=5426µs = 1.4x” does not
-   reproduce and is withdrawn. The admissible same-worker result is 1.0327x; a
-   `df_abs` control was null at 1.0071x with CI `[0.9870, 1.0261]`. The residual is
-   OpenBLAS's hand-tuned assembly GEMM microkernel versus fp's auto-vectorized Rust
-   GEMM, not the compiler ISA flag. **Retry predicate:** only a hand-written,
-   register-blocked and packed-panel GEMM microkernel; no further build-flag sweep.
+   and (b) leave the per-core gap untouched. A `df_abs` control on the same worker
+   pair was null at 1.0071x with CI `[0.9870, 1.0261]`, so the ISA flag is neutral
+   outside GEMM. The residual is OpenBLAS's hand-tuned assembly GEMM microkernel
+   versus fp's auto-vectorized Rust GEMM, not the compiler ISA flag.
+   **Retry predicate:** only a hand-written, register-blocked and packed-panel GEMM
+   microkernel; no further build-flag sweep.
+
+   `-C target-cpu=x86-64-v3` is a benchmark-fleet build option, not a shipping one:
+   frankenpandas is a library distributed to third parties, and v3 codegen faults on
+   pre-2015 consumer CPUs. A 3.3% single-workload gain does not justify that.
 
 ## Conclusion
 
