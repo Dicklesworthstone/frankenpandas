@@ -12,9 +12,10 @@ Modes:
    A prior row on the surface blocks with its retry predicate printed.
 
 2. `--check-new-rows` (default; pre-commit mode) — every NEW `###` REJECT must record
-   either an A/A null control or a counted mechanism shown unchanged. Every NEW `###`
-   KEEP/WIN/SHIPPED row must record both a 64-hex binary SHA-256 and an in-process
-   executing-ELF marker. Shell-side hashes do not satisfy the latter.
+   either an A/A null control or a counted mechanism shown unchanged / missing a
+   predeclared numeric mechanism threshold. Every NEW `###` KEEP/WIN/SHIPPED row
+   must record both a 64-hex binary SHA-256 and an in-process executing-ELF marker.
+   Shell-side hashes do not satisfy the latter.
 
 3. `--check-disk` — print `df -h /data` and block below 120 GiB free.
 
@@ -81,6 +82,18 @@ MECHANISM = re.compile(
     r"page[- ]faults?|branch[- ]miss(?:es)?|cache[- ]miss(?:es)?)",
     re.IGNORECASE,
 )
+# A predeclared numeric COUNTED-mechanism pregate can also decide a row without
+# an A/A wall null. Both the measured and required values must be present; vague
+# prose such as "cycles missed the target" remains blocked.
+COUNTED_THRESHOLD = re.compile(
+    r"(?:instructions?|cycles|syscalls?|allocations?|mallocs?|page[- ]faults?|"
+    r"branch[- ]miss(?:es)?|cache[- ]miss(?:es)?|IPC)[^\n]{0,160}"
+    r"\d[\d_,]*(?:\.\d+)?\s*(?:x|%|cycles?)?[^\n]{0,120}"
+    r"(?:required|predeclared|pregate|threshold|limit)[^\n]{0,80}"
+    r"\d[\d_,]*(?:\.\d+)?\s*(?:x|%|cycles?)?[^\n]{0,80}"
+    r"(?:fail(?:ed)?|miss(?:ed)?|below|short|not (?:meet|clear))",
+    re.IGNORECASE,
+)
 IN_PROCESS_SHA256 = re.compile(
     r"(?:bench_elf_sha256\s*=|running (?:test )?ELF SHA-?256\s*[:=]|"
     r"executing (?:ELF|binary).{0,40}SHA-?256\s*[:=]|"
@@ -140,7 +153,9 @@ def validate_new_rows(
         blob = f"{title}\n{body}"
         verdict_title = ZERO_VERDICT_COUNT.sub("", title)
         if REJECT_MARK.search(verdict_title) and not (
-            has_positive_null_control(blob) or MECHANISM.search(blob)
+            has_positive_null_control(blob)
+            or MECHANISM.search(blob)
+            or COUNTED_THRESHOLD.search(blob)
         ):
             blocked_rejects.append(title)
         if KEEP_MARK.search(verdict_title) and not IN_PROCESS_SHA256.search(blob):
@@ -170,8 +185,9 @@ def check_new_rows(base: str, *, cached: bool) -> int:
             print(
                 "\nEvery REJECT must record ONE of:\n"
                 "  (a) an A/A null control\n"
-                "  (b) a COUNTED mechanism unchanged — instructions/cycles/syscalls/"
-                "allocations/faults\n"
+                "  (b) a COUNTED mechanism unchanged, or measured below a "
+                "predeclared numeric mechanism threshold — instructions/cycles/"
+                "syscalls/allocations/faults\n"
                 "'bit-identical' does not satisfy (b): parity is not a mechanism count."
             )
         if blocked_keeps:
@@ -412,6 +428,24 @@ def self_test() -> int:
             "reject_with_count",
             [("REJECT foo", "perf stat instructions unchanged")],
             (0, 0),
+        ),
+        (
+            "reject_with_numeric_counted_pregate",
+            [
+                (
+                    "REJECT packed kernel",
+                    (
+                        "Counted mechanism: cycles ratio measured 1.191365x versus "
+                        "predeclared threshold 1.250000x; it failed the counted pregate."
+                    ),
+                )
+            ],
+            (0, 0),
+        ),
+        (
+            "reject_with_vague_counted_pregate",
+            [("REJECT packed kernel", "cycles missed the target")],
+            (1, 0),
         ),
         ("keep_without_sha", [("KEEP foo", "same worker")], (0, 1)),
         ("keep_shell_sha", [("KEEP foo", f"shell sha256 {sha}")], (0, 1)),

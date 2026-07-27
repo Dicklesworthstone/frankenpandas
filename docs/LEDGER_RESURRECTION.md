@@ -702,7 +702,7 @@ other live incident-dependent statement; no separate `PERF_LEDGER` exists.
 
 The ratchet is substantive rather than cosmetic:
 
-- `python3 scripts/perf_candidate_preflight.py --self-test` passes all 17
+- `python3 scripts/perf_candidate_preflight.py --self-test` passes all 19
   deterministic cases;
 - replaying the escaped “ONE real loss” title is blocked;
 - `--check-new-rows --base 4eb983bcf` admits all seven post-hardening ledger

@@ -19774,7 +19774,7 @@ incident-dependent claim; this repository has no separate `PERF_LEDGER` file.
 
 Gate self-check:
 
-- deterministic suite: **17/17 PASS**, including the exact “ONE real loss”
+- deterministic suite: **19/19 PASS**, including the exact “ONE real loss”
   title that previously escaped;
 - exact escaped-row replay: **BLOCKED** as one basis-free negative verdict;
 - all seven ledger sections added since `4eb983bcf`: **PASS**;
@@ -19816,3 +19816,52 @@ packed-B register microkernel that first proves at least **1.25x fewer cycles** 
 exact 316x316 fold with cellwise bit identity, then reaches a production A/A
 `required_log_effect < 0.08` using amortized/persistent scheduling rather than per-call OS-thread
 spawn. A 4x8-or-wider tile is a candidate shape, not proof.
+
+### 2026-07-27 ProudChapel — `df_dot` packed-A+B 4x8 counted-cycle pregate — REJECT before production
+
+Ledger preflight printed the live `materialize_float64_dot` predicate: do not
+touch production until a genuinely new packed-A plus packed-B register kernel
+uses at least 1.25x fewer cycles than the current AXPY path on the exact
+316x316 fold, with every output bit preserved. The experiment therefore stayed
+inside an ignored release-perf test; no production route was changed.
+
+The test built column-major A and B inputs matching the real DataFrame layout.
+The candidate packed A row-major and B into 8-column panels on every invocation,
+then used a 4x8 register tile. Packing, output allocation, computation, and
+output destruction were all inside the counted region. Every one of **99,856**
+cells matched the ascending-`l` AXPY reference by `f64::to_bits()`; checksum
+`fedb831369ba039e`.
+
+Both arms ran from the same release-perf test executable on `ovh-a`, pinned to
+CPU 0. Each counter sample performed 256 complete products, and elevated
+`perf stat -r 7` supplied seven repeats with zero migrations:
+
+| counted quantity | AXPY | packed A+B 4x8 | AXPY / packed |
+|---|---:|---:|---:|
+| user cycles | 5,638,364,969 (±0.43%) | 4,732,693,852 (±0.35%) | **1.191365x** |
+| cycles / product | 22,024,863 | 18,487,085 | **1.191365x** |
+| retired instructions | 27,189,764,385 | 24,539,207,213 | 1.108013x |
+| task clock | 1,269.316 ms | 1,230.604 ms | 1.031457x |
+
+**Counted mechanism: cycles ratio measured 1.191365x versus predeclared
+threshold 1.250000x; it failed the counted pregate.** Admission required at
+most 17,619,891 cycles/product. The candidate used 18,487,085, missing by
+867,195 cycles/product. This is a counted-mechanism rejection, not a wall-noise
+inference; A/A cannot turn a stable 16.06% mechanism reduction into the required
+20%. The experimental test was removed after the run.
+
+**NO-CEILING scope.** This rejects only the measured safe-Rust packed-A+B 4x8
+schedule. It does not claim that a different GEMM organization cannot win.
+The current Lane M df_dot streak is two rejected runtime schedules (the
+existing packed-B 4x4 router and this new packed-A+B 4x8 pregate); switch veins
+now rather than manufacture a third tile-only variant.
+
+**Concrete retry predicate.** Do not retry the existing 4x4 router, this 4x8
+loop, worker affinity, or compiler flags. Reopen only for a materially
+different safe-Rust schedule with a counted mechanism that predicts removal of
+at least another 4.7% of candidate cycles. Admit it only if the same-core exact
+shape reaches **≤17,619,891 cycles/product** while all 99,856 cells remain
+bit-identical. A tile-width change alone is not such a mechanism.
+
+Full protocol and counter evidence:
+`artifacts/bench/quiet_lane_m_df_dot_packed_ab_pregate_20260727.md`.
