@@ -184,12 +184,12 @@ fn dt_weekday_family_matches_pandas_oracle() {
 
 #[test]
 fn dt_strftime_matches_pandas_oracle() {
-    // A typed-vs-generic differential cannot see a bug both arms share, and both
-    // strftime arms derive the date from the SAME formula, so pin it to the
-    // oracle independently. `Timestamp::strftime` mixes truncating `total_secs /
-    // 86400` with a positive-wrapped `secs_of_day`; that pairing was checked
-    // against pandas here and is CORRECT for the pre-1970 non-midnight case
-    // (unlike `day_name`, which was not). This is the regression guard for it.
+    // A typed-vs-generic differential cannot see a bug both arms share, so pin
+    // the public Series accessor to the oracle independently. This does NOT
+    // exercise `Timestamp::strftime`: the typed Series path uses its own
+    // Euclidean civil-date emitter. The model-integrity re-audit caught the
+    // direct Timestamp path's former truncating-division defect and guards it
+    // in fp-types' `timestamp_strftime_floors_pre_epoch_instants_1pmlp`.
     let expected_dates = [
         "2024-01-01",
         "2024-02-29",

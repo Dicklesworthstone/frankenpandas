@@ -19701,3 +19701,43 @@ Concrete retry predicates, referenced by every row above:
   chase CV. Rerun the exact 2M NaN/37 shape only if a batched same-worker invocation can first drive
   `required_log_effect < 0.57692812`; reconcile it with an independent repeat such as G6 before
   changing the surface-level FASTER conclusion.
+
+### 2026-07-27 ProudChapel — model-integrity re-audit of the six 2026-07-25 provider-fallback-window commits
+
+Scope: commits authored between 20:40 on 2026-07-25 and 00:35 on 2026-07-26, when the provider
+silently substituted a weaker model. Per the owner rule, measurements carrying an in-process
+executing-ELF identity, same-invocation A/A control, or byte-identity proof were not rerun merely
+because of the incident. This pass instead re-read the executed call graph, every semantic proof,
+each claimed result against its own gate, and the uncovered code paths. No new performance lever
+was proposed and no sixth string-groupby hash-table implementation was attempted.
+
+| commit | disposition | fresh adjudication |
+|---|---|---|
+| `0d694c28` | **CORRECTED** | The workload counterparts and full-call timing boundaries are real, and the block-storage universal-wiring design objection stands. The `df_groupby_2strkey_sum @10k` direction does not: 0.8563x had neither A/A nor a counted mechanism, so it is `VOID-NONULL`, not an authoritative loss. Source reconstruction also proves the two-string-key call routed through `DataFrameGroupBy::aggregate_named_func` → `agg_typed_pairs_dense_f64_moments` → `multi_mixed_dense_grouping`, not the named `compute_dense_group_ids` Series path. The artifact's overall 1.24x weighted score is likewise not a whole-suite result: five unmeasured categories were inserted as 1.00 placeholders. |
+| `b7751a8d` | **CORRECTED** | The reuse idea is semantically plausible only for `SeriesGroupBy::compute_dense_group_ids` over the same all-valid contiguous-Utf8 `Column`; `DataFrameGroupBy::compute_dense_group_ids` does not exist. It neither explains nor repairs the two-key DataFrame row above. `br-frankenpandas-f11op` is corrected to that Series-only scope and still requires a fresh-column control plus a repeated-groupby arm. No ratio was ever claimed. |
+| `cab977a66` | **CORRECTED** | The executable-identity/A/A/median-CI harness implementation and the axis=1 tile-local production change are sound. Exact bits were checked for all 1,000,000 outputs, the public call reaches the changed all-valid Float64 path, and both KEEPs clear their own 2x-null gates: incremental `log(effect)=0.497887 > 0.394594 required`; public `0.460299 > 0.318601`. The correction is documentary/methodological: its V1–V5 ledger audit and 16-VOID headline were not the fleet-standard six-class, row-by-row hand audit. `4eb983bcf` §11 superseded them with the definitive frankenfs taxonomy (88 actual decisions; 76 VOID, including 74 `VOID-NONULL`). |
+| `8bb91629` | **SOUND** | The measured fixture reaches the changed row-parallel primitive; the profile names its worker closure at 29.77% self. Workers own disjoint output ranges while each row retains the serial left-to-right mean/M2/finish order. Public, serial-reference, and parallel outputs matched bit-for-bit before timing. The final 1.955356x effect clears its own null gate by over 5x in log space (`0.670572 > 0.124779 required`); high CV had no vote. |
+| `cdf7f5d9` | **CORRECTED** | `Timestamp::day_name`'s `div_euclid` repair is sound, the typed-path reachability test is real, and `4eb983bcf` correctly applied the same repair to the separate `fp-frame` inline path. Two judgments did not survive: the mechanical ledger taxonomy/df_dot 1.4x assertion were later superseded, and this commit's claim that `Timestamp::strftime` handled a pre-epoch non-midnight instant was never tested—the Series test uses a different Euclidean emitter. Direct inspection found truncating second/day division made every negative non-midnight direct Timestamp wrong (at `-1 ns`: `1970-01-01 00:00:00.999999` instead of `1969-12-31 23:59:59.999999`). The direct path now uses Euclidean division and has both Apollo-11 and `-1 ns` oracle regressions. |
+| `039bca43` | **CORRECTED** | The first ratchet did not meet the assigned minimum: it accepted zero-self as a reject basis, did not gate KEEPs on an in-process SHA, failed open if the checker was absent, and exposed an override. `4eb983bcf` fixed those defects and covered every formal benchmark executable. This re-audit additionally fixed a title-parser false positive where summary headings such as “0 REJECTS” or “no new KEEPs” were treated as verdict rows; deterministic self-tests now cover both cases. |
+
+No commit is retracted wholesale: every unsound assertion has a narrower sound remainder and an
+append-only correction. In particular, the axis=1 production KEEPs retain authority; the unproven
+two-string-key 10k direction and its Series-factorization attribution do not.
+
+Concrete retry predicates:
+
+- `df_groupby_2strkey_sum @10k`: promote the historical vector beyond routing evidence only after a
+  current symbolized profile gives a named frame in the executed DataFrame multi-key route more than
+  5% self-time, then rerun that exact shape with the schema-v4 executing-ELF/A/A/median-CI contract.
+  Do not infer a Series cache lever and do not attempt another hash-table implementation.
+- `br-frankenpandas-f11op`: proceed only after a repeated-`SeriesGroupBy` profile puts the contiguous
+  Utf8 factorization arm above 5% self. The fresh-column arm must remain inside its A/A interval and
+  the repeat arm must clear it; report the result only as reuse across groupby objects.
+- Axis=1 moments: retain the existing predicates—reopen only when a current profile again puts the
+  shipped primitive above 20% self and a successor removes a measured component without changing
+  per-row floating-point order.
+- Datetime formatting: reopen the corrected direct `Timestamp::strftime` arithmetic only on a direct
+  pandas-oracle disagreement, including a negative sub-second instant; a Series-only differential is
+  not evidence for this direct API.
+- Ledger preflight: change verdict-title recognition only with a new deterministic failing case,
+  keeping actual verdict rows fail-closed. Run `--self-test` before every such change.

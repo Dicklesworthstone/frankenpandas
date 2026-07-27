@@ -651,3 +651,26 @@ but the historical cross-worker `1.4x` number is withdrawn. The remaining `df_do
 explained by the ISA flag. The retry predicate is a hand-written register-blocked, packed-panel GEMM
 microkernel; another compiler-flag sweep is barred. Full evidence is banked in
 `artifacts/bench/quiet_lane_m_df_dot_isa_20260726.md`.
+
+## 13. Model-integrity re-audit of the provider-fallback window
+
+The six commits authored from 2026-07-25 20:40 through 2026-07-26 00:35 were
+re-read after the provider disclosed a silent fallback to a weaker model.
+Artifact-backed measurements were not rerun: the review instead reconstructed
+the executed call paths, checked the semantic proofs and each decision against
+its own numbers, and inspected code outside the original gates.
+
+| commit | disposition | correction |
+|---|---|---|
+| `0d694c28` | **CORRECTED** | The two-string-key 10k direction is `VOID-NONULL`, not an authoritative loss. Its executed DataFrame path ends in `multi_mixed_dense_grouping`, not the Series factorization function named by the original follow-up. |
+| `b7751a8d` | **CORRECTED** | The cache idea is narrowed to repeated `SeriesGroupBy` objects over one all-valid contiguous-Utf8 column; it has no authority over the two-key DataFrame row. |
+| `cab977a66` | **CORRECTED** | Both axis=1 KEEPs and their harness proof stand. The preliminary V1-V5/16-VOID audit is superseded by the later six-class, row-by-row audit in section 11. |
+| `8bb91629` | **SOUND** | The profiled path, bit-identity argument, disjoint parallel writes, and 1.955356x median-CI decision all withstand review. |
+| `cdf7f5d9` | **CORRECTED** | The day-name repair stands, but its Series strftime test never exercised direct `Timestamp::strftime`; the direct negative-instant arithmetic is now Euclidean and covered at Apollo 11 and `-1 ns`. |
+| `039bca43` | **CORRECTED** | Section 11 already repaired the original gate contract. The current gate now also distinguishes zero-count summaries such as `0 REJECTS` and `no new KEEPs` from actual verdict rows. |
+
+No commit is retracted wholesale. The complete adjudication, numerical
+cross-checks, and concrete retry predicates are append-only in the 2026-07-27
+ProudChapel entry of `docs/NEGATIVE_EVIDENCE.md`. The corrected queue forbids
+using the historical two-string-key vector to justify a Series cache lever or a
+sixth in-repo string-groupby hash table.

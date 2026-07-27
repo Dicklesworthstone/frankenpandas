@@ -50,6 +50,11 @@ REJECT_MARK = re.compile(
     re.IGNORECASE,
 )
 KEEP_MARK = re.compile(r"\bKEEP\b|\bSHIPPED\b|\bWIN\b", re.IGNORECASE)
+ZERO_VERDICT_COUNT = re.compile(
+    r"\b(?:0|zero|no)\s+(?:new\s+)?"
+    r"(?:REJECT(?:ED|S)?|NOSHIP|NO-SHIP|KEEP(?:S)?|SHIPPED|WIN(?:S)?)\b",
+    re.IGNORECASE,
+)
 NULL_CTRL = re.compile(
     r"(?:null control|null-control|A/A|null arm|null floor|nulls?\s*~\s*1\.0)"
     r"[^\n]{0,160}\d",
@@ -131,11 +136,12 @@ def validate_new_rows(
     blocked_keeps: list[str] = []
     for title, body in sections:
         blob = f"{title}\n{body}"
-        if REJECT_MARK.search(title) and not (
+        verdict_title = ZERO_VERDICT_COUNT.sub("", title)
+        if REJECT_MARK.search(verdict_title) and not (
             has_positive_null_control(blob) or MECHANISM.search(blob)
         ):
             blocked_rejects.append(title)
-        if KEEP_MARK.search(title) and not IN_PROCESS_SHA256.search(blob):
+        if KEEP_MARK.search(verdict_title) and not IN_PROCESS_SHA256.search(blob):
             blocked_keeps.append(title)
     return blocked_rejects, blocked_keeps
 
@@ -238,7 +244,7 @@ def check_candidate(candidate: str, surface: str | None) -> int:
 
     hits: list[tuple[int, str, str]] = []
     for line_no, title, body in ledger_sections():
-        if not REJECT_MARK.search(title):
+        if not REJECT_MARK.search(ZERO_VERDICT_COUNT.sub("", title)):
             continue
         blob = f"{title}\n{body}"
         if all(contains_surface_term(blob, term) for term in surface_terms):
@@ -394,6 +400,16 @@ def self_test() -> int:
         (
             "keep_executing_sha",
             [("KEEP foo", f"bench_elf_sha256={sha} (123 bytes) /tmp/bench")],
+            (0, 0),
+        ),
+        (
+            "summary_zero_rejects_is_not_a_reject",
+            [("Integrity summary: 6 commits, 0 REJECTS", "No performance row.")],
+            (0, 0),
+        ),
+        (
+            "summary_no_new_keeps_is_not_a_keep",
+            [("Audit summary: no new KEEPs", "No performance row.")],
             (0, 0),
         ),
     ]

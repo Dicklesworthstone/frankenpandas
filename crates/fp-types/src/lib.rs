@@ -2974,13 +2974,18 @@ impl Timestamp {
         if self.is_nat() {
             return "NaT".to_string();
         }
-        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
+        // Floor both boundaries for pre-epoch instants. Truncating division
+        // produces an internally inconsistent date/time pair for every negative
+        // non-midnight timestamp (and is especially visible at -1 ns):
+        // 1970-01-01 00:00:00.999999 instead of
+        // 1969-12-31 23:59:59.999999.
+        let total_secs = self.nanos.div_euclid(Timedelta::NANOS_PER_SEC);
         // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
         // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
         let sub_nanos = self.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
 
-        let days_since_epoch = total_secs / 86400;
-        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+        let days_since_epoch = total_secs.div_euclid(86400);
+        let secs_of_day = total_secs.rem_euclid(86400);
 
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
@@ -11339,6 +11344,23 @@ mod tests {
         assert_eq!(ts.strftime("%Y/%m/%d %H:%M"), "1971/01/01 09:15");
         assert_eq!(ts.strftime("%%Y|%%%m|%Q|%|λ"), "%1971|%%01|%Q|%|λ");
         assert_eq!(Timestamp::nat().strftime("%Y-%m-%d"), "NaT");
+    }
+
+    #[test]
+    fn timestamp_strftime_floors_pre_epoch_instants_1pmlp() {
+        let apollo = Timestamp::parse("1969-07-20T20:17:40").unwrap();
+        assert_eq!(
+            apollo.strftime("%Y-%m-%d %H:%M:%S.%f"),
+            "1969-07-20 20:17:40.000000"
+        );
+
+        // The smallest negative instant catches both truncation defects:
+        // second flooring and day flooring.
+        let one_ns_before_epoch = Timestamp::from_nanos(-1);
+        assert_eq!(
+            one_ns_before_epoch.strftime("%Y-%m-%d %H:%M:%S.%f"),
+            "1969-12-31 23:59:59.999999"
+        );
     }
 
     #[test]
