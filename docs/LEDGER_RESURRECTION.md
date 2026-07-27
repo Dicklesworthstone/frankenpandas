@@ -369,7 +369,7 @@ B — none of these were re-run. They are queued for our Lane M rotation.**
 | 3 | `:222` max/min portable-SIMD `i64x4` (uza04.207) | 0.17× / 0.16× — "AVX2-width `std::simd` variant was 3.1× slower than the manual accumulator" | An **AVX2-width** vector type compiled for a **baseline** target lowers to scalar/SSE2 emulation — the reject measured the emulation, not the lever. | **VOID-ISA** |
 | 4 | `:788` explicit AVX2 via `#[target_feature(enable="avx2")]` + runtime dispatch | Reverted — requires `unsafe`, and the crate is `#![forbid(unsafe_code)]` (cf. `:571`) | The *unsafe* objection stands and is a real repo constraint. But the **safe** alternative it was weighed against — a global target-feature build — was rejected on **portability**, which is the premise now removed. Re-decide the safe build-flag path, **not** the unsafe intrinsic. | **VOID (partial)** |
 | 5 | `:5235` `.cargo/config.toml` "intentionally empty — a `+fma,+avx2` … deliberately-reverted build decision" | Deliberate portability choice | Same premise. The fleet no longer contains a non-AVX2 rust worker. | **VOID (policy)** |
-| 6 | `docs/repo_vs_pandas_assessment_dustysummit.md:42` `df_dot` **AVX2 REJECT #2** | Measured AVX2 = 3850 µs vs SSE2 5426 µs = **1.4×**, "still 3.1× slower than pandas single-thread… **not worth it at a portability cost**" | ⚠️ **Only PARTLY void — state this honestly.** Unlike rows 1–5 this one *did* build with `+avx2,+fma` and measure. **The 1.4× measurement stands.** What is void is only the *cost/benefit* half of the conclusion ("at a portability cost"), since there is no longer a portability cost. It does **not** become a 2–4× win. | **VALID measurement / VOID rationale** |
+| 6 | `docs/repo_vs_pandas_assessment_dustysummit.md:42` `df_dot` **AVX2 REJECT #2** | Historical AVX2 = 3850 µs vs SSE2 5426 µs = **1.4×**, "still 3.1× slower than pandas single-thread… **not worth it at a portability cost**" | **MODEL-INTEGRITY CORRECTION (§12):** the historical arms were not a same-worker pair. The admissible whole-binary replay measured only `1.0327×` on the same worker, so the `1.4×` number is withdrawn; the old portability rationale is independently stale. | **SUPERSEDED / historical ratio withdrawn** |
 
 **Ranking for the Lane M rotation** (campaign rule: by target-frame self-time, tie-broken toward
 levers whose design work is already done): **1 → 2 → 3 → 6 → 4 → 5.** Row 1 outranks the rest
@@ -635,7 +635,7 @@ lower CV is forbidden.
 This closes the scorecard's 16-row high-CV queue: 14 resurrect into valid wins and 2 remain honest
 nulls. It does not rewrite the historic measurement; it supersedes the historic admission rule.
 
-### 12.2 Append-only correction to the `df_dot` audit row
+### 12.2 Correction to the `df_dot` audit row
 
 Section 9 row 6 said that the historical `1.4x` AVX2 measurement stood while only its portability
 rationale had become void. The new same-worker whole-binary A/B proves that statement wrong:
@@ -670,7 +670,42 @@ its own numbers, and inspected code outside the original gates.
 | `039bca43` | **CORRECTED** | Section 11 already repaired the original gate contract. The current gate now also distinguishes zero-count summaries such as `0 REJECTS` and `no new KEEPs` from actual verdict rows. |
 
 No commit is retracted wholesale. The complete adjudication, numerical
-cross-checks, and concrete retry predicates are append-only in the 2026-07-27
+cross-checks, and concrete retry predicates are banked in the 2026-07-27
 ProudChapel entry of `docs/NEGATIVE_EVIDENCE.md`. The corrected queue forbids
 using the historical two-string-key vector to justify a Series cache lever or a
 sixth in-repo string-groupby hash table.
+
+## 14. Model-integrity remediation closure
+
+The six verdicts are fully reconciled to the repository state:
+
+| verdict total | sound | corrected | retracted | corrected verdicts with landed remediation |
+|---:|---:|---:|---:|---:|
+| 6 | 1 | 5 | 0 | 5 |
+
+The five corrective chains are concrete:
+
+1. `0d694c28` → `192f190a0` plus the final correction of its original ledger
+   section, generated scorecard, and `br-frankenpandas-uza04.218`.
+2. `b7751a8d` → `192f190a0`'s Series-only `br-frankenpandas-f11op` scope.
+3. `cab977a66` → `4eb983bcf`'s definitive six-class, row-by-row hand audit.
+4. `cdf7f5d9` → `4eb983bcf`'s fp-frame day-name repair,
+   `192f190a0`'s direct strftime repair, and `2ee82f41f`'s df_dot correction.
+5. `039bca43` → `4eb983bcf`'s fail-closed contract plus the final
+   loss/slower/regression verdict-title classifier.
+
+Four downstream citation sites required correction: the original groupby
+ledger section, the preliminary df_dot resurrection row, the generated
+groupby scorecard, and the closed groupby-matrix bead. Searches of README,
+the canonical performance scorecard, and the repository assessment found no
+other live incident-dependent statement; no separate `PERF_LEDGER` exists.
+
+The ratchet is substantive rather than cosmetic:
+
+- `python3 scripts/perf_candidate_preflight.py --self-test` passes all 17
+  deterministic cases;
+- replaying the escaped “ONE real loss” title is blocked;
+- `--check-new-rows --base 4eb983bcf` admits all seven post-hardening ledger
+  sections;
+- the checker remains installed in the pre-commit chain at
+  `.git/hooks/hooks.d/pre-commit/60-perf-ledger-preflight.sh`.

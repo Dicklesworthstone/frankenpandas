@@ -46,13 +46,15 @@ DEFAULT_DF_TIMEOUT_SECONDS = 10.0
 DEFAULT_COMPILE_TIMEOUT_SECONDS = 3600.0
 
 REJECT_MARK = re.compile(
-    r"\bREJECT(?:ED|S)?\b|\bNOSHIP\b|\bNO-SHIP\b|zero-gain|~0-gain",
+    r"\bREJECT(?:ED|S)?\b|\bNOSHIP\b|\bNO-SHIP\b|"
+    r"\bSLOWER\b|\bLOSS(?:ES)?\b|\bREGRESSION(?:S)?\b|zero-gain|~0-gain",
     re.IGNORECASE,
 )
 KEEP_MARK = re.compile(r"\bKEEP\b|\bSHIPPED\b|\bWIN\b", re.IGNORECASE)
 ZERO_VERDICT_COUNT = re.compile(
     r"\b(?:0|zero|no)\s+(?:new\s+)?"
-    r"(?:REJECT(?:ED|S)?|NOSHIP|NO-SHIP|KEEP(?:S)?|SHIPPED|WIN(?:S)?)\b",
+    r"(?:REJECT(?:ED|S)?|NOSHIP|NO-SHIP|SLOWER|LOSS(?:ES)?|"
+    r"REGRESSION(?:S)?|KEEP(?:S)?|SHIPPED|WIN(?:S)?)\b",
     re.IGNORECASE,
 )
 NULL_CTRL = re.compile(
@@ -384,7 +386,28 @@ def self_test() -> int:
         ("reject_bare_null", [("REJECT foo", "A/A null control mentioned")], (1, 0)),
         ("reject_perf_stat_only", [("REJECT foo", "perf stat was attempted")], (1, 0)),
         ("reject_claim_only", [("REJECT foo", "no work was removed")], (1, 0)),
+        (
+            "reject_model_incident_real_loss_without_basis",
+            [
+                (
+                    (
+                        "uza04.218 matrix: ONE real loss "
+                        "(df_groupby_2strkey_sum @10k 0.86x)"
+                    ),
+                    (
+                        "Four p50 ratios agree; output is bit-identical. "
+                        "No executing-ELF identity was recorded."
+                    ),
+                )
+            ],
+            (1, 0),
+        ),
         ("reject_with_null", [("REJECT foo", "A/A null control 1.001x")], (0, 0)),
+        (
+            "slower_with_null",
+            [("df_groupby_2strkey_sum is SLOWER", "A/A null control 1.001x")],
+            (0, 0),
+        ),
         (
             "reject_with_count",
             [("REJECT foo", "perf stat instructions unchanged")],
@@ -410,6 +433,11 @@ def self_test() -> int:
         (
             "summary_no_new_keeps_is_not_a_keep",
             [("Audit summary: no new KEEPs", "No performance row.")],
+            (0, 0),
+        ),
+        (
+            "summary_zero_losses_is_not_a_reject",
+            [("Integrity summary: zero losses", "No performance row.")],
             (0, 0),
         ),
     ]

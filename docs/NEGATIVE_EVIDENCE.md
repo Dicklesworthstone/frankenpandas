@@ -19010,7 +19010,15 @@ Artifacts:
 - `artifacts/bench/cod_fp_uza04_217_groupby_scalar_remaining_control_10k_100k.json`
 - `artifacts/perf/cod_fp_uza04_217_groupby_scalar_scorecard_2026-07-23.md`
 
-### 2026-07-25 QuietHarbor — uza04.218 groupby harness matrix CLOSED: 5/5 rows covered, ONE real loss (df_groupby_2strkey_sum @10k 0.86x), and the cv gate was discarding decidable rows
+### 2026-07-25 QuietHarbor — uza04.218 groupby harness matrix CLOSED: 5/5 rows covered; df_groupby_2strkey_sum @10k 0.86x is VOID-NONULL routing evidence
+
+**MODEL-INTEGRITY CORRECTION (2026-07-27, `br-frankenpandas-psuwe`):** retain
+the raw samples below, but withdraw the claimed loss and its attribution. This
+invocation recorded neither an A/A null control nor a counted mechanism, and
+the executing ELF did not self-report its SHA-256. Under the fleet six-class
+taxonomy the `0.8563x` sample is `VOID-NONULL`, not a decided performance
+verdict. The linked scorecard's former `1.24x` weighted result is also withdrawn:
+five unmeasured categories were represented by `1.00x` placeholders.
 
 Completed `br-frankenpandas-uza04.218`. The five remaining fp-bench groupby rows (`groupby_multi_str`,
 `groupby_agg3_str`, `df_groupby_str_sum`, `df_groupby_2key_sum`, `df_groupby_2strkey_sum`) got their pandas
@@ -19046,13 +19054,15 @@ attempt, admitted or not):
 | `groupby_agg3_str` | 100k | 3.01 / 3.03 / 2.99 / 2.81 | **2.998x** | 2.81–3.03 | 1 of 4 |
 | `df_groupby_2strkey_sum` | 10k | 0.872 / 0.850 / 0.837 / 0.862 | **0.856x** | 0.837–0.872 | 1 of 4 |
 
-Four runs agree to within 3% on each row, and the cv gate admitted exactly one of each. A ~15% deficit is far
-outside any plausible A/A floor on this host; `df_groupby_2strkey_sum @10k` is a REAL, reproducible loss and
-`groupby_agg3_str @100k` is a real ~3x win. Gating on cv rejected the harness, not the effect — exactly the
-failure mode the campaign names. **Rows are decided here on the median of per-run p50 ratios; cv is retained
-as provenance only.**
+Four runs agree to within 3% on each row, and the cv gate admitted exactly one
+of each. That makes the vectors useful for routing, but repeatability across
+A/B samples does not establish the harness floor. Without a same-invocation
+A/A null, the `0.856x` and `2.998x` directions are not admitted performance
+verdicts. The cv-only filter was still the wrong screen; a future rerun must
+decide the rows on a median CI relative to its measured null floor.
 
-**Attribution of the one loss (arithmetic on the measured rows, not a symbolized profile).** The int-key
+**Historical attribution hypothesis (arithmetic on the measured rows, not a
+symbolized profile; not evidence for a lever).** The int-key
 sibling `df_groupby_2key_sum` has the SAME 100x50=5000 group combos and wins (1.209x @10k, 1.505x @100k), so
 the deficit is specific to the string keys. fp str-minus-int delta: 809 us @10k, 2572 us @100k over the same
 5000 groups. Marginal per-row str cost = (2572-809)/90000 = 19.6 ns/row; the residual ~613 us at 10k is
@@ -19060,13 +19070,15 @@ per-group/fixed. At 10k there are 5000 groups over 10k rows — **2 rows per gro
 ~40% of fp's total and the workload is in a many-tiny-groups regime that 100k amortizes away. This is
 consistent with the already-ledgered str-key factorization floor (hashbrown ~10.5 ns/row vs khash ~2.5 ns).
 
-**Verdict: KEEP coverage. The loss is NOT a new vein** — it is the known str-key factorization floor sampled
-at a small-n/many-groups shape that the previous 100k/1M coverage hid. No source lever attempted.
+**Corrected verdict: KEEP coverage only.** No source lever was attempted. Do
+not cite the `0.856x` direction as a real loss, and do not use it to attribute
+work to string factorization.
 
-Retry predicate: retry `df_groupby_2strkey_sum @10k` ONLY after (1) a symbolized profile attributes >5% exact
-self-time to a frame OTHER than `compute_dense_group_ids`' Utf8 factorization at the 10k/5000-group shape, or
-(2) the str-key factorization floor itself is attacked by a non-hash primitive (MPH / ART / radix-partition
-per campaign §5) — NOT by a 6th hash-table variant, which the ledger closes as conclusive.
+Retry predicate: retry `df_groupby_2strkey_sum @10k` only in a harness that
+self-reports the executing ELF SHA-256, runs an A/A null in the same invocation,
+and admits the A/B direction under the median-CI gate. Then require a symbolized
+profile to attribute >5% self-time to the actual DataFrame two-key path before
+proposing a lever. Do not attempt a sixth hash-table variant.
 
 Artifacts:
 
@@ -19721,7 +19733,7 @@ was proposed and no sixth string-groupby hash-table implementation was attempted
 | `039bca43` | **CORRECTED** | The first ratchet did not meet the assigned minimum: it accepted zero-self as a reject basis, did not gate KEEPs on an in-process SHA, failed open if the checker was absent, and exposed an override. `4eb983bcf` fixed those defects and covered every formal benchmark executable. This re-audit additionally fixed a title-parser false positive where summary headings such as “0 REJECTS” or “no new KEEPs” were treated as verdict rows; deterministic self-tests now cover both cases. |
 
 No commit is retracted wholesale: every unsound assertion has a narrower sound remainder and an
-append-only correction. In particular, the axis=1 production KEEPs retain authority; the unproven
+explicit correction. In particular, the axis=1 production KEEPs retain authority; the unproven
 two-string-key 10k direction and its Series-factorization attribution do not.
 
 Concrete retry predicates:
@@ -19741,6 +19753,33 @@ Concrete retry predicates:
   not evidence for this direct API.
 - Ledger preflight: change verdict-title recognition only with a new deterministic failing case,
   keeping actual verdict rows fail-closed. Run `--self-test` before every such change.
+
+**Remediation closure reconciliation (`br-frankenpandas-psuwe`).**
+
+| corrected verdict | landed remediation |
+|---|---|
+| `0d694c28` | `192f190a0` corrected the verdict and executed path; this closeout also corrected the original ledger section, its generated scorecard, and `br-frankenpandas-uza04.218`. |
+| `b7751a8d` | `192f190a0` narrowed `br-frankenpandas-f11op` to the real `SeriesGroupBy` surface and removed authority over the DataFrame two-key row. |
+| `cab977a66` | `4eb983bcf` replaced the preliminary V1–V5 result with the definitive hand-adjudicated frankenfs six-class audit. |
+| `cdf7f5d9` | `4eb983bcf` fixed the separate fp-frame day-name path; `192f190a0` repaired direct negative-instant `Timestamp::strftime`; `2ee82f41f` withdrew the cross-worker df_dot `1.4x` claim. |
+| `039bca43` | `4eb983bcf` made the minimum ledger contract fail-closed; this closeout recognizes `SLOWER`, `LOSS`, and `REGRESSION` headings and replays the exact escaped title. |
+
+All five `CORRECTED` verdicts now have landed remediation; the sole `SOUND`
+verdict required none, and there are no whole-commit `RETRACTED` verdicts. Four
+downstream claim sites were corrected in this closeout: the original
+`NEGATIVE_EVIDENCE` section, the preliminary df_dot row in
+`LEDGER_RESURRECTION`, the groupby matrix scorecard, and the closed matrix bead.
+README and canonical `artifacts/perf/SCORECARD.md` searches found no surviving
+incident-dependent claim; this repository has no separate `PERF_LEDGER` file.
+
+Gate self-check:
+
+- deterministic suite: **17/17 PASS**, including the exact “ONE real loss”
+  title that previously escaped;
+- exact escaped-row replay: **BLOCKED** as one basis-free negative verdict;
+- all seven ledger sections added since `4eb983bcf`: **PASS**;
+- installed pre-commit chain:
+  `.git/hooks/hooks.d/pre-commit/60-perf-ledger-preflight.sh`, fail-closed.
 
 ### 2026-07-27 ProudChapel — `df_dot` finite-to-existing-packed-4x4 route — REJECT / NULL-UNDECIDABLE
 
