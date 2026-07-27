@@ -19741,3 +19741,39 @@ Concrete retry predicates:
   not evidence for this direct API.
 - Ledger preflight: change verdict-title recognition only with a new deterministic failing case,
   keeping actual verdict rows fail-closed. Run `--self-test` before every such change.
+
+### 2026-07-27 ProudChapel — `df_dot` finite-to-existing-packed-4x4 route — REJECT / NULL-UNDECIDABLE
+
+Ledger preflight printed the historical `df_dot` parallelism and N-block rejects plus their later
+correction: the only live runtime retry was a hand-written packed-panel, register-blocked GEMM
+microkernel, not a sixth string-groupby table and not another compiler-flag sweep. A fresh
+same-workload `perf` profile on `ovh-a` put
+`<fp_columnar::ScalarValues>::materialize_float64_dot` at **58.71% self-time**, so the target was
+genuinely on the timed `df_dot @100k` route.
+
+The one-lever candidate routed large finite products from the per-output-column lazy AXPY plan into
+the existing eager packed-B, 4x4 register-blocked kernel. A 104x104 focused test checked every one
+of 10,816 cells against an explicit ascending-`l` fold with `to_bits()` equality. The public
+workload checksum was also identical (`4957dea0fe3e2ed1`). Both arms built and ran strict-remote on
+`ovh-a`; line-one in-process identities were:
+
+| arm | executing ELF SHA-256 | bytes |
+|---|---|---:|
+| baseline | `7e53ce12eea2c0c0d0f7b7fcb04917dbe58d134a4d7503a635c22da4eaa5d84e` | 70,153,648 |
+| candidate | `e636f8ccd9b2a28519f9d10e28e33309e92bfdf0c0fb6046041fd71e93e5ef87` | 70,151,784 |
+
+The nominal wall p50 improved from **5469.922 us to 4621.283 us (1.183637x)**, but the independent
+bootstrap median-effect CI was **[0.980745, 1.387111]**. More importantly, the candidate's own
+same-invocation A/A median CI was **[0.750460, 1.138589]** versus the baseline's
+**[0.997229, 1.002048]**. Thus `claim_log_effect=0.168592` did not clear
+`required_log_effect=0.574138`; the combined 2x-null interval was [0.563190, 1.775599]. CV had no
+vote. This is a contract-valid **REJECT / NULL-UNDECIDABLE**, and the candidate source was removed.
+Full protocol and raw timing/null vectors are in
+`artifacts/bench/quiet_lane_m_df_dot_microkernel_20260727.md`.
+
+**Concrete retry predicate.** Do not retry the finite-to-fallback router, the current 4x4 packed-B
+kernel, worker caps/affinity, or compiler flags. Reopen only for a genuinely new packed-A plus
+packed-B register microkernel that first proves at least **1.25x fewer cycles** than AXPY on the
+exact 316x316 fold with cellwise bit identity, then reaches a production A/A
+`required_log_effect < 0.08` using amortized/persistent scheduling rather than per-call OS-thread
+spawn. A 4x8-or-wider tile is a candidate shape, not proof.
