@@ -127,6 +127,9 @@ gemini.mcp.json
 .beads/*.rebuild_*
 .beads/recovery*/
 .beads_recovery/
+# Persistent machine-local FrankenSQLite namespace sidecars beside the Beads DB.
+.beads/*-fsqlite-ns-gate
+.beads/*-fsqlite-ns-use
 
 # Agent session ephemeral files
 SESSION_TODO.md

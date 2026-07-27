@@ -20,7 +20,7 @@ chmod +x "$SRC_DOC"
 read -r -d '' HOOK_BODY <<'EOF' || true
 #!/usr/bin/env bash
 # Perf-ledger preflight (campaign perf-campaign-20260725, Meta-Lever #1 ratchet).
-# Refuses an undecidable REJECT or an unprovenanced KEEP in NEGATIVE_EVIDENCE.md.
+# Refuses an inadmissible verdict in either performance-ledger document.
 set -uo pipefail
 REPO="$(git rev-parse --show-toplevel)"
 PREFLIGHT="$REPO/scripts/perf_candidate_preflight.py"
@@ -28,7 +28,16 @@ PREFLIGHT="$REPO/scripts/perf_candidate_preflight.py"
   echo "pre-commit: BLOCKED — required perf-ledger preflight is missing or non-executable: $PREFLIGHT" >&2
   exit 1
 }
-if ! git diff --cached --name-only | grep -q '^docs/NEGATIVE_EVIDENCE\.md$'; then
+STAGED_PATHS="$(git diff --cached --name-only)" || exit 1
+if printf '%s\n' "$STAGED_PATHS" |
+  grep -Eq '^scripts/perf_candidate_preflight\.py$'; then
+  python3 "$PREFLIGHT" --self-test || {
+    echo "pre-commit: BLOCKED — perf-ledger preflight self-test failed."
+    exit 1
+  }
+fi
+if ! printf '%s\n' "$STAGED_PATHS" |
+  grep -Eq '^docs/(NEGATIVE_EVIDENCE|LEDGER_RESURRECTION)\.md$'; then
   exit 0
 fi
 python3 "$PREFLIGHT" --check-new-rows --cached --base HEAD
@@ -36,7 +45,7 @@ rc=$?
 if [ "$rc" -ne 0 ]; then
   echo ""
   echo "pre-commit: BLOCKED by perf-ledger preflight."
-  echo "REJECT requires A/A or a counted mechanism; KEEP requires an in-process ELF SHA-256."
+  echo "REJECT requires A/A or a counted mechanism; kept rows require executing-ELF/A/A/median-CI provenance and an exact maintenance-self-speedup/incumbent-win class."
   exit 1
 fi
 exit 0

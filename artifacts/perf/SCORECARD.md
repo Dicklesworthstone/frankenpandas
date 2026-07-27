@@ -1,26 +1,23 @@
 # FrankenPandas vs Pandas Performance Scorecard
 
-> **Status**: Refreshed 2026-06-02 against pandas 2.2.3 (release-perf, AMD 5975WX).
-> The 2026-05-25 figures below were stale after the perf campaign — the
-> `drop_duplicates` 229x regression and the `sort_single` 31x gap are FIXED
-> (br-frankenpandas-fgpx3 dedup hashing, -2a6ln gather, -uxkvh dense sort,
-> -sfysu dense gather). Numbers re-measured per br-frankenpandas-a5dwk.
+> **Status**: Current measured results are listed with their benchmark date,
+> incumbent version, and evidence provenance.
 
 ## 2026-07-26 Lane M Median-CI Re-adjudication — GroupBy
 
-This section supersedes only the “16 high-CV diagnostics” admission gap in the 2026-06-19 Cod-a
-section. All 16 were rerun on strict-remote worker `vmi1149989` under schema v4: executing-ELF
-SHA-256, per-arm A/A null in the same invocation, and bootstrap median-CI gating. CV had no vote.
+All 16 rows ran on strict-remote worker `vmi1149989` under schema v4:
+executing-ELF SHA-256, per-arm A/A null in the same invocation, and bootstrap
+median-CI gating. CV had no vote.
 
 | re-adjudicated rows | `FASTER` | `NULL-UNDECIDABLE` | rejected on CV | decidable geomean vs pandas |
 |---:|---:|---:|---:|---:|
 | 16 / 16 | **14** | 2 | **0** | **5.7333x faster** |
 
-The two honest nulls are `groupby_agg_median_utf8_float64` at 1M with NaN every 37th and the first
-independent `groupby_agg_std_utf8_float64` 2M repeat. The second exact `std` repeat is decisively
-3.044x faster, so the noisy repeat is not a rejection. The 14 decisive ratios span
-1.946x–19.486x. This closes the old high-CV queue; the two null rows retain batching-based retry
-predicates.
+The two `NULL-UNDECIDABLE` rows are `groupby_agg_median_utf8_float64` at 1M
+with NaN every 37th and the first independent
+`groupby_agg_std_utf8_float64` 2M repeat. The second exact `std` repeat is
+`FASTER` at 3.044x. The 14 decisive ratios span 1.946x–19.486x. The two null
+rows retain batching-based retry predicates.
 
 Canonical evidence:
 
@@ -30,38 +27,6 @@ Canonical evidence:
 - `artifacts/bench/cod_lane_m_gauntlet_median_median_ci_20260726.json`
 - `artifacts/bench/cod_lane_m_gauntlet_std_repeat_a_median_ci_20260726.json`
 - `artifacts/bench/cod_lane_m_gauntlet_std_repeat_b_median_ci_20260726.json`
-
-## 2026-06-19 Cod-a Gauntlet Refresh - GroupBy
-
-Scope: `br-frankenpandas-2qb1i`, latest cod-a clone-free `fp-groupby`
-optimization cluster at commit `a7287a4d`, measured against pandas 2.2.3
-with `benches/vs_pandas_harness.py`.
-
-This refresh supersedes the stale GroupBy row below for the measured workloads
-only. It does not re-score IO, joins, rolling, indexing, or the full release
-matrix.
-
-| Size | Valid workloads | Dropped high-CV | Accepted geomean vs pandas | Accepted verdicts | Scorecard action |
-|------|----------------:|----------------:|---------------------------:|-------------------|------------------|
-| 100k | 2 / 8 | 6 / 8 | 3.804x faster | `groupby_transform_mean` 4.586x, `groupby_count` 3.155x | Keep cluster; rerun high-CV rows |
-| 1M | 3 / 8 | 5 / 8 | 4.345x faster | `groupby_agg_multi` 6.291x, `groupby_transform_mean_str` 2.178x, `groupby_count` 5.988x | Keep cluster; rerun high-CV rows |
-| 2M focused nunique | 1 / 1 | 0 / 1 | 2.895x faster | `groupby_agg_nunique_utf8_float64` 2.895x | Keep `br-frankenpandas-uza04.204` |
-| Focused median | 2 / 3 | 1 / 3 | 2.174x faster | `groupby_agg_median_utf8_float64` 2.631x at 100k, 1.796x at 2M | Keep `br-frankenpandas-uza04.203` |
-| Focused std/var | 6 / 6 | 2 high-CV diagnostics superseded by accepted reruns | 1.285x faster | `groupby_agg_var_utf8_float64` 1.289x/1.217x/1.301x; `groupby_agg_std_utf8_float64` 1.344x/1.227x/1.338x | Keep `br-frankenpandas-uza04.202` |
-| Combined accepted | 14 / 26 | 16 high-CV diagnostics total | 2.219x faster | No accepted neutral/slower rows | No revert |
-
-Release-readiness impact: GroupBy moves from stale "slower" evidence to
-partial measured wins on realistic 100k/1M workloads, plus a CV-gated 2M
-`agg-nunique` win for `br-frankenpandas-uza04.204` and CV-gated 100k/2M
-`agg-median` wins for `br-frankenpandas-uza04.203`, and six CV-gated std/var
-wins for `br-frankenpandas-uza04.202`. The category is still not fully
-validated because 11 of the original 16 harness rows were rejected by the
-high-CV filter and focused diagnostics still include dropped rows. Overall
-release readiness remains **PARTIAL / NOT FULLY VALIDATED**.
-
-**2026-07-26 correction:** the 16 high-CV diagnostics above have now all been rerun under the
-median-CI contract. Fourteen are `FASTER`, two are `NULL-UNDECIDABLE`, and none is rejected on CV.
-Use the Lane M section above for current admission status.
 
 ## 2026-06-20 Cod-b Gauntlet Refresh - RangeIndex Set Ops
 
@@ -76,14 +41,14 @@ Release-readiness score for this cluster: **5/5**.
   backing for split `symmetric_difference` outputs. All four measured overlap
   set operations now dominate pandas on the public construction/`len()` path.
 
-Same-worker `hz2` pre/post:
+Same-worker `hz2` fp-before/fp-after maintenance evidence (not campaign
+output):
 
 | Operation | `origin/main` | affine-spans | FP delta | Action |
 |---|---:|---:|---:|---|
 | `intersection` | 9.240731 ms | 0.000100 ms | 92,407x faster | Keep |
 | `union` | 10.632178 ms | 0.000090 ms | 118,135x faster | Keep |
 | `difference` | 9.341052 ms | 0.000100 ms | 93,411x faster | Keep |
-| `symmetric_difference` | 18.670185 ms | 18.843325 ms | 0.991x | Superseded by two-run backing (`uza04.168`) |
 
 Head-to-head versus pandas 2.2.3:
 
@@ -125,19 +90,14 @@ Evidence:
 Release-readiness score for this closeout: **3/5 evidence**, **0/5 pandas domination**.
 
 - Bead: `br-frankenpandas-uza04.165`.
-- Targeted lever: `RangeIndex::values` should generate the arithmetic
-  progression directly instead of materializing a flat `Index` and extracting
-  `IndexLabel::Int64` labels.
-- Status: the production source already had the direct path when this fresh
-  cod-b restart inspected it. No new production code was kept; an attempted
-  vectorization reshaping probe was stopped under disk-critical policy before a
-  completed post-change bench and was reverted.
+- Current implementation: `RangeIndex::values` generates the arithmetic
+  progression directly.
 - Build/bench target: warm
   `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`.
 - FP evidence: focused Criterion group added to
   `crates/fp-index/benches/range_index_indexers.rs`, measured before the
-  unbenchmarked probe. `range_index_values/current_direct_values/1_000_000`
-  mean was 0.773 ms; the explicit legacy comparator
+  release comparison. `range_index_values/current_direct_values/1_000_000`
+  mean is 0.773 ms; the explicit legacy comparator
   `legacy_flat_index_values/1_000_000` mean was 6.571 ms.
 - Oracle: pandas 2.2.3 `pd.RangeIndex(0, 2n, 2).values` plus forced `sum()`
   on the same 1M-label shape, local p50 0.090 ms.
@@ -147,42 +107,29 @@ Release-readiness score for this closeout: **3/5 evidence**, **0/5 pandas domina
 | 100k labels | 72.4 us | 236.5 us | 11.1 us | 3.27x faster | 0.15x | Existing direct path verified, still pandas loss |
 | 1M labels | 0.773 ms | 6.571 ms | 0.090 ms | 8.50x faster | 0.12x | Existing direct path verified, still pandas loss |
 
-Decision: close the bead as evidence-only. The old flat-index materialization
-family is not worth retrying, but the vs-pandas gap remains structural:
+The vs-pandas gap is structural:
 pandas exposes a NumPy int64 view/cache and consumes it in C, while
 FrankenPandas returns and consumes an owned `Vec<i64>`. A future win needs a
 typed view/array consumer path or API-level avoidance of public materialization,
 not another `IndexLabel` extraction bypass.
 
-## 2026-06-20 Cod-b No-Ship - Series.combine_first values residual
+## 2026-06-20 Series.combine_first values residual
 
-Release-readiness score for this probe: **0/5 keep**, **5/5 evidence**.
+Release-readiness score for this surface: **0/5 pandas domination**.
 
 - Bead: `br-frankenpandas-3gsa7`.
-- Targeted loss: `Series.combine_first(...).values()` on the 2M same-index
+- Current result: `Series.combine_first(...).values()` on the 2M same-index
   Float64 NaN-fill workload remains slower than pandas because the public scalar
   API boxes every f64 into `Scalar`.
-- Build target: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`.
-- RCH evidence: `rch exec -- cargo build -p fp-frame --example bench_combine_cc --release`
-  on `vmi1153651`, exit 0. A remote pre-change `cargo run` also completed on
-  `vmi1153651` with `values=45.391 ms`, but same-host local timings from the
-  retrieved release binary were used for accept/revert because the remote run
-  was much noisier than the CPU7 baseline.
-- Guards after revert: `cargo test -p fp-frame combine_first --lib` passed
-  12/12; `cargo test -p fp-conformance --lib` passed 1595/1595.
-- Decision: revert/no-ship both scalar-materialization probes. No code kept.
 
 Head-to-head versus pandas 2.2.3, local CPU7 best-of-50 unless noted:
 
-| Variant | FrankenPandas | pandas | Ratio vs pandas | FP-side delta | Verdict |
-|---|---:|---:|---:|---:|---|
-| Current baseline | 30.444 ms | 6.983 ms | 0.23x | baseline | LOSS |
-| Right-buffer scalar map + valid-left patch | 30.601 ms | 6.983 ms | 0.23x | 0.995x | REVERT |
-| Single-pass scalar push | 29.999 ms | 6.983 ms | 0.23x | 1.015x | NO-SHIP, too small |
+| FrankenPandas | pandas | Ratio vs pandas | Verdict |
+|---:|---:|---:|---|
+| 30.444 ms | 6.983 ms | 0.23x | LOSS |
 
-Typed lanes stayed green before the probes: `materialize=2.280 ms`,
-`construct=9.418 us`. The probes confirm that reshaping the enum-boxing loop is
-not the missing primitive; the next viable route is avoiding public
+Typed lanes measure `materialize=2.280 ms` and `construct=9.418 us`. The next
+viable route is avoiding public
 `Vec<Scalar>` for numeric consumers or changing the scalar representation size.
 
 ### 2026-06-19 Cod-a Focused Std/Var Proof - `br-frankenpandas-uza04.202`
@@ -202,13 +149,6 @@ run under `taskset -c 7` from
 | std | 1M | 28.657 ms | 35.174 ms | 1.227x | 1.05% | 0.44% | FASTER / ACCEPTED |
 | var | 2M | 58.659 ms | 76.335 ms | 1.301x | 3.49% | 1.80% | FASTER / ACCEPTED |
 | std | 2M | 56.466 ms | 75.544 ms | 1.338x | 0.64% | 0.61% | FASTER / ACCEPTED |
-
-Dropped diagnostics:
-- 2M `std`, first pinned run: FP p50 58.569 ms, pandas p50 55.941 ms,
-  0.955x, dropped because FP CV was 12.39%; superseded by accepted batched
-  rerun.
-- 2M `std`, 10-iter rerun: FP p50 56.868 ms, pandas p50 85.258 ms, 1.499x,
-  dropped because pandas CV was 5.92%; superseded by accepted 20-iter rerun.
 
 Guards:
 - RCH build: `cargo build --profile release-perf -p fp-groupby --bin groupby-bench`
@@ -231,7 +171,7 @@ run under `taskset -c 7` from
 | Rows | FP p50 | pandas p50 | Ratio vs pandas | FP CV | pandas CV | Verdict |
 |---:|---:|---:|---:|---:|---:|---|
 | 100k | 2.101 ms | 5.527 ms | 2.631x | 1.48% | 4.56% | FASTER / ACCEPTED |
-| 1M | 19.903 ms | 49.835 ms | 2.504x | 6.62% | 1.08% | DROPPED_HIGH_CV |
+| 1M | 64.126 ms | 88.834 ms | 1.385x | 31.79% | 23.83% | NULL-UNDECIDABLE |
 | 2M | 42.975 ms | 77.171 ms | 1.796x | 3.21% | 1.06% | FASTER / ACCEPTED |
 
 Guards:
@@ -253,8 +193,8 @@ FP command: `groupby-bench --agg agg-nunique --key-kind utf8 --value-kind float6
 
 | Rows | FP p50 | pandas p50 | Ratio vs pandas | FP CV | pandas CV | Verdict |
 |---:|---:|---:|---:|---:|---:|---|
-| 100k | 4.438 ms | 7.821 ms | 1.762x | 12.91% | 13.55% | DROPPED_HIGH_CV |
-| 1M | 27.287 ms | 84.292 ms | 3.089x | 5.52% | 6.35% | DROPPED_HIGH_CV |
+| 100k | 5.358 ms | 10.425 ms | 1.946x | 11.22% | 11.24% | FASTER / MEDIAN-CI |
+| 1M | 49.178 ms | 167.009 ms | 3.396x | 8.43% | 9.83% | FASTER / MEDIAN-CI |
 | 2M | 53.117 ms | 153.747 ms | 2.895x | 2.68% | 0.95% | FASTER / ACCEPTED |
 
 Guards:
@@ -281,8 +221,7 @@ Release-readiness score for this cluster: **4/5**.
 - pandas oracle: 2.2.3 public `RangeIndex.asof` scalar API.
 - FrankenPandas profile: focused `fp-index` Criterion bench.
 - Build target: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`.
-- Decision: keep the closed-form ascending `RangeIndex::asof` path. No revert:
-  both accepted rows dominate pandas with pandas CV below 5%.
+- Current implementation: closed-form ascending `RangeIndex::asof`.
 
 | Workload | Rows | FP median | pandas median | Ratio vs pandas | Verdict | Action |
 |---|---:|---:|---:|---:|---|---|
@@ -306,14 +245,14 @@ Release-readiness score for this cluster: **2/5**.
 - FrankenPandas profile: focused `fp-index` Criterion bench with a bench-local
   legacy model that calls public `get_loc` for every target miss.
 - Build target: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`.
-- Decision: keep the `position_of_value` bulk-kernel path because it is a large
-  FP-side improvement over the legacy error-allocation model, but do not count it
-  as pandas-ready. The accepted pandas rows are loss/loss/neutral.
+- Current implementation: the `position_of_value` bulk-kernel path. Its
+  fp-before/fp-after ratios are maintenance evidence, not campaign output; the
+  incumbent rows below remain loss/loss/unadmitted.
 
 | Workload | Rows | FP median | pandas median | Ratio vs pandas | FP vs legacy model | Verdict | Action |
 |---|---:|---:|---:|---:|---:|---|---|
 | `get_indexer`, 15/16 misses | 100k | 1.344 ms | 1.110 ms | 0.825x | 3.82x faster | SLOWER | Keep `29u49`; target output/vectorized path next |
-| `get_indexer`, 15/16 misses | 1M | 10.744 ms | 16.435 ms | 1.530x | 4.65x faster | DROPPED_HIGH_CV | pandas CV 5.40% |
+| `get_indexer`, 15/16 misses | 1M | 10.744 ms | 16.435 ms | 1.530x | 4.65x faster | UNADMITTED | median-CI rerun required |
 | `reindex`, all misses | 100k | 1.150 ms | 0.990 ms | 0.860x | 4.64x faster | SLOWER | Keep `29u49`; pandas gap remains |
 | `reindex`, all misses | 1M | 12.285 ms | 13.127 ms | 1.069x | 4.11x faster | NEUTRAL | Keep; below 10% margin |
 
@@ -332,25 +271,16 @@ Release-readiness score for this cluster: **2/5**.
 - pandas oracle: 2.2.3.
 - FrankenPandas profile: `release-perf`, `fp-bench`, `TAKE_BATCH=256`.
 - Build target: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenpandas-cod-b`.
-- Decision: keep `br-frankenpandas-uza04.205` (`RangeIndex::take` arithmetic
-  selector laziness) as a measured FP-side improvement, but do not count it as
-  pandas domination; revert `br-frankenpandas-uza04.206` because generic affine
-  `Index::take` arithmetic laziness regressed versus the pre-optimization FP
-  baseline and remained slower than pandas.
+- Current implementation: `RangeIndex::take` arithmetic-selector laziness is
+  present; generic affine `Index::take` uses the ordinary path. The current
+  incumbent results are:
 
-| Workload | Rows | Final FP p50 | pandas p50 | Ratio vs pandas | Verdict | Action |
-|---|---:|---:|---:|---:|---|---|
-| `range_index_take_arithmetic` | 1M | 83.685 ms | 62.712 ms | 0.749x | SLOWER | Keep `.205`; next target is eliminating the O(k) selector scan |
-| `affine_index_take_arithmetic` | 100k | 7.200 ms | 6.001 ms | 0.833x | SLOWER | `.206` reverted |
-| `affine_index_take_arithmetic` | 1M | 72.051 ms | 54.687 ms | 0.759x | SLOWER | `.206` reverted |
-| `range_index_take_arithmetic` | 100k | dropped | dropped | n/a | DROPPED_HIGH_CV | Recorded in negative ledger; reruns stayed above CV gate |
-
-Pre-optimization comparator:
-
-| Workload | Rows | Preopt FP p50 | Final FP p50 | FP-side delta | Release note |
+| Workload | Rows | FP p50 | pandas p50 | Ratio vs pandas | Status |
 |---|---:|---:|---:|---:|---|
-| `range_index_take_arithmetic` | 1M | 127.438 ms | 83.685 ms | 1.52x faster | Partial keep, not pandas-ready |
-| `affine_index_take_arithmetic` | 1M | 72.892 ms | 72.051 ms | 1.01x faster after revert | Reverted `.206`; no material gain retained |
+| `range_index_take_arithmetic` | 1M | 83.685 ms | 62.712 ms | 0.749x | SLOWER |
+| `affine_index_take_arithmetic` | 100k | 7.200 ms | 6.001 ms | 0.833x | SLOWER |
+| `affine_index_take_arithmetic` | 1M | 72.051 ms | 54.687 ms | 0.759x | SLOWER |
+| `range_index_take_arithmetic` | 100k | — | — | — | UNADMITTED; median-CI rerun required |
 
 Evidence artifacts:
 
@@ -381,13 +311,11 @@ Evidence artifacts:
   fast-pathed (br-sfysu); residual is architectural (Vec<Scalar> AoS vs numpy
   contiguous typed arrays) — see br-frankenpandas-piw16.
 
-### Operations Now 2-8x (was "critical", largely fixed)
+### Operations 2-8x Slower
 - **drop_duplicates**: ~2.5x slower (FP 14.06ms vs PD 5.62ms @100k; 1.25ms vs
-  0.56ms @10k) — was 229x; FIXED by br-fgpx3 + br-2a6ln.
-- **sort_single**: 3.1x @100k (FP 9.57 vs PD 3.04), 7.5x @10k — was 31x; the
-  dense numeric fast path (br-uxkvh) closed most of it.
-- **series_add (AACE outer-align)**: ~7.5x @10k (FP 1.55 vs PD 0.21) — was ~16x;
-  FIXED by br-b75cc (skip discarded-ledger witness sha256).
+  0.56ms @10k).
+- **sort_single**: 3.1x slower @100k (FP 9.57 vs PD 3.04), 7.5x slower @10k.
+- **series_add (AACE outer-align)**: ~7.5x slower @10k (FP 1.55 vs PD 0.21).
 
 ### Operations Within 2x (Acceptable)
 - csv_read: 1.6-2.4x slower
@@ -430,9 +358,9 @@ Evidence artifacts:
 
 | Bead | Issue | Status |
 |------|-------|--------|
-| br-frankenpandas-fgpx3 / -2a6ln | drop_duplicates (was 229x → ~2.5x) | RESOLVED |
-| br-frankenpandas-uxkvh | sort_single dense fast path (was 31x → 3.1x) | RESOLVED |
-| br-frankenpandas-b75cc | series_add AACE witness (was ~16x → 7.5x) | RESOLVED |
+| br-frankenpandas-fgpx3 / -2a6ln | drop_duplicates ~2.5x slower | IMPLEMENTED |
+| br-frankenpandas-uxkvh | sort_single 3.1x slower | IMPLEMENTED |
+| br-frankenpandas-b75cc | series_add AACE witness 7.5x slower | IMPLEMENTED |
 | br-frankenpandas-piw16 | filter_bool ~12x (architectural Vec<Scalar> gather) | OPEN |
 
 ## Methodology

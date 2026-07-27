@@ -19800,10 +19800,11 @@ incident-dependent claim; this repository has no separate `PERF_LEDGER` file.
 
 Gate self-check:
 
-- deterministic suite: **19/19 PASS**, including the exact “ONE real loss”
-  title that previously escaped;
-- exact escaped-row replay: **BLOCKED** as one basis-free negative verdict;
-- all seven ledger sections added since `4eb983bcf`: **PASS**;
+- deterministic suite: **45/45 PASS**, including the exact “ONE real loss”
+  title, exact class/provenance enforcement, and added/modified boundary cases
+  for both ledgers and the legacy Results table;
+- exact basis-free negative-row replay: **BLOCKED**;
+- the live working-tree scan across both ledgers: **PASS**;
 - installed pre-commit chain:
   `.git/hooks/hooks.d/pre-commit/60-perf-ledger-preflight.sh`, fail-closed.
 
@@ -19909,12 +19910,12 @@ is not campaign output or a competitive claim.
 repeatedly constructed fresh `SeriesGroupBy` objects over the same all-valid
 contiguous-Utf8 key column. On RCH worker `ovh-a` (reported hostname
 `fixmydocuments`), the executing profile process self-reported
-`bench_elf_sha256=719857f2d4c750cd42b8bb63bc36f787b47355143d629d47326e046ded8fbc66
-(108074160 bytes)
+`bench_elf_sha256=9fdfd9facb8a63eca562294e74640cf660ffebf3832c7a1483aeb794157774af
+(108075184 bytes)
 /data/projects/frankenpandas/.rch-target-ovh-a-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/deps/fp_frame-4db73fde98141b5a`.
-`SeriesGroupBy::compute_dense_group_ids` carried **8.15% flat self-time**,
+`SeriesGroupBy::compute_dense_group_ids` carried **10.46% flat self-time**,
 clearing the predeclared `>5%` gate; its hash-table entry child carried a
-further 56.45%. A test-only `inline(never)` preserved the named frame without
+further 50.90%. A test-only `inline(never)` preserved the named frame without
 changing production codegen. The workload therefore genuinely reached the named
 SeriesGroupBy factorization path.
 
@@ -19925,7 +19926,7 @@ to the existing `usize` gid layout and taking the group count from the
 first-seen uniques. Separately constructed groupby objects over the same
 column can now reuse that witness; the object's existing `dense_ids` cache
 still handles repeated aggregations on one object. Nullable, scalar-backed,
-sorted, and non-Utf8 keys retain their old paths.
+and non-Utf8 keys retain their old paths.
 
 **Same-invocation contract.** One release-perf test binary contained the
 production candidate plus a `cfg(test)` switch for the original branch.
@@ -19933,33 +19934,33 @@ Across 25 alternating blocks it ran original, an identical original A/A null,
 and candidate.
 
 **Executing ELF SHA-256 (self-reported by process):**
-`bench_elf_sha256=715b6a666dbc6e42a5fd77650a6a7ef8413f810f87cc8c63ec6afbd91668bcfe
-(108074176 bytes)
+`bench_elf_sha256=b34345a187f398884d1cb00a40abafe1c19ab2a1f17535f3dd4bc996faa7b3a2
+(108075152 bytes)
 /data/projects/frankenpandas/.rch-target-ovh-a-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/deps/fp_frame-4db73fde98141b5a`.
 
 **A/A null control (same invocation):** 25 alternating original/original pairs;
-the 95% bootstrap median CIs were [0.960047, 0.999156] for reused-column and
-[0.992240, 1.003890] for first-use.
+the 95% bootstrap median CIs were [0.979670, 1.008254] for reused-column and
+[0.964642, 1.003810] for first-use.
 
-**Median-CI decision:** the 3.860334x reused-column effect cleared its
-0.08154526 required log effect, and the 1.129041x first-use effect cleared its
-0.01558007 requirement; both thresholds are twice the corresponding A/A
+**Median-CI decision:** the 3.999235x reused-column effect cleared its
+0.04107857 required log effect, and the 1.091185x first-use effect cleared its
+0.07199659 requirement; both thresholds are twice the corresponding A/A
 log-CI half-width.
 
 **CV role:** provenance only; CV had no vote.
 
 | workload | original p50 | candidate p50 | paired median ratio | A/A 95% median CI | required log effect | decision |
 |---|---:|---:|---:|---:|---:|---|
-| fresh groupby objects, reused 1M-row key column | 9.719755 ms | 2.562956 ms | **3.860334x** | [0.960047, 0.999156] | 0.08154526 | **`maintenance-self-speedup` KEEP** |
-| fresh 250k-row key column per arm | 2.607901 ms | 2.305021 ms | **1.129041x** | [0.992240, 1.003890] | 0.01558007 | **`maintenance-self-speedup` KEEP** |
+| fresh groupby objects, reused 1M-row key column | 10.319186 ms | 2.646363 ms | **3.999235x** | [0.979670, 1.008254] | 0.04107857 | **`maintenance-self-speedup` KEEP** |
+| fresh 250k-row key column per arm | 2.750980 ms | 2.572976 ms | **1.091185x** | [0.964642, 1.003810] | 0.07199659 | **`maintenance-self-speedup` KEEP** |
 
 Both fp-before/fp-after effects clear their respective A/A median-CI floors.
 The first row measures witness reuse; the fresh-column row shows that the
 canonical default factorizer plus gid conversion also improves first use.
 
 **Behavior proof.** Original and cached outputs were observably equal with
-identical first-seen label order. A normal regression covers variable-width
-keys, empty string, repeated values, and non-ASCII `é`: original plus two
+identical first-seen label order. A normal regression covers empty input,
+variable-width keys, empty string, repeated values, and non-ASCII `é`: original plus two
 separately constructed cached groupby objects all produce labels
 `["beta", "", "alpha", "é", "z"]` and sums `[5, 8, 3, 5, 7]`.
 
@@ -19975,11 +19976,12 @@ incumbent arm runs side-by-side in the same invocation.
 Full evidence:
 `artifacts/bench/quiet_lane_m_series_groupby_utf8_cache_20260727.md`.
 
-### 2026-07-27 QuietHarbor — class-1 structural hunt: row iteration is a REAL vs-incumbent win (8.32x@100k -> 14.57x@1M); `df_apply_row`'s 125.93x is an IDIOM ARTIFACT and is NOT claimed
+### 2026-07-27 QuietHarbor — class-1 row-iteration incumbent coverage; result unadmitted pending null/provenance contract
 
 Lane M, structural-weakness hunt, class 1 (interpreted/dynamic overhead: big-N shapes where the
-incumbent pays a per-element interpreter cost). All ratios below are vs-incumbent — `benches/
-vs_pandas_harness.py` runs pandas 2.2.3 side by side in the same invocation. `taskset -c 48-63`.
+incumbent pays a per-element interpreter cost). The ratios below are directional incumbent
+comparisons: `benches/vs_pandas_harness.py` ran pandas 2.2.3 side by side in the same invocation
+under `taskset -c 48-63`, but this invocation did not record the full campaign admission contract.
 
 **Survey finding that motivated the target.** 88 of fp-bench's workloads have **no pandas
 counterpart**, so they had never been measured against the incumbent at all. The canonical class-1
@@ -20012,25 +20014,30 @@ signature of a constant idiom multiplier, not a structural weakness. Two unrelat
 **`df_iterrows`'s 153x/181x is real but is measured against pandas' WORST idiom.** `itertuples` is
 18.8x better than `iterrows` at 100k. Quoting 153x would be the same trap in weaker form.
 
-**KEEP — the defensible claim is `df_itertuples`: 8.32x @100k, 14.57x @1M, vs-incumbent.** This is a
-genuine class-1 structural win because **row iteration has no vectorized escape**: measured at 100k,
+**DIRECTIONAL COVERAGE — `df_itertuples` measured 8.32x @100k and 14.57x @1M.**
+The mechanism is plausible because **row iteration has no vectorized escape**: measured at 100k,
 `itertuples` 94,348 us and `to_numpy()` + `map(tuple)` 106,464 us, so pandas' *best* row-materialization
 idiom is ~94 ms against fp's 10.4 ms. Whichever idiom the user picks, pandas must construct a Python
 object per row and fp does not. The ratio growing 1.75x as N grows 10x is the structural evidence: the
-gap is per-element, not fixed overhead.
+gap is per-element, not fixed overhead. It is not an `incumbent-win` until the missing evidence below
+is captured.
 
 Executing-ELF identity for both runs, self-reported in-process by `fp-bench` via
 `std::env::current_exe()` (not a shell-side hash):
 `bench_elf_sha256=af04a28995c14a1e0dd878f755e834972548c5de75309c21826ea04077e91489` (70,264,816 bytes,
 `/data/tmp/cargo-target/release-perf/fp-bench`). The binary's mtime (1785180408) predates both the
-100k run (1785180878) and the 1M run (1785183103), so one ELF produced every number above. Provenance
-gap worth fixing: the harness JSON records `executable_sha256: n/a` for the fp arm — `fp-bench` prints
-its identity on stdout but `run_fp_workload_subprocess` does not capture it, so harness-contract §2.1
-is only partly wired into the subprocess path.
-cv was 4.5–17.7% and is recorded as provenance only, never as the gate; effects of 8x–15x are orders
-of magnitude outside any plausible noise floor on this host.
+100k run (1785180878) and the 1M run (1785183103), so one ELF produced every number above. The
+harness JSON nevertheless records `executable_sha256: n/a` for the fp arm because
+`run_fp_workload_subprocess` does not capture the self-report.
+
+**Admission gap:** no same-invocation A/A null was recorded, the pandas artifact SHA-256 was not
+recorded, and the two size runs do not carry a shared invocation ID. CV was 4.5–17.7% and is
+provenance only; it cannot substitute for the missing median-CI null. Therefore this row has no
+campaign result class and authorizes no competitive claim.
 
 Retry predicate: before quoting ANY new vs-pandas ratio from a workload whose fp side uses a callback
 or an iterator, first measure pandas' cheapest idiom for the same task and report against THAT. A
 ratio that does not grow with N is an idiom penalty until proven otherwise. Do not re-run
-`df_apply_row` as a competitive row; keep it as coverage only.
+`df_apply_row` as a competitive row; keep it as coverage only. Admit `df_itertuples` only after one
+invocation records the executing-ELF self-report, pandas name/version/artifact SHA-256, shared
+invocation ID and ratio, numeric A/A bootstrap median CI, median-CI decision, and CV-as-provenance.

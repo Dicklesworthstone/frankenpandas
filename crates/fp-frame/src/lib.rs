@@ -32730,6 +32730,12 @@ pub struct SeriesGroupBy<'a> {
     dense_ids: std::cell::OnceCell<Option<(std::rc::Rc<[usize]>, usize)>>,
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static SERIES_GROUPBY_FORCE_UNCACHED_UTF8: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 /// Single-pass dense groupby `diff(periods)` over an all-valid no-NaN Float64
 /// value slice and a precomputed dense gid per row (br-frankenpandas-gbcum).
 /// Keeps a per-gid ring buffer of the last `periods` values so each output is
@@ -34173,7 +34179,9 @@ impl SeriesGroupBy<'_> {
     /// every subsequent call, so a reused groupby (`g.sum(); g.mean(); g.max()`)
     /// pays the factorize once — matching pandas' GroupBy-object factorize cache.
     /// The layout depends only on `by` (immutably borrowed, cannot change), so the
-    /// cache is never stale. Fresh construction is unchanged (one compute).
+    /// cache is never stale. A fresh groupby still builds its object-local gid
+    /// vector once; for all-valid contiguous Utf8 keys that build may reuse the
+    /// immutable column-level default-factorize witness.
     fn dense_group_ids(&self) -> Option<(std::rc::Rc<[usize]>, usize)> {
         self.dense_ids
             .get_or_init(|| {
@@ -34183,6 +34191,7 @@ impl SeriesGroupBy<'_> {
             .clone()
     }
 
+    #[cfg_attr(test, inline(never))]
     fn compute_dense_group_ids(&self) -> Option<(Vec<usize>, usize)> {
         if let Some(data) = self.by.column.as_i64_slice()
             && let Some((min, range)) = i64_dense_histogram_range(data)
@@ -34260,6 +34269,32 @@ impl SeriesGroupBy<'_> {
                 }
                 return Some((gid_per_row, ngroups));
             }
+        }
+
+        #[cfg(test)]
+        let allow_column_factorize_cache =
+            SERIES_GROUPBY_FORCE_UNCACHED_UTF8.with(|force_uncached| !force_uncached.get());
+        #[cfg(not(test))]
+        let allow_column_factorize_cache = true;
+
+        // A separately constructed SeriesGroupBy over the same immutable
+        // contiguous-Utf8 key column cannot reuse this object's `dense_ids`,
+        // but the key column already owns the canonical default-factorize
+        // witness used by Series::factorize. Reuse its first-seen codes and
+        // unique count, converting only the non-negative i64 codes to the
+        // usize gid layout expected by groupby consumers. The witness is
+        // available only for all-valid contiguous Utf8 with default
+        // first-seen semantics, exactly matching the branch below; nullable,
+        // scalar-backed, and non-Utf8 keys retain their existing paths.
+        if allow_column_factorize_cache
+            && let Some((codes, uniques)) = self.by.column.utf8_default_factorize_columns()
+            && let Some(code_values) = codes.as_i64_slice()
+        {
+            let gid_per_row: Option<Vec<usize>> = code_values
+                .iter()
+                .map(|&code| usize::try_from(code).ok())
+                .collect();
+            return Some((gid_per_row?, uniques.len()));
         }
 
         if let Some((bytes, offsets)) = self.by.column.as_utf8_contiguous() {
@@ -180842,7 +180877,7 @@ mod transpose_reject_reaudit_cod_fp {
         100.0 * variance.sqrt() / avg
     }
 
-    fn bootstrap_median_ci(values: &[f64]) -> (f64, f64) {
+    pub(super) fn bootstrap_median_ci(values: &[f64]) -> (f64, f64) {
         assert!(!values.is_empty(), "bootstrap input");
         let mut state = 0xf2a2_0260_725d_1ce5_u64;
         let mut medians = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
@@ -180930,13 +180965,13 @@ mod transpose_reject_reaudit_cod_fp {
 
     pub(super) fn binary_sha256() -> String {
         let exe = std::env::current_exe().expect("current test binary");
-        let bytes = std::fs::read(exe).expect("read current test binary");
+        let bytes = std::fs::read(&exe).expect("read current test binary");
         let digest = Sha256::digest(&bytes);
         let mut hex = String::with_capacity(64);
         for byte in digest {
             write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
         }
-        hex
+        format!("{hex} ({} bytes) {}", bytes.len(), exe.display())
     }
 
     pub(super) fn worker_hostname() -> String {
@@ -181098,7 +181133,7 @@ mod transpose_reject_reaudit_cod_fp {
         let candidate_cv = cv_pct(&candidate);
         println!("AUDIT sorted sequential BTree insert; rows={ROWS}; cols={COLS}");
         println!("WORKER {}", worker_hostname());
-        println!("BINARY_SHA256 {}", binary_sha256());
+        println!("bench_elf_sha256={}", binary_sha256());
         println!("ORIG_MS {orig:?}");
         println!("CANDIDATE_MS {candidate:?}");
         println!(
@@ -181327,7 +181362,7 @@ mod transpose_reject_reaudit_cod_fp {
             "AUDIT flattened pair-buffer morsels; rows={ROWS}; cols={COLS}; workers={workers}"
         );
         println!("WORKER {}", worker_hostname());
-        println!("BINARY_SHA256 {}", binary_sha256());
+        println!("bench_elf_sha256={}", binary_sha256());
         println!("ORIG_MS {orig:?}");
         println!("CANDIDATE_MS {candidate:?}");
         println!(
@@ -181584,7 +181619,7 @@ mod transpose_reject_reaudit_cod_fp {
 
         println!("AUDIT to_dict(index) BTreeMap row shards; rows={ROWS}; cols={COLS}");
         println!("WORKER {}", worker_hostname());
-        println!("BINARY_SHA256 {}", binary_sha256());
+        println!("bench_elf_sha256={}", binary_sha256());
         println!("ORIG_MS {orig:?}");
         println!("CANDIDATE_MS {candidate:?}");
         println!(
@@ -181796,7 +181831,7 @@ mod transpose_reject_reaudit_cod_fp {
 
         println!("AUDIT direct indexed lazy transpose slot; rows={ROWS}; cols={COLS}");
         println!("WORKER {}", worker_hostname());
-        println!("BINARY_SHA256 {}", binary_sha256());
+        println!("bench_elf_sha256={}", binary_sha256());
         println!("ORIG_MS {orig:?}");
         println!("CANDIDATE_MS {candidate:?}");
         println!("ORIG_NULL_RATIOS {orig_null:?}");
@@ -182170,7 +182205,7 @@ mod axis1_moment_void_audit_cod_fp {
 
         println!("AUDIT axis1 tiled two-pass var; rows={ROWS}; cols={COLS}");
         println!("WORKER {}", worker_hostname());
-        println!("BINARY_SHA256 {}", binary_sha256());
+        println!("bench_elf_sha256={}", binary_sha256());
         println!("ORIG_MS {orig:?}");
         println!("CANDIDATE_MS {candidate:?}");
         println!(
@@ -182242,7 +182277,7 @@ mod axis1_moment_void_audit_cod_fp {
         );
         println!("AUDIT axis1 fused-tile frontier; rows={ROWS}; cols={COLS}");
         println!("WORKER {}", worker_hostname());
-        println!("BINARY_SHA256 {}", binary_sha256());
+        println!("bench_elf_sha256={}", binary_sha256());
         println!("RESURRECTED_MS {resurrected:?}");
         println!("FUSED_TILE_INCREMENTAL_MS {candidate_incremental:?}");
         report_contract(
@@ -182329,7 +182364,7 @@ mod axis1_moment_void_audit_cod_fp {
         );
         println!("AUDIT axis1 row-parallel fused tiles; rows={ROWS}; cols={COLS}");
         println!("WORKER {}", worker_hostname());
-        println!("BINARY_SHA256 {}", binary_sha256());
+        println!("bench_elf_sha256={}", binary_sha256());
         println!("SERIAL_FUSED_TILE_MS {orig:?}");
         println!("PARALLEL_FUSED_TILE_MS {candidate:?}");
         println!(
@@ -182351,6 +182386,344 @@ mod axis1_moment_void_audit_cod_fp {
         assert!(
             self_pct >= 0.1,
             "candidate self-time must be at least 0.1%; got {self_pct:.6}%"
+        );
+    }
+}
+
+#[cfg(test)]
+mod series_groupby_utf8_cache_profile_cod_fp {
+    use std::{hint::black_box, time::Instant};
+
+    use fp_columnar::Column;
+    use fp_index::Index;
+
+    use super::{
+        SERIES_GROUPBY_FORCE_UNCACHED_UTF8, Series,
+        transpose_reject_reaudit_cod_fp::{
+            binary_sha256, bootstrap_median_ci, median, profile_current_test, report_contract,
+            worker_hostname,
+        },
+    };
+
+    const ROWS: usize = 1_000_000;
+    const FRESH_ROWS: usize = 250_000;
+    const GROUPS: usize = 1_000;
+    const BLOCKS: usize = 25;
+    const PROFILE_LOOPS: usize = 96;
+
+    fn fixture(rows: usize) -> (Series, Series) {
+        let mut bytes = Vec::with_capacity(rows * 5);
+        let mut offsets = Vec::with_capacity(rows + 1);
+        offsets.push(0);
+        for row in 0..rows {
+            let group = row % GROUPS;
+            bytes.push(b'g');
+            bytes.push(b'0' + ((group / 1_000) % 10) as u8);
+            bytes.push(b'0' + ((group / 100) % 10) as u8);
+            bytes.push(b'0' + ((group / 10) % 10) as u8);
+            bytes.push(b'0' + (group % 10) as u8);
+            offsets.push(bytes.len());
+        }
+
+        let index = Index::new_known_unique_int64_unit_range(0, rows);
+        let keys = Series::new(
+            "key".to_owned(),
+            index.clone(),
+            Column::from_utf8_contiguous(bytes, offsets),
+        )
+        .expect("contiguous Utf8 key");
+        let values = Series::new(
+            "value".to_owned(),
+            index,
+            Column::from_f64_values_owned(
+                (0..rows)
+                    .map(|row| ((row * 17) % 10_003) as f64)
+                    .collect(),
+            ),
+        )
+        .expect("Float64 values");
+        (values, keys)
+    }
+
+    #[inline(never)]
+    fn fresh_series_groupby_sum(values: &Series, keys: &Series) -> usize {
+        let output = values
+            .groupby(keys)
+            .expect("fresh SeriesGroupBy")
+            .sum()
+            .expect("grouped sum");
+        let groups = output.len();
+        black_box(output);
+        groups
+    }
+
+    fn set_uncached(force_uncached: bool) {
+        SERIES_GROUPBY_FORCE_UNCACHED_UTF8.with(|flag| flag.set(force_uncached));
+    }
+
+    fn time_sum(values: &Series, keys: &Series, force_uncached: bool) -> f64 {
+        set_uncached(force_uncached);
+        let started = Instant::now();
+        let groups = black_box(fresh_series_groupby_sum(black_box(values), black_box(keys)));
+        let elapsed = started.elapsed().as_secs_f64() * 1e3;
+        set_uncached(false);
+        assert_eq!(groups, GROUPS);
+        elapsed
+    }
+
+    fn time_fresh_sum(force_uncached: bool) -> f64 {
+        let (values, keys) = fixture(FRESH_ROWS);
+        time_sum(&values, &keys, force_uncached)
+    }
+
+    fn run_pairs(
+        mut orig: impl FnMut() -> f64,
+        mut candidate: impl FnMut() -> f64,
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        for round in 0..4 {
+            if round % 2 == 0 {
+                black_box(orig());
+                black_box(orig());
+                black_box(candidate());
+            } else {
+                black_box(candidate());
+                black_box(orig());
+                black_box(orig());
+            }
+        }
+
+        let mut orig_samples = Vec::with_capacity(BLOCKS);
+        let mut null_samples = Vec::with_capacity(BLOCKS);
+        let mut candidate_samples = Vec::with_capacity(BLOCKS);
+        for block in 0..BLOCKS {
+            if block % 2 == 0 {
+                orig_samples.push(orig());
+                null_samples.push(orig());
+                candidate_samples.push(candidate());
+            } else {
+                candidate_samples.push(candidate());
+                null_samples.push(orig());
+                orig_samples.push(orig());
+            }
+        }
+        (orig_samples, null_samples, candidate_samples)
+    }
+
+    fn median_gate(label: &str, orig: &[f64], null: &[f64], candidate: &[f64], require_keep: bool) {
+        let null_ratios: Vec<f64> = orig
+            .iter()
+            .zip(null)
+            .map(|(arm_a, arm_b)| arm_a / arm_b)
+            .collect();
+        let candidate_ratios: Vec<f64> = orig
+            .iter()
+            .zip(candidate)
+            .map(|(arm_a, arm_b)| arm_a / arm_b)
+            .collect();
+        let (null_low, null_high) = bootstrap_median_ci(&null_ratios);
+        let required_log_effect = 2.0 * null_low.ln().abs().max(null_high.ln().abs());
+        let effect = median(&candidate_ratios).ln();
+        if require_keep {
+            assert!(
+                effect > required_log_effect,
+                "{label} must clear the A/A median-CI floor: effect={effect}, required={required_log_effect}"
+            );
+        } else {
+            assert!(
+                effect >= -required_log_effect,
+                "{label} regressed outside the A/A median-CI floor: effect={effect}, required={required_log_effect}"
+            );
+        }
+    }
+
+    #[test]
+    fn cached_utf8_factorization_preserves_first_seen_groupby_semantics() {
+        let key_values = ["beta", "", "alpha", "beta", "é", "", "z"];
+        let mut bytes = Vec::new();
+        let mut offsets = Vec::with_capacity(key_values.len() + 1);
+        offsets.push(0);
+        for value in key_values {
+            bytes.extend_from_slice(value.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let index = Index::new_known_unique_int64_unit_range(0, key_values.len());
+        let keys = Series::new(
+            "key".to_owned(),
+            index.clone(),
+            Column::from_utf8_contiguous(bytes, offsets),
+        )
+        .expect("variable-width contiguous Utf8 keys");
+        let values = Series::new(
+            "value".to_owned(),
+            index,
+            Column::from_f64_values(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]),
+        )
+        .expect("values");
+
+        set_uncached(true);
+        let orig = values
+            .groupby(&keys)
+            .expect("original fresh groupby")
+            .sum()
+            .expect("original sum");
+        set_uncached(false);
+        let candidate = values
+            .groupby(&keys)
+            .expect("candidate fresh groupby")
+            .sum()
+            .expect("candidate sum");
+        let candidate_again = values
+            .groupby(&keys)
+            .expect("second candidate fresh groupby")
+            .sum()
+            .expect("second candidate sum");
+
+        assert!(orig.equals(&candidate));
+        assert!(candidate.equals(&candidate_again));
+        let labels: Vec<String> = candidate
+            .index()
+            .labels()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(labels, ["beta", "", "alpha", "é", "z"]);
+        assert_eq!(
+            candidate
+                .column()
+                .as_f64_slice()
+                .expect("grouped Float64 sums"),
+            &[5.0, 8.0, 3.0, 5.0, 7.0]
+        );
+
+        let empty_index = Index::new_known_unique_int64_unit_range(0, 0);
+        let empty_keys = Series::new(
+            "key".to_owned(),
+            empty_index.clone(),
+            Column::from_utf8_contiguous(Vec::new(), vec![0]),
+        )
+        .expect("empty contiguous Utf8 keys");
+        let empty_values = Series::new(
+            "value".to_owned(),
+            empty_index,
+            Column::from_f64_values_owned(Vec::new()),
+        )
+        .expect("empty values");
+        set_uncached(true);
+        let empty_orig = empty_values
+            .groupby(&empty_keys)
+            .expect("empty original groupby")
+            .sum()
+            .expect("empty original sum");
+        set_uncached(false);
+        let empty_candidate = empty_values
+            .groupby(&empty_keys)
+            .expect("empty candidate groupby")
+            .sum()
+            .expect("empty candidate sum");
+        assert!(empty_orig.equals(&empty_candidate));
+        assert!(empty_candidate.is_empty());
+    }
+
+    #[test]
+    #[ignore = "Lane M profile gate; run explicitly"]
+    fn profile_repeated_fresh_series_groupby_utf8_cod_fp() {
+        const TEST_NAME: &str = concat!(
+            "series_groupby_utf8_cache_profile_cod_fp::",
+            "profile_repeated_fresh_series_groupby_utf8_cod_fp"
+        );
+        const CHILD_ENV: &str = "FP_SERIES_GROUPBY_UTF8_PROFILE_CHILD";
+
+        let (values, keys) = fixture(ROWS);
+        assert_eq!(
+            fresh_series_groupby_sum(&values, &keys),
+            GROUPS,
+            "first-seen Utf8 group count"
+        );
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            set_uncached(true);
+            for _ in 0..PROFILE_LOOPS {
+                assert_eq!(
+                    black_box(fresh_series_groupby_sum(
+                        black_box(&values),
+                        black_box(&keys)
+                    )),
+                    GROUPS
+                );
+            }
+            set_uncached(false);
+            return;
+        }
+
+        println!("bench_elf_sha256={}", binary_sha256());
+        println!("WORKER {}", worker_hostname());
+        let self_pct = profile_current_test(TEST_NAME, CHILD_ENV, "compute_dense_group_ids");
+        println!("TARGET_SELF_PCT {self_pct:.6}");
+        assert!(
+            self_pct > 5.0,
+            "SeriesGroupBy::compute_dense_group_ids must exceed 5% self-time; got {self_pct:.6}%"
+        );
+    }
+
+    #[test]
+    #[ignore = "Lane M one-binary A/B; run explicitly"]
+    fn audit_series_groupby_utf8_column_cache_cod_fp() {
+        println!("bench_elf_sha256={}", binary_sha256());
+        println!("WORKER {}", worker_hostname());
+
+        let (values, keys) = fixture(ROWS);
+        set_uncached(true);
+        let orig = values
+            .groupby(&keys)
+            .expect("original groupby")
+            .sum()
+            .expect("original sum");
+        set_uncached(false);
+        let candidate = values
+            .groupby(&keys)
+            .expect("candidate groupby")
+            .sum()
+            .expect("candidate sum");
+        assert!(orig.equals(&candidate), "cached gid observable parity");
+        assert_eq!(orig.index().labels(), candidate.index().labels());
+        drop((orig, candidate));
+
+        let (reused_orig, reused_null, reused_candidate) = run_pairs(
+            || time_sum(&values, &keys, true),
+            || time_sum(&values, &keys, false),
+        );
+        println!("REUSED_ORIG_MS {reused_orig:?}");
+        println!("REUSED_CANDIDATE_MS {reused_candidate:?}");
+        report_contract(
+            "series_groupby_utf8_reused_column",
+            &reused_orig,
+            &reused_null,
+            &reused_candidate,
+        );
+        median_gate(
+            "reused-column claim",
+            &reused_orig,
+            &reused_null,
+            &reused_candidate,
+            true,
+        );
+
+        let (fresh_orig, fresh_null, fresh_candidate) =
+            run_pairs(|| time_fresh_sum(true), || time_fresh_sum(false));
+        println!("FRESH_ORIG_MS {fresh_orig:?}");
+        println!("FRESH_CANDIDATE_MS {fresh_candidate:?}");
+        report_contract(
+            "series_groupby_utf8_fresh_column_control",
+            &fresh_orig,
+            &fresh_null,
+            &fresh_candidate,
+        );
+        median_gate(
+            "fresh-column control",
+            &fresh_orig,
+            &fresh_null,
+            &fresh_candidate,
+            false,
         );
     }
 }

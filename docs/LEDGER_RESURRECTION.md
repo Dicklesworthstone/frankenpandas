@@ -414,7 +414,14 @@ exit=2
 That is the "do not attempt a 6th hash-table variant" prohibition made **mechanical** instead of
 merely written down.
 
-**Mode 2 — `--check-new-rows`.** Every newly added `###` REJECT section must record at least one of:
+**Mode 2 — `--check-new-rows`.** Every added or modified verdict-bearing entry in
+either `docs/NEGATIVE_EVIDENCE.md` or `docs/LEDGER_RESURRECTION.md` is checked. The
+accepted entry boundaries are the canonical `###` section schema used by both
+documents and the legacy `## Results` table-row schema in
+`docs/NEGATIVE_EVIDENCE.md`; changing the body of an existing decision is therefore
+not a way around the gate.
+
+Every REJECT entry must record at least one of:
 
 | basis | why it is sufficient |
 |---|---|
@@ -426,9 +433,26 @@ hand-adjudicated void rows. `~0% self` is useful profile evidence, but it is not
 substitute in a row titled REJECT: record it as profile/routing evidence rather than laundering it
 through an A/B verdict.
 
-Every newly added `###` KEEP/WIN/SHIPPED section must also contain a 64-hex SHA-256 **and** an
-in-process executing-ELF marker (`bench_elf_sha256`, `current_exe`, or equivalent). A neighboring
-shell hash is deliberately rejected.
+Every kept entry must declare exactly one campaign result class:
+
+- `maintenance-self-speedup` means FrankenPandas before versus FrankenPandas after.
+  It may be kept as maintenance, but it is not campaign output and may not contain
+  a pandas-facing WIN claim.
+- `incumbent-win` means the actual pandas incumbent ran beside FrankenPandas in the
+  same invocation. It requires the pinned incumbent name and version, incumbent
+  artifact SHA-256, shared invocation ID, and measured ratio.
+
+Both classes require the exact machine-readable markers
+`**Campaign result class:**`, `**Executing ELF SHA-256 (self-reported by process):**`,
+`**A/A null control (same invocation):**`, `**Median-CI decision:**`, and
+`**CV role:**`. The ELF marker must contain the complete line emitted by the running
+process: `bench_elf_sha256=<64 lowercase hex> (<positive bytes> bytes) <path>`.
+`incumbent-win` additionally requires
+`**Legacy incumbent arm (same invocation):** name=pandas version=<pin>
+artifact_sha256=<64 lowercase hex> invocation_id=<shared id>
+measured_ratio=<number>x`. A neighboring shell hash, a bare “same invocation”
+sentence, or a `maintenance-self-speedup` label attached to competitive prose is
+deliberately rejected.
 
 Deterministic self-tests:
 
@@ -443,7 +467,13 @@ Deterministic self-tests:
 | target frame 0.000% self-time, no A/A/count | **BLOCKED** |
 | KEEP with a shell-computed SHA | **BLOCKED** |
 | KEEP with `bench_elf_sha256=unavailable` plus an unrelated shell SHA | **BLOCKED** |
-| KEEP with `bench_elf_sha256=<64 hex>` | passes |
+| KEEP with an ELF hash but no exact result class | **BLOCKED** |
+| maintenance row titled WIN or claiming “faster than pandas” | **BLOCKED** |
+| complete maintenance row with ELF/A/A/median-CI/CV provenance | passes |
+| incumbent row with a bare “same invocation” but no pinned pandas arm | **BLOCKED** |
+| incumbent row missing any of pandas version/artifact SHA/shared invocation/ratio | **BLOCKED** |
+| complete pandas incumbent row with ELF/A/A/median-CI/CV provenance | passes |
+| malformed added or modified row at any supported path/schema boundary | **BLOCKED** |
 
 Note the first row: **"bit-identical" does not buy passage.** Parity ≠ mechanism. That distinction is
 the whole ballgame — it is what took our own mechanical `VALID-MECHANISM` count from 102 to two
@@ -461,7 +491,9 @@ compiles default to a configurable 3,600-second ceiling and exit 2 on timeout.
 `scripts/install_perf_preflight_hook.sh` installs it as a **pre-commit hook**, additively into the
 mcp-agent-mail chain-runner (`.git/hooks/hooks.d/pre-commit/60-perf-ledger-preflight.sh`) so it
 composes with the file-reservation guard rather than replacing it. It gates only commits that touch
-`docs/NEGATIVE_EVIDENCE.md`, so it costs nothing on ordinary commits.
+either verdict ledger. If the preflight source itself is staged, the hook runs its
+boundary self-test even when no ledger row is staged; ordinary commits still avoid
+the ledger scan.
 
 `.git/hooks/` is not version-controlled, so **every fresh checkout must run the installer once** —
 that is the one weak link, and it is why the installer is committed and idempotent rather than the
