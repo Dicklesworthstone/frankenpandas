@@ -20322,3 +20322,162 @@ and
 `artifacts/bench/proud_lane_m_explode_string_python_10m_20260727.json`
 (SHA-256
 `edc3865261bfb684711f5db52cf8efc2ec421ae01e98c870821cfa8aed3c190f`).
+
+### 2026-07-28 QuietHarbor — strings @1M measured against BOTH pandas backends: 1.39–2.82x vs pandas' best backend, not the 4.33–10.60x the object arm reports
+
+Class-1 hunt at scale. The string workloads had always built their key/name columns from Python
+string lists, so the incumbent arm ran pandas' **object** dtype — pandas 2.x's default and also its
+slow path. Added an arrow arm (`57195e1ed`, `FP_HARNESS_PANDAS_STRING_BACKEND=arrow`) and ran the
+same three workloads against both, one invocation per arm, backend recorded in each artifact's
+`parameters.pandas_string_backend`.
+
+| workload @1M | fp p50 | pandas object | vs object | pandas arrow | **vs arrow** |
+|---|---:|---:|---:|---:|---:|
+| `str_sort` | 33,296.5 us | 352,888.8 us | 10.598x | 50,102.4 us | **1.386x** |
+| `str_value_counts` | 9,702.2 us | 59,433.6 us | 6.126x | 13,282.2 us | **1.411x** |
+| `str_groupby_sum` | 7,407.8 us | 32,105.6 us | 4.334x | 19,405.8 us | **2.819x** |
+
+**Campaign result class:** `incumbent-win`.
+
+Claimed at the ARROW ratios only (1.386x / 1.411x / 2.819x). The object-arm ratios are a labelled
+secondary row and must not be quoted as the headline:
+they measure the incumbent's worst configuration, which is the same error as quoting
+`df.apply(..., axis=1)` when `df.sum(axis=1)` exists. Publishing 10.6x here would inflate the real
+result by ~7.6x.
+
+**Legacy incumbent arm (same invocation):**
+`name=pandas version=2.2.3
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+invocation_id=vs-pandas-20260728T061146.857571Z-pid284880
+measured_ratio=1.386x`
+for `str_sort` on the claimed Arrow arm; the same pandas artifact and invocation measured
+`measured_ratio=1.411x` for `str_value_counts` and `measured_ratio=2.819x` for `str_groupby_sum`.
+The object arm used the same pandas artifact under
+`invocation_id=vs-pandas-20260728T061115.397425Z-pid275166`, measuring 10.598x / 6.126x / 4.334x.
+Artifact identity is `importlib-metadata-content-tree-v1` over 2,922 files / 70,681,559 bytes; host
+`/usr/bin/python3.13` sha256
+`efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e`. The Arrow arm used pyarrow
+24.0.0.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=934f1d90638810ee55e459e68a95ecba2729ccd4b0eac0082f56a1479cd08780`
+(70,265,048 bytes) `/data/tmp/cargo-target/release-perf/fp-bench` — one ELF across both arms.
+
+**A/A null control (same invocation):** Arrow arm FP median CI=[0.929143, 1.135435] and pandas median CI=[0.978625, 1.073681] for str_sort; FP median CI=[0.986533, 1.020855] and pandas median CI=[0.982134, 1.043175] for str_value_counts; FP median CI=[0.945936, 1.047888] and pandas median CI=[0.986492, 1.020957] for str_groupby_sum. Object arm FP median CI=[0.927767, 1.066073] and pandas median CI=[0.986603, 1.012244] for str_sort; FP median CI=[0.984923, 1.025190] and pandas median CI=[0.876922, 1.058382] for str_value_counts; FP median CI=[0.961203, 1.031073] and pandas median CI=[0.974180, 1.078560] for str_groupby_sum. 25 alternating pairs per engine per arm, both engines. Shared invocation identity: Arrow vs-pandas-20260728T061146.857571Z-pid284880, object vs-pandas-20260728T061115.397425Z-pid275166.
+
+**Median-CI decision:** all six rows decidable at the 2x margin. On the claimed arrow arm,
+`str_sort` numeric median effect=0.32615080 cleared required threshold=0.25403238;
+`str_value_counts` effect=0.34450000 cleared required threshold=0.08450000;
+`str_groupby_sum` effect=1.03650000 cleared required threshold=0.11120000. The object-arm effects
+also cleared their respective numeric requirements (effect=2.36070000 vs threshold=0.14990000;
+effect=1.81250000 vs threshold=0.26270000; effect=1.46650000 vs threshold=0.15130000).
+
+**CV role:** provenance only; CV had no vote.
+
+**Why this matters more over time, not less:** pandas 3 makes arrow-backed strings the default
+(`pd.options.future.infer_string`), so every object-arm string claim erodes without anyone touching
+the code. Suspect published claims not yet re-measured: `joins str 17.3x`, the Utf8-BYPASS family
+(unique/value_counts/nunique/mode/dup/isin), `astype(str)`, and the strings row of any scorecard.
+Tracked as `br-frankenpandas-ltmk9`.
+
+**Also invalidated, in BOTH directions — `dt_date` / `dt_time` are not measurable as written.** A
+pre-existing harness comment already documents it: fp-bench's datetime generator overflows i64 at
+n >= 100,000 (release wraps silently) so pandas cannot build the same series, AND pandas returns
+object arrays of Python `date`/`time` while fp returns an ISO-8601 Utf8 column. Different input and
+different output. The 4.04x/12.11x I measured at 1M are withdrawn, and the arrow comparison that
+appeared to flip `.dt.date` into a large loss is equally invalid and is NOT claimed as one. The
+representation-equivalent pandas call is `s.dt.strftime(...)`; measuring that is the fix.
+
+Retry predicate: no string- or datetime-surface ratio may be published from the object arm alone.
+Run both arms and report the arrow one. For any surface whose fp side uses a callback, an iterator,
+or a different output representation, first establish that the two halves compute the same thing from
+the same input — `dt_date` failed that test and `df_apply_row` failed the cheapest-idiom test.
+
+### 2026-07-28 ProudChapel — joint string-backend screen plus 10M follow-up: 9/9 FASTER, 2.126x strongest-incumbent geomean
+
+This follow-up makes the object/Arrow selection explicit inside one 1M
+invocation, then carries only pandas `string[pyarrow]`, the fastest incumbent
+for all three workloads, to 10M. The preceding separate-invocation screen
+remains valid routing evidence; this row is the canonical competitive result.
+
+**Campaign result class:** `incumbent-win`.
+
+The strongest-incumbent rows are 1.776x/2.526x for string sort,
+1.481x/1.458x for string value-counts, and 3.200x/2.982x for string-key
+groupby-sum at 1M/10M. Their geomean is 2.126x. Object-only ratios are
+secondary diagnostics and are not competitive headlines.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=4ac48e4c83e07a1750c64e8d3d48aa0f9ce43ebe2e4fda298b4dd77df9f2dd2d
+(70294216 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`
+at 1M. The 10M invocation separately reported
+`86614d5dd206fa0573677787907006e5b21e06b25db5703725e586c68b2e8ba2`
+(70,294,368 bytes) at the same path. Both ran on `vmi1264463` and reported
+harness-source SHA-256
+`55c7f737d6d18b460b566338e6f8859dcc9dcc51ff5b0c91b1aa3373c4b8de47`.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260728T064511.318611Z-pid1785126
+measured_ratio=1.458x
+The 1M backend screen used invocation
+`vs-pandas-20260728T063309.699807Z-pid1758322`. Both used pyarrow 24.0.0
+content-tree SHA-256
+`2e701e78b2e69a481b6e901b584db29c4151221f59568dcb7cde7f036bca5f17`
+and Python executable SHA-256
+`efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. On the conservative 10M value-counts row, FrankenPandas median
+CI=[0.952319, 1.014717] and pandas median CI=[0.943298, 1.019154].
+All nine exact intervals are recorded below and in the raw schema-v4
+artifacts.
+
+**Median-CI decision:** all nine rows are decidable. The narrowest claimed
+row is 10M value-counts: numeric median effect=0.37732781 cleared required
+threshold=0.11674512. The closest row to its gate is 1M Arrow sort:
+effect=0.57427493 cleared required threshold=0.49294904.
+
+**CV role:** provenance only; CV had no vote.
+
+| pandas backend | workload | size | FP p50 | pandas p50 | ratio | FP A/A 95% median CI | pandas A/A 95% median CI | effect / required | verdict |
+|---|---|---:|---:|---:|---:|---|---|---:|---|
+| object | `str_sort` | 1M | 86.492 ms | 660.871 ms | **7.641x** | [0.897760, 1.144962] | [0.975916, 1.019528] | 2.03351189 / 0.27074301 | **FASTER** |
+| `string[pyarrow]` | `str_sort` | 1M | 87.174 ms | 154.807 ms | **1.776x** | [0.781551, 1.190955] | [0.954701, 1.086849] | 0.57427493 / 0.49294904 | **FASTER** |
+| object | `str_value_counts` | 1M | 22.301 ms | 98.563 ms | **4.420x** | [0.953335, 1.034170] | [0.933980, 1.044445] | 1.48606678 / 0.13660123 | **FASTER** |
+| `string[pyarrow]` | `str_value_counts` | 1M | 22.359 ms | 33.124 ms | **1.481x** | [0.962780, 1.068560] | [0.976184, 1.051414] | 0.39305010 / 0.13262302 | **FASTER** |
+| object | `str_groupby_sum` | 1M | 14.918 ms | 61.871 ms | **4.147x** | [0.958645, 1.036576] | [0.974951, 1.041829] | 1.42248959 / 0.08446952 | **FASTER** |
+| `string[pyarrow]` | `str_groupby_sum` | 1M | 14.191 ms | 45.405 ms | **3.200x** | [0.985028, 1.117088] | [0.978088, 1.063541] | 1.16301003 / 0.22145032 | **FASTER** |
+| `string[pyarrow]` | `str_sort` | 10M | 656.105 ms | 1,657.029 ms | **2.526x** | [0.946730, 1.037833] | [0.988864, 1.023574] | 0.92646044 / 0.10948346 | **FASTER** |
+| `string[pyarrow]` | `str_value_counts` | 10M | 218.066 ms | 318.024 ms | **1.458x** | [0.952319, 1.014717] | [0.943298, 1.019154] | 0.37732781 / 0.11674512 | **FASTER** |
+| `string[pyarrow]` | `str_groupby_sum` | 10M | 145.070 ms | 432.653 ms | **2.982x** | [0.945491, 1.038132] | [0.950300, 1.032075] | 1.09272211 / 0.11210124 | **FASTER** |
+
+String sort is the requested scale-amplified class: the ratio grows 42.2%
+from 1M to 10M and the absolute median advantage grows from 67.6 ms to 1.001
+seconds. Value-counts and groupby-sum remain decisive but approximately
+ratio-stable; their absolute advantages grow to 100.0 ms and 287.6 ms.
+
+A 1,000-row pandas semantic probe produced identical values and index order
+across object and Arrow for all three operations. Both aliases route to the
+same unchanged FP contiguous-Utf8 workload. Existing stable-sort,
+nullable-Utf8 value-count, and Utf8-key groupby guards cover the FP contract.
+
+**Concrete retry predicates:** the rows stand until the workload boundary,
+fixture, FP implementation, harness source, pandas/pyarrow artifact,
+allocator, worker ISA, or backend inventory changes. Re-screen every available
+pandas string backend after a pandas or pyarrow change and carry only the
+fastest semantically identical arm to large N. Do not quote object-only ratios
+as competitive claims. Re-run sort only for a tail claim using fresh child
+processes plus peak RSS and major-fault counters. Do not infer an FP source
+lever without a current profile naming a non-zero-self frame and a computed
+Amdahl ceiling.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_string_backends_1m_10m_20260728.md`,
+`artifacts/bench/proud_lane_m_string_backends_1m_20260728.json` (SHA-256
+`079a8aa05c9e00442c88b7e8929638deb75a77cbfd3c153e02548b89c9b736bf`),
+and
+`artifacts/bench/proud_lane_m_string_arrow_10m_20260728.json` (SHA-256
+`431a097cd70dbf5fce9054529913a9e9c4c9d2580aadb46d5ef49d778da450ec`).

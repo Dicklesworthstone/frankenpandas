@@ -2342,9 +2342,24 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Paired
                 }),
             }
         }
-        ("strings", "str_sort" | "str_value_counts" | "str_groupby_sum") => {
+        (
+            "strings",
+            "str_sort"
+            | "str_sort_object"
+            | "str_sort_arrow"
+            | "str_value_counts"
+            | "str_value_counts_object"
+            | "str_value_counts_arrow"
+            | "str_groupby_sum"
+            | "str_groupby_sum_object"
+            | "str_groupby_sum_arrow",
+        ) => {
             let frame = build_str_frame(rows);
-            match workload {
+            let base_workload = workload
+                .strip_suffix("_object")
+                .or_else(|| workload.strip_suffix("_arrow"))
+                .unwrap_or(workload);
+            match base_workload {
                 "str_sort" => time_us(|| {
                     let _ = frame.sort_values("name", true).expect("str sort");
                 }),

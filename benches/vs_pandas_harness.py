@@ -930,7 +930,11 @@ def pandas_string_backend() -> str:
     Run BOTH and report fp against the better one; keep object as a labelled
     secondary row, never as the headline. Per br-frankenpandas-ltmk9.
     """
-    backend = os.environ.get("FP_HARNESS_PANDAS_STRING_BACKEND", "object").strip().lower()
+    backend = (
+        os.environ.get("FP_HARNESS_PANDAS_STRING_BACKEND", "object")
+        .strip()
+        .lower()
+    )
     if backend not in {"object", "arrow"}:
         raise ValueError(
             f"FP_HARNESS_PANDAS_STRING_BACKEND must be 'object' or 'arrow', got {backend!r}"
@@ -938,37 +942,85 @@ def pandas_string_backend() -> str:
     return backend
 
 
-def _as_string_column(values: list[str]):
-    """Build the key/name column in the configured pandas string backend."""
-    if pandas_string_backend() == "arrow":
+def _as_string_column(values: list[str], backend: str):
+    """Build one key/name column in an explicitly named pandas backend."""
+    if backend == "arrow":
         # Fails loudly rather than silently degrading to object: a silent
         # fallback would report an object-arm number as an arrow-arm result.
         return pd.array(values, dtype="string[pyarrow]")
-    return values
+    if backend == "object":
+        return values
+    raise ValueError(f"unknown pandas string backend: {backend!r}")
 
 
-def _build_str_frame(n: int) -> pd.DataFrame:
+def _build_str_frame(n: int, backend: str | None = None) -> pd.DataFrame:
     # Mirrors fp-bench build_str_frame: key = ~1000-distinct group label,
     # name = unique ~15-byte id (sort key), val = float64.
+    selected_backend = backend or pandas_string_backend()
     keys = [f"g{i % 1000:04d}" for i in range(n)]
     names = [f"item_{i:010d}" for i in range(n)]
     return pd.DataFrame({
-        "key": _as_string_column(keys),
-        "name": _as_string_column(names),
+        "key": _as_string_column(keys, selected_backend),
+        "name": _as_string_column(names, selected_backend),
         "val": np.arange(n, dtype=np.float64),
     })
 
-def bench_str_sort_pandas(df: pd.DataFrame) -> list[float]:
-    f = _build_str_frame(len(df))
+
+def _bench_str_sort_pandas(df: pd.DataFrame, backend: str) -> PairedSamples:
+    f = _build_str_frame(len(df), backend)
     return time_operation(lambda: f.sort_values("name"))
 
-def bench_str_value_counts_pandas(df: pd.DataFrame) -> list[float]:
-    f = _build_str_frame(len(df))
+
+def bench_str_sort_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_str_sort_pandas(df, pandas_string_backend())
+
+
+def bench_str_sort_object_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_str_sort_pandas(df, "object")
+
+
+def bench_str_sort_arrow_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_str_sort_pandas(df, "arrow")
+
+
+def _bench_str_value_counts_pandas(
+    df: pd.DataFrame,
+    backend: str,
+) -> PairedSamples:
+    f = _build_str_frame(len(df), backend)
     return time_operation(lambda: f["key"].value_counts())
 
-def bench_str_groupby_sum_pandas(df: pd.DataFrame) -> list[float]:
-    f = _build_str_frame(len(df))
+
+def bench_str_value_counts_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_str_value_counts_pandas(df, pandas_string_backend())
+
+
+def bench_str_value_counts_object_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_str_value_counts_pandas(df, "object")
+
+
+def bench_str_value_counts_arrow_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_str_value_counts_pandas(df, "arrow")
+
+
+def _bench_str_groupby_sum_pandas(
+    df: pd.DataFrame,
+    backend: str,
+) -> PairedSamples:
+    f = _build_str_frame(len(df), backend)
     return time_operation(lambda: f.groupby("key")["val"].sum())
+
+
+def bench_str_groupby_sum_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_str_groupby_sum_pandas(df, pandas_string_backend())
+
+
+def bench_str_groupby_sum_object_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_str_groupby_sum_pandas(df, "object")
+
+
+def bench_str_groupby_sum_arrow_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_str_groupby_sum_pandas(df, "arrow")
 
 
 def bench_df_dot_pandas(df: pd.DataFrame) -> list[float]:
@@ -1101,8 +1153,14 @@ PANDAS_WORKLOADS = {
     },
     "strings": {
         "str_sort": bench_str_sort_pandas,
+        "str_sort_object": bench_str_sort_object_pandas,
+        "str_sort_arrow": bench_str_sort_arrow_pandas,
         "str_value_counts": bench_str_value_counts_pandas,
+        "str_value_counts_object": bench_str_value_counts_object_pandas,
+        "str_value_counts_arrow": bench_str_value_counts_arrow_pandas,
         "str_groupby_sum": bench_str_groupby_sum_pandas,
+        "str_groupby_sum_object": bench_str_groupby_sum_object_pandas,
+        "str_groupby_sum_arrow": bench_str_groupby_sum_arrow_pandas,
     },
     "linalg": {
         "df_dot": bench_df_dot_pandas,
@@ -1532,11 +1590,13 @@ def main():
                 "decidability_margin": DECIDABILITY_MARGIN,
                 "gate": "median_bootstrap_ci",
                 "cv_role": "provenance_only",
-                # Which pandas string backend the incumbent arm ran. `object` is
-                # pandas 2.x's default AND its slow path; `arrow` is what a modern
-                # pandas user gets and what pandas 3 defaults to. Recorded so a
-                # string-surface ratio can never be read as the wrong arm.
-                "pandas_string_backend": pandas_string_backend(),
+                "pandas_string_backend_policy": {
+                    "unsuffixed_workloads": pandas_string_backend(),
+                    "explicit_workload_suffixes": {
+                        "_object": "object",
+                        "_arrow": "string[pyarrow]",
+                    },
+                },
                 "shared_invocation_id": invocation_id,
             },
             "results": all_results,
