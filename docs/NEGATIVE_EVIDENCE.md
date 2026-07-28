@@ -20177,3 +20177,70 @@ Full evidence:
 `artifacts/bench/proud_lane_m_rolling_expanding_1m_10m_20260727.json`
 (JSON SHA-256
 `391365d0a53224479a70dcb8dfa687ff447ef2bae3219dd0aece19060f9fb0be`).
+
+### 2026-07-27 ProudChapel — 1M/10M numeric merge resurrection: 6/6 `incumbent-win`, 3.710x geomean
+
+Lane M re-adjudicated the shipping unique-Int64 inner/left/outer merge family
+at 1M and 10M under the schema-v4 contract. Both engines received identical
+key and payload values; setup stayed outside the timed public merge call. This
+was measurement-only incumbent evidence, not an fp-before/fp-after lever or
+maintenance self-speedup.
+
+**Campaign result class:** `incumbent-win`.
+
+All six rows are admitted under that class.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=885f386e10f4440e961b2672543c8fe735eadccf055748fc2e63dd48da979349
+(70,208,952 bytes)
+/data/projects/frankenpandas/.rch-target-ovh-a-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):**
+`name=pandas version=2.2.3
+artifact_sha256=fb69f90acac18b871bb69f5eab56bea198b17692c5045de29eed608132a959c9
+invocation_id=vs-pandas-20260728T035631.671745Z-pid2122218
+measured_ratio=3.710x`
+
+**A/A null control (same invocation):** every row ran 25 alternating pairs per
+engine. FP bootstrap-median 95% CIs ranged from [0.994356, 1.000509] to
+[0.963643, 1.013766]; pandas ranged from [0.999618, 1.002138] to
+[0.909849, 1.070320]. Exact per-row intervals are below and in the raw
+artifact.
+
+**Median-CI decision:** the smallest admitted median effect=0.43828016 cleared
+its required threshold=0.02574092. All six claim-log effects cleared twice
+their combined A/A log-CI half-width; even the broadest row,
+`join_outer@10M`, measured effect=1.83311235 versus required
+threshold=0.18895384.
+
+**CV role:** provenance only; CV had no vote.
+
+| workload | size | FP p50 | pandas p50 | ratio | FP A/A 95% median CI | pandas A/A 95% median CI | claim / required log effect | verdict |
+|---|---:|---:|---:|---:|---|---|---:|---|
+| `join_inner` | 1M | 2.618 ms | 19.895 ms | **7.599x** | [0.991618, 1.012245] | [0.999618, 1.002138] | 2.02803246 / 0.02434037 | **FASTER** |
+| `join_inner` | 10M | 37.232 ms | 133.635 ms | **3.589x** | [0.989816, 1.001965] | [0.992164, 1.001922] | 1.27794804 / 0.02047241 | **FASTER** |
+| `join_left` | 1M | 5.338 ms | 12.708 ms | **2.381x** | [0.994356, 1.000509] | [0.991565, 1.026109] | 0.86746426 / 0.05154784 | **FASTER** |
+| `join_left` | 10M | 70.317 ms | 108.995 ms | **1.550x** | [0.993308, 0.999978] | [0.987770, 1.012954] | 0.43828016 / 0.02574092 | **FASTER** |
+| `join_outer` | 1M | 9.485 ms | 39.273 ms | **4.141x** | [0.963643, 1.013766] | [0.979382, 1.026793] | 1.42085968 / 0.07406973 | **FASTER** |
+| `join_outer` | 10M | 111.388 ms | 696.546 ms | **6.253x** | [0.974273, 1.013474] | [0.909849, 1.070320] | 1.83311235 / 0.18895384 | **FASTER** |
+
+Inner and left narrow from 1M to 10M while outer widens, so the family does
+not support one universal gap-growing interpreted-overhead mechanism. The
+10M raw tails are broad (FP CV 151.76%, 152.23%, and 98.73%; pandas outer
+61.77%), but CV is provenance and the paired median-CI effects remain
+decisive.
+
+**Concrete retry predicates:** for `join_inner`, reopen the competitive number
+only after source, materialization boundary, pandas artifact, or worker ISA
+changes, preserving the exact unique-key workload and full contract. For
+`join_left`, do not pursue a new kernel lever unless a current profile gives a
+named frame >5% self-time and >5% computed Amdahl ceiling. For `join_outer`,
+the median claim stands; retry only to make a tail-latency claim, using fresh
+child processes plus peak RSS and major-fault counters with the same worker
+and binary identities.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_merge_1m_10m_20260727.md` and
+`artifacts/bench/proud_lane_m_merge_1m_10m_20260727.json`
+(JSON SHA-256
+`cac48c70982fa9c16a6a04e7645abd1753e8a7ef3a82dfaf1325a665385243d3`).
