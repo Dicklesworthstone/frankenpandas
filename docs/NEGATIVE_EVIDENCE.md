@@ -20041,3 +20041,71 @@ ratio that does not grow with N is an idiom penalty until proven otherwise. Do n
 `df_apply_row` as a competitive row; keep it as coverage only. Admit `df_itertuples` only after one
 invocation records the executing-ELF self-report, pandas name/version/artifact SHA-256, shared
 invocation ID and ratio, numeric A/A bootstrap median CI, median-CI decision, and CV-as-provenance.
+
+### 2026-07-27 ProudChapel — `df_itertuples` 1M incumbent-win KEEP; 10M remains `NULL_UNDECIDABLE`
+
+Lane M completed the exact retry predicate above in one strict-remote
+same-worker invocation. At 1M rows x 10 Float64 columns, FrankenPandas measured
+16.102x against pandas 2.2.3's exact `list(df.itertuples())` API and 7.562x
+against `df.to_records(index=True).tolist()`, the fastest of four
+task-equivalent pandas row-materialization idioms screened before the run. The
+conservative 7.562x ratio is the campaign headline.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=1ef0c1e07a5b0b5d57904b255e41e7306d0f277a2c12fa8d4ccff774848c623c
+(70,209,136 bytes)
+/data/projects/frankenpandas/.rch-target-ovh-a-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):**
+`name=pandas version=2.2.3
+artifact_sha256=fb69f90acac18b871bb69f5eab56bea198b17692c5045de29eed608132a959c9
+invocation_id=vs-pandas-20260728T025312.250425Z-pid1927317
+measured_ratio=7.562x`
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. On the conservative admitted 1M row, FP median=1.000891 with 95% median
+CI=[0.997740, 1.002731], and pandas median=1.000053 with 95% median
+CI=[0.991804, 1.002277].
+
+**Median-CI decision:** the conservative 1M median claim effect=2.02319795
+cleared the required effect=0.01645864. The exact-API effect=2.77893859 also
+cleared its required effect=0.08308420. At 10M, required effects of 4.15474274
+and 3.16316085 exceeded the respective numeric claim effects, so both rows
+remained inside the median-CI null floor.
+
+**CV role:** provenance only; CV had no vote.
+
+| pandas incumbent | size | FP p50 | pandas p50 | ratio | FP A/A 95% median CI | pandas A/A 95% median CI | verdict |
+|---|---:|---:|---:|---:|---|---|---|
+| exact `list(df.itertuples())` | 1M | 74.978 ms | 1,207.293 ms | **16.102x** | [0.998815, 1.002631] | [0.964552, 1.042417] | **FASTER** |
+| fastest screened task-equivalent row tuples | 1M | 75.095 ms | 567.903 ms | **7.562x** | [0.997740, 1.002731] | [0.991804, 1.002277] | **FASTER** |
+| exact `list(df.itertuples())` | 10M | 4,204.863 ms | 15,222.475 ms | 3.620x | [0.125259, 7.651503] | [0.961040, 1.027252] | `NULL_UNDECIDABLE` |
+| fastest screened task-equivalent row tuples | 10M | 1,011.189 ms | 6,148.378 ms | 6.080x | [0.213035, 4.862635] | [0.999103, 1.009067] | `NULL_UNDECIDABLE` |
+
+The exact and task-equivalent arms both fully materialize one ordered row
+product containing the index and ten values. Existing `DataFrame::itertuples`
+unit and golden tests cover its observable row values; this work changed only
+the benchmark/provenance path. The admitted JSON carries the same invocation,
+ELF, pandas artifact, and 25-round null-control contract on all four rows.
+
+The first 10M attempt was discarded before analysis because the Python
+generator used 10M rows while Rust silently fell back to 100k. The admitted
+invocation followed an exact `10M -> (10_000_000, 10)` routing fix and
+regression test. Its two independent 10M FP p50s were 13.47x and 56.08x their
+corresponding 1M p50s, which rules out the old 100k fallback. That spread, plus
+the broad FP null intervals, is why no 10M competitive claim is admitted.
+
+Retry predicate: do not quote either 10M ratio. Reopen 10M row materialization
+only after a same-invocation supervisor runs each timed arm in a fresh child
+process, records peak RSS and major faults, preserves same-worker ELF and
+pandas identities, and reduces the combined A/A required log effect to at
+most 0.20. Include both the exact pandas API and the independently selected
+task-equivalent incumbent arm again.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_df_itertuples_1m_10m_20260727.md` and
+`artifacts/bench/proud_lane_m_df_itertuples_1m_10m_20260727.json`
+(JSON SHA-256
+`dd1436e016ce09172f4c4a100deedb07cf3b7e266b62ea25e7efaa7b284212a0`).

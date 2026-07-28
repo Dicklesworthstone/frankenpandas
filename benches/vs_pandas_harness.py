@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
@@ -62,6 +63,7 @@ SIZE_CONFIGS = {
     "100k": {"rows": 100_000, "cols": 10},
     "1M": {"rows": 1_000_000, "cols": 10},
     "2M": {"rows": 2_000_000, "cols": 10},
+    "10M": {"rows": 10_000_000, "cols": 10},
 }
 
 PAIRED_ROUNDS = 25
@@ -96,6 +98,48 @@ def executable_identity(path: Path) -> dict[str, Any]:
         "sha256": digest.hexdigest(),
         "bytes": byte_count,
         "path": str(resolved),
+    }
+
+
+def pandas_artifact_identity() -> dict[str, Any]:
+    """Hash the installed pandas distribution that this process imports.
+
+    Hashing only ``sys.executable`` identifies the Python host, not the legacy
+    incumbent.  The distribution file list comes from the installed wheel's
+    metadata; folding each relative path, byte length, and file body produces
+    one deterministic identity for the actual pandas package loaded here.
+    """
+    distribution = importlib.metadata.distribution("pandas")
+    package_files = sorted(distribution.files or (), key=lambda item: str(item))
+    if not package_files:
+        raise RuntimeError("installed pandas distribution has no file manifest")
+
+    digest = hashlib.sha256()
+    byte_count = 0
+    file_count = 0
+    for package_file in package_files:
+        resolved = Path(distribution.locate_file(package_file))
+        if not resolved.is_file():
+            continue
+        relative = str(package_file).replace(os.sep, "/").encode("utf-8")
+        file_size = resolved.stat().st_size
+        digest.update(len(relative).to_bytes(8, "little"))
+        digest.update(relative)
+        digest.update(file_size.to_bytes(8, "little"))
+        with resolved.open("rb") as artifact_file:
+            while chunk := artifact_file.read(1024 * 1024):
+                digest.update(chunk)
+                byte_count += len(chunk)
+        file_count += 1
+
+    if file_count == 0:
+        raise RuntimeError("installed pandas distribution has no readable files")
+    return {
+        "sha256": digest.hexdigest(),
+        "bytes": byte_count,
+        "files": file_count,
+        "path": str(Path(pd.__file__).resolve()),
+        "scheme": "importlib-metadata-content-tree-v1",
     }
 
 
@@ -468,6 +512,18 @@ def bench_df_itertuples_pandas(df: pd.DataFrame) -> list[float]:
     # headline of the two.
     def op():
         return len(list(df.itertuples()))
+
+    return time_operation(op)
+
+
+def bench_df_row_tuples_fastest_pandas(df: pd.DataFrame) -> list[float]:
+    # Fairness control for the iterator/callback retry predicate.  A local
+    # four-idiom screen found to_records(...).tolist() faster than default
+    # itertuples(), itertuples(name=None), and to_numpy()+map(tuple).  It yields
+    # the same task-level product -- a fully materialized Python tuple per row,
+    # including the index -- without charging pandas for namedtuple machinery.
+    def op():
+        return len(df.to_records(index=True).tolist())
 
     return time_operation(op)
 
@@ -906,6 +962,7 @@ PANDAS_WORKLOADS = {
         "astype_str_f64": bench_astype_str_f64_pandas,
         "df_iterrows": bench_df_iterrows_pandas,
         "df_itertuples": bench_df_itertuples_pandas,
+        "df_row_tuples_fastest": bench_df_row_tuples_fastest_pandas,
         "df_apply_row": bench_df_apply_row_pandas,
     },
     "groupby": {
@@ -1064,7 +1121,7 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
         capture_output=True,
         check=False,
         text=True,
-        timeout=300,
+        timeout=1800 if size == "10M" else 300,
     )
 
     if result.returncode != 0:
@@ -1243,13 +1300,36 @@ def main():
                         help="Run specific category")
     parser.add_argument("--all", action="store_true", help="Run all categories")
     parser.add_argument("--sizes", default="10k,100k,1M",
-                        help="Comma-separated sizes (10k,100k,1M,2M)")
+                        help="Comma-separated sizes (10k,100k,1M,2M,10M)")
     parser.add_argument("--dtypes", default="float64",
                         help="Comma-separated dtypes")
     parser.add_argument("--workloads",
                         help="Comma-separated workload names within the selected category")
     parser.add_argument("--output", type=Path, help="Output JSON file")
+    parser.add_argument(
+        "--json-stdout",
+        action="store_true",
+        help="Emit one bench_result_json=<compact JSON> line for remote capture",
+    )
+    parser.add_argument(
+        "--dependency-probe",
+        action="store_true",
+        help="Exit 0 only when the pinned pandas incumbent is importable",
+    )
     args = parser.parse_args()
+
+    if args.dependency_probe:
+        if pd is None:
+            print("ERROR: pandas not installed", file=sys.stderr)
+            sys.exit(1)
+        if pd.__version__ != "2.2.3":
+            print(
+                f"ERROR: expected pandas 2.2.3, found {pd.__version__}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"pandas_dependency_probe=ready version={pd.__version__}")
+        return
 
     if not args.category and not args.all:
         parser.error("Specify --category or --all")
@@ -1257,6 +1337,22 @@ def main():
     if pd is None:
         print("ERROR: pandas not installed", file=sys.stderr)
         sys.exit(1)
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    invocation_id = (
+        "vs-pandas-"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}-"
+        f"pid{os.getpid()}"
+    )
+    pandas_artifact = pandas_artifact_identity()
+    print(
+        "pandas_artifact_sha256="
+        f"{pandas_artifact['sha256']} "
+        f"({pandas_artifact['bytes']} bytes, "
+        f"{pandas_artifact['files']} files) "
+        f"{pandas_artifact['path']}"
+    )
+    print(f"bench_invocation_id={invocation_id}")
 
     sizes = [s.strip() for s in args.sizes.split(",")]
     dtypes = [d.strip() for d in args.dtypes.split(",")]
@@ -1272,7 +1368,6 @@ def main():
         tmp_path = Path(tmp_dir)
 
         all_results = []
-        timestamp = datetime.now(timezone.utc).isoformat()
 
         print("=== vs-pandas Benchmark Harness ===")
         print(f"Timestamp: {timestamp}")
@@ -1287,11 +1382,14 @@ def main():
         for category in categories:
             print(f"\n[{category.upper()}] (weight: {CATEGORIES[category]})")
             results = run_category(category, sizes, dtypes, tmp_path, workload_filter)
+            for result in results:
+                result["invocation_id"] = invocation_id
             all_results.extend(results)
 
         output = {
             "schema_version": "v4",
             "timestamp": timestamp,
+            "invocation_id": invocation_id,
             "engine_identity": {
                 "frankenpandas": {
                     "version": "0.1.2",
@@ -1302,6 +1400,7 @@ def main():
                     "version": pd.__version__,
                     "role": "Oracle",
                     "executable": harness_identity,
+                    "artifact": pandas_artifact,
                 },
             },
             "parameters": {
@@ -1315,6 +1414,7 @@ def main():
                 "decidability_margin": DECIDABILITY_MARGIN,
                 "gate": "median_bootstrap_ci",
                 "cv_role": "provenance_only",
+                "shared_invocation_id": invocation_id,
             },
             "results": all_results,
             "summary": compute_summary(all_results),
@@ -1324,11 +1424,16 @@ def main():
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(output, indent=2))
             print(f"\nResults written to: {args.output}")
-        else:
+        elif not args.json_stdout:
             RESULTS_DIR.mkdir(parents=True, exist_ok=True)
             out_file = RESULTS_DIR / f"bench_{timestamp.replace(':', '-')}.json"
             out_file.write_text(json.dumps(output, indent=2))
             print(f"\nResults written to: {out_file}")
+        if args.json_stdout:
+            print(
+                "bench_result_json="
+                + json.dumps(output, separators=(",", ":"), sort_keys=True)
+            )
 
 
 def compute_summary(results: list[dict[str, Any]]) -> dict[str, Any]:

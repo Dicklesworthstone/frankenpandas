@@ -73,7 +73,7 @@ fn same_worker_python(target_dir: &Path, harness_script: &Path) -> (PathBuf, Pat
     ];
     let import_is_ready = Command::new(&python)
         .arg(harness_script)
-        .arg("--help")
+        .arg("--dependency-probe")
         .env("PYTHONNOUSERSITE", "1")
         .env("PYTHONPATH", &site_packages)
         .stdout(Stdio::null())
@@ -113,7 +113,7 @@ fn same_worker_python(target_dir: &Path, harness_script: &Path) -> (PathBuf, Pat
     );
     let import_status = Command::new(&python)
         .arg(harness_script)
-        .arg("--help")
+        .arg("--dependency-probe")
         .env("PYTHONNOUSERSITE", "1")
         .env("PYTHONPATH", &site_packages)
         .stdout(Stdio::null())
@@ -199,6 +199,7 @@ fn size_rows_cols(size: &str) -> (usize, usize) {
         "100k" => (100_000, 10),
         "1M" => (1_000_000, 10),
         "2M" => (2_000_000, 10),
+        "10M" => (10_000_000, 10),
         _ => (100_000, 10),
     }
 }
@@ -1127,8 +1128,10 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Paired
             // pandas: list(df.iterrows())
             let _ = df.iterrows();
         }),
-        ("dataframe_ops", "df_itertuples") => time_us(|| {
-            // pandas: list(df.itertuples())
+        ("dataframe_ops", "df_itertuples" | "df_row_tuples_fastest") => time_us(|| {
+            // pandas exact arm: list(df.itertuples()). The
+            // df_row_tuples_fastest fairness arm uses the fastest independently
+            // screened pandas route to a fully materialized tuple per row.
             let _ = df.itertuples();
         }),
         ("dataframe_ops", "df_mode") => time_us(|| {
@@ -2876,7 +2879,7 @@ fn main() {
 
 #[cfg(test)]
 mod harness_contract_tests {
-    use super::{ITERS, paired_time_us, self_identity};
+    use super::{ITERS, paired_time_us, self_identity, size_rows_cols};
 
     #[test]
     fn executable_identity_is_a_lowercase_sha256() {
@@ -2913,6 +2916,11 @@ mod harness_contract_tests {
                 .all(|ratio| ratio.is_finite() && *ratio > 0.0)
         );
         assert_ne!(samples.checksum, 0);
+    }
+
+    #[test]
+    fn ten_million_size_routes_to_ten_million_rust_rows() {
+        assert_eq!(size_rows_cols("10M"), (10_000_000, 10));
     }
 }
 
