@@ -623,12 +623,17 @@ def entry_rejects_surface(entry: LedgerEntry, surface_terms: list[str]) -> bool:
         return has_negative_verdict(entry.verdict_text)
 
     lines = [line.strip() for line in entry.body.splitlines() if line.strip()]
-    clauses = [
-        unit.strip()
-        for unit in re.split(r"[\n|,;]+", entry.body)
-        if unit.strip()
+    decision_units = [
+        clause.strip()
+        for line in lines
+        for sentence in re.split(
+            r"(?<=[.!?])\s+(?=[A-Z*`])",
+            line,
+        )
+        for clause in re.split(r"[|,;]+", sentence)
+        if clause.strip()
     ]
-    for unit in [*lines, *clauses]:
+    for unit in decision_units:
         if all(
             contains_surface_term(unit, term) for term in surface_terms
         ) and has_negative_verdict(unit):
@@ -1069,6 +1074,19 @@ def self_test() -> int:
     )
     if entry_rejects_surface(sibling_entry, ["join_outer"]):
         failed.append("sibling_surface_win: unrelated control was treated as rejected")
+
+    checks += 1
+    cross_sentence_entry = entry(
+        "allocator adoption",
+        (
+            "Neutral controls include str_value_counts +2.5% (not release proof). "
+            "Apparent regressions were rerun and rejected. Verdict: KEEP."
+        ),
+    )
+    if entry_rejects_surface(cross_sentence_entry, ["str_value_counts"]):
+        failed.append(
+            "cross_sentence_surface: later negative sentence contaminated neutral surface"
+        )
 
     checks += 1
     body_reject_entry = entry(
