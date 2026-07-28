@@ -915,14 +915,46 @@ def bench_join_inner_str_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: left.merge(right, on="key", how="inner"))
 
 
+def pandas_string_backend() -> str:
+    """Which pandas string backend the incumbent arm should use.
+
+    `object` is pandas 2.x's default and what this harness has always measured.
+    It is ALSO pandas' slow path: measured here at 1M on this exact fixture,
+    `string[pyarrow]` is 6.51x faster on sort_values, 3.21x on value_counts and
+    1.89x on groupby-sum. Reporting only the object arm compares FrankenPandas
+    against the incumbent's worst configuration -- the same class of error as
+    quoting `df.apply(..., axis=1)` when `df.sum(axis=1)` exists. pandas 3 makes
+    arrow-backed strings the default, so the object arm is a shrinking baseline.
+
+    Set `FP_HARNESS_PANDAS_STRING_BACKEND=arrow` to measure against pandas' best.
+    Run BOTH and report fp against the better one; keep object as a labelled
+    secondary row, never as the headline. Per br-frankenpandas-ltmk9.
+    """
+    backend = os.environ.get("FP_HARNESS_PANDAS_STRING_BACKEND", "object").strip().lower()
+    if backend not in {"object", "arrow"}:
+        raise ValueError(
+            f"FP_HARNESS_PANDAS_STRING_BACKEND must be 'object' or 'arrow', got {backend!r}"
+        )
+    return backend
+
+
+def _as_string_column(values: list[str]):
+    """Build the key/name column in the configured pandas string backend."""
+    if pandas_string_backend() == "arrow":
+        # Fails loudly rather than silently degrading to object: a silent
+        # fallback would report an object-arm number as an arrow-arm result.
+        return pd.array(values, dtype="string[pyarrow]")
+    return values
+
+
 def _build_str_frame(n: int) -> pd.DataFrame:
     # Mirrors fp-bench build_str_frame: key = ~1000-distinct group label,
     # name = unique ~15-byte id (sort key), val = float64.
     keys = [f"g{i % 1000:04d}" for i in range(n)]
     names = [f"item_{i:010d}" for i in range(n)]
     return pd.DataFrame({
-        "key": keys,
-        "name": names,
+        "key": _as_string_column(keys),
+        "name": _as_string_column(names),
         "val": np.arange(n, dtype=np.float64),
     })
 
@@ -1500,6 +1532,11 @@ def main():
                 "decidability_margin": DECIDABILITY_MARGIN,
                 "gate": "median_bootstrap_ci",
                 "cv_role": "provenance_only",
+                # Which pandas string backend the incumbent arm ran. `object` is
+                # pandas 2.x's default AND its slow path; `arrow` is what a modern
+                # pandas user gets and what pandas 3 defaults to. Recorded so a
+                # string-surface ratio can never be read as the wrong arm.
+                "pandas_string_backend": pandas_string_backend(),
                 "shared_invocation_id": invocation_id,
             },
             "results": all_results,
