@@ -82,9 +82,19 @@ LEDGER_SPECS = (
 )
 NEGATIVE_LEDGER = REPO / LEDGER_SPECS[0].relative_path
 
-REJECT_MARK = re.compile(
-    r"\bREJECT(?:ED|S)?\b|\bNOSHIP\b|\bNO-SHIP\b|"
-    r"\bSLOWER\b|\bLOSS(?:ES)?\b|\bREGRESSION(?:S)?\b|zero-gain|~0-gain",
+EXPLICIT_REJECT_MARK = re.compile(
+    r"\bREJECT(?:ED|S)?\b|\bREVERT(?:ED)?\b|\bNOSHIP\b|\bNO-SHIP\b|"
+    r"zero-gain|~0-gain",
+    re.IGNORECASE,
+)
+DIRECTION_MARK = re.compile(
+    r"\b(?P<negative>SLOWER|LOSS(?:ES)?|REGRESSION(?:S)?)\b|"
+    r"\b(?P<positive>WIN|FASTER|FIXED|KEEP|SHIPPED)\b",
+    re.IGNORECASE,
+)
+NEGATED_DIRECTION_MARK = re.compile(
+    r"\b(?:not\s+(?:a\s+)?|no(?:\s+[A-Za-z-]+){0,3}\s+|phantom\s+)"
+    r"(?:slower|loss(?:es)?|regression(?:s)?)\b",
     re.IGNORECASE,
 )
 KEEP_MARK = re.compile(r"\bKEEP\b|\bSHIPPED\b|\bWIN\b", re.IGNORECASE)
@@ -440,10 +450,30 @@ def incumbent_contract_errors(body: str) -> list[str]:
     return errors
 
 
+def has_negative_verdict(text: str) -> bool:
+    """Return the final decision, not every historical direction in a title.
+
+    Ledger headings routinely say ``LOSS -> WIN`` or ``WIN, not a loss``.
+    Treating the first negative word as the verdict makes the candidate
+    preflight block unrelated, already-resolved work. Explicit reject/revert
+    markers still dominate even when a heading also says the baseline wins.
+    """
+    verdict_text = ZERO_VERDICT_COUNT.sub("", text)
+    verdict_text = NEGATED_DIRECTION_MARK.sub("", verdict_text)
+    if EXPLICIT_REJECT_MARK.search(verdict_text):
+        return True
+    if re.match(r"\s*(?:fixed|resolved|closed)\b", verdict_text, re.IGNORECASE):
+        return False
+    final_direction: str | None = None
+    for match in DIRECTION_MARK.finditer(verdict_text):
+        final_direction = match.lastgroup
+    return final_direction == "negative"
+
+
 def verdict_flags(entry: LedgerEntry) -> tuple[bool, bool]:
     verdict_text = ZERO_VERDICT_COUNT.sub("", entry.verdict_text)
     positive = bool(KEEP_MARK.search(verdict_text) or marker_values(entry.body, CLASS_MARKER))
-    negative = bool(REJECT_MARK.search(verdict_text))
+    negative = has_negative_verdict(verdict_text)
     return positive, negative
 
 
@@ -560,7 +590,7 @@ def contains_surface_term(blob: str, term: str) -> bool:
     """Match a surface token without treating `str` as part of `instrumented`."""
     return bool(
         re.search(
-            rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])",
+            rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])",
             blob,
             re.IGNORECASE,
         )
@@ -581,6 +611,31 @@ def retry_predicate(body: str) -> str:
     return "NOT_RECORDED"
 
 
+def entry_rejects_surface(entry: LedgerEntry, surface_terms: list[str]) -> bool:
+    """Require the surface and negative decision to occur in one decision unit.
+
+    A negative entry can mention many sibling controls in its body. Those
+    siblings are not rejected surfaces merely because they appear somewhere
+    in the same section. Prefer the title/verdict, then bounded body lines and
+    paragraphs that carry both the requested surface and a negative decision.
+    """
+    if all(contains_surface_term(entry.title, term) for term in surface_terms):
+        return has_negative_verdict(entry.verdict_text)
+
+    lines = [line.strip() for line in entry.body.splitlines() if line.strip()]
+    clauses = [
+        unit.strip()
+        for unit in re.split(r"[\n|,;]+", entry.body)
+        if unit.strip()
+    ]
+    for unit in [*lines, *clauses]:
+        if all(
+            contains_surface_term(unit, term) for term in surface_terms
+        ) and has_negative_verdict(unit):
+            return True
+    return False
+
+
 def check_candidate(candidate: str, surface: str | None) -> int:
     if not NEGATIVE_LEDGER.is_file():
         print(f"preflight: ledger not found at {NEGATIVE_LEDGER}", file=sys.stderr)
@@ -597,11 +652,7 @@ def check_candidate(candidate: str, surface: str | None) -> int:
 
     hits: list[tuple[int, str, str]] = []
     for entry in ledger_entries():
-        _, negative = verdict_flags(entry)
-        if not negative:
-            continue
-        blob = f"{entry.title}\n{entry.body}"
-        if all(contains_surface_term(blob, term) for term in surface_terms):
+        if entry_rejects_surface(entry, surface_terms):
             hits.append((entry.line_no, entry.title, retry_predicate(entry.body)))
 
     if hits:
@@ -977,6 +1028,55 @@ def self_test() -> int:
         "summary_zero_losses_is_not_a_reject",
         entry("Integrity summary: zero losses", "No performance row."),
     )
+
+    def expect_negative_direction(name: str, text: str, expected: bool) -> None:
+        nonlocal checks
+        checks += 1
+        actual = has_negative_verdict(text)
+        if actual != expected:
+            failed.append(f"{name}: expected negative={expected}, got {actual}")
+
+    expect_negative_direction(
+        "resolved_not_a_loss",
+        "explode is a WIN (43.8x), not a loss",
+        False,
+    )
+    expect_negative_direction(
+        "resolved_loss_to_win",
+        "candidate 0.62x LOSS -> 1.49x WIN",
+        False,
+    )
+    expect_negative_direction(
+        "fixed_loss_heading",
+        "Fixed: concat Int64 construction (24x loss)",
+        False,
+    )
+    expect_negative_direction(
+        "remaining_loss",
+        "candidate remains a 0.62x LOSS",
+        True,
+    )
+    expect_negative_direction(
+        "explicit_reject_dominates_baseline_win",
+        "candidate REJECT; baseline remains a WIN",
+        True,
+    )
+
+    checks += 1
+    sibling_entry = entry(
+        "df.abs was the real loss",
+        "| join_outer 0.71x | 2.29x WIN after clean remeasurement |",
+    )
+    if entry_rejects_surface(sibling_entry, ["join_outer"]):
+        failed.append("sibling_surface_win: unrelated control was treated as rejected")
+
+    checks += 1
+    body_reject_entry = entry(
+        "frontier survey",
+        "The ewm_mean candidate is SLOWER and remains below parity.",
+    )
+    if not entry_rejects_surface(body_reject_entry, ["ewm_mean"]):
+        failed.append("body_surface_reject: decision-local body reject was missed")
 
     negative_spec = LEDGER_SPECS[0]
     resurrection_spec = LEDGER_SPECS[1]
