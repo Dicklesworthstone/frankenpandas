@@ -516,6 +516,27 @@ def bench_df_to_dict_index_materialize_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(op)
 
 
+def bench_df_pivot_pandas(df: pd.DataFrame) -> list[float]:
+    # Counterpart to fp-bench dataframe_ops/df_pivot, whose comment specifies
+    # df.pivot(index="r", columns="c", values="v") with UNIQUE (r, c) pairs
+    # (pivot raises on duplicates): r = i // 10, c = i % 10.
+    n = len(df)
+    rows = np.arange(n)
+    f = pd.DataFrame({"r": rows // 10, "c": rows % 10, "v": df["col_0"].to_numpy()})
+    return time_operation(lambda: f.pivot(index="r", columns="c", values="v"))
+
+
+def bench_df_pivot_table_pandas(df: pd.DataFrame) -> list[float]:
+    # Counterpart to fp-bench dataframe_ops/df_pivot_table: r = i % 100 (100
+    # rows), c = i % 10 (10 cols), aggfunc="mean" -> a 100x10 result.
+    n = len(df)
+    rows = np.arange(n)
+    f = pd.DataFrame({"r": rows % 100, "c": rows % 10, "v": df["col_0"].to_numpy()})
+    return time_operation(
+        lambda: f.pivot_table(values="v", index="r", columns="c", aggfunc="mean")
+    )
+
+
 def bench_df_iterrows_pandas(df: pd.DataFrame) -> list[float]:
     # Counterpart to fp-bench dataframe_ops/df_iterrows, whose comment specifies
     # `list(df.iterrows())`. Class-1 structural shape: pandas constructs a Series
@@ -1094,6 +1115,8 @@ PANDAS_WORKLOADS = {
         "df_itertuples": bench_df_itertuples_pandas,
         "df_row_tuples_fastest": bench_df_row_tuples_fastest_pandas,
         "df_apply_row": bench_df_apply_row_pandas,
+        "df_pivot": bench_df_pivot_pandas,
+        "df_pivot_table": bench_df_pivot_table_pandas,
         "df_explode": bench_df_explode_pandas,
         "df_explode_string_python": bench_df_explode_string_python_pandas,
         "df_explode_string_arrow": bench_df_explode_string_arrow_pandas,
