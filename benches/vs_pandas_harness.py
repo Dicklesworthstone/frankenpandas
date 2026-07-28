@@ -43,6 +43,11 @@ try:
 except ImportError:
     pd = None
 
+try:
+    import pyarrow as pa
+except ImportError:
+    pa = None
+
 PROJECT_ROOT = Path(__file__).parent.parent
 RESULTS_DIR = PROJECT_ROOT / "artifacts" / "bench"
 
@@ -101,18 +106,24 @@ def executable_identity(path: Path) -> dict[str, Any]:
     }
 
 
-def pandas_artifact_identity() -> dict[str, Any]:
-    """Hash the installed pandas distribution that this process imports.
+def distribution_artifact_identity(
+    distribution_name: str,
+    module_file: str,
+) -> dict[str, Any]:
+    """Hash one installed distribution that participates in an engine arm.
 
     Hashing only ``sys.executable`` identifies the Python host, not the legacy
-    incumbent.  The distribution file list comes from the installed wheel's
-    metadata; folding each relative path, byte length, and file body produces
-    one deterministic identity for the actual pandas package loaded here.
+    incumbent or its optional storage backend. The distribution file list
+    comes from the installed wheel's metadata; folding each relative path,
+    byte length, and file body produces one deterministic identity for the
+    actual package loaded here.
     """
-    distribution = importlib.metadata.distribution("pandas")
+    distribution = importlib.metadata.distribution(distribution_name)
     package_files = sorted(distribution.files or (), key=lambda item: str(item))
     if not package_files:
-        raise RuntimeError("installed pandas distribution has no file manifest")
+        raise RuntimeError(
+            f"installed {distribution_name} distribution has no file manifest"
+        )
 
     digest = hashlib.sha256()
     byte_count = 0
@@ -133,14 +144,26 @@ def pandas_artifact_identity() -> dict[str, Any]:
         file_count += 1
 
     if file_count == 0:
-        raise RuntimeError("installed pandas distribution has no readable files")
+        raise RuntimeError(
+            f"installed {distribution_name} distribution has no readable files"
+        )
     return {
         "sha256": digest.hexdigest(),
         "bytes": byte_count,
         "files": file_count,
-        "path": str(Path(pd.__file__).resolve()),
+        "path": str(Path(module_file).resolve()),
         "scheme": "importlib-metadata-content-tree-v1",
     }
+
+
+def pandas_artifact_identity() -> dict[str, Any]:
+    """Hash the installed pandas distribution imported by this process."""
+    return distribution_artifact_identity("pandas", pd.__file__)
+
+
+def pyarrow_artifact_identity() -> dict[str, Any]:
+    """Hash the optional Arrow backend used by string[pyarrow] arms."""
+    return distribution_artifact_identity("pyarrow", pa.__file__)
 
 
 def bootstrap_median_ci(values: list[float]) -> tuple[float, float]:
@@ -537,6 +560,29 @@ def bench_df_apply_row_pandas(df: pd.DataFrame) -> list[float]:
         return len(df.apply(lambda row: row.sum(), axis=1))
 
     return time_operation(op)
+
+
+def _bench_df_explode_pandas(
+    df: pd.DataFrame,
+    storage_dtype: object,
+) -> PairedSamples:
+    """Split three-part strings and explode, with setup outside timing."""
+    n = len(df)
+    values = [f"a{i % 97},b{i % 89},c{i % 83}" for i in range(n)]
+    series = pd.Series(values, dtype=storage_dtype)
+    return time_operation(lambda: series.str.split(",").explode())
+
+
+def bench_df_explode_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_df_explode_pandas(df, object)
+
+
+def bench_df_explode_string_python_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_df_explode_pandas(df, "string[python]")
+
+
+def bench_df_explode_string_arrow_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_df_explode_pandas(df, "string[pyarrow]")
 
 
 def bench_astype_str_f64_pandas(df: pd.DataFrame) -> list[float]:
@@ -964,6 +1010,9 @@ PANDAS_WORKLOADS = {
         "df_itertuples": bench_df_itertuples_pandas,
         "df_row_tuples_fastest": bench_df_row_tuples_fastest_pandas,
         "df_apply_row": bench_df_apply_row_pandas,
+        "df_explode": bench_df_explode_pandas,
+        "df_explode_string_python": bench_df_explode_string_python_pandas,
+        "df_explode_string_arrow": bench_df_explode_string_arrow_pandas,
     },
     "groupby": {
         "groupby_sum_int64": bench_groupby_sum_pandas,
@@ -1288,11 +1337,18 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
 
 def main():
     harness_identity = executable_identity(Path(sys.executable))
+    harness_source_identity = executable_identity(Path(__file__))
     print(
         "bench_harness_elf_sha256="
         f"{harness_identity['sha256']} "
         f"({harness_identity['bytes']} bytes) "
         f"{harness_identity['path']}"
+    )
+    print(
+        "bench_harness_source_sha256="
+        f"{harness_source_identity['sha256']} "
+        f"({harness_source_identity['bytes']} bytes) "
+        f"{harness_source_identity['path']}"
     )
 
     parser = argparse.ArgumentParser(description="vs-pandas head-to-head timing harness")
@@ -1328,7 +1384,19 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
-        print(f"pandas_dependency_probe=ready version={pd.__version__}")
+        if pa is None:
+            print("ERROR: pyarrow not installed", file=sys.stderr)
+            sys.exit(1)
+        if pa.__version__ != "24.0.0":
+            print(
+                f"ERROR: expected pyarrow 24.0.0, found {pa.__version__}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(
+            "pandas_dependency_probe=ready "
+            f"version={pd.__version__} pyarrow_version={pa.__version__}"
+        )
         return
 
     if not args.category and not args.all:
@@ -1336,6 +1404,9 @@ def main():
 
     if pd is None:
         print("ERROR: pandas not installed", file=sys.stderr)
+        sys.exit(1)
+    if pa is None:
+        print("ERROR: pyarrow not installed", file=sys.stderr)
         sys.exit(1)
 
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -1345,12 +1416,20 @@ def main():
         f"pid{os.getpid()}"
     )
     pandas_artifact = pandas_artifact_identity()
+    pyarrow_artifact = pyarrow_artifact_identity()
     print(
         "pandas_artifact_sha256="
         f"{pandas_artifact['sha256']} "
         f"({pandas_artifact['bytes']} bytes, "
         f"{pandas_artifact['files']} files) "
         f"{pandas_artifact['path']}"
+    )
+    print(
+        "pyarrow_artifact_sha256="
+        f"{pyarrow_artifact['sha256']} "
+        f"({pyarrow_artifact['bytes']} bytes, "
+        f"{pyarrow_artifact['files']} files) "
+        f"{pyarrow_artifact['path']}"
     )
     print(f"bench_invocation_id={invocation_id}")
 
@@ -1401,8 +1480,15 @@ def main():
                     "role": "Oracle",
                     "executable": harness_identity,
                     "artifact": pandas_artifact,
+                    "optional_backends": {
+                        "pyarrow": {
+                            "version": pa.__version__,
+                            "artifact": pyarrow_artifact,
+                        },
+                    },
                 },
             },
+            "harness_source": harness_source_identity,
             "parameters": {
                 "sizes": sizes,
                 "dtypes": dtypes,

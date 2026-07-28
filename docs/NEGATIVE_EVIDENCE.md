@@ -20244,3 +20244,81 @@ Full evidence:
 `artifacts/bench/proud_lane_m_merge_1m_10m_20260727.json`
 (JSON SHA-256
 `cac48c70982fa9c16a6a04e7645abd1753e8a7ef3a82dfaf1325a665385243d3`).
+
+### 2026-07-27 ProudChapel — split-and-explode clears the fastest pandas backend at 1M/10M
+
+Lane M closed the old unadmitted `df_explode` coverage gap with a live pandas
+storage-backend screen and a large-N follow-up. Both engines materialized the
+same three ordered values per input row and repeated source index. Setup was
+outside timing. At 1M, pandas `string[python]` was faster than both its
+`object` and `string[pyarrow]` alternatives, so only that strongest incumbent
+advanced to 10M.
+
+**Campaign result class:** `incumbent-win`.
+
+All four measured rows are admitted. The conservative headline is the
+fastest-incumbent comparison: 9.656x at 1M and 9.927x at 10M.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=1004f1a94d113ce7491d598b96948c19bcfeb7a54d6b3c050456f2e37b4d60d6
+(70293280 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`;
+the separately self-reported 10M ELF was
+`d8ed875bd0d9b1e057bb81dc09fc532d1a9cd91efefd218ce5b9f5952c0ed59d`
+(70,293,304 bytes) at the same absolute path. Both invocations reported
+harness-source SHA-256
+`b58aabad2ada84132e40f8f504f9f7cca21a9482dcaae736a9b9017f07c3dd6a`.
+
+**Legacy incumbent arm (same invocation):**
+`name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260728T042541.777759Z-pid1487265
+measured_ratio=9.656x`
+at 1M. The 10M row used the same pandas artifact and
+`invocation_id=vs-pandas-20260728T044019.007957Z-pid1509753`, measuring
+9.927x. The screened Arrow arm used pyarrow 24.0.0 content-tree SHA-256
+`2e701e78b2e69a481b6e901b584db29c4151221f59568dcb7cde7f036bca5f17`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. On the fastest-incumbent arm, 1M FP median CI=[0.955614, 0.999670] and
+pandas median CI=[0.953308, 1.035103]; 10M FP median
+CI=[0.930059, 1.123736] and pandas median CI=[0.876962, 1.162040].
+
+**Median-CI decision:** at 1M the numeric median effect=2.26762913 cleared
+required threshold=0.09563501; at 10M effect=2.29522199 cleared required
+threshold=0.30035482. The object and Arrow 1M effects also cleared their
+respective numeric requirements.
+
+**CV role:** provenance only; CV had no vote.
+
+| pandas storage | size | FP p50 | pandas p50 | ratio | FP A/A 95% median CI | pandas A/A 95% median CI | effect / required | verdict |
+|---|---:|---:|---:|---:|---|---|---:|---|
+| `object` | 1M | 134.263 ms | 1,329.562 ms | **9.903x** | [0.963659, 1.089874] | [0.919331, 1.081146] | 2.29280112 / 0.17212484 | **FASTER** |
+| `string[python]` | 1M | 129.557 ms | 1,251.063 ms | **9.656x** | [0.955614, 0.999670] | [0.953308, 1.035103] | 2.26762913 / 0.09563501 | **FASTER** |
+| `string[pyarrow]` | 1M | 134.662 ms | 1,316.825 ms | **9.779x** | [0.929549, 1.058178] | [0.900276, 0.980604] | 2.28020920 / 0.21010809 | **FASTER** |
+| `string[python]` | 10M | 1,600.738 ms | 15,889.945 ms | **9.927x** | [0.930059, 1.123736] | [0.876962, 1.162040] | 2.29522199 / 0.30035482 | **FASTER** |
+
+Against the fastest pandas backend, the ratio grows 2.8% from 1M to 10M and
+the absolute median-time advantage grows from 1.122 seconds to 14.289
+seconds. The 10M FP CV is 60.74%, but its median effect remains 7.6x the
+required log-effect threshold. This admits a median claim, not a tail-latency
+claim.
+
+**Concrete retry predicates:** the median rows stand until the explode
+implementation, timed boundary, harness source, pandas/pyarrow artifact,
+worker ISA, or allocator changes. Re-screen all pandas storage backends after
+a pandas or pyarrow version change and carry only the fastest semantically
+identical arm to 10M. Retry the 10M row only to make a p95/p99 claim, using
+fresh child processes plus peak RSS and major-fault counters. Do not propose
+another fp-side explode lever without a current profile naming a frame above
+5% self-time and a computed Amdahl ceiling above 5%; the prior contiguous-Utf8
+and typed-index levers remain closed.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_explode_1m_10m_20260727.md`,
+`artifacts/bench/proud_lane_m_explode_backends_1m_20260727.json` (SHA-256
+`3ebd597232ddfb653b8898f263d4500d96ac9e57a256dad6c3135d13fb3ba735`),
+and
+`artifacts/bench/proud_lane_m_explode_string_python_10m_20260727.json`
+(SHA-256
+`edc3865261bfb684711f5db52cf8efc2ec421ae01e98c870821cfa8aed3c190f`).

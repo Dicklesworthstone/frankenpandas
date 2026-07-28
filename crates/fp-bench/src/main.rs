@@ -70,6 +70,7 @@ fn same_worker_python(target_dir: &Path, harness_script: &Path) -> (PathBuf, Pat
     let pinned_packages = [
         ["numpy", "2.4.3"].join("=="),
         ["pandas", "2.2.3"].join("=="),
+        ["pyarrow", "24.0.0"].join("=="),
     ];
     let import_is_ready = Command::new(&python)
         .arg(harness_script)
@@ -1069,7 +1070,10 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Paired
             // pandas: df.melt()
             let _ = df.melt(&[], &[], None, None).expect("melt");
         }),
-        ("dataframe_ops", "df_explode") => {
+        (
+            "dataframe_ops",
+            "df_explode" | "df_explode_string_python" | "df_explode_string_arrow",
+        ) => {
             // Series of comma-separated strings "aN,bN,cN" (3 parts each).
             // pandas: s.str.split(",").explode().
             let mut bytes: Vec<u8> = Vec::new();
