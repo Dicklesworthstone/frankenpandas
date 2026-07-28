@@ -20109,3 +20109,71 @@ Full evidence:
 `artifacts/bench/proud_lane_m_df_itertuples_1m_10m_20260727.json`
 (JSON SHA-256
 `dd1436e016ce09172f4c4a100deedb07cf3b7e266b62ea25e7efaa7b284212a0`).
+
+### 2026-07-27 ProudChapel — large-N rolling/expanding resurrection: 7/8 `incumbent-win`, EWM@10M `NULL_UNDECIDABLE`
+
+Lane M re-adjudicated the shipping rolling family at 1M and 10M under the
+schema-v4 contract. This was measurement-only incumbent evidence, not an
+fp-before/fp-after lever or maintenance self-speedup. The seven decidable rows
+have a **1.728x geomean** against the live pandas 2.2.3 incumbent.
+
+**Campaign result class:** `incumbent-win`.
+
+Seven rows are admitted under that class; `ewm_mean@10M` remains
+`NULL_UNDECIDABLE`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=dfe3fd9cb3badf5e3889d33d9c587c68570798869fe71d0bcbf40e4b6877c34f
+(70,209,304 bytes)
+/data/projects/frankenpandas/.rch-target-ovh-a-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):**
+`name=pandas version=2.2.3
+artifact_sha256=fb69f90acac18b871bb69f5eab56bea198b17692c5045de29eed608132a959c9
+invocation_id=vs-pandas-20260728T034723.542175Z-pid2087469
+measured_ratio=1.728x`
+
+**A/A null control (same invocation):** every row ran 25 alternating pairs per
+engine. The narrowest/widest FP bootstrap-median 95% CIs were
+[0.999936, 1.000401] and [0.996737, 1.002322]; pandas ranged from
+[0.997150, 1.004560] to [0.993457, 1.030774]. Exact per-row intervals are in
+the table and raw artifact.
+
+**Median-CI decision:** the smallest admitted median effect=0.17706398 cleared
+its required threshold=0.03238203; all seven admitted rows cleared twice their
+combined A/A log-CI half-width. `ewm_mean@10M` stayed inside the threshold:
+median effect=0.00472877 versus required threshold=0.02484177, so its numeric
+1.005x ratio is not a claim.
+
+**CV role:** provenance only; CV had no vote.
+
+| workload | size | FP p50 | pandas p50 | ratio | FP A/A 95% median CI | pandas A/A 95% median CI | claim / required log effect | verdict |
+|---|---:|---:|---:|---:|---|---|---:|---|
+| `rolling_mean_w10` | 1M | 6.641 ms | 10.791 ms | **1.625x** | [0.999367, 1.001059] | [0.993865, 1.005599] | 0.48549084 / 0.01230734 | **FASTER** |
+| `rolling_mean_w10` | 10M | 67.482 ms | 111.184 ms | **1.648x** | [0.999936, 1.000401] | [0.988181, 1.007534] | 0.49932384 / 0.02377846 | **FASTER** |
+| `rolling_std_w50` | 1M | 13.223 ms | 18.097 ms | **1.369x** | [0.997875, 1.002812] | [0.993457, 1.030774] | 0.31377669 / 0.06062042 | **FASTER** |
+| `rolling_std_w50` | 10M | 132.314 ms | 176.701 ms | **1.335x** | [0.999622, 1.000371] | [0.987496, 1.007966] | 0.28927991 / 0.02516584 | **FASTER** |
+| `expanding_sum` | 1M | 3.036 ms | 9.422 ms | **3.103x** | [0.996737, 1.002322] | [0.990040, 1.009378] | 1.13244814 / 0.02001893 | **FASTER** |
+| `expanding_sum` | 10M | 30.731 ms | 77.891 ms | **2.535x** | [0.998532, 1.002498] | [0.997150, 1.004560] | 0.93002714 / 0.00909850 | **FASTER** |
+| `ewm_mean` | 1M | 6.657 ms | 7.947 ms | **1.194x** | [0.999943, 1.002920] | [0.983939, 1.015565] | 0.17706398 / 0.03238203 | **FASTER** |
+| `ewm_mean` | 10M | 66.811 ms | 67.128 ms | 1.005x | [0.998581, 1.000726] | [0.987656, 1.003537] | 0.00472877 / 0.02484177 | `NULL_UNDECIDABLE` |
+
+Rolling mean/std remain stable from 1M to 10M. Expanding sum remains the
+largest win but narrows with N, while EWM converges to parity. This is valid
+large-N incumbent coverage, but unlike GroupBy it is not evidence of a
+gap-growing interpreted-overhead mechanism.
+
+**Concrete retry predicates:** the seven admitted rows stand until their
+kernel, benchmark boundary, pandas artifact, or worker ISA changes; any
+replacement claim must repeat the live-incumbent/same-invocation
+ELF/A/A/median-CI contract. Do not quote `ewm_mean@10M`. Reopen that row only
+if fresh-child/counter isolation reduces its required log effect to <=0.0040
+with the same identities, or a current profile attributes >5% self-time to a
+named EWM frame and a counted mechanism can remove >=2% of whole-workload
+cycles. The rejected branch/loop-shape micro-optimization remains closed.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_rolling_expanding_1m_10m_20260727.md` and
+`artifacts/bench/proud_lane_m_rolling_expanding_1m_10m_20260727.json`
+(JSON SHA-256
+`391365d0a53224479a70dcb8dfa687ff447ef2bae3219dd0aece19060f9fb0be`).
