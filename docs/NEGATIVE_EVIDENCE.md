@@ -20927,3 +20927,76 @@ Weaker-incumbent diagnostic:
 `artifacts/bench/proud_lane_m_expanding_apply_stateful_1m_10m_20260728.json`
 (SHA-256
 `f5181b63d20158755ef891d45ed01020c3ba6eaac131b8218901d5bff790b156`).
+
+### 2026-07-28 ProudChapel — literal `str.contains` Arrow-incumbent REJECT at 1M/10M; 0.749x geomean
+
+Lane M screened the pandas object, `string[python]`, and
+`string[pyarrow]` backends on the exact `item_{i:010d}` fixture before
+admitting an incumbent. At 1M their medians were 177.904 ms, 156.607 ms,
+and 41.948 ms, respectively. All three output arrays were exactly equal with
+468,559 true elements. Only the fastest Arrow arm advanced.
+
+The canonical gate compared literal, case-sensitive substring search:
+pandas `Series.str.contains("5", regex=False)` versus FrankenPandas
+`Series::str().contains("5")`. Both arms used the same all-valid ordered
+names, and population stayed outside timing. The strict-remote focused
+`str_contains` filter passed 13/13 tests before measurement.
+
+| size | FP p50 | pandas Arrow p50 | FP/pandas ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 50.187 ms | 42.342 ms | **0.844x** | 0.16997788 / 0.16244565 | SLOWER |
+| 10M | 630.038 ms | 418.686 ms | **0.665x** | 0.40865758 / 0.21203502 | SLOWER |
+
+The two-row geomean is 0.749x (pandas is 1.335x faster). The FP/pandas
+ratio worsens 21.2% with scale, and the absolute median deficit grows from
+7.845 ms to 211.351 ms.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T043315.046949Z-pid3676335
+measured_ratio=0.665x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=ad25a86447134d5fac336cdb0d9af3def77adb2bd921e3854aaaa9b0b58256b1
+(70379784 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The worker's direct post-run SHA-256 matched the in-process self-report. The
+worker/local Rust source SHA-256 matched
+`5ba72d89a3bf5888b635cc6c0937213bd03ae536536b6467a3058656548f1484`;
+the worker/local/in-process Python harness source SHA-256 matched
+`a3968444b266656cf8cdbbf142b98445e486f39634251e6ff6131c7b973b19c1`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.921988,1.076340]/[0.937536,1.006525] at 1M and
+[0.985473,1.111841]/[0.955177,1.028445] at 10M.
+
+**Median-CI decision:** the absolute median log effects
+0.16997788 and 0.40865758 cleared the required thresholds
+0.16244565 and 0.21203502 at 1M and 10M. Both losses are decidable.
+
+**CV role:** provenance only; CV had no vote, including FP/pandas CV of
+30.81%/16.37% at 1M and 23.79%/15.43% at 10M.
+
+**Decision: REJECT** the competitive claim; retain the Arrow incumbent arm
+as measurement coverage. This is an honest strongest-incumbent loss, not an
+object-dtype strawman or a self-speedup.
+
+**Concrete retry predicates:** re-open only after (1) a profile of this exact
+10M workload names a non-zero-self FP frame, records its self-time and Amdahl
+ceiling, and supports a production lever capable of removing at least 33.6%
+of FP median time (the parity floor); (2) the FP literal-contains
+implementation, contiguous-Utf8 representation, allocator, compiler, worker
+ISA, or fixture changes; or (3) the pandas or pyarrow artifact changes and a
+fresh same-worker backend screen selects the new fastest semantically
+identical arm. Do not retry with pandas object or `string[python]`; both
+weaker arms were already screened out. Any retry still requires one
+self-identified ELF, the fastest live pandas arm in the same invocation,
+alternating A/A controls, and median-CI admission.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_str_contains_arrow_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_str_contains_arrow_1m_10m_20260728.json`
+(SHA-256
+`78650f5cca479b7352b804c14f4263a823923dde2796ea2558868eabfaea5da5`).

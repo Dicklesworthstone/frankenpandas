@@ -2387,10 +2387,14 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Paired
         // String-column ops (the rest of the matrix is numeric-only). pandas:
         // f.sort_values("name") / f["key"].value_counts() / f.groupby("key")
         // ["val"].sum(). The numeric `df` built above is unused here.
-        ("strings", "str_len" | "str_upper" | "str_contains" | "str_startswith") => {
+        (
+            "strings",
+            "str_len" | "str_upper" | "str_contains" | "str_contains_arrow" | "str_startswith",
+        ) => {
             let frame = build_str_frame(rows);
             let series = frame.get_column("name");
-            match workload {
+            let base_workload = workload.strip_suffix("_arrow").unwrap_or(workload);
+            match base_workload {
                 "str_len" => time_us(|| {
                     let _ = series.str().len().expect("str len");
                 }),

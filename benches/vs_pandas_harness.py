@@ -1152,6 +1152,19 @@ def bench_str_groupby_sum_arrow_pandas(df: pd.DataFrame) -> PairedSamples:
     return _bench_str_groupby_sum_pandas(df, "arrow")
 
 
+def bench_str_contains_arrow_pandas(df: pd.DataFrame) -> PairedSamples:
+    """Run literal contains on the fastest screened pandas string backend.
+
+    A same-worker 1M screen compared object, ``string[python]``, and
+    ``string[pyarrow]`` storage. Arrow was fastest, and all three produced the
+    same boolean output. ``regex=False`` matches FrankenPandas' literal
+    substring contract without charging pandas for an unnecessary regex.
+    """
+    names = [f"item_{i:010d}" for i in range(len(df))]
+    series = pd.Series(_as_string_column(names, "arrow"))
+    return time_operation(lambda: series.str.contains("5", regex=False))
+
+
 def bench_df_dot_pandas(df: pd.DataFrame) -> list[float]:
     import math
     dim = math.isqrt(len(df))
@@ -1294,6 +1307,7 @@ PANDAS_WORKLOADS = {
         "str_groupby_sum": bench_str_groupby_sum_pandas,
         "str_groupby_sum_object": bench_str_groupby_sum_object_pandas,
         "str_groupby_sum_arrow": bench_str_groupby_sum_arrow_pandas,
+        "str_contains_arrow": bench_str_contains_arrow_pandas,
     },
     "linalg": {
         "df_dot": bench_df_dot_pandas,
