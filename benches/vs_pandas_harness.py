@@ -37,7 +37,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from functools import partial
+from functools import lru_cache, partial
 from io import StringIO
 from json import JSONDecodeError
 from pathlib import Path
@@ -87,8 +87,12 @@ BOOTSTRAP_RESAMPLES = 10_000
 NULL_CI_CONFIDENCE = 0.95
 DECIDABILITY_MARGIN = 2.0
 WARMUP_ITERATIONS = 3
-CPU_SAMPLE_INTERVAL_SECONDS = 0.300
+# One second distinguishes sustained host tenancy from ordinary sub-100 ms
+# scheduler/kernel bursts on the 128-thread measurement host. The per-CPU 20%
+# ceiling still rejects a competing build, benchmark, or repository scan.
+CPU_SAMPLE_INTERVAL_SECONDS = 1.0
 MAX_HOST_WIDE_BUSY_FRACTION = 0.20
+SETUP_QUIESCENCE_SETTLE_SECONDS = 1.0
 TAKE_BATCH = 256
 TRANSPOSE_BATCH = 8192
 
@@ -553,6 +557,7 @@ def probe_operation_threads(func) -> dict[str, int]:
     }
 
 
+@lru_cache(maxsize=None)
 def executable_identity(path: Path) -> dict[str, Any]:
     """Hash the executable that actually hosts this engine."""
     resolved = path.resolve(strict=True)
@@ -1923,6 +1928,11 @@ def run_pandas_workload(
     """Run a single pandas workload and return timing result."""
     config = SIZE_CONFIGS[size]
     df = generate_test_data(config["rows"], config["cols"], dtype)
+    # Population is outside the timed arm but can leave short-lived allocator
+    # or kernel page work on CPUs outside this process's affinity. Let that
+    # setup-only activity drain before the mandatory immediate pre-arm sample;
+    # the sample still fails closed if any work remains.
+    time.sleep(SETUP_QUIESCENCE_SETTLE_SECONDS)
 
     bench_func = PANDAS_WORKLOADS[category][workload]
     if category == "io":
@@ -2444,7 +2454,6 @@ def main():
         )
         sys.exit(2)
     exclusivity_gate = HostWideExclusivityGate(online_cpu_ids)
-    exclusivity_gate.require_quiet("invocation_preflight")
 
     timestamp = datetime.now(timezone.utc).isoformat()
     invocation_id = (
@@ -2473,6 +2482,11 @@ def main():
         "benchmark_host_fingerprint_json="
         + json.dumps(fingerprint, separators=(",", ":"), sort_keys=True)
     )
+    # Hashing the 228 MiB pandas + pyarrow installation can wake filesystem
+    # kernel workers outside this process's affinity mask. Keep that provenance
+    # work outside the admitted region: invocation preflight is the final
+    # substantive action before fixture setup and the first per-arm bracket.
+    exclusivity_gate.require_quiet("invocation_preflight")
 
     sizes = [s.strip() for s in args.sizes.split(",")]
     dtypes = [d.strip() for d in args.dtypes.split(",")]
@@ -2559,6 +2573,9 @@ def main():
                     "maximum_busy_fraction": MAX_HOST_WIDE_BUSY_FRACTION,
                     "sample_interval_ms": round(
                         CPU_SAMPLE_INTERVAL_SECONDS * 1000
+                    ),
+                    "post_setup_settle_ms": round(
+                        SETUP_QUIESCENCE_SETTLE_SECONDS * 1000
                     ),
                     "checks": (
                         "invocation preflight, immediately before and after "
