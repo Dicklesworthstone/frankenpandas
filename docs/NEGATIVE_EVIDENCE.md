@@ -20481,3 +20481,83 @@ Full evidence:
 and
 `artifacts/bench/proud_lane_m_string_arrow_10m_20260728.json` (SHA-256
 `431a097cd70dbf5fce9054529913a9e9c4c9d2580aadb46d5ef49d778da450ec`).
+
+### 2026-07-28 QuietHarbor + ProudChapel — pivot-family incumbent WIN is reproducible; relative scaling is ELF/host-sensitive
+
+Commit `c9267880d` added live pandas arms for `df_pivot` and
+`df_pivot_table`. Three self-identifying FrankenPandas ELFs then produced nine
+same-invocation incumbent rows at 1M and 10M: eight median-CI-decidable wins,
+one null-undecidable row, and nine point estimates above 1.0x.
+
+**Campaign result class:** `incumbent-win`.
+
+The complete strict-remote gate on `vmi1264463` produced:
+
+| workload | size | FP p50 | pandas p50 | ratio | effect / required | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| `df_pivot` | 1M | 55.980 ms | 135.162 ms | **2.414x** | 0.88148262 / 0.19865211 | FASTER |
+| `df_pivot` | 10M | 1,215.589 ms | 1,398.645 ms | 1.151x | 0.14027514 / 0.36357417 | NULL_UNDECIDABLE |
+| `df_pivot_table` | 1M | 25.042 ms | 65.996 ms | **2.635x** | 0.96902563 / 0.24872262 | FASTER |
+| `df_pivot_table` | 10M | 266.440 ms | 553.235 ms | **2.076x** | 0.73063521 / 0.19131626 | FASTER |
+
+A bounded 10M `df_pivot` confirmation on the same remote worker built a
+different self-identifying ELF and measured 1.289x, effect=0.25410519 against
+required threshold=0.17693107: FASTER. A local same-invocation run under a
+third ELF measured decisive 3.368x/3.996x pivot and 2.805x/3.626x
+pivot_table rows at 1M/10M.
+
+The local ELF's ratios increased with N, but the complete strict-remote ELF's
+ratios decreased from 2.414x to 1.151x and from 2.635x to 2.076x. Absolute
+time saved increased with N, while relative scaling was binary/host-sensitive.
+This is a competitive pivot-family win, not evidence for a portable
+ratio-amplifying Class-1 mechanism.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260728T230137.754366Z-pid3096432
+measured_ratio=2.414x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=a4178caffbf7cf26b99f162dd68646c2994a37015a94204b52f99f0809a0d1d5
+(70294112 bytes) /data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The independent 10M confirmation self-reported
+`95bcac44a908ea7db67c069a319ef0b37886892892c9c55b581cde82c4b8d37a`;
+the local corroborating ELF self-reported
+`e3f48b7795e4cdde321e6cda4304cde6a859b7798a3a9e8bc8590b593bed42a5`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. In the complete strict-remote gate, FP/pandas median CIs were
+`df_pivot` 1M [0.985448,1.052660]/[0.931436,1.104426],
+`df_pivot` 10M [0.955749,1.017278]/[0.879676,1.199359],
+`df_pivot_table` 1M [0.969502,1.021514]/[1.000525,1.132425], and
+`df_pivot_table` 10M [0.951242,1.040232]/[0.908775,1.026735].
+
+**Median-CI decision:** eight of nine rows cleared their numeric median-effect
+thresholds. The narrowest strict-remote decisive row was the 10M confirmation:
+effect=0.25410519 cleared required threshold=0.17693107. The complete gate's
+10M pivot row was inside its null floor: effect=0.14027514 did not clear
+required threshold=0.36357417.
+
+**CV role:** provenance only; CV had no vote.
+
+**Concrete retry predicates:** keep the incumbent-win classification until
+the workload boundary, fixture, FrankenPandas implementation, harness source,
+pandas artifact, allocator, compiler, or worker ISA changes. Re-open a
+monotonic ratio-growth claim only when the same self-identified ELF runs both
+sizes on the same worker in one invocation and two clean repeats show the
+ratio increase outside the combined A/A intervals. Re-run 10M pivot after any
+provenance change because one complete strict-remote gate was
+null-undecidable. Do not propose a source lever without a current profile
+naming a non-zero-self frame and a computed Amdahl ceiling.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_pivot_1m_10m_20260728.md`,
+`artifacts/bench/quiet_lane_m_pivot_1m_20260728.json` (SHA-256
+`6b8d912abfe9429b6cac94f8bc71f498e9a118620d20c3ae68725f8de56025ab`),
+`artifacts/bench/quiet_lane_m_pivot_10m_20260728.json` (SHA-256
+`07251adb354b258a594ce05b4d57fe15410dca5cfe5dce5a17af9881f817c929`),
+`artifacts/bench/proud_lane_m_pivot_1m_10m_20260728.json` (SHA-256
+`634d3999907e969ae78330ad55dfc40692d6236d44c3b1cee84224164380788b`),
+and `artifacts/bench/proud_lane_m_pivot_10m_confirm_20260728.json` (SHA-256
+`10cdfc68b1cd20b52a83020c6c64f9d8714759409de560da84d6bb54d0ed0f6b`).
