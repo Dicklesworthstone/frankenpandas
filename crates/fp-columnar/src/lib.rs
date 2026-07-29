@@ -2742,6 +2742,7 @@ impl ScalarValues {
     fn all_valid_float64_finite_witness(&self) -> Option<bool> {
         match self {
             Self::LazyAllValidFloat64 { all_finite, .. }
+            | Self::LazyAllValidFloat64Vec { all_finite, .. }
             | Self::LazyAllValidFloat64Chunks { all_finite, .. }
             | Self::LazyAllValidFloat64Slice { all_finite, .. } => all_finite.get().copied(),
             _ => None,
@@ -33532,6 +33533,23 @@ mod tests {
             let b = float_col.abs().expect("abs");
             assert_eq!(b.values()[0], Scalar::Float64(1.5));
             assert!(b.values()[1].is_missing());
+        }
+
+        #[test]
+        fn abs_preserves_owned_f64_cached_finiteness_witness() {
+            for (input, expected_witness) in [
+                (vec![-1.5, 0.0, f64::MAX], Some(true)),
+                (vec![-1.5, f64::NEG_INFINITY], Some(false)),
+            ] {
+                let input = Column::from_f64_values(input);
+                assert_eq!(input.f64_finite_witness(), expected_witness);
+                let output = input.abs().expect("all-valid Float64 abs");
+                assert_eq!(
+                    output.f64_finite_witness(),
+                    expected_witness,
+                    "owned Float64 output dropped the cached witness"
+                );
+            }
         }
 
         #[test]
