@@ -21,7 +21,7 @@ use std::{
     hint::black_box,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use fp_columnar::{Column, ValidityMask};
@@ -46,6 +46,15 @@ struct PairedSamples {
     null_arm_b_us: Vec<f64>,
     null_ratios: Vec<f64>,
     checksum: u64,
+    thread_probe: ThreadProbe,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ThreadProbe {
+    runtime_available_parallelism: usize,
+    process_threads_before_probe: usize,
+    peak_process_threads: usize,
+    operation_threads_used: usize,
 }
 
 /// SHA-256 of this executable, computed by the process that is actually
@@ -63,6 +72,113 @@ fn self_identity() -> String {
         write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
     }
     format!("{hex} ({} bytes) {}", bytes.len(), path.display())
+}
+
+fn runtime_isa_features() -> Vec<&'static str> {
+    let mut features = vec!["scalar"];
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if std::is_x86_feature_detected!("sse2") {
+            features.push("sse2");
+        }
+        if std::is_x86_feature_detected!("avx2") {
+            features.push("avx2");
+        }
+        if std::is_x86_feature_detected!("fma") {
+            features.push("fma");
+        }
+        if std::is_x86_feature_detected!("bmi2") {
+            features.push("bmi2");
+        }
+        if std::is_x86_feature_detected!("vaes") {
+            features.push("vaes");
+        }
+        if std::is_x86_feature_detected!("avx512f") {
+            features.push("avx512f");
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            features.push("neon");
+        }
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            features.push("dotprod");
+        }
+        if std::arch::is_aarch64_feature_detected!("i8mm") {
+            features.push("i8mm");
+        }
+    }
+    features
+}
+
+#[cfg(target_os = "linux")]
+fn process_thread_count() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("Threads:")
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+        })
+        .unwrap_or(1)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_thread_count() -> usize {
+    1
+}
+
+/// Observe one untimed operation so every benchmark can report how much
+/// parallelism it actually exercised, not merely how many CPUs were available.
+///
+/// FrankenPandas' current parallel paths use scoped worker threads. A monitor
+/// thread samples `/proc/self/status`; subtracting the pre-existing process
+/// threads and the monitor itself yields the peak operation worker count. A
+/// serial operation therefore reports one, while a scoped four-worker path
+/// reports four. The probe runs before warmup and never enters a timed region.
+fn probe_operation_threads<F, T>(op: &mut F) -> ThreadProbe
+where
+    F: FnMut() -> T,
+{
+    use std::sync::{
+        Barrier,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    let runtime_available_parallelism =
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let process_threads_before_probe = process_thread_count();
+    let peak_process_threads = AtomicUsize::new(process_threads_before_probe);
+    let keep_sampling = AtomicBool::new(true);
+    let ready = Barrier::new(2);
+
+    std::thread::scope(|scope| {
+        let monitor = scope.spawn(|| {
+            ready.wait();
+            while keep_sampling.load(Ordering::Acquire) {
+                peak_process_threads.fetch_max(process_thread_count(), Ordering::Relaxed);
+                std::thread::sleep(Duration::from_micros(20));
+            }
+            peak_process_threads.fetch_max(process_thread_count(), Ordering::Relaxed);
+        });
+        ready.wait();
+        black_box(op());
+        keep_sampling.store(false, Ordering::Release);
+        monitor.join().expect("thread-count monitor must not panic");
+    });
+
+    let peak_process_threads = peak_process_threads.load(Ordering::Relaxed);
+    let operation_threads_used = peak_process_threads
+        .saturating_sub(process_threads_before_probe.saturating_add(1))
+        .max(1);
+    ThreadProbe {
+        runtime_available_parallelism,
+        process_threads_before_probe,
+        peak_process_threads,
+        operation_threads_used,
+    }
 }
 
 fn same_worker_python(target_dir: &Path, harness_script: &Path) -> (PathBuf, PathBuf) {
@@ -615,6 +731,7 @@ fn paired_time_us<F, T>(mut op: F, repeat: usize, divide_by_repeat: bool) -> Pai
 where
     F: FnMut() -> T,
 {
+    let thread_probe = probe_operation_threads(&mut op);
     for _ in 0..WARMUP {
         for _ in 0..repeat {
             black_box(op());
@@ -647,6 +764,7 @@ where
         null_arm_b_us,
         null_ratios,
         checksum,
+        thread_probe,
     }
 }
 
@@ -661,6 +779,9 @@ where
     Op: FnMut(&Subject) -> Output,
 {
     let mut checksum = 0_u64;
+    let probe_subject = black_box(setup());
+    let thread_probe = probe_operation_threads(&mut || op(black_box(&probe_subject)));
+    black_box(probe_subject);
     let (times_us, null_arm_a_us, null_arm_b_us, null_ratios) = {
         let mut time_arm = || {
             let subject = black_box(setup());
@@ -704,6 +825,7 @@ where
         null_arm_b_us,
         null_ratios,
         checksum,
+        thread_probe,
     }
 }
 
@@ -2981,18 +3103,35 @@ fn main() {
                 .iter()
                 .map(|ratio| format!("{ratio}"))
                 .collect();
+            let runtime_isa_features = runtime_isa_features()
+                .into_iter()
+                .map(|feature| format!("\"{feature}\""))
+                .collect::<Vec<_>>()
+                .join(",");
             println!(
                 concat!(
                     "{{\"times_us\":[{}],",
                     "\"null_control\":{{\"arm_a_times_us\":[{}],",
                     "\"arm_b_times_us\":[{}],\"ratios\":[{}]}},",
-                    "\"checksum\":\"{:016x}\"}}"
+                    "\"checksum\":\"{:016x}\",",
+                    "\"thread_provenance\":{{",
+                    "\"runtime_available_parallelism\":{},",
+                    "\"process_threads_before_probe\":{},",
+                    "\"peak_process_threads\":{},",
+                    "\"operation_threads_used\":{},",
+                    "\"runtime_detected_isa_features\":[{}]",
+                    "}}}}"
                 ),
                 times.join(","),
                 null_arm_a.join(","),
                 null_arm_b.join(","),
                 null_ratios.join(","),
                 samples.checksum,
+                samples.thread_probe.runtime_available_parallelism,
+                samples.thread_probe.process_threads_before_probe,
+                samples.thread_probe.peak_process_threads,
+                samples.thread_probe.operation_threads_used,
+                runtime_isa_features,
             );
         }
         None => {
@@ -3011,8 +3150,8 @@ mod harness_contract_tests {
     use fp_types::Scalar;
 
     use super::{
-        ITERS, paired_time_us, self_identity, size_rows_cols, stateful_apply_step,
-        stateful_expanding_step, stateful_rolling_step,
+        ITERS, paired_time_us, runtime_isa_features, self_identity, size_rows_cols,
+        stateful_apply_step, stateful_expanding_step, stateful_rolling_step,
     };
 
     #[test]
@@ -3050,6 +3189,17 @@ mod harness_contract_tests {
                 .all(|ratio| ratio.is_finite() && *ratio > 0.0)
         );
         assert_ne!(samples.checksum, 0);
+        assert!(samples.thread_probe.runtime_available_parallelism >= 1);
+        assert!(samples.thread_probe.operation_threads_used >= 1);
+        assert!(
+            samples.thread_probe.peak_process_threads
+                >= samples.thread_probe.process_threads_before_probe
+        );
+    }
+
+    #[test]
+    fn runtime_isa_provenance_always_includes_scalar_fallback() {
+        assert!(runtime_isa_features().contains(&"scalar"));
     }
 
     #[test]

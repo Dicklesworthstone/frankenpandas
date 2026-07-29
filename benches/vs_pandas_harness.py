@@ -15,6 +15,9 @@ Per BENCH_MATRIX_SPEC.md:
 Usage:
     python benches/vs_pandas_harness.py --category io --sizes 100k
     python benches/vs_pandas_harness.py --all --sizes 10k,100k,1M
+    taskset -c 0-63 python benches/vs_pandas_harness.py \
+        --category groupby --workloads groupby_mean_float64 \
+        --sizes 1M,10M --thread-count 64
 """
 from __future__ import annotations
 
@@ -24,9 +27,12 @@ import importlib.metadata
 import json
 import math
 import os
+import platform
 import re
+import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -88,6 +94,231 @@ class PairedSamples:
     null_arm_b_us: list[float] = field(default_factory=list)
     null_ratios: list[float] = field(default_factory=list)
     checksum: int = 0
+    runtime_available_parallelism: int = 1
+    process_threads_before_probe: int = 1
+    peak_process_threads: int = 1
+    operation_threads_used: int = 1
+
+
+def _read_text(path: Path) -> str | None:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return None
+
+
+def _online_cpu_ids() -> list[int]:
+    cpu_ids = []
+    for cpu_dir in Path("/sys/devices/system/cpu").glob("cpu[0-9]*"):
+        try:
+            cpu_id = int(cpu_dir.name[3:])
+        except ValueError:
+            continue
+        online = _read_text(cpu_dir / "online")
+        if online in (None, "1"):
+            cpu_ids.append(cpu_id)
+    return sorted(cpu_ids)
+
+
+def _cpu_flags() -> set[str]:
+    cpuinfo = _read_text(Path("/proc/cpuinfo")) or ""
+    for line in cpuinfo.splitlines():
+        if line.lower().startswith(("flags", "features")) and ":" in line:
+            return set(line.split(":", 1)[1].split())
+    return set()
+
+
+def _cpu_model() -> str:
+    cpuinfo = _read_text(Path("/proc/cpuinfo")) or ""
+    for line in cpuinfo.splitlines():
+        if line.lower().startswith(("model name", "hardware")) and ":" in line:
+            return line.split(":", 1)[1].strip()
+    return platform.processor() or "unknown"
+
+
+def _git_sha() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unavailable"
+    return result.stdout.strip() if result.returncode == 0 else "unavailable"
+
+
+def host_fingerprint() -> dict[str, Any]:
+    """Capture host-wide topology plus the process' effective CPU budget."""
+    online_cpus = _online_cpu_ids()
+    affinity_cpus = (
+        sorted(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else online_cpus
+    )
+    physical_cores: set[tuple[str, str]] = set()
+    for cpu_id in online_cpus:
+        topology = Path(f"/sys/devices/system/cpu/cpu{cpu_id}/topology")
+        package = _read_text(topology / "physical_package_id")
+        core = _read_text(topology / "core_id")
+        if package is not None and core is not None:
+            physical_cores.add((package, core))
+
+    flags = _cpu_flags()
+    tracked_isa = (
+        "sse2",
+        "avx",
+        "avx2",
+        "fma",
+        "bmi1",
+        "bmi2",
+        "aes",
+        "vaes",
+        "avx512f",
+    )
+    mem_total_kib = 0
+    meminfo = _read_text(Path("/proc/meminfo")) or ""
+    for line in meminfo.splitlines():
+        if line.startswith("MemTotal:"):
+            mem_total_kib = int(line.split()[1])
+            break
+
+    governors = sorted(
+        {
+            value
+            for cpu_id in affinity_cpus
+            if (
+                value := _read_text(
+                    Path(
+                        f"/sys/devices/system/cpu/cpu{cpu_id}/cpufreq/"
+                        "scaling_governor"
+                    )
+                )
+            )
+        }
+    )
+    numa_nodes = sorted(
+        path.name
+        for path in Path("/sys/devices/system/node").glob("node[0-9]*")
+    )
+    return {
+        "host_identity": socket.gethostname(),
+        "platform_node": platform.node(),
+        "architecture": platform.machine(),
+        "cpu_model": _cpu_model(),
+        "physical_cores": len(physical_cores),
+        "logical_threads": len(online_cpus),
+        "threads_per_core": (
+            len(online_cpus) // len(physical_cores) if physical_cores else None
+        ),
+        "ram_bytes": mem_total_kib * 1024,
+        "numa_nodes": len(numa_nodes),
+        "kernel": platform.release(),
+        "git_sha": _git_sha(),
+        "cpu_governors": governors,
+        "smt_active": _read_text(Path("/sys/devices/system/cpu/smt/active")),
+        "frequency_boost": _read_text(
+            Path("/sys/devices/system/cpu/cpufreq/boost")
+        ),
+        "affinity_cpus": affinity_cpus,
+        "affinity_logical_cpu_cap": len(affinity_cpus),
+        "runtime_detected_isa_features": [
+            feature for feature in tracked_isa if feature in flags
+        ],
+        "runtime_absent_isa_features": [
+            feature for feature in tracked_isa if feature not in flags
+        ],
+    }
+
+
+def _process_thread_count() -> int:
+    status = _read_text(Path("/proc/self/status")) or ""
+    for line in status.splitlines():
+        if line.startswith("Threads:"):
+            return int(line.split(":", 1)[1].strip())
+    return 1
+
+
+def _thread_cpu_ticks() -> dict[int, int]:
+    ticks: dict[int, int] = {}
+    for task_dir in Path("/proc/self/task").glob("[0-9]*"):
+        stat = _read_text(task_dir / "stat")
+        if not stat:
+            continue
+        close_paren = stat.rfind(")")
+        if close_paren < 0:
+            continue
+        fields = stat[close_paren + 1 :].split()
+        if len(fields) <= 12:
+            continue
+        try:
+            ticks[int(task_dir.name)] = int(fields[11]) + int(fields[12])
+        except ValueError:
+            continue
+    return ticks
+
+
+def probe_operation_threads(func) -> dict[str, int]:
+    """Observe one untimed call and report active/peak process threads."""
+    runtime_available_parallelism = (
+        len(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else (os.cpu_count() or 1)
+    )
+    process_threads_before_probe = _process_thread_count()
+    ticks_before = _thread_cpu_ticks()
+    peak_process_threads = process_threads_before_probe
+    ready = threading.Event()
+    stop = threading.Event()
+
+    def monitor() -> None:
+        nonlocal peak_process_threads
+        ready.set()
+        while not stop.is_set():
+            peak_process_threads = max(
+                peak_process_threads,
+                _process_thread_count(),
+            )
+            time.sleep(0.000_020)
+        peak_process_threads = max(peak_process_threads, _process_thread_count())
+
+    monitor_thread = threading.Thread(
+        target=monitor,
+        name="fp-bench-thread-probe",
+        daemon=True,
+    )
+    monitor_thread.start()
+    ready.wait()
+    monitor_native_id = monitor_thread.native_id
+    try:
+        func()
+    finally:
+        stop.set()
+        monitor_thread.join()
+
+    ticks_after = _thread_cpu_ticks()
+    cpu_active_threads = sum(
+        ticks > ticks_before.get(tid, 0)
+        for tid, ticks in ticks_after.items()
+        if tid != monitor_native_id
+    )
+    newly_spawned_workers = max(
+        0,
+        peak_process_threads - process_threads_before_probe - 1,
+    )
+    return {
+        "runtime_available_parallelism": runtime_available_parallelism,
+        "process_threads_before_probe": process_threads_before_probe,
+        "peak_process_threads": peak_process_threads,
+        "operation_threads_used": max(
+            1,
+            cpu_active_threads,
+            newly_spawned_workers,
+        ),
+    }
 
 
 def executable_identity(path: Path) -> dict[str, Any]:
@@ -192,11 +423,18 @@ class TimingResult:
     dtype: str
     engine: str
     times_us: list[float] = field(default_factory=list)
+    null_arm_a_us: list[float] = field(default_factory=list)
+    null_arm_b_us: list[float] = field(default_factory=list)
     null_ratios: list[float] = field(default_factory=list)
     checksum: str | None = None
     executable_sha256: str | None = None
     executable_bytes: int | None = None
     executable_path: str | None = None
+    runtime_available_parallelism: int | None = None
+    process_threads_before_probe: int | None = None
+    peak_process_threads: int | None = None
+    operation_threads_used: int | None = None
+    runtime_detected_isa_features: list[str] = field(default_factory=list)
 
     @property
     def p50_us(self) -> float:
@@ -243,8 +481,13 @@ class TimingResult:
         return bool(
             self.times_us
             and self.null_ratios
+            and len(self.null_arm_a_us) == len(self.null_ratios)
+            and len(self.null_arm_b_us) == len(self.null_ratios)
             and self.checksum
             and self.executable_sha256
+            and self.runtime_available_parallelism
+            and self.operation_threads_used
+            and self.runtime_detected_isa_features
         )
 
     def to_metrics(self, rows: int) -> dict[str, Any]:
@@ -259,6 +502,12 @@ class TimingResult:
             "cv_pct": round(self.cv_pct, 2),
             "throughput_rows_sec": round(rows / (self.p50_us / 1_000_000)),
             "checksum": self.checksum,
+            "thread_count_actually_used": self.operation_threads_used,
+            "runtime_available_parallelism": self.runtime_available_parallelism,
+            "process_threads_before_probe": self.process_threads_before_probe,
+            "peak_process_threads": self.peak_process_threads,
+            "runtime_detected_isa_features": self.runtime_detected_isa_features,
+            "samples_us": self.times_us,
             "executable": {
                 "sha256": self.executable_sha256,
                 "bytes": self.executable_bytes,
@@ -266,6 +515,9 @@ class TimingResult:
             },
             "null_control": {
                 "rounds": len(self.null_ratios),
+                "arm_a_times_us": self.null_arm_a_us,
+                "arm_b_times_us": self.null_arm_b_us,
+                "ratios": self.null_ratios,
                 "median_ratio": round(self.null_median_ratio, 6),
                 "median_ci_95": [
                     round(null_ci_low, 6),
@@ -361,6 +613,7 @@ def paired_operation(func, repeat: int = 1,
                      warmup: int = WARMUP_ITERATIONS,
                      rounds: int = PAIRED_ROUNDS) -> PairedSamples:
     """Time identical arms back-to-back, alternating order every round."""
+    thread_probe = probe_operation_threads(func)
     for _ in range(warmup):
         for _ in range(repeat):
             func()
@@ -396,6 +649,14 @@ def paired_operation(func, repeat: int = 1,
         null_arm_b_us=null_arm_b_us,
         null_ratios=null_ratios,
         checksum=checksum,
+        runtime_available_parallelism=thread_probe[
+            "runtime_available_parallelism"
+        ],
+        process_threads_before_probe=thread_probe[
+            "process_threads_before_probe"
+        ],
+        peak_process_threads=thread_probe["peak_process_threads"],
+        operation_threads_used=thread_probe["operation_threads_used"],
     )
 
 
@@ -1412,8 +1673,14 @@ PANDAS_WORKLOADS = {
 }
 
 
-def run_pandas_workload(category: str, workload: str, size: str,
-                        dtype: str, tmp_path: Path) -> TimingResult:
+def run_pandas_workload(
+    category: str,
+    workload: str,
+    size: str,
+    dtype: str,
+    tmp_path: Path,
+    fingerprint: dict[str, Any],
+) -> TimingResult:
     """Run a single pandas workload and return timing result."""
     config = SIZE_CONFIGS[size]
     df = generate_test_data(config["rows"], config["cols"], dtype)
@@ -1428,7 +1695,6 @@ def run_pandas_workload(category: str, workload: str, size: str,
     if not isinstance(samples, PairedSamples):
         raise TypeError(f"{category}/{workload} did not use the paired timing contract")
     identity = executable_identity(Path(sys.executable))
-
     return TimingResult(
         workload=workload,
         category=category,
@@ -1436,11 +1702,20 @@ def run_pandas_workload(category: str, workload: str, size: str,
         dtype=dtype,
         engine="pandas",
         times_us=samples.times_us,
+        null_arm_a_us=samples.null_arm_a_us,
+        null_arm_b_us=samples.null_arm_b_us,
         null_ratios=samples.null_ratios,
         checksum=f"{samples.checksum:016x}",
         executable_sha256=identity["sha256"],
         executable_bytes=identity["bytes"],
         executable_path=identity["path"],
+        runtime_available_parallelism=samples.runtime_available_parallelism,
+        process_threads_before_probe=samples.process_threads_before_probe,
+        peak_process_threads=samples.peak_process_threads,
+        operation_threads_used=samples.operation_threads_used,
+        runtime_detected_isa_features=fingerprint[
+            "runtime_detected_isa_features"
+        ],
     )
 
 
@@ -1556,6 +1831,7 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
         )
 
     null_control = data.get("null_control", {})
+    thread_provenance = data.get("thread_provenance", {})
     return TimingResult(
         workload=workload,
         category=category,
@@ -1563,11 +1839,25 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
         dtype=dtype,
         engine="frankenpandas",
         times_us=data["times_us"],
+        null_arm_a_us=null_control.get("arm_a_times_us", []),
+        null_arm_b_us=null_control.get("arm_b_times_us", []),
         null_ratios=null_control.get("ratios", []),
         checksum=data.get("checksum"),
         executable_sha256=identity_match.group(1),
         executable_bytes=int(identity_match.group(2)),
         executable_path=identity_match.group(3),
+        runtime_available_parallelism=thread_provenance.get(
+            "runtime_available_parallelism"
+        ),
+        process_threads_before_probe=thread_provenance.get(
+            "process_threads_before_probe"
+        ),
+        peak_process_threads=thread_provenance.get("peak_process_threads"),
+        operation_threads_used=thread_provenance.get("operation_threads_used"),
+        runtime_detected_isa_features=thread_provenance.get(
+            "runtime_detected_isa_features",
+            [],
+        ),
     )
 
 
@@ -1632,8 +1922,67 @@ def compute_comparison(fp_result: TimingResult, pd_result: TimingResult,
     return result
 
 
+def build_thread_provenance(
+    fingerprint: dict[str, Any],
+    requested_thread_count: int | None,
+    fp_result: TimingResult,
+    pd_result: TimingResult,
+) -> dict[str, Any]:
+    """Build and validate the mandatory per-cell scaling provenance."""
+    affinity_cap = fingerprint["affinity_logical_cpu_cap"]
+    errors = []
+    if requested_thread_count is not None and affinity_cap != requested_thread_count:
+        errors.append(
+            "requested thread count does not match the effective affinity cap"
+        )
+    for result in (fp_result, pd_result):
+        if result.runtime_available_parallelism != affinity_cap:
+            errors.append(
+                f"{result.engine} runtime_available_parallelism="
+                f"{result.runtime_available_parallelism} != affinity cap {affinity_cap}"
+            )
+        if not result.operation_threads_used or result.operation_threads_used < 1:
+            errors.append(f"{result.engine} did not report actual operation threads")
+        elif result.operation_threads_used > affinity_cap:
+            errors.append(
+                f"{result.engine} operation thread count "
+                f"{result.operation_threads_used} exceeds affinity cap {affinity_cap}"
+            )
+        if not result.runtime_detected_isa_features:
+            errors.append(f"{result.engine} did not report runtime ISA features")
+
+    return {
+        "host_identity": fingerprint["host_identity"],
+        "cpu_model": fingerprint["cpu_model"],
+        "physical_cores": fingerprint["physical_cores"],
+        "logical_threads": fingerprint["logical_threads"],
+        "thread_count_requested": requested_thread_count,
+        "thread_count_actually_used": {
+            "frankenpandas": fp_result.operation_threads_used,
+            "pandas": pd_result.operation_threads_used,
+        },
+        "runtime_available_parallelism": {
+            "frankenpandas": fp_result.runtime_available_parallelism,
+            "pandas": pd_result.runtime_available_parallelism,
+        },
+        "runtime_detected_isa_features": {
+            "host": fingerprint["runtime_detected_isa_features"],
+            "frankenpandas": fp_result.runtime_detected_isa_features,
+            "pandas": pd_result.runtime_detected_isa_features,
+        },
+        "affinity_or_cpuset_cap": {
+            "logical_cpu_count": affinity_cap,
+            "cpu_ids": fingerprint["affinity_cpus"],
+        },
+        "contract_errors": errors,
+        "valid": not errors,
+    }
+
+
 def run_category(category: str, sizes: list[str], dtypes: list[str],
-                 tmp_path: Path, workload_filter: set[str] | None = None) -> list[dict[str, Any]]:
+                 tmp_path: Path, fingerprint: dict[str, Any],
+                 requested_thread_count: int | None,
+                 workload_filter: set[str] | None = None) -> list[dict[str, Any]]:
     """Run all workloads in a category for given sizes and dtypes."""
     results = []
     workloads = PANDAS_WORKLOADS.get(category, {})
@@ -1649,10 +1998,26 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                 config = SIZE_CONFIGS[size]
                 print(f"  [{category}] {workload} @ {size}/{dtype}...", end=" ", flush=True)
 
-                pd_result = run_pandas_workload(category, workload, size, dtype, tmp_path)
+                pd_result = run_pandas_workload(
+                    category,
+                    workload,
+                    size,
+                    dtype,
+                    tmp_path,
+                    fingerprint,
+                )
                 fp_result = run_fp_workload_subprocess(category, workload, size, dtype)
 
                 comparison = compute_comparison(fp_result, pd_result, config["rows"])
+                comparison["thread_provenance"] = build_thread_provenance(
+                    fingerprint,
+                    requested_thread_count,
+                    fp_result,
+                    pd_result,
+                )
+                if not comparison["thread_provenance"]["valid"]:
+                    comparison["verdict"] = "CONTRACT_INVALID"
+                    comparison["ratio"] = None
                 results.append(comparison)
 
                 verdict = comparison.get("verdict", "N/A")
@@ -1667,7 +2032,7 @@ def main():
     harness_identity = executable_identity(Path(sys.executable))
     harness_source_identity = executable_identity(Path(__file__))
     print(
-        "bench_harness_elf_sha256="
+        "bench_elf_sha256="
         f"{harness_identity['sha256']} "
         f"({harness_identity['bytes']} bytes) "
         f"{harness_identity['path']}"
@@ -1699,6 +2064,28 @@ def main():
         "--dependency-probe",
         action="store_true",
         help="Exit 0 only when the pinned pandas incumbent is importable",
+    )
+    parser.add_argument(
+        "--thread-count",
+        type=int,
+        help=(
+            "Required effective logical-CPU budget for this invocation; the "
+            "harness refuses to run unless it equals the process affinity cap"
+        ),
+    )
+    parser.add_argument(
+        "--expected-hostname",
+        help="Fail closed unless the benchmark host has this exact hostname",
+    )
+    parser.add_argument(
+        "--expected-physical-cores",
+        type=int,
+        help="Fail closed unless host topology reports this physical-core count",
+    )
+    parser.add_argument(
+        "--expected-logical-threads",
+        type=int,
+        help="Fail closed unless host topology reports this logical-thread count",
     )
     args = parser.parse_args()
 
@@ -1737,6 +2124,45 @@ def main():
         print("ERROR: pyarrow not installed", file=sys.stderr)
         sys.exit(1)
 
+    fingerprint = host_fingerprint()
+    host_contract_errors = []
+    if args.thread_count is not None:
+        if args.thread_count < 1:
+            host_contract_errors.append("--thread-count must be positive")
+        elif fingerprint["affinity_logical_cpu_cap"] != args.thread_count:
+            host_contract_errors.append(
+                f"thread_count={args.thread_count} but affinity cap is "
+                f"{fingerprint['affinity_logical_cpu_cap']}"
+            )
+    if (
+        args.expected_hostname is not None
+        and fingerprint["host_identity"] != args.expected_hostname
+    ):
+        host_contract_errors.append(
+            f"hostname={fingerprint['host_identity']!r}, expected "
+            f"{args.expected_hostname!r}"
+        )
+    if (
+        args.expected_physical_cores is not None
+        and fingerprint["physical_cores"] != args.expected_physical_cores
+    ):
+        host_contract_errors.append(
+            f"physical_cores={fingerprint['physical_cores']}, expected "
+            f"{args.expected_physical_cores}"
+        )
+    if (
+        args.expected_logical_threads is not None
+        and fingerprint["logical_threads"] != args.expected_logical_threads
+    ):
+        host_contract_errors.append(
+            f"logical_threads={fingerprint['logical_threads']}, expected "
+            f"{args.expected_logical_threads}"
+        )
+    if host_contract_errors:
+        for error in host_contract_errors:
+            print(f"ERROR: thread provenance contract: {error}", file=sys.stderr)
+        sys.exit(2)
+
     timestamp = datetime.now(timezone.utc).isoformat()
     invocation_id = (
         "vs-pandas-"
@@ -1760,6 +2186,10 @@ def main():
         f"{pyarrow_artifact['path']}"
     )
     print(f"bench_invocation_id={invocation_id}")
+    print(
+        "benchmark_host_fingerprint_json="
+        + json.dumps(fingerprint, separators=(",", ":"), sort_keys=True)
+    )
 
     sizes = [s.strip() for s in args.sizes.split(",")]
     dtypes = [d.strip() for d in args.dtypes.split(",")]
@@ -1788,7 +2218,15 @@ def main():
 
         for category in categories:
             print(f"\n[{category.upper()}] (weight: {CATEGORIES[category]})")
-            results = run_category(category, sizes, dtypes, tmp_path, workload_filter)
+            results = run_category(
+                category,
+                sizes,
+                dtypes,
+                tmp_path,
+                fingerprint,
+                args.thread_count,
+                workload_filter,
+            )
             for result in results:
                 result["invocation_id"] = invocation_id
             all_results.extend(results)
@@ -1817,6 +2255,7 @@ def main():
                 },
             },
             "harness_source": harness_source_identity,
+            "host_fingerprint": fingerprint,
             "parameters": {
                 "sizes": sizes,
                 "dtypes": dtypes,
@@ -1836,6 +2275,18 @@ def main():
                     },
                 },
                 "shared_invocation_id": invocation_id,
+                "thread_provenance_contract": {
+                    "thread_count_requested": args.thread_count,
+                    "expected_hostname": args.expected_hostname,
+                    "expected_physical_cores": args.expected_physical_cores,
+                    "expected_logical_threads": args.expected_logical_threads,
+                    "affinity_or_cpuset_cap": {
+                        "logical_cpu_count": fingerprint[
+                            "affinity_logical_cpu_cap"
+                        ],
+                        "cpu_ids": fingerprint["affinity_cpus"],
+                    },
+                },
             },
             "results": all_results,
             "summary": compute_summary(all_results),
