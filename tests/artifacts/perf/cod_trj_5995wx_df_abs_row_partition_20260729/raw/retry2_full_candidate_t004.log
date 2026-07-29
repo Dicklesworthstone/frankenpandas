@@ -1,0 +1,30 @@
+bench_elf_sha256=efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e (6894448 bytes) /usr/bin/python3.13
+bench_harness_source_sha256=17994e77586614a4c54fc0a2edb2bcef140ff690a37344fdaa747899691cb209 (98795 bytes) /data/projects/frankenpandas-dfabs-claim6189-20260729/benches/vs_pandas_harness.py
+pandas_artifact_sha256=80c4fc7efcc4d8deabf0faf971a49013556a22109ae402df6913962a577d227e (70670271 bytes, 2922 files) /data/projects/frankenpandas-thread-sweep/target/lane-m-python-site/pandas/__init__.py
+pyarrow_artifact_sha256=6b2e8b5bb3ba8524bd443b7ad2a89cb411944c2dcf86339303979536aa82e3c2 (157862520 bytes, 861 files) /data/projects/frankenpandas-thread-sweep/target/lane-m-python-site/pyarrow/__init__.py
+bench_invocation_id=vs-pandas-20260729T224545.134036Z-pid3899347
+benchmark_host_fingerprint_json={"affinity_cpus":[0,1,2,3],"affinity_logical_cpu_cap":4,"architecture":"x86_64","cpu_governors":["performance"],"cpu_model":"AMD Ryzen Threadripper PRO 5995WX 64-Cores","frequency_boost":"1","git_sha":"unavailable","host_identity":"threadripperje","kernel":"6.17.0-41-generic","logical_threads":128,"numa_nodes":1,"physical_cores":64,"platform_node":"threadripperje","ram_bytes":536069869568,"runtime_absent_isa_features":["avx512f"],"runtime_detected_isa_features":["sse2","avx","avx2","fma","bmi1","bmi2","aes","vaes"],"smt_active":"1","threads_per_core":2}
+host_wide_quiescence=phase=invocation_preflight online_cpu_count=128 maximum_busy_fraction=0.200 busy_cpu_count_above_limit=0 verdict=clear
+=== vs-pandas Benchmark Harness ===
+Timestamp: 2026-07-29T22:45:45.134025+00:00
+Categories: dataframe_ops
+Sizes: 1M, 10M
+Dtypes: float64
+Workloads: df_abs
+pandas version: 2.2.3
+
+
+[DATAFRAME_OPS] (weight: 0.2)
+  [dataframe_ops] df_abs @ 1M/float64... host_wide_quiescence=phase=pre_measurement:pandas:dataframe_ops/df_abs/1M/float64 online_cpu_count=128 maximum_busy_fraction=0.200 busy_cpu_count_above_limit=0 verdict=clear
+host_wide_quiescence=phase=post_measurement:pandas:dataframe_ops/df_abs/1M/float64 online_cpu_count=128 maximum_busy_fraction=0.200 busy_cpu_count_above_limit=0 verdict=clear
+host_wide_quiescence=phase=pre_measurement:frankenpandas:dataframe_ops/df_abs/1M/float64 online_cpu_count=128 maximum_busy_fraction=0.200 busy_cpu_count_above_limit=0 verdict=clear
+host_wide_quiescence=phase=post_measurement:frankenpandas:dataframe_ops/df_abs/1M/float64 online_cpu_count=128 maximum_busy_fraction=0.200 busy_cpu_count_above_limit=0 verdict=clear
+FASTER (1.79x)
+  [dataframe_ops] df_abs @ 10M/float64... host_wide_quiescence=phase=pre_measurement:pandas:dataframe_ops/df_abs/10M/float64 online_cpu_count=128 maximum_busy_fraction=0.200 busy_cpu_count_above_limit=0 verdict=clear
+host_wide_quiescence=phase=post_measurement:pandas:dataframe_ops/df_abs/10M/float64 online_cpu_count=128 maximum_busy_fraction=0.200 busy_cpu_count_above_limit=0 verdict=clear
+host_wide_quiescence=phase=pre_measurement:frankenpandas:dataframe_ops/df_abs/10M/float64 online_cpu_count=128 maximum_busy_fraction=0.200 busy_cpu_count_above_limit=0 verdict=clear
+host_wide_quiescence=phase=post_measurement:frankenpandas:dataframe_ops/df_abs/10M/float64 online_cpu_count=128 maximum_busy_fraction=0.200 busy_cpu_count_above_limit=0 verdict=clear
+FASTER (1.52x)
+host_wide_quiescence=phase=invocation_postflight online_cpu_count=128 maximum_busy_fraction=0.200 busy_cpu_count_above_limit=0 verdict=clear
+
+Results written to: /data/projects/frankenpandas-dfabs-claim6189-20260729/results/retry2_full_candidate_t004.json

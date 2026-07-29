@@ -21352,3 +21352,127 @@ and the four
 `tests/artifacts/perf/cod_trj_5995wx_*_thread_sweep_20260729/raw`
 directories. A mechanical pass validated 32 canonical files and 64/64
 contract-valid rows after remote-to-local transfer.
+
+### 2026-07-29 ProudChapel — `df_abs` row×column scheduler exceeds the ten-column worker ceiling but is 18.9% slower at its best raised cap — REJECTED
+
+Lane M consumed the prior row-chunk retry predicate with one portable safe-Rust
+candidate. The candidate admitted only homogeneous all-valid Float64 frames,
+split each column into nonempty row chunks, released one scoped thread per
+worker through a shared start condition, and collected each worker's exact
+output directly into `Arc<[f64]>`. Mixed, nullable, Int64, Bool, and small
+worker-count calls retained the existing column path. Exact-bit, validity,
+index, column-order, and cached-finiteness tests passed before timing.
+
+The exact current 10M ELF was profiled first on an exclusive `trj`.
+`<fp_columnar::Column>::abs` carried 96.51% self-time across 8,779 samples
+with zero lost samples, admitting the experiment but not proving that the
+self-time was profitably parallel. The first post-profile invocation was
+invalidated in full when the scheduled `git-prune-broken-refs` service ran
+`git fsck` and the all-online-CPU post-arm bracket observed CPUs 38 and 63
+above the 20% busy ceiling. No completed 1M row from that invocation was
+salvaged. After three clear admission samples, the retry proceeded.
+
+**Hardware and execution provenance:** host `threadripperje`, AMD Ryzen
+Threadripper PRO 5995WX, 64 physical cores, 128 logical threads, two threads
+per core, 536,069,869,568 bytes RAM, one NUMA node, kernel
+`6.17.0-41-generic`, uniform `performance` governor, SMT and boost enabled.
+Runtime detection recorded SSE2, AVX, AVX2, FMA, BMI1, BMI2, AES, and VAES,
+with AVX-512F absent. Every row records its exact affinity, requested workers,
+and operation-probed actual workers.
+
+**Result class:** maintenance reject; no new competitive claim.
+
+| requested cap | current actual workers 1M→10M / p50 1M / 10M | candidate actual workers 1M→10M / p50 1M / 10M | candidate 10M pandas ratio |
+|---:|---:|---:|---:|
+| 1 | 1→1 / 4.293 / 47.350 ms | 1→1 / 4.320 / 47.458 ms | 1.422x |
+| 2 | 2→2 / 3.883 / 43.616 ms | 2→2 / 4.486 / 43.564 ms | 1.546x |
+| 4 | 4→4 / 3.906 / 43.974 ms | 4→4 / 3.988 / 44.251 ms | 1.524x |
+| 8 | 8→8 / 4.171 / 44.694 ms | 8→8 / 4.365 / 44.811 ms | 1.516x |
+| 16 | 10→10 / 2.771 / 26.465 ms | 13→16 / 3.803 / 37.778 ms | 1.786x |
+| 32 | 10→10 / 2.341 / **20.022 ms** | 13→32 / 3.224 / 29.068 ms | 2.318x |
+| 64 | 10→10 / 2.913 / 20.336 ms | 13→64 / 3.333 / **24.173 ms** | **2.812x** |
+| 128 | 10→10 / 3.116 / 20.680 ms | 13→128 / 3.440 / 24.527 ms | 2.796x |
+
+The candidate therefore removed the worker ceiling mechanically but not the
+time. Its best raised-cap row was 18.9% slower than current at the same cap
+and 20.7% slower than current's best row. It remained 75.4% above the
+13.780 ms budget required for a 5x incumbent result. The 128-SMT row did not
+improve over 64 physical threads.
+
+The separate current-ELF placement control kept actual workers fixed at ten.
+Compact/spread medians were 2.909/2.940 ms at 1M and 26.701/22.433 ms at
+10M, with the descriptive large-N crossover between 6M and 8M. These were
+separate live-pandas invocations, so this is topology-routing evidence, not a
+directional placement keep.
+
+**Amount-of-work audit:** every canonical row ran 50 timed FrankenPandas calls
+and 50 timed pandas calls: 25 alternating A/A pairs per engine. Current and
+candidate used the same ten-column Float64 fixtures and stable checksums.
+There is no hidden iteration-count or input-cardinality mismatch. The
+candidate kept the same number of cellwise `abs` evaluations but added up to
+128 scoped-thread lifecycles and independently allocated Arc chunks where the
+current path uses at most ten column tasks and ten owned output buffers. That
+coordination/allocation split is an inference until a rejected-candidate
+profile attributes it, but the measured loss itself is decisive enough to
+stop.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=80c4fc7efcc4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T225002.460674Z-pid3913647
+measured_ratio=2.812x
+
+Every candidate cell carried its own live pandas arm and shared invocation ID;
+no positive cross-invocation candidate claim is made.
+
+**Executing ELF SHA-256 (self-reported by process):**
+current=`6b37a4d1a613953f1a3d15a6459029a1784424522c4af5f21bddefc9391eaada`
+(73,715,112 bytes);
+candidate=`067bcf3bd6122ff916cfeed507c96c09f6b42e4a993cf34b7462d8d0623a6262`
+(73,880,632 bytes);
+Python=`efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e`
+(6,894,448 bytes).
+External hashes matched process line-one identities. The admitted harness
+source SHA-256 was
+`17994e77586614a4c54fc0a2edb2bcef140ff690a37344fdaa747899691cb209`.
+Commit `ec06548826eee926f8f84cb477307ee5eeca81c7` retains that exact measured
+source; the subsequent equivalent Python 3.13 `cache` spelling was made only
+after timing.
+
+**A/A null control (same invocation):** every engine and row has 25
+alternating pairs. At the current cap-32 10M best, FP/pandas bootstrap-median
+95% CIs were `[0.988765,1.021688]`/`[0.997242,1.002281]`; absolute log effect
+`1.22023605` cleared required `0.04291175`. At candidate cap 64 10M they were
+`[0.929819,1.044281]`/`[0.997381,1.002582]`; effect `1.03372583` cleared
+required `0.14553132`. These gates establish each same-invocation pandas win;
+they do not turn the slower candidate into a maintenance keep.
+
+**CV role:** provenance only; CV had no vote. Representative FP/pandas CVs
+were 2.07%/1.59% for current cap-32 10M and 14.53%/1.09% for candidate
+cap-64 10M.
+
+**Decision: REJECT** the scoped-thread, worker-private-Arc row×column
+scheduler. Its production source and focused tests were removed after the
+proof corpus was copied. The fixed-cardinality cap-13 threshold series was
+not run: a threshold cannot rescue a production candidate that lost at every
+raised cap, so further exclusive-host work would only tune a rejected family.
+
+**Concrete retry predicate:** do not retry this scoped-thread/per-worker-Arc
+design, its row threshold, or its maximum-worker cap. Re-open only after a
+materially different implementation removes per-call thread creation and
+per-worker output allocation—such as a reusable scheduler plus a proven safe
+contiguous-output partition—and an allocation plus named-frame profile of the
+exact 10M path predicts at most 13.780 ms. A future positive result must place
+live pandas, the actual current FrankenPandas scheduler, and the new candidate
+in the same invocation; give every arm its own A/A null; preserve exact output;
+record host, 64C/128T topology, governor, ISA, exact affinity, requested and
+actual threads, and all executable SHA-256s; and clear the two-times-null
+median-CI gate. CV remains provenance only.
+
+Full evidence:
+`tests/artifacts/perf/cod_trj_5995wx_df_abs_row_partition_20260729/`.
+The directory contains the DEFINE/design/hypothesis ledgers, exact-current
+profile, invalid fail-closed attempt, ten admission retries, and 65 copied raw
+files. Eighteen canonical JSON files / 44 rows passed the mechanical contract
+audit, and the local raw tree matched the released `trj` tree recursively by
+SHA-256 before Agent Mail release 6264.

@@ -6,10 +6,11 @@ Run `DataFrame::abs()` over the canonical all-valid Float64 frame with ten
 columns at 1M and 10M rows. The current implementation distributes independent
 columns across `available_parallelism().min(ncols)` scoped workers, so the
 existing trj artifact observes ten operation workers at every requested cap
-from 16 through 128. Profile the exact 10M path before source mutation. If the
-profile supports it, compare that baseline with one safe-Rust row-by-column
-work decomposition that can use more workers without changing cell values,
-column order, dtype, index, validity, or finiteness semantics.
+from 16 through 128. Profile the exact current 10M ELF before any candidate
+timing or landing. If the profile supports it, compare that baseline with one
+safe-Rust row-by-column work decomposition that can use more workers without
+changing cell values, column order, dtype, index, validity, or finiteness
+semantics.
 
 ## Metric and decision
 
@@ -27,6 +28,36 @@ At 10M rows, beat live pandas by at least 5x. The current best trj medians are
 19.482 ms for FrankenPandas and 68.902 ms for pandas (3.537x), so the same
 pandas time implies a FrankenPandas budget of at most 13.780 ms: at least
 29.3% total-time removal from the current best.
+
+## Final decision
+
+**REJECT** the portable scoped-thread row×column candidate and retain the
+current column scheduler.
+
+The exclusive production sweep made the requested/actual worker distinction
+real: at 10M, the current path stayed at ten actual workers for requested caps
+16/32/64/128, while the candidate used 16/32/64/128. More workers did not
+remove time:
+
+| requested cap | current workers / p50 | candidate workers / p50 | candidate versus current |
+|---:|---:|---:|---:|
+| 16 | 10 / 26.465 ms | 16 / 37.778 ms | 42.7% slower |
+| 32 | 10 / 20.022 ms | 32 / 29.068 ms | 45.2% slower |
+| 64 | 10 / 20.336 ms | 64 / 24.173 ms | 18.9% slower |
+| 128 | 10 / 20.680 ms | 128 / 24.527 ms | 18.6% slower |
+
+The best candidate row remained 75.4% above the fixed 13.780 ms campaign
+budget and produced only a 2.812x same-invocation pandas ratio. All rows used
+50 timed calls per engine, the same fixtures, and stable checksums, so this is
+not an iteration-count-shaped loss. The candidate adds scoped-thread and
+per-worker allocation work while the number of elementwise `abs` operations
+stays fixed.
+
+The full adaptive production sweep was already sufficient to reject the
+implementation. The cap-13 threshold series was therefore stopped rather than
+spending another exclusive-host window tuning a candidate that lost at every
+raised cap. The rejected source was removed; the profile and all raw attempts
+remain as the result.
 
 ## Golden output
 
@@ -67,14 +98,13 @@ record the exact CPU IDs from `lscpu -e` after claiming trj). Then run the
 requested-cap sweep. This separates placement from worker count; keep the
 128-logical-CPU/SMT row separate from the 64-physical-core row.
 
-## Existing-ELF curve explanation
+## Existing-ELF curve hypothesis
 
 The 1M decline after cap 16 is **not** evidence of additional worker overhead:
 the operation probe observed exactly ten FrankenPandas workers at caps 16, 32,
 64, and 128. Only the set of CPUs on which Linux may place those ten workers
-widens. The current medians imply the following unavoidable input-plus-output
-streaming lower bounds (ten Float64 input columns plus ten Float64 output
-columns):
+widens. The historical medians imply the following input-plus-output streaming
+lower bounds (ten Float64 input columns plus ten Float64 output columns):
 
 | rows / affinity cap | FP median | minimum bytes moved | effective lower-bound throughput |
 |---|---:|---:|---:|
@@ -83,12 +113,13 @@ columns):
 | 10M / 16 | 30.095 ms | 1.6 GB | 53.2 GB/s |
 | 10M / 128 | 19.482 ms | 1.6 GB | 82.1 GB/s |
 
-Thus compact placement wins while the 160 MB operation is small enough for
-cache locality and thread placement to dominate, whereas broad placement wins
-once the 1.6 GB operation needs aggregate memory bandwidth. The controlled
-ten-CPU compact-versus-spread experiment above is required to locate the
-row-count crossover without changing worker cardinality. Only after that
-placement effect is isolated may a candidate row-partition threshold be
+Those historical rows predate the mandatory host-wide arm brackets, so the
+timings are diagnostic rather than proof of the cause. They predict that
+compact placement wins while the 160 MB operation is small enough for cache
+locality to dominate, whereas broad placement wins once the 1.6 GB operation
+needs aggregate memory bandwidth. The controlled, host-exclusive ten-CPU
+compact-versus-spread experiment above must distinguish that prediction from
+co-tenant contamination before a candidate row-partition threshold is
 attributed to worker-granularity overhead.
 
 ## Scope boundary
