@@ -21231,3 +21231,124 @@ Full evidence:
 `artifacts/bench/proud_lane_m_dt_month_name_1m_10m_20260728.json`
 (SHA-256
 `94751388626aa6a7b7a047fd08702fc204361647c2df6da03356c1c7104cd7bf`).
+
+### 2026-07-29 ProudChapel — trj 5995WX full thread sweep: no operation exceeds 10 workers; join peaks at 8.169x, sort returns to a 0.921x loss at the 128-thread cap
+
+Lane M ran the required full `1/2/4/8/16/32/64/128` affinity sweep
+side-by-side with the live pandas 2.2.3 incumbent. The four exact Float64
+surfaces were `groupby_mean_float64`, `df_abs`, `join_inner`, and
+`sort_values_single`, each at 1M and 10M rows. Every cap used `taskset` over
+logical CPU IDs `0..N-1`; population and the operation-thread probe stayed
+outside the timed region.
+
+**Hardware and actual-thread provenance:** host identity `threadripperje`
+(`trj`), AMD Ryzen Threadripper PRO 5995WX, 64 physical cores, 128 logical
+threads, 536,069,869,568 bytes RAM, one NUMA node, eight 8-core L3 domains.
+Runtime detection reported AVX2, FMA, BMI2, and VAES, with AVX-512F absent.
+No engine inferred its used-thread count from the affinity: the untimed
+CPU-time-active probe measured FP/pandas operation workers. GroupBy used
+`1/1` at every cap; `df_abs` and sort used
+`1/1, 2/1, 4/1, 8/1, 10/1, 10/1, 10/1, 10/1`; join used
+`1/1, 2/1, 3/1, 3/1, 3/1, 3/1, 3/1, 3/1`.
+
+**Campaign result class:** `incumbent-win`.
+
+| surface | current trj one-thread ratio, 1M / 10M | best ratio, 1M / 10M | full-cap ratio, 1M / 10M | scaling finding |
+|---|---:|---:|---:|---|
+| `groupby_mean_float64` | 3.971x / 3.403x | 4.341x (cap 2, actual 1) / 3.473x (cap 8, actual 1) | 4.028x / 3.438x | flat; both engines remain serial |
+| `df_abs` | 1.662x / 1.433x | 3.237x (cap 16, actual 10) / 3.537x (cap 128, actual 10) | 2.365x / 3.537x | FP scales only to the 10-column ceiling |
+| `join_inner` | 7.825x / 3.712x | **8.169x / 3.874x** (cap 4, actual 3) | 3.208x / 2.476x | three-worker ceiling; cross-L3 placement erases advantage |
+| `sort_values_single` | 1.131x / **0.769x SLOWER** | 1.932x (cap 32, actual 10) / 1.332x (cap 64, actual 10) | 1.863x / **0.921x SLOWER** | 10-column gather scales, serial residual remains, SMT-wide placement regresses |
+
+Across the 64 rows, 61 are decidably FASTER, two sort/10M rows are
+decidably SLOWER, and sort/10M at cap 2 is `NULL_UNDECIDABLE` at 1.002x.
+The current trj GroupBy result corrects the assumption that the older
+19.486x worker number transferred to this machine: the old artifact omitted
+host/thread topology and measured pandas at 53.144 ms. Across all eight trj
+caps pandas is 8.596–9.923 ms at 1M, FP remains serial, and the ratio is
+3.835x–4.341x. The old number remains historical worker evidence, not a trj
+baseline.
+
+At 10M, `df_abs` improves from 47.090 ms at one thread to 19.482 ms with
+10 workers (2.417x FP-side) while pandas stays at one worker. Join is
+locality-sensitive: cap 4 keeps its three workers inside one L3 domain and
+measures 34.729 ms, but cap 128 permits wide placement and rises to
+60.500 ms. Sort moves from 1,581.088 ms at one thread to a best FP median of
+919.016 ms at cap 32, then regresses to 1,383.717 ms when all SMT siblings
+are allowed at cap 128.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=80c4fc7efcc4d8deabf0faf971a49013556a22109ae402df6913962a577d227e
+invocation_id=vs-pandas-20260729T074115.919872Z-pid1543968
+measured_ratio=1.143x
+
+That marker names the first decidable 10M sort win. All other cells carry
+their own non-placeholder shared invocation ID in the canonical raw JSON;
+there was no cross-invocation pairing.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=50e9e4001486513763eca3fe4a7904f24ec94b849fd1d28b18b7937e29888fad
+(73636568 bytes)
+/data/projects/frankenpandas-thread-sweep/target/release-perf/fp-bench`.
+All 32 canonical invocations reported this same ELF. Python self-reported
+`bench_elf_sha256=efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e
+(6894448 bytes) /usr/bin/python3.13`.
+
+**A/A null control (same invocation):** every engine and row has 25
+alternating pairs. Representative FP/pandas bootstrap-median 95% CIs were
+GroupBy cap-1 1M `[0.997632,1.002880]`/`[0.998300,1.000724]` and 10M
+`[1.000456,1.010495]`/`[0.969965,1.001129]`; `df_abs` cap-128 10M
+`[0.992366,1.030057]`/`[0.997553,1.002759]`; join cap-4 1M
+`[0.995512,1.010284]`/`[0.998077,1.002746]` and 10M
+`[0.989580,1.007539]`/`[0.997233,1.002357]`; sort cap-1 10M
+`[0.996273,1.003961]`/`[0.994320,1.000427]`, cap-2 10M
+`[0.995707,1.005368]`/`[0.996662,1.004690]`, cap-32 10M
+`[0.990699,1.004603]`/`[0.997461,1.007806]`, and cap-128 10M
+`[0.991175,1.013266]`/`[0.988862,1.039408]`.
+
+**Median-CI decision:** representative absolute median-CI log effect /
+required threshold pairs are GroupBy cap-1 `1.37901534/0.00575174` at 1M and
+`1.22469461/0.06098999` at 10M; `df_abs` cap-128 10M
+`1.26316912/0.05922756`; join cap-4 `2.10032636/0.02046256` at 1M and
+`1.35417195/0.02094929` at 10M; and sort/10M
+`0.26220226/0.01139286` SLOWER at cap 1,
+`0.00214967/0.01070736` NULL_UNDECIDABLE at cap 2,
+`0.28045168/0.01868900` FASTER at cap 32, and
+`0.08270452/0.07730210` SLOWER at cap 128. Every directional verdict was
+made by this gate.
+
+**CV role:** provenance only; CV had no vote. Across all 64 rows, FP CV
+ranged from 0.25% to 17.62% and pandas CV from 0.41% to 6.38%. In
+particular, sort cap-128 10M remains a median-CI loss despite FP CV 15.23%.
+
+**Decision: KEEP** the 61 cell-specific live-incumbent wins, including the
+decisive 8.169x 1M join result. **Decision: REJECT** a competitive claim for
+sort/10M at caps 1 and 128; their exact A/A controls make both losses
+decidable. Keep cap 2 as `NULL_UNDECIDABLE`, not a reject. This sweep changes
+no production source and does not claim a new optimization lever.
+
+**Concrete retry predicates:** for GroupBy, do not resweep this ELF until a
+row-partitioned implementation makes the exact operation probe report more
+than one active worker; then retain byte/parity proof and the live pandas
+arm. For `df_abs`, re-open beyond the 10-worker ceiling only after a
+row-chunk path or a fixture wider than 10 columns exists, with a bandwidth
+profile first; reaching 5x at 10M from the current best requires at least a
+29.3% FP-time removal. For join, retry caps above 4 only after same-L3
+placement or scheduler-aware worker pinning exists; the retry must prove the
+same three-worker count and exact output while recovering the cap-4 median.
+For sort, source mutation requires a profile of this exact 10M path naming a
+non-zero-self frame and computed Amdahl ceiling. Reaching 5x from the
+cap-32 median requires reducing 919.016 ms to at most 243.305 ms, a 73.5%
+total-time removal; do not retry the rejected small-size gather-floor or
+pair-sort levers. Any remeasurement still requires trj topology, exact
+affinity, actual operation threads, runtime ISA, one self-reported ELF,
+same-invocation live pandas and A/A arms, and median-CI admission.
+
+Full evidence:
+`artifacts/bench/cod_trj_5995wx_partitionable_thread_sweep_20260729.md`,
+`artifacts/bench/cod_trj_5995wx_partitionable_thread_sweep_20260729.json`,
+and the four
+`tests/artifacts/perf/cod_trj_5995wx_*_thread_sweep_20260729/raw`
+directories. A mechanical pass validated 32 canonical files and 64/64
+contract-valid rows after remote-to-local transfer.
