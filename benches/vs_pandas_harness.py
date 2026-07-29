@@ -1165,6 +1165,18 @@ def bench_str_contains_arrow_pandas(df: pd.DataFrame) -> PairedSamples:
     return time_operation(lambda: series.str.contains("5", regex=False))
 
 
+def bench_str_startswith_arrow_pandas(df: pd.DataFrame) -> PairedSamples:
+    """Run prefix matching on the fastest screened pandas string backend.
+
+    A same-worker 1M screen compared object, ``string[python]``, and
+    ``string[pyarrow]`` storage. Arrow was fastest, and all three produced the
+    same all-true boolean output for the exact benchmark names.
+    """
+    names = [f"item_{i:010d}" for i in range(len(df))]
+    series = pd.Series(_as_string_column(names, "arrow"))
+    return time_operation(lambda: series.str.startswith("item"))
+
+
 def bench_df_dot_pandas(df: pd.DataFrame) -> list[float]:
     import math
     dim = math.isqrt(len(df))
@@ -1308,6 +1320,7 @@ PANDAS_WORKLOADS = {
         "str_groupby_sum_object": bench_str_groupby_sum_object_pandas,
         "str_groupby_sum_arrow": bench_str_groupby_sum_arrow_pandas,
         "str_contains_arrow": bench_str_contains_arrow_pandas,
+        "str_startswith_arrow": bench_str_startswith_arrow_pandas,
     },
     "linalg": {
         "df_dot": bench_df_dot_pandas,

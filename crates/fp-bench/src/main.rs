@@ -2389,7 +2389,12 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Paired
         // ["val"].sum(). The numeric `df` built above is unused here.
         (
             "strings",
-            "str_len" | "str_upper" | "str_contains" | "str_contains_arrow" | "str_startswith",
+            "str_len"
+            | "str_upper"
+            | "str_contains"
+            | "str_contains_arrow"
+            | "str_startswith"
+            | "str_startswith_arrow",
         ) => {
             let frame = build_str_frame(rows);
             let series = frame.get_column("name");

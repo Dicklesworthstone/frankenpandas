@@ -21000,3 +21000,77 @@ Full evidence:
 `artifacts/bench/proud_lane_m_str_contains_arrow_1m_10m_20260728.json`
 (SHA-256
 `78650f5cca479b7352b804c14f4263a823923dde2796ea2558868eabfaea5da5`).
+
+### 2026-07-28 ProudChapel — `str.startswith` Arrow-incumbent REJECT at 1M/10M; 0.420x geomean
+
+Lane M re-adjudicated the historical object-string result under the live
+incumbent policy. A same-worker pandas 2.2.3 screen on the exact
+`item_{i:010d}` fixture measured object at 193.081 ms,
+`string[python]` at 146.044 ms, and `string[pyarrow]` at 10.394 ms.
+All three output arrays were exactly equal with 1,000,000 true values. Only
+the fastest Arrow arm advanced.
+
+The canonical gate compared pandas `Series.str.startswith("item")` with
+FrankenPandas `Series::str().startswith("item")`. Both arms used the same
+all-valid ordered names, and population stayed outside timing. The
+strict-remote focused `str_startswith` filter passed 6/6 tests before
+measurement.
+
+| size | FP p50 | pandas Arrow p50 | FP/pandas ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 25.440 ms | 10.329 ms | **0.406x** | 0.90132742 / 0.17251561 | SLOWER |
+| 10M | 250.332 ms | 108.572 ms | **0.434x** | 0.83537229 / 0.31271556 | SLOWER |
+
+The two-row geomean is 0.420x (pandas is 2.382x faster). The ratio improves
+6.9% with scale but remains a large loss; the absolute median deficit grows
+from 15.110 ms to 141.760 ms.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T050418.942527Z-pid3741365
+measured_ratio=0.434x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=64a5bcccd668d2c05cf76f0f25458cf6d444c719f7347079ce1ddf63677f1ae0
+(70379840 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The worker's direct post-run SHA-256 matched the in-process self-report. The
+worker/local Rust source SHA-256 matched
+`bf155d88b2fc76b163b021375adb9b5674ba47ed4792253d1512285a47902cc4`;
+the worker/local/in-process Python harness source SHA-256 matched
+`798465900ee2052aba24b7d523594e7226d1df19f448761ca776360ff6a2faa7`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.954257,1.090087]/[0.963220,1.041711] at 1M and
+[0.955747,1.023732]/[0.855253,0.996646] at 10M.
+
+**Median-CI decision:** the absolute median log effects
+0.90132742 and 0.83537229 cleared the required thresholds
+0.17251561 and 0.31271556 at 1M and 10M. Both losses are decidable.
+
+**CV role:** provenance only; CV had no vote, including FP/pandas CV of
+12.78%/12.98% at 1M and 10.37%/21.28% at 10M.
+
+**Decision: REJECT** the competitive claim; retain the Arrow incumbent arm
+as measurement coverage. The historical object-only ratio is not an
+admissible competitive claim under the current policy.
+
+**Concrete retry predicates:** re-open only after (1) a profile of this exact
+10M workload names a non-zero-self FP frame, records its self-time and Amdahl
+ceiling, and supports a production lever capable of removing at least 56.7%
+of FP median time (the parity floor); (2) the FP prefix implementation,
+contiguous-Utf8 representation, Bool output, allocator, compiler, worker ISA,
+or fixture changes; or (3) the pandas or pyarrow artifact changes and a fresh
+same-worker backend screen selects the new fastest semantically identical
+arm. Do not retry with pandas object or `string[python]`; both weaker arms
+were already screened out. Any retry still requires one self-identified ELF,
+the fastest live pandas arm in the same invocation, alternating A/A controls,
+and median-CI admission.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_str_startswith_arrow_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_str_startswith_arrow_1m_10m_20260728.json`
+(SHA-256
+`a14dce9be27576dfeb90ac7f8afb1a3a81077256e240a27471e221f394f1e6d6`).
