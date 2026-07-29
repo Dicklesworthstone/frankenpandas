@@ -1071,19 +1071,17 @@ def bench_dt_floor_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: s.dt.floor("D"))
 
 
-# `600s` (10 min) makes both the date and the time-of-day vary while keeping 1M
-# rows inside datetime64[ns].
-#
-# NOT YET APPLES-TO-APPLES — do not gate on these rows. fp-bench's `datetime`
-# arm generates `base + i * 86_437_000_000_000` nanos, which OVERFLOWS i64 at
-# n >= 100_000 (release wraps silently), so pandas cannot build the same series
-# (`date_range` raises OutOfBoundsDatetime). The fp-bench generator has to be
-# fixed to a non-overflowing step before these two halves measure one workload.
-# Until then the pandas half stands alone as a cost anchor for `.dt.date` /
-# `.dt.time` on 1M in-range datetimes. Note also that pandas' `.dt.date` /
-# `.dt.time` return object arrays of Python `datetime.date` / `datetime.time`,
-# whereas FrankenPandas returns an ISO-8601 Utf8 column; the representation-
-# equivalent pandas call is `s.dt.strftime(...)`.
+# `600s` (10 min) exactly matches fp-bench's in-range nanosecond generator
+# through 10M rows. `dt_strftime` is the representation-equivalent incumbent:
+# both engines emit `%Y-%m-%d` strings. The same-named pandas `.dt.date` /
+# `.dt.time` arms below return Python object arrays, while FrankenPandas returns
+# ISO-8601 Utf8, so those two remain diagnostic-only and must not be gated.
+def bench_dt_strftime_pandas(df: pd.DataFrame) -> PairedSamples:
+    n = len(df)
+    s = pd.Series(pd.date_range("2000-01-01", periods=n, freq="600s"))
+    return time_operation(lambda: s.dt.strftime("%Y-%m-%d"))
+
+
 def bench_dt_date_pandas(df: pd.DataFrame) -> list[float]:
     n = len(df)
     s = pd.Series(pd.date_range("2000-01-01", periods=n, freq="600s"))
@@ -1200,6 +1198,7 @@ PANDAS_WORKLOADS = {
     "datetime": {
         "to_datetime": bench_to_datetime_pandas,
         "dt_floor": bench_dt_floor_pandas,
+        "dt_strftime": bench_dt_strftime_pandas,
         "dt_date": bench_dt_date_pandas,
         "dt_time": bench_dt_time_pandas,
     },

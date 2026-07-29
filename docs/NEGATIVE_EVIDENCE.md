@@ -20618,3 +20618,62 @@ Full evidence:
 `artifacts/bench/proud_lane_m_melt_1m_10m_20260728.md` and
 `artifacts/bench/proud_lane_m_melt_1m_10m_20260728.json` (SHA-256
 `6fd1aeba21a743549c902db456e02e51c0d547895bd44f60853964ced06cdb30`).
+
+### 2026-07-28 ProudChapel — datetime `dt_strftime` live-incumbent WIN at 1M/10M; absolute advantage grows, ratio does not
+
+The prior audit identified `s.dt.strftime("%Y-%m-%d")` as the
+representation-equivalent pandas counterpart for FrankenPandas' Utf8
+datetime formatting. The benchmark generator now uses the identical in-range
+sequence on both sides (`2000-01-01 + i * 600s`) through 10M rows, and the
+schema-v4 harness runs the actual pandas 2.2.3 call live beside FrankenPandas.
+The pandas `.dt.date` and `.dt.time` object-producing arms remain excluded.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | FP p50 | pandas p50 | ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 76.239 ms | 991.039 ms | **12.999x** | 2.56487794 / 0.12830703 | FASTER |
+| 10M | 1,256.212 ms | 11,130.928 ms | **8.861x** | 2.18162684 / 1.08638672 | FASTER |
+
+The two-row geomean is 10.732x. Absolute median time saved grows from
+914.800 ms to 9.875 seconds, while the ratio contracts 31.8%. This is a
+decisive incumbent win, not evidence for a ratio-amplifying Class-1 mechanism
+on this ELF.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T003944.972139Z-pid3276902
+measured_ratio=12.999x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=ed445e842c6ef4fffc19dc2e6ae047cc9c7984ef49a546df27c2f676ccff62d4
+(70294592 bytes) /data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas median CIs were [0.956368,1.052630]/[0.937861,1.025801] at 1M
+and [0.580890,1.660819]/[0.922031,1.023460] at 10M. The combined 2x intervals
+were [0.879583,1.136902] and [0.337434,2.963547].
+
+**Median-CI decision:** at 1M, median effect
+claim_log_effect=2.56487794 cleared the required threshold
+required_log_effect=0.12830703; at 10M, median effect
+claim_log_effect=2.18162684 cleared the required threshold
+required_log_effect=1.08638672.
+
+**CV role:** provenance only; CV had no vote, including the 58.77% 10M
+FrankenPandas CV.
+
+**Concrete retry predicates:** keep the incumbent-win classification until
+the format, datetime sequence, FrankenPandas implementation, harness source,
+pandas artifact, allocator, compiler, worker ISA, or executing ELF changes.
+Re-open a ratio-growth claim only when the same self-identified ELF runs both
+sizes on one worker in one invocation and two clean repeats put the 10M ratio
+above the 1M ratio outside the combined A/A intervals. Do not use `.dt.date`
+or `.dt.time` as the incumbent until both engines expose the same logical and
+physical output contract.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_dt_strftime_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_dt_strftime_1m_10m_20260728.json` (SHA-256
+`6f3c6ac279221851d345ecf159e48e24377f8c3ad3fdd867a669cd1abd4c4aa3`).
