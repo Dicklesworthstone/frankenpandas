@@ -67,6 +67,30 @@ record the exact CPU IDs from `lscpu -e` after claiming trj). Then run the
 requested-cap sweep. This separates placement from worker count; keep the
 128-logical-CPU/SMT row separate from the 64-physical-core row.
 
+## Existing-ELF curve explanation
+
+The 1M decline after cap 16 is **not** evidence of additional worker overhead:
+the operation probe observed exactly ten FrankenPandas workers at caps 16, 32,
+64, and 128. Only the set of CPUs on which Linux may place those ten workers
+widens. The current medians imply the following unavoidable input-plus-output
+streaming lower bounds (ten Float64 input columns plus ten Float64 output
+columns):
+
+| rows / affinity cap | FP median | minimum bytes moved | effective lower-bound throughput |
+|---|---:|---:|---:|
+| 1M / 16 | 2.232 ms | 160 MB | 71.7 GB/s |
+| 1M / 128 | 3.076 ms | 160 MB | 52.0 GB/s |
+| 10M / 16 | 30.095 ms | 1.6 GB | 53.2 GB/s |
+| 10M / 128 | 19.482 ms | 1.6 GB | 82.1 GB/s |
+
+Thus compact placement wins while the 160 MB operation is small enough for
+cache locality and thread placement to dominate, whereas broad placement wins
+once the 1.6 GB operation needs aggregate memory bandwidth. The controlled
+ten-CPU compact-versus-spread experiment above is required to locate the
+row-count crossover without changing worker cardinality. Only after that
+placement effect is isolated may a candidate row-partition threshold be
+attributed to worker-granularity overhead.
+
 ## Scope boundary
 
 This round does not alter GroupBy, sort, join, pandas, global runtime policy, or
