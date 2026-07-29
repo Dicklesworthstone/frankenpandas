@@ -34,8 +34,10 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import partial
 from io import StringIO
 from json import JSONDecodeError
 from pathlib import Path
@@ -268,6 +270,29 @@ class HostWideExclusivityGate:
         }
 
 
+def _run_host_exclusive_arm(
+    exclusivity_gate: HostWideExclusivityGate,
+    phase_suffix: str,
+    operation: Callable[[], Any],
+) -> tuple[Any, dict[str, Any]]:
+    """Run one untimed outer arm only when both host-wide guards are clear."""
+    pre_quiescence = exclusivity_gate.require_quiet(
+        f"pre_measurement:{phase_suffix}"
+    )
+    result = operation()
+    post_quiescence = exclusivity_gate.require_quiet(
+        f"post_measurement:{phase_suffix}"
+    )
+    return (
+        result,
+        {
+            "pre_measurement": pre_quiescence,
+            "post_measurement": post_quiescence,
+            "valid": True,
+        },
+    )
+
+
 def _host_wide_exclusivity_self_test() -> None:
     """Exercise clear, busy, and incomplete adjudication without timing."""
     clear = _host_wide_quiescence_observation(
@@ -297,6 +322,34 @@ def _host_wide_exclusivity_self_test() -> None:
         or incomplete["missing_cpu_ids"] != [1]
     ):
         raise RuntimeError("incomplete sample must identify the missing CPU")
+
+    class RecordingGate:
+        def __init__(self) -> None:
+            self.phases: list[str] = []
+
+        def require_quiet(self, phase: str) -> dict[str, Any]:
+            self.phases.append(phase)
+            return {"phase": phase, "verdict": "clear"}
+
+    gate = RecordingGate()
+    result, artifact = _run_host_exclusive_arm(
+        gate,
+        "frankenpandas:self-test",
+        lambda: "completed",
+    )
+    if result != "completed":
+        raise RuntimeError("exclusive arm must return the operation result")
+    if gate.phases != [
+        "pre_measurement:frankenpandas:self-test",
+        "post_measurement:frankenpandas:self-test",
+    ]:
+        raise RuntimeError("every exclusive arm must be bracketed by two guards")
+    if (
+        artifact["pre_measurement"]["verdict"] != "clear"
+        or artifact["post_measurement"]["verdict"] != "clear"
+        or not artifact["valid"]
+    ):
+        raise RuntimeError("exclusive arm artifact must retain both clear guards")
 
 
 def _cpu_flags() -> set[str]:
@@ -1872,16 +1925,14 @@ def run_pandas_workload(
     df = generate_test_data(config["rows"], config["cols"], dtype)
 
     bench_func = PANDAS_WORKLOADS[category][workload]
-    pre_quiescence = exclusivity_gate.require_quiet(
-        f"pre_measurement:pandas:{category}/{workload}/{size}/{dtype}"
-    )
-
     if category == "io":
-        samples = bench_func(df, tmp_path)
+        operation = partial(bench_func, df, tmp_path)
     else:
-        samples = bench_func(df)
-    post_quiescence = exclusivity_gate.require_quiet(
-        f"post_measurement:pandas:{category}/{workload}/{size}/{dtype}"
+        operation = partial(bench_func, df)
+    samples, quiescence = _run_host_exclusive_arm(
+        exclusivity_gate,
+        f"pandas:{category}/{workload}/{size}/{dtype}",
+        operation,
     )
 
     if not isinstance(samples, PairedSamples):
@@ -1910,11 +1961,7 @@ def run_pandas_workload(
                 "runtime_detected_isa_features"
             ],
         ),
-        {
-            "pre_measurement": pre_quiescence,
-            "post_measurement": post_quiescence,
-            "valid": True,
-        },
+        quiescence,
     )
 
 
@@ -2207,24 +2254,22 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                     fingerprint,
                     exclusivity_gate,
                 )
-                fp_pre_quiescence = exclusivity_gate.require_quiet(
-                    "pre_measurement:frankenpandas:"
-                    f"{category}/{workload}/{size}/{dtype}"
-                )
-                fp_result = run_fp_workload_subprocess(category, workload, size, dtype)
-                fp_post_quiescence = exclusivity_gate.require_quiet(
-                    "post_measurement:frankenpandas:"
-                    f"{category}/{workload}/{size}/{dtype}"
+                fp_result, fp_quiescence = _run_host_exclusive_arm(
+                    exclusivity_gate,
+                    f"frankenpandas:{category}/{workload}/{size}/{dtype}",
+                    partial(
+                        run_fp_workload_subprocess,
+                        category,
+                        workload,
+                        size,
+                        dtype,
+                    ),
                 )
 
                 comparison = compute_comparison(fp_result, pd_result, config["rows"])
                 comparison["host_wide_quiescence"] = {
                     "pandas": pandas_quiescence,
-                    "frankenpandas": {
-                        "pre_measurement": fp_pre_quiescence,
-                        "post_measurement": fp_post_quiescence,
-                        "valid": True,
-                    },
+                    "frankenpandas": fp_quiescence,
                     "valid": True,
                 }
                 comparison["thread_provenance"] = build_thread_provenance(
