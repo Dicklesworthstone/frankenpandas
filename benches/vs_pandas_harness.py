@@ -85,6 +85,8 @@ BOOTSTRAP_RESAMPLES = 10_000
 NULL_CI_CONFIDENCE = 0.95
 DECIDABILITY_MARGIN = 2.0
 WARMUP_ITERATIONS = 3
+CPU_SAMPLE_INTERVAL_SECONDS = 0.300
+MAX_HOST_WIDE_BUSY_FRACTION = 0.20
 TAKE_BATCH = 256
 TRANSPOSE_BATCH = 8192
 
@@ -121,6 +123,180 @@ def _online_cpu_ids() -> list[int]:
         if online in (None, "1"):
             cpu_ids.append(cpu_id)
     return sorted(cpu_ids)
+
+
+def _read_host_cpu_ticks() -> dict[int, tuple[int, int]]:
+    """Read total and idle scheduler ticks for every online host CPU."""
+    stat = _read_text(Path("/proc/stat"))
+    if stat is None:
+        raise RuntimeError("host-wide exclusivity requires readable /proc/stat")
+
+    ticks = {}
+    for line in stat.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        label = fields[0]
+        if not label.startswith("cpu") or not label[3:].isdigit():
+            continue
+        try:
+            values = [int(value) for value in fields[1:]]
+        except ValueError as error:
+            raise RuntimeError(f"invalid /proc/stat row for {label}") from error
+        if len(values) < 5:
+            raise RuntimeError(f"/proc/stat row for {label} is too short")
+        total = sum(values)
+        idle = values[3] + values[4]
+        ticks[int(label[3:])] = (total, idle)
+    if not ticks:
+        raise RuntimeError("host-wide exclusivity found no CPU rows in /proc/stat")
+    return ticks
+
+
+def _sample_host_cpu_busy() -> dict[int, float]:
+    """Sample per-CPU busy fractions over the fleet-standard 300 ms window."""
+    before = _read_host_cpu_ticks()
+    time.sleep(CPU_SAMPLE_INTERVAL_SECONDS)
+    after = _read_host_cpu_ticks()
+    busy = {}
+    for cpu_id, (total_before, idle_before) in before.items():
+        if cpu_id not in after:
+            continue
+        total_after, idle_after = after[cpu_id]
+        total_delta = max(0, total_after - total_before)
+        idle_delta = max(0, idle_after - idle_before)
+        busy[cpu_id] = (
+            1.0
+            if total_delta == 0
+            else max(0, total_delta - idle_delta) / total_delta
+        )
+    return busy
+
+
+def _host_wide_quiescence_observation(
+    phase: str,
+    expected_cpu_ids: list[int],
+    busy_fractions: dict[int, float],
+) -> dict[str, Any]:
+    """Adjudicate one all-online-CPU quiescence sample."""
+    missing_cpu_ids = [
+        cpu_id for cpu_id in expected_cpu_ids if cpu_id not in busy_fractions
+    ]
+    busy_cpu_ids = [
+        cpu_id
+        for cpu_id in expected_cpu_ids
+        if busy_fractions.get(cpu_id, 1.0) > MAX_HOST_WIDE_BUSY_FRACTION
+    ]
+    observed = {
+        f"cpu{cpu_id}": busy_fractions[cpu_id]
+        for cpu_id in expected_cpu_ids
+        if cpu_id in busy_fractions
+    }
+    return {
+        "phase": phase,
+        "scope": "all_online_host_cpus",
+        "sample_interval_ms": round(CPU_SAMPLE_INTERVAL_SECONDS * 1000),
+        "maximum_busy_fraction": MAX_HOST_WIDE_BUSY_FRACTION,
+        "expected_cpu_count": len(expected_cpu_ids),
+        "sampled_cpu_count": len(observed),
+        "missing_cpu_ids": missing_cpu_ids,
+        "busy_cpu_ids_above_limit": busy_cpu_ids,
+        "busy_cpu_count_above_limit": len(busy_cpu_ids),
+        "maximum_observed_busy_fraction": max(observed.values(), default=1.0),
+        "sampled_cpu_busy_fraction": observed,
+        "verdict": (
+            "clear"
+            if expected_cpu_ids and not missing_cpu_ids and not busy_cpu_ids
+            else "blocked"
+        ),
+    }
+
+
+@dataclass
+class HostWideExclusivityGate:
+    """Fail closed unless every online host CPU is quiet before each arm."""
+    expected_cpu_ids: list[int]
+    observations: list[dict[str, Any]] = field(default_factory=list)
+
+    def require_quiet(self, phase: str) -> dict[str, Any]:
+        try:
+            busy_fractions = _sample_host_cpu_busy()
+        except RuntimeError as error:
+            print(
+                f"ERROR: host-wide benchmark exclusivity: {error}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2) from error
+        observation = _host_wide_quiescence_observation(
+            phase,
+            self.expected_cpu_ids,
+            busy_fractions,
+        )
+        self.observations.append(observation)
+        if observation["verdict"] != "clear":
+            print(
+                "ERROR: host-wide benchmark exclusivity requires every online "
+                "CPU to remain at or below "
+                f"{MAX_HOST_WIDE_BUSY_FRACTION * 100:.1f}% busy; "
+                f"phase={phase} missing={observation['missing_cpu_ids']} "
+                f"busy={observation['busy_cpu_ids_above_limit']}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        print(
+            "host_wide_quiescence="
+            f"phase={phase} "
+            f"online_cpu_count={len(self.expected_cpu_ids)} "
+            f"maximum_busy_fraction={MAX_HOST_WIDE_BUSY_FRACTION:.3f} "
+            "busy_cpu_count_above_limit=0 verdict=clear"
+        )
+        return observation
+
+    def artifact(self) -> dict[str, Any]:
+        return {
+            "required": True,
+            "scope": "all_online_host_cpus",
+            "online_cpu_ids": self.expected_cpu_ids,
+            "maximum_busy_fraction": MAX_HOST_WIDE_BUSY_FRACTION,
+            "sample_interval_ms": round(CPU_SAMPLE_INTERVAL_SECONDS * 1000),
+            "observations": self.observations,
+            "valid": bool(self.observations)
+            and all(
+                observation["verdict"] == "clear"
+                for observation in self.observations
+            ),
+        }
+
+
+def _host_wide_exclusivity_self_test() -> None:
+    """Exercise clear, busy, and incomplete adjudication without timing."""
+    clear = _host_wide_quiescence_observation(
+        "self-test-clear",
+        [0, 1],
+        {0: 0.0, 1: MAX_HOST_WIDE_BUSY_FRACTION},
+    )
+    if clear["verdict"] != "clear":
+        raise RuntimeError("threshold-boundary sample must be clear")
+    busy = _host_wide_quiescence_observation(
+        "self-test-busy",
+        [0, 1],
+        {0: 0.0, 1: MAX_HOST_WIDE_BUSY_FRACTION + 0.001},
+    )
+    if (
+        busy["verdict"] != "blocked"
+        or busy["busy_cpu_ids_above_limit"] != [1]
+    ):
+        raise RuntimeError("over-threshold sample must identify the busy CPU")
+    incomplete = _host_wide_quiescence_observation(
+        "self-test-incomplete",
+        [0, 1],
+        {0: 0.0},
+    )
+    if (
+        incomplete["verdict"] != "blocked"
+        or incomplete["missing_cpu_ids"] != [1]
+    ):
+        raise RuntimeError("incomplete sample must identify the missing CPU")
 
 
 def _cpu_flags() -> set[str]:
@@ -1689,12 +1865,16 @@ def run_pandas_workload(
     dtype: str,
     tmp_path: Path,
     fingerprint: dict[str, Any],
-) -> TimingResult:
+    exclusivity_gate: HostWideExclusivityGate,
+) -> tuple[TimingResult, dict[str, Any]]:
     """Run a single pandas workload and return timing result."""
     config = SIZE_CONFIGS[size]
     df = generate_test_data(config["rows"], config["cols"], dtype)
 
     bench_func = PANDAS_WORKLOADS[category][workload]
+    quiescence = exclusivity_gate.require_quiet(
+        f"pre_measurement:pandas:{category}/{workload}/{size}/{dtype}"
+    )
 
     if category == "io":
         samples = bench_func(df, tmp_path)
@@ -1704,27 +1884,30 @@ def run_pandas_workload(
     if not isinstance(samples, PairedSamples):
         raise TypeError(f"{category}/{workload} did not use the paired timing contract")
     identity = executable_identity(Path(sys.executable))
-    return TimingResult(
-        workload=workload,
-        category=category,
-        size=size,
-        dtype=dtype,
-        engine="pandas",
-        times_us=samples.times_us,
-        null_arm_a_us=samples.null_arm_a_us,
-        null_arm_b_us=samples.null_arm_b_us,
-        null_ratios=samples.null_ratios,
-        checksum=f"{samples.checksum:016x}",
-        executable_sha256=identity["sha256"],
-        executable_bytes=identity["bytes"],
-        executable_path=identity["path"],
-        runtime_available_parallelism=samples.runtime_available_parallelism,
-        process_threads_before_probe=samples.process_threads_before_probe,
-        peak_process_threads=samples.peak_process_threads,
-        operation_threads_used=samples.operation_threads_used,
-        runtime_detected_isa_features=fingerprint[
-            "runtime_detected_isa_features"
-        ],
+    return (
+        TimingResult(
+            workload=workload,
+            category=category,
+            size=size,
+            dtype=dtype,
+            engine="pandas",
+            times_us=samples.times_us,
+            null_arm_a_us=samples.null_arm_a_us,
+            null_arm_b_us=samples.null_arm_b_us,
+            null_ratios=samples.null_ratios,
+            checksum=f"{samples.checksum:016x}",
+            executable_sha256=identity["sha256"],
+            executable_bytes=identity["bytes"],
+            executable_path=identity["path"],
+            runtime_available_parallelism=samples.runtime_available_parallelism,
+            process_threads_before_probe=samples.process_threads_before_probe,
+            peak_process_threads=samples.peak_process_threads,
+            operation_threads_used=samples.operation_threads_used,
+            runtime_detected_isa_features=fingerprint[
+                "runtime_detected_isa_features"
+            ],
+        ),
+        quiescence,
     )
 
 
@@ -1991,6 +2174,7 @@ def build_thread_provenance(
 def run_category(category: str, sizes: list[str], dtypes: list[str],
                  tmp_path: Path, fingerprint: dict[str, Any],
                  requested_thread_count: int | None,
+                 exclusivity_gate: HostWideExclusivityGate,
                  workload_filter: set[str] | None = None) -> list[dict[str, Any]]:
     """Run all workloads in a category for given sizes and dtypes."""
     results = []
@@ -2007,17 +2191,27 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                 config = SIZE_CONFIGS[size]
                 print(f"  [{category}] {workload} @ {size}/{dtype}...", end=" ", flush=True)
 
-                pd_result = run_pandas_workload(
+                pd_result, pandas_quiescence = run_pandas_workload(
                     category,
                     workload,
                     size,
                     dtype,
                     tmp_path,
                     fingerprint,
+                    exclusivity_gate,
+                )
+                fp_quiescence = exclusivity_gate.require_quiet(
+                    "pre_measurement:frankenpandas:"
+                    f"{category}/{workload}/{size}/{dtype}"
                 )
                 fp_result = run_fp_workload_subprocess(category, workload, size, dtype)
 
                 comparison = compute_comparison(fp_result, pd_result, config["rows"])
+                comparison["host_wide_quiescence"] = {
+                    "pandas": pandas_quiescence,
+                    "frankenpandas": fp_quiescence,
+                    "valid": True,
+                }
                 comparison["thread_provenance"] = build_thread_provenance(
                     fingerprint,
                     requested_thread_count,
@@ -2096,7 +2290,17 @@ def main():
         type=int,
         help="Fail closed unless host topology reports this logical-thread count",
     )
+    parser.add_argument(
+        "--host-exclusivity-self-test",
+        action="store_true",
+        help="Exercise the fail-closed host-wide quiescence adjudicator and exit",
+    )
     args = parser.parse_args()
+
+    if args.host_exclusivity_self_test:
+        _host_wide_exclusivity_self_test()
+        print("host_wide_exclusivity_self_test=pass")
+        return
 
     if args.dependency_probe:
         if pd is None:
@@ -2172,6 +2376,16 @@ def main():
             print(f"ERROR: thread provenance contract: {error}", file=sys.stderr)
         sys.exit(2)
 
+    online_cpu_ids = _online_cpu_ids()
+    if not online_cpu_ids:
+        print(
+            "ERROR: host-wide benchmark exclusivity found no online CPUs",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    exclusivity_gate = HostWideExclusivityGate(online_cpu_ids)
+    exclusivity_gate.require_quiet("invocation_preflight")
+
     timestamp = datetime.now(timezone.utc).isoformat()
     invocation_id = (
         "vs-pandas-"
@@ -2234,12 +2448,14 @@ def main():
                 tmp_path,
                 fingerprint,
                 args.thread_count,
+                exclusivity_gate,
                 workload_filter,
             )
             for result in results:
                 result["invocation_id"] = invocation_id
             all_results.extend(results)
 
+        exclusivity_gate.require_quiet("invocation_postflight")
         output = {
             "schema_version": "v4",
             "timestamp": timestamp,
@@ -2265,6 +2481,7 @@ def main():
             },
             "harness_source": harness_source_identity,
             "host_fingerprint": fingerprint,
+            "host_wide_exclusivity": exclusivity_gate.artifact(),
             "parameters": {
                 "sizes": sizes,
                 "dtypes": dtypes,
@@ -2276,6 +2493,18 @@ def main():
                 "decidability_margin": DECIDABILITY_MARGIN,
                 "gate": "median_bootstrap_ci",
                 "cv_role": "provenance_only",
+                "host_wide_exclusivity_contract": {
+                    "required": True,
+                    "scope": "all_online_host_cpus",
+                    "maximum_busy_fraction": MAX_HOST_WIDE_BUSY_FRACTION,
+                    "sample_interval_ms": round(
+                        CPU_SAMPLE_INTERVAL_SECONDS * 1000
+                    ),
+                    "checks": (
+                        "invocation preflight, immediately before each pandas "
+                        "and FrankenPandas arm, and invocation postflight"
+                    ),
+                },
                 "pandas_string_backend_policy": {
                     "unsuffixed_workloads": pandas_string_backend(),
                     "explicit_workload_suffixes": {
