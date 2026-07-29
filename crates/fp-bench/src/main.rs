@@ -317,6 +317,9 @@ fn size_rows_cols(size: &str) -> (usize, usize) {
         "100k" => (100_000, 10),
         "1M" => (1_000_000, 10),
         "2M" => (2_000_000, 10),
+        "4M" => (4_000_000, 10),
+        "6M" => (6_000_000, 10),
+        "8M" => (8_000_000, 10),
         "10M" => (10_000_000, 10),
         _ => (100_000, 10),
     }
@@ -3203,7 +3206,11 @@ mod harness_contract_tests {
     }
 
     #[test]
-    fn ten_million_size_routes_to_ten_million_rust_rows() {
+    fn large_thread_scaling_sizes_route_to_the_requested_rust_rows() {
+        assert_eq!(size_rows_cols("2M"), (2_000_000, 10));
+        assert_eq!(size_rows_cols("4M"), (4_000_000, 10));
+        assert_eq!(size_rows_cols("6M"), (6_000_000, 10));
+        assert_eq!(size_rows_cols("8M"), (8_000_000, 10));
         assert_eq!(size_rows_cols("10M"), (10_000_000, 10));
     }
 

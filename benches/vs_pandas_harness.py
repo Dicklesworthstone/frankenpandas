@@ -74,6 +74,9 @@ SIZE_CONFIGS = {
     "100k": {"rows": 100_000, "cols": 10},
     "1M": {"rows": 1_000_000, "cols": 10},
     "2M": {"rows": 2_000_000, "cols": 10},
+    "4M": {"rows": 4_000_000, "cols": 10},
+    "6M": {"rows": 6_000_000, "cols": 10},
+    "8M": {"rows": 8_000_000, "cols": 10},
     "10M": {"rows": 10_000_000, "cols": 10},
 }
 
@@ -2055,7 +2058,7 @@ def main():
                         help="Run specific category")
     parser.add_argument("--all", action="store_true", help="Run all categories")
     parser.add_argument("--sizes", default="10k,100k,1M",
-                        help="Comma-separated sizes (10k,100k,1M,2M,10M)")
+                        help="Comma-separated sizes (10k,100k,1M,2M,4M,6M,8M,10M)")
     parser.add_argument("--dtypes", default="float64",
                         help="Comma-separated dtypes")
     parser.add_argument("--workloads",
