@@ -20677,3 +20677,82 @@ Full evidence:
 `artifacts/bench/proud_lane_m_dt_strftime_1m_10m_20260728.md` and
 `artifacts/bench/proud_lane_m_dt_strftime_1m_10m_20260728.json` (SHA-256
 `6f3c6ac279221851d345ecf159e48e24377f8c3ad3fdd867a669cd1abd4c4aa3`).
+
+### 2026-07-28 ProudChapel — stateful Series callback incumbent WIN at 1M/10M; 19.713x geomean
+
+Lane M added a large-N ordered callback whose output is the full prefix
+recurrence `state = (state * 31 + value) & 0x7fffffff` over `0..n`. Every
+callback invocation affects every later output, so a built-in reduction cannot
+replace the callback while preserving the observed Series. Population remains
+outside timing on both engines.
+
+A six-route pandas 2.2.3 screen found `Series.map` the fastest
+task-equivalent route at 1M: 313.244 ms versus 318.525 ms for
+`Series.transform`, 326.596 ms for exact `Series.apply`, 359.640 ms for
+`Series(np.fromiter(...))`, 411.551 ms for a list comprehension plus Series,
+and 435.176 ms for `Series(map(...))`. All six outputs and final states were
+exactly equal. The fastest arm advanced to the canonical gate.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | FP p50 | pandas p50 | ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 32.628 ms | 692.448 ms | **21.223x** | 3.05506638 / 0.10051494 | FASTER |
+| 10M | 433.931 ms | 7,945.613 ms | **18.311x** | 2.90749025 / 0.44077829 | FASTER |
+
+The two-row geomean is 19.713x. Absolute median time saved grows from
+659.820 ms to 7.512 seconds, while the ratio contracts 13.7%. This is a
+decisive ordered-callback incumbent win, not a ratio-amplifying Class-1 result
+on this ELF. A separate exact-`Series.apply` diagnostic measured
+21.963x/18.484x; those larger ratios are not the headline.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T020458.526396Z-pid3412769
+measured_ratio=21.223x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=a51f3952bce4d8d551d3f2dac1536414d0a524096481748071fd6a1cae1cfc06
+(70315096 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The committed harness source SHA-256 is
+`4661081137c47bdfa48baba2917f45cd33456b08ac7e5b889815fcffb962408a`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.984570,1.030109]/[0.980584,1.051542] at 1M and
+[0.938003,1.246562]/[0.969347,1.077802] at 10M.
+
+**Median-CI decision:** median effect 3.05506638 cleared the required
+log-effect threshold 0.10051494 at 1M; median effect 2.90749025 cleared the
+required log-effect threshold 0.44077829 at 10M.
+
+**CV role:** provenance only; CV had no vote, including the 92.51% FP CV at
+10M.
+
+**Decision: KEEP** the incumbent harness coverage and the two admitted rows.
+This is measurement-only campaign output, not an FP-before/FP-after
+self-speedup or production source lever. The strict-remote recurrence fixture
+test passed 1/1; the canonical raw artifact passed the schema-v4 contract and
+its worker/local SHA-256 matched.
+
+**Concrete retry predicates:** keep the ratios until the callback recurrence,
+input order, Series callback implementation, harness source, pandas artifact,
+allocator, compiler, worker ISA, or executing ELF changes. Re-open a
+ratio-growth claim only when one self-identified ELF runs both sizes on one
+worker in one invocation and two independent gates put the 10M ratio above
+the 1M ratio outside the combined A/A intervals. Re-screen callable pandas
+routes after a pandas version change. Do not infer a production
+`Series::apply` lever without a current profile naming a non-zero-self frame
+and a computed Amdahl ceiling.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_series_apply_stateful_1m_10m_20260728.md`,
+`artifacts/bench/proud_lane_m_series_apply_stateful_fastest_map_1m_10m_20260728.json`
+(SHA-256
+`0cf53b4d18a28f34f4bb15a3eadb4d8244ea7a014751f146bc55df49b2a7dda5`),
+and the exact-apply diagnostic
+`artifacts/bench/proud_lane_m_series_apply_stateful_1m_10m_20260728.json`
+(SHA-256
+`9645721969dc4930b50bcce0e522bec87d1b04632ee17c1b30de171660c97387`).

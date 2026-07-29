@@ -15,6 +15,7 @@
 #[cfg(feature = "lazy-transpose-prototype")]
 use std::sync::Arc;
 use std::{
+    cell::Cell,
     collections::BTreeMap,
     fmt::Write as _,
     hint::black_box,
@@ -239,6 +240,18 @@ fn gen_i64_column(rng: &mut SplitMix64, rows: usize) -> Vec<i64> {
 
 fn gen_bool_column(rng: &mut SplitMix64, rows: usize) -> Vec<bool> {
     (0..rows).map(|_| (rng.next_u64() & 1) != 0).collect()
+}
+
+/// Ordered, stateful callback used by the large-N `Series.apply` incumbent
+/// gate. The recurrence makes one callback invocation per element observable:
+/// replacing it with a vectorized reduction changes every subsequent output.
+fn stateful_apply_step(state: &Cell<i64>, value: &Scalar) -> Scalar {
+    let Scalar::Int64(input) = value else {
+        panic!("stateful apply fixture must contain Int64 values");
+    };
+    let next = state.get().wrapping_mul(31).wrapping_add(*input) & 0x7fff_ffff;
+    state.set(next);
+    Scalar::Int64(next)
 }
 
 fn gen_datetime64_column(rows: usize, column: usize) -> Vec<i64> {
@@ -2668,6 +2681,24 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Paired
                 )
                 .expect("apply");
         }),
+        ("dataframe_ops", "series_apply_stateful") => {
+            // pandas: Series(range(n)).apply(stateful_step). The callback is an
+            // ordered recurrence, so each call affects all later outputs.
+            // Population stays outside the timed closure on both engines.
+            let series = Series::new(
+                "s",
+                Index::new_known_unique_int64_unit_range(0, rows),
+                Column::from_i64_values((0..rows as i64).collect()),
+            )
+            .expect("stateful apply series");
+            time_us(|| {
+                let state = Cell::new(0_i64);
+                let result = series
+                    .apply(|value| stateful_apply_step(&state, value))
+                    .expect("stateful series apply");
+                (result, state.get())
+            })
+        }
         ("dataframe_ops", "cut_explicit") => {
             // pandas: pd.cut(s, bins=[-1,1e5,...,1.1e6]) — explicit edges spanning
             // the [0,1e6] data (all in-range -> all-valid). Exercises cut_bins.
@@ -2900,7 +2931,11 @@ fn main() {
 
 #[cfg(test)]
 mod harness_contract_tests {
-    use super::{ITERS, paired_time_us, self_identity, size_rows_cols};
+    use std::cell::Cell;
+
+    use fp_types::Scalar;
+
+    use super::{ITERS, paired_time_us, self_identity, size_rows_cols, stateful_apply_step};
 
     #[test]
     fn executable_identity_is_a_lowercase_sha256() {
@@ -2942,6 +2977,28 @@ mod harness_contract_tests {
     #[test]
     fn ten_million_size_routes_to_ten_million_rust_rows() {
         assert_eq!(size_rows_cols("10M"), (10_000_000, 10));
+    }
+
+    #[test]
+    fn stateful_apply_fixture_is_order_dependent_and_deterministic() {
+        let state = Cell::new(0_i64);
+        let actual: Vec<Scalar> = (0..8)
+            .map(|value| stateful_apply_step(&state, &Scalar::Int64(value)))
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(33),
+                Scalar::Int64(1_026),
+                Scalar::Int64(31_810),
+                Scalar::Int64(986_115),
+                Scalar::Int64(30_569_571),
+                Scalar::Int64(947_656_708),
+            ]
+        );
+        assert_eq!(state.get(), 947_656_708);
     }
 }
 

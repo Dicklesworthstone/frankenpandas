@@ -591,6 +591,32 @@ def bench_df_apply_row_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(op)
 
 
+def bench_series_apply_stateful_pandas(df: pd.DataFrame) -> PairedSamples:
+    """Run the fastest pandas route for an ordered, stateful callback.
+
+    A six-route 1M screen compared ``Series.apply``, ``Series.map``,
+    ``Series.transform``, an explicit Python loop, ``Series(map(...))``, and
+    ``Series(np.fromiter(...))``. ``Series.map`` was the fastest
+    task-equivalent route and produced the exact same output and final state.
+    Unlike the row-sum apply trap, a reduction cannot preserve this
+    recurrence's ordered callback outputs.
+    """
+    series = pd.Series(np.arange(len(df), dtype=np.int64), copy=False)
+
+    def op():
+        state = 0
+
+        def step(value):
+            nonlocal state
+            state = (state * 31 + int(value)) & 0x7fff_ffff
+            return state
+
+        result = series.map(step)
+        return result, state
+
+    return time_operation(op)
+
+
 def _bench_df_explode_pandas(
     df: pd.DataFrame,
     storage_dtype: object,
@@ -1122,6 +1148,7 @@ PANDAS_WORKLOADS = {
         "df_itertuples": bench_df_itertuples_pandas,
         "df_row_tuples_fastest": bench_df_row_tuples_fastest_pandas,
         "df_apply_row": bench_df_apply_row_pandas,
+        "series_apply_stateful": bench_series_apply_stateful_pandas,
         "df_pivot": bench_df_pivot_pandas,
         "df_pivot_table": bench_df_pivot_table_pandas,
         "df_explode": bench_df_explode_pandas,
