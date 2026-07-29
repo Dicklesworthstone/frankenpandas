@@ -20561,3 +20561,60 @@ Full evidence:
 `634d3999907e969ae78330ad55dfc40692d6236d44c3b1cee84224164380788b`),
 and `artifacts/bench/proud_lane_m_pivot_10m_confirm_20260728.json` (SHA-256
 `10cdfc68b1cd20b52a83020c6c64f9d8714759409de560da84d6bb54d0ed0f6b`).
+
+### 2026-07-28 ProudChapel — DataFrame melt live-incumbent WIN at 1M/10M; absolute advantage grows, ratio does not
+
+The public comparison table quoted `df_melt` without a live pandas arm in the
+schema-v4 harness. Added the exact pandas `df.melt()` counterpart to
+`df.melt(&[], &[], None, None)` and ran both sizes in one invocation on the
+same remote worker and FrankenPandas ELF.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | output rows | FP p50 | pandas p50 | ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---:|---|
+| 1M | 10M | 46.759 ms | 327.968 ms | **7.014x** | 1.94792031 / 0.22190937 | FASTER |
+| 10M | 100M | 477.967 ms | 3,101.565 ms | **6.489x** | 1.87011998 / 0.32408655 | FASTER |
+
+The absolute median advantage grows from 281.210 ms to 2.624 seconds, but the
+ratio decreases 7.5% from 1M to 10M. Melt is a strong incumbent win, not a
+ratio-amplifying Class-1 result on this ELF.
+
+Both engines used ten all-valid Float64 input columns. Fixture construction
+was outside timing; empty id/value selections melt all ten columns into the
+default `variable` and `value` outputs. Existing auto-value-var/default-name
+unit coverage and the live pandas melt oracle lock the behavior boundary.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T001542.350934Z-pid3244074
+measured_ratio=7.014x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=95bcac44a908ea7db67c069a319ef0b37886892892c9c55b581cde82c4b8d37a
+(70294080 bytes) /data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas median CIs were [0.942553,1.009586]/[0.894979,1.032962]
+at 1M and [0.939184,1.175911]/[0.984187,1.050304] at 10M.
+
+**Median-CI decision:** both rows were decidable. At 1M numeric median
+effect=1.94792031 cleared required threshold=0.22190937; at 10M
+effect=1.87011998 cleared required threshold=0.32408655.
+
+**CV role:** provenance only; CV had no vote.
+
+**Concrete retry predicates:** keep the incumbent-win classification until
+the workload boundary, column count/dtype, FrankenPandas implementation,
+harness source, pandas artifact, allocator, compiler, or worker ISA changes.
+Re-open a ratio-growth claim only when the same self-identified ELF runs both
+sizes on the same worker in one invocation and two clean repeats show a larger
+10M ratio outside the combined A/A intervals. Do not propose a source lever
+without a current profile naming a non-zero-self frame and a computed Amdahl
+ceiling.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_melt_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_melt_1m_10m_20260728.json` (SHA-256
+`6fd1aeba21a743549c902db456e02e51c0d547895bd44f60853964ced06cdb30`).

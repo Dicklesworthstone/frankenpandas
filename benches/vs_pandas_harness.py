@@ -490,6 +490,14 @@ def bench_value_counts_pandas(df: pd.DataFrame) -> list[float]:
 def bench_cumsum_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df.cumsum())
 
+
+def bench_df_melt_pandas(df: pd.DataFrame) -> list[float]:
+    # Exact counterpart to fp-bench dataframe_ops/df_melt:
+    # DataFrame::melt([], [], None, None) selects every input column as a
+    # value column and uses the default "variable"/"value" output names.
+    return time_operation(lambda: df.melt())
+
+
 def bench_df_transpose_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation_repeated(lambda: df.T, TRANSPOSE_BATCH)
 
@@ -1107,6 +1115,7 @@ PANDAS_WORKLOADS = {
         "drop_duplicates": bench_drop_duplicates_pandas,
         "value_counts": bench_value_counts_pandas,
         "cumsum": bench_cumsum_pandas,
+        "df_melt": bench_df_melt_pandas,
         "df_transpose": bench_df_transpose_pandas,
         "df_transpose_materialize": bench_df_transpose_materialize_pandas,
         "df_to_dict_index_materialize": bench_df_to_dict_index_materialize_pandas,

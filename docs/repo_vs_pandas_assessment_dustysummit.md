@@ -9,7 +9,7 @@ bounded lever).
 
 | category | representative fp-vs-pandas |
 |---|---|
-| dataframe_ops | 2–18x (mode `774c7146f`; nunique 3.7x; to_dict 12–15x; melt 7.4x; get_dummies 17.8x; stack 1.7x; live pandas 2.2.3: pivot 2.41x @1M / 1.29x @10M; pivot_table 2.64x @1M / 2.08x @10M) |
+| dataframe_ops | 2–18x (mode `774c7146f`; nunique 3.7x; to_dict 12–15x; get_dummies 17.8x; stack 1.7x; live pandas 2.2.3: melt 7.01x @1M / 6.49x @10M; pivot 2.41x @1M / 1.29x @10M; pivot_table 2.64x @1M / 2.08x @10M) |
 | groupby (agg kernels) | unique 5x, rank 3x, nunique 1.4x, median/quantile competitive |
 | rolling | std 1.9x, skew 2.1x, mean 2.5x, ewm 2.1x, sum 5x |
 | joins | inner 8.4x, left 5.5x, outer 6.9x, str 17.3x |
