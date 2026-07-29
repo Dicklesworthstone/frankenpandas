@@ -37,7 +37,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from functools import lru_cache, partial
+from functools import cache, partial
 from io import StringIO
 from json import JSONDecodeError
 from pathlib import Path
@@ -557,7 +557,7 @@ def probe_operation_threads(func) -> dict[str, int]:
     }
 
 
-@lru_cache(maxsize=None)
+@cache
 def executable_identity(path: Path) -> dict[str, Any]:
     """Hash the executable that actually hosts this engine."""
     resolved = path.resolve(strict=True)
