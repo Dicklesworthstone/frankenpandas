@@ -1872,7 +1872,7 @@ def run_pandas_workload(
     df = generate_test_data(config["rows"], config["cols"], dtype)
 
     bench_func = PANDAS_WORKLOADS[category][workload]
-    quiescence = exclusivity_gate.require_quiet(
+    pre_quiescence = exclusivity_gate.require_quiet(
         f"pre_measurement:pandas:{category}/{workload}/{size}/{dtype}"
     )
 
@@ -1880,6 +1880,9 @@ def run_pandas_workload(
         samples = bench_func(df, tmp_path)
     else:
         samples = bench_func(df)
+    post_quiescence = exclusivity_gate.require_quiet(
+        f"post_measurement:pandas:{category}/{workload}/{size}/{dtype}"
+    )
 
     if not isinstance(samples, PairedSamples):
         raise TypeError(f"{category}/{workload} did not use the paired timing contract")
@@ -1907,7 +1910,11 @@ def run_pandas_workload(
                 "runtime_detected_isa_features"
             ],
         ),
-        quiescence,
+        {
+            "pre_measurement": pre_quiescence,
+            "post_measurement": post_quiescence,
+            "valid": True,
+        },
     )
 
 
@@ -2200,16 +2207,24 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                     fingerprint,
                     exclusivity_gate,
                 )
-                fp_quiescence = exclusivity_gate.require_quiet(
+                fp_pre_quiescence = exclusivity_gate.require_quiet(
                     "pre_measurement:frankenpandas:"
                     f"{category}/{workload}/{size}/{dtype}"
                 )
                 fp_result = run_fp_workload_subprocess(category, workload, size, dtype)
+                fp_post_quiescence = exclusivity_gate.require_quiet(
+                    "post_measurement:frankenpandas:"
+                    f"{category}/{workload}/{size}/{dtype}"
+                )
 
                 comparison = compute_comparison(fp_result, pd_result, config["rows"])
                 comparison["host_wide_quiescence"] = {
                     "pandas": pandas_quiescence,
-                    "frankenpandas": fp_quiescence,
+                    "frankenpandas": {
+                        "pre_measurement": fp_pre_quiescence,
+                        "post_measurement": fp_post_quiescence,
+                        "valid": True,
+                    },
                     "valid": True,
                 }
                 comparison["thread_provenance"] = build_thread_provenance(
@@ -2501,8 +2516,9 @@ def main():
                         CPU_SAMPLE_INTERVAL_SECONDS * 1000
                     ),
                     "checks": (
-                        "invocation preflight, immediately before each pandas "
-                        "and FrankenPandas arm, and invocation postflight"
+                        "invocation preflight, immediately before and after "
+                        "each pandas and FrankenPandas arm, and invocation "
+                        "postflight"
                     ),
                 },
                 "pandas_string_backend_policy": {
