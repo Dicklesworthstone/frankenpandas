@@ -265,6 +265,23 @@ fn stateful_rolling_step(state: &Cell<i64>, values: &[f64]) -> f64 {
     next as f64
 }
 
+/// Ordered callback for the large-N `Expanding.apply` incumbent gate.
+///
+/// Reading both the newest value and the growing prefix length makes the
+/// expanding-window contract observable; the running state makes callback
+/// order and cardinality observable.
+fn stateful_expanding_step(state: &Cell<i64>, values: &[f64]) -> f64 {
+    let newest = values.last().copied().unwrap_or_default() as i64;
+    let next = state
+        .get()
+        .wrapping_mul(31)
+        .wrapping_add(newest)
+        .wrapping_add(values.len() as i64)
+        & 0x7fff_ffff;
+    state.set(next);
+    next as f64
+}
+
 fn gen_datetime64_column(rows: usize, column: usize) -> Vec<i64> {
     let base = 1_609_459_200_000_000_000_i64;
     (0..rows)
@@ -2153,6 +2170,25 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Paired
                 let _ = series.expanding(Some(1)).sum().expect("expanding sum");
             })
         }
+        ("rolling", "expanding_apply_stateful") => {
+            // pandas task-equivalent winner after an eight-route 1M screen:
+            // np.fromiter over the same ordered recurrence. Prefix length,
+            // newest value, and all prior callback states remain observable.
+            let series = Series::new(
+                "s",
+                Index::new_known_unique_int64_unit_range(0, rows),
+                Column::from_f64_values_owned((0..rows).map(|row| (row % 997) as f64).collect()),
+            )
+            .expect("stateful expanding series");
+            time_us(|| {
+                let state = Cell::new(0_i64);
+                let result = series
+                    .expanding(Some(1))
+                    .apply(|values| stateful_expanding_step(&state, values))
+                    .expect("stateful expanding apply");
+                (result, state.get())
+            })
+        }
         ("rolling", "ewm_mean") => {
             let series = df.get_column("col_0");
             time_us(|| {
@@ -2967,7 +3003,7 @@ mod harness_contract_tests {
 
     use super::{
         ITERS, paired_time_us, self_identity, size_rows_cols, stateful_apply_step,
-        stateful_rolling_step,
+        stateful_expanding_step, stateful_rolling_step,
     };
 
     #[test]
@@ -3044,6 +3080,18 @@ mod harness_contract_tests {
         ];
         assert_eq!(actual, [3.0, 99.0, 3_078.0]);
         assert_eq!(state.get(), 3_078);
+    }
+
+    #[test]
+    fn stateful_expanding_fixture_preserves_prefix_and_callback_order() {
+        let state = Cell::new(0_i64);
+        let actual = [
+            stateful_expanding_step(&state, &[0.0]),
+            stateful_expanding_step(&state, &[0.0, 1.0]),
+            stateful_expanding_step(&state, &[0.0, 1.0, 2.0]),
+        ];
+        assert_eq!(actual, [1.0, 34.0, 1_059.0]);
+        assert_eq!(state.get(), 1_059);
     }
 }
 

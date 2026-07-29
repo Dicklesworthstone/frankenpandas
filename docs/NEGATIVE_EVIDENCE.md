@@ -20836,3 +20836,94 @@ Full evidence:
 `artifacts/bench/proud_lane_m_rolling_apply_stateful_1m_10m_20260728.json`
 (SHA-256
 `811a0c96f76d12e31ef4f72feaaf0a2e0c57401264fa9a6e80ca52a324de305b`).
+
+### 2026-07-28 ProudChapel — stateful Expanding.apply incumbent WIN at 1M/10M; 22.245x geomean
+
+Lane M added an ordered expanding-prefix callback over
+`value[i] = i % 997`. The callback runs
+`state = (state * 31 + value[i] + prefix_len) & 0x7fffffff`; each output
+depends on the newest prefix member, prefix length, and every preceding
+callback invocation. Population remains outside timing on both engines.
+
+An eight-route pandas 2.2.3 screen on canonical worker `vmi1264463` found a
+stateful scalar callback driven by `np.fromiter(map(...))` fastest at 1M:
+491.419 ms versus 511.099 ms for generator-driven `np.fromiter`, 526.040 ms
+for `itertools.accumulate`, 586.065 ms for `Series.apply`, 606.179 ms for
+`Series.transform`, 628.080 ms for `Series.map`, 1,071.759 ms for exact
+`Expanding.apply(raw=True)`, and 29,797.105 ms for exact
+`Expanding.apply(raw=False)`. All eight outputs and final states were exactly
+equal. The fastest arm advanced to the canonical gate.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | FP p50 | pandas p50 | ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 22.774 ms | 563.862 ms | **24.759x** | 3.20917814 / 0.62273492 | FASTER |
+| 10M | 299.330 ms | 5,982.580 ms | **19.987x** | 2.99506041 / 0.22873088 | FASTER |
+
+The two-row geomean is 22.245x. Absolute median time saved grows from
+541.087 ms to 5.683 seconds, while the ratio contracts 19.3%. This is a
+decisive ordered expanding-callback incumbent win, not a ratio-amplifying
+Class-1 result on this ELF. The exact pandas API's larger idiom penalty is
+route-screen evidence only and is not the headline.
+
+The first gate used the locally fastest generator route. The same-worker
+screen then showed `np.fromiter(map(...))` was 3.9% faster, so no campaign
+claim is based on that first gate. Its raw JSON remains a
+weaker-incumbent diagnostic; only the following map-arm invocation is
+canonical.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T034520.201126Z-pid3599005
+measured_ratio=19.987x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=f3e65361ae1f089b2b3d2b95f6938a046b558c1aa14ab04a4ee15c4bfaffd86e
+(70379320 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The worker's direct post-run SHA-256 matched the in-process self-report. The
+canonical harness source SHA-256 is
+`126797478b435c4021ae1d8b71f1094b1813327764c786acf4af424037cafcbe`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.973233,1.028115]/[0.732445,1.055421] at 1M and
+[0.918880,1.114410]/[0.990895,1.121162] at 10M.
+
+**Median-CI decision:** median effect 3.20917814 cleared the required
+log-effect threshold 0.62273492 at 1M; median effect 2.99506041 cleared the
+required log-effect threshold 0.22873088 at 10M.
+
+**CV role:** provenance only; CV had no vote, including FP/pandas CV of
+43.80%/35.84% at 1M and 43.77%/22.89% at 10M.
+
+**Decision: KEEP** the incumbent harness coverage and both admitted rows.
+This is measurement-only campaign output, not an FP-before/FP-after
+self-speedup or production source lever. The strict-remote recurrence fixture
+test passed 1/1; the canonical raw artifact passed the schema-v4 contract and
+its remote/local SHA-256 matched.
+
+**Concrete retry predicates:** keep the ratios until the input sequence,
+recurrence, expanding `min_periods`, FrankenPandas expanding callback
+implementation, harness source, pandas or NumPy artifact, allocator, compiler,
+worker ISA, or executing ELF changes. Re-open a ratio-growth claim only when
+one self-identified ELF runs both sizes on one worker in one invocation and
+two independent gates put the 10M ratio above the 1M ratio outside the
+combined A/A intervals. Re-screen callable pandas routes after a pandas,
+NumPy, or worker-class change. Retry 10M for a tail-latency claim only with
+fresh child processes plus peak RSS and major-fault counters. Do not infer a
+production `Expanding::apply` lever without a current profile naming a
+non-zero-self frame and a computed Amdahl ceiling.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_expanding_apply_stateful_1m_10m_20260728.md`.
+Canonical raw JSON:
+`artifacts/bench/proud_lane_m_expanding_apply_stateful_map_canonical_1m_10m_20260728.json`
+(SHA-256
+`eecebb7761ed1a6bfd87ac33243a991c6f073c3c63fccbff060f74f78dc13cb2`).
+Weaker-incumbent diagnostic:
+`artifacts/bench/proud_lane_m_expanding_apply_stateful_1m_10m_20260728.json`
+(SHA-256
+`f5181b63d20158755ef891d45ed01020c3ba6eaac131b8218901d5bff790b156`).

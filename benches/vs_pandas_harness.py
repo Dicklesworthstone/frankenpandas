@@ -916,6 +916,37 @@ def bench_rolling_apply_stateful_pandas(df: pd.DataFrame) -> PairedSamples:
 def bench_expanding_sum_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df["col_0"].expanding().sum())
 
+
+def bench_expanding_apply_stateful_pandas(df: pd.DataFrame) -> PairedSamples:
+    """Run an ordered stateful callback over every growing prefix.
+
+    An eight-route same-worker 1M screen found ``np.fromiter(map(...))`` over
+    a stateful scalar callback fastest. It beat a generator-driven
+    ``np.fromiter``, ``itertools.accumulate``, ``Series.map``,
+    ``Series.apply``, ``Series.transform``, and exact ``Expanding.apply`` with
+    both ``raw=True`` and ``raw=False``. Every route produced the same Float64
+    Series and final state.
+    """
+    mask = 0x7FFF_FFFF
+    series = pd.Series(np.arange(len(df), dtype=np.int64) % 997, copy=False)
+    raw = series.to_numpy(copy=False)
+
+    def op():
+        state = 0
+        prefix_len = 0
+
+        def step(value):
+            nonlocal state, prefix_len
+            prefix_len += 1
+            state = (state * 31 + int(value) + prefix_len) & mask
+            return float(state)
+
+        output = np.fromiter(map(step, raw), dtype=np.float64, count=len(raw))
+        return pd.Series(output, index=series.index, copy=False), state
+
+    return time_operation(op)
+
+
 def bench_ewm_mean_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df["col_0"].ewm(span=10).mean())
 
@@ -1237,6 +1268,7 @@ PANDAS_WORKLOADS = {
         "rolling_std_w50": bench_rolling_std_w50_pandas,
         "rolling_apply_stateful": bench_rolling_apply_stateful_pandas,
         "expanding_sum": bench_expanding_sum_pandas,
+        "expanding_apply_stateful": bench_expanding_apply_stateful_pandas,
         "ewm_mean": bench_ewm_mean_pandas,
     },
     "indexing": {
