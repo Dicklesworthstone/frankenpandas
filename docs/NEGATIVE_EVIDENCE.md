@@ -21149,3 +21149,85 @@ Full evidence:
 `artifacts/bench/proud_lane_m_dt_day_name_1m_10m_20260728.json`
 (SHA-256
 `ac6e425f512f86d756a30281b8aec4ecfca999216243fc935213b1c62d434913`).
+
+### 2026-07-28 ProudChapel — `dt.month_name` fastest-incumbent KEEP at 1M/10M; 1.631x geomean
+
+Lane M re-adjudicated the historical direct-API result under the live
+incumbent policy. A same-worker pandas 2.2.3 / NumPy 2.4.3 screen on the
+exact 1M-row, 600-second fixture measured direct
+`Series.dt.month_name()` at 266.402 ms, `Series.dt.strftime("%B")` at
+6,800.564 ms, `Series.dt.month` plus NumPy name gather and full Series
+construction at 52.999 ms, and public `Series.array.month` plus the same
+gather and construction at 38.571 ms. All four Series were exactly equal,
+including dtype, index, and name. Only the fastest task-equivalent route
+advanced.
+
+The canonical gate compared that live pandas route with FrankenPandas
+`Series::dt().month_name()`. Both arms used the same all-valid ordered
+timestamps, and population stayed outside timing. The strict-remote focused
+`dt_month_name` test passed 1/1 before measurement.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | FP p50 | pandas fastest p50 | pandas/FP ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 26.223 ms | 41.446 ms | **1.580x** | 0.45773268 / 0.26653188 | FASTER |
+| 10M | 265.554 ms | 447.255 ms | **1.684x** | 0.52130954 / 0.11355576 | FASTER |
+
+The two-row geomean is 1.631x. Absolute median time saved grows from
+15.222 ms to 181.701 ms, and the ratio improves 6.6% with scale. This is a
+live-incumbent win and a modest ratio-amplifying Class-1 result on this ELF.
+Historical ratios against direct `.dt.month_name()` are weaker-incumbent
+diagnostics, not current competitive claims.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T061653.224380Z-pid3877027
+measured_ratio=1.684x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=a3a1cf82c4a7f5e0dfee9e5cdbfd59caacc96270fa009b72ae65599529bf5438
+(70378976 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The worker's direct post-run SHA-256 matched the in-process self-report. The
+worker/local Rust source SHA-256 matched
+`bf155d88b2fc76b163b021375adb9b5674ba47ed4792253d1512285a47902cc4`;
+the worker/local/in-process Python harness source SHA-256 matched
+`87ce0065fcf194501f93ab140201cf8f25fc7d62ffe5138c11291d46e221a388`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.972114,1.014791]/[0.925429,1.142554] at 1M and
+[0.971938,1.058421]/[0.961573,1.057509] at 10M.
+
+**Median-CI decision:** the median effect was 0.45773268 against the required
+threshold 0.26653188 at 1M and 0.52130954 against 0.11355576 at 10M. Both
+wins are decidable.
+
+**CV role:** provenance only; CV had no vote, including FP/pandas CV of
+7.24%/21.78% at 1M and 9.70%/13.73% at 10M.
+
+**Decision: KEEP** the competitive claim and retain the fastest pandas arm
+as measurement coverage. Production source did not change.
+
+The first attempted invocation self-reported the prior Python harness hash
+and failed on the unknown workload before measurement. It produced no row
+and has no verdict. Only the retry whose process self-reported the exact
+current harness hash above was admitted.
+
+**Concrete retry predicates:** re-open only after (1) the FrankenPandas
+month-name kernel, datetime representation, Utf8 output, allocator, compiler,
+worker ISA, fixture, pandas or NumPy artifact, harness source, or executing
+ELF changes; (2) a fresh same-worker pandas screen finds a faster route
+producing an exactly equal complete Series; or (3) a fresh canonical run
+with one self-identified ELF and 25 alternating A/A pairs per engine makes
+either row non-decidable or places its ratio at or below 1.0 outside the
+combined null interval. Any revalidation still requires the fastest live
+pandas arm in the same invocation and median-CI admission at both sizes.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_dt_month_name_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_dt_month_name_1m_10m_20260728.json`
+(SHA-256
+`94751388626aa6a7b7a047fd08702fc204361647c2df6da03356c1c7104cd7bf`).
