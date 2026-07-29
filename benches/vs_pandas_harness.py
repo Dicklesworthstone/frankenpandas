@@ -752,6 +752,11 @@ def bench_cumsum_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df.cumsum())
 
 
+def bench_df_abs_pandas(df: pd.DataFrame) -> list[float]:
+    """Elementwise absolute value over the same dense Float64 frame as fp-bench."""
+    return time_operation(lambda: df.abs())
+
+
 def bench_df_melt_pandas(df: pd.DataFrame) -> list[float]:
     # Exact counterpart to fp-bench dataframe_ops/df_melt:
     # DataFrame::melt([], [], None, None) selects every input column as a
@@ -1574,6 +1579,7 @@ PANDAS_WORKLOADS = {
         "drop_duplicates": bench_drop_duplicates_pandas,
         "value_counts": bench_value_counts_pandas,
         "cumsum": bench_cumsum_pandas,
+        "df_abs": bench_df_abs_pandas,
         "df_melt": bench_df_melt_pandas,
         "df_transpose": bench_df_transpose_pandas,
         "df_transpose_materialize": bench_df_transpose_materialize_pandas,
