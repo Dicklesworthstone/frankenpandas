@@ -21074,3 +21074,78 @@ Full evidence:
 `artifacts/bench/proud_lane_m_str_startswith_arrow_1m_10m_20260728.json`
 (SHA-256
 `a14dce9be27576dfeb90ac7f8afb1a3a81077256e240a27471e221f394f1e6d6`).
+
+### 2026-07-28 ProudChapel — `dt.day_name` fastest-incumbent KEEP at 1M/10M; 3.587x geomean
+
+Lane M re-adjudicated the historical direct-API result under the live
+incumbent policy. A same-worker pandas 2.2.3 screen on the exact 1M-row,
+600-second fixture measured direct `Series.dt.day_name()` at 563.805 ms,
+`Series.dt.strftime("%A")` at 7,465.375 ms, and `Series.dt.dayofweek`
+followed by a NumPy weekday-name gather and full Series construction at
+54.286 ms. All three Series were exactly equal, including dtype, index, and
+name. Only the fastest task-equivalent route advanced.
+
+The canonical gate compared that live pandas route with FrankenPandas
+`Series::dt().day_name()`. Both arms used the same all-valid ordered
+timestamps, and population stayed outside timing. The strict-remote focused
+`dt_day_name` test passed 1/1 before measurement.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | FP p50 | pandas fastest p50 | pandas/FP ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 13.204 ms | 45.721 ms | **3.463x** | 1.24205526 / 0.10970379 | FASTER |
+| 10M | 130.697 ms | 485.621 ms | **3.716x** | 1.31254780 / 0.20945764 | FASTER |
+
+The two-row geomean is 3.587x. Absolute median time saved grows from
+32.517 ms to 354.924 ms, and the ratio improves 7.3% with scale. This is a
+decisive live-incumbent win and a modest ratio-amplifying Class-1 result on
+this ELF. Historical ratios against direct `.dt.day_name()` are
+weaker-incumbent diagnostics, not current competitive claims.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T053143.056179Z-pid3783239
+measured_ratio=3.716x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=0b212606e7b27a180f4d01e74f12965aa67c59a2cef8f9b3d3de2410629766cd
+(70379824 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The worker's direct post-run SHA-256 matched the in-process self-report. The
+worker/local Rust source SHA-256 matched
+`bf155d88b2fc76b163b021375adb9b5674ba47ed4792253d1512285a47902cc4`;
+the worker/local/in-process Python harness source SHA-256 matched
+`251ac27c48c2f484da72af4d0ab58e1e22c310b5b6c707879bbba5df267b4d75`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.954469,1.041674]/[0.990359,1.056384] at 1M and
+[0.975424,1.110409]/[0.998803,1.054907] at 10M.
+
+**Median-CI decision:** the median effect was 1.24205526 against the required
+threshold 0.10970379 at 1M and 1.31254780 against 0.20945764 at 10M. Both
+wins are decidable.
+
+**CV role:** provenance only; CV had no vote, including FP/pandas CV of
+98.51%/8.17% at 1M and 276.57%/7.27% at 10M.
+
+**Decision: KEEP** the competitive claim and retain the fastest pandas arm
+as measurement coverage. Production source did not change.
+
+**Concrete retry predicates:** re-open only after (1) the FrankenPandas
+day-name kernel, datetime representation, Utf8 output, allocator, compiler,
+worker ISA, fixture, pandas artifact, NumPy artifact, harness source, or
+executing ELF changes; (2) a fresh same-worker pandas screen finds a faster
+route producing an exactly equal complete Series; or (3) a fresh canonical
+run with one self-identified ELF and 25 alternating A/A pairs per engine
+makes either row non-decidable or places its ratio at or below 1.0 outside
+the combined null interval. Any revalidation still requires the fastest live
+pandas arm in the same invocation and median-CI admission at both sizes.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_dt_day_name_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_dt_day_name_1m_10m_20260728.json`
+(SHA-256
+`ac6e425f512f86d756a30281b8aec4ecfca999216243fc935213b1c62d434913`).
