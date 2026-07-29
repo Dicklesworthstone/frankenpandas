@@ -20756,3 +20756,83 @@ and the exact-apply diagnostic
 `artifacts/bench/proud_lane_m_series_apply_stateful_1m_10m_20260728.json`
 (SHA-256
 `9645721969dc4930b50bcce0e522bec87d1b04632ee17c1b30de171660c97387`).
+
+### 2026-07-28 ProudChapel — stateful Rolling.apply incumbent WIN at 1M/10M; 8.114x geomean
+
+Lane M added a width-10 rolling callback over `value[i] = i % 997`. The
+callback runs the ordered recurrence
+`state = (state * 31 + window_sum) & 0x7fffffff`; every output depends on every
+preceding callback invocation. Population remains outside timing on both
+engines.
+
+An eight-route pandas 2.2.3 screen found `rolling.sum()` plus a stateful
+generator driven into `np.fromiter` the fastest task-equivalent route at 1M:
+174.846 ms versus 186.628 ms for `itertools.accumulate`, 204.617 ms for
+`ufunc.accumulate`, 248.072 ms for `Series.map`, 282.538 ms for
+`Series.apply`, 299.585 ms for `Series.transform`, 1,417.559 ms for exact
+`rolling.apply(raw=True)`, and 22,679.292 ms for exact
+`rolling.apply(raw=False)`. All eight outputs and final states were exactly
+equal. The fastest arm advanced to the canonical gate.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | FP p50 | pandas p50 | ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 45.768 ms | 452.062 ms | **9.877x** | 2.29023087 / 0.16091064 | FASTER |
+| 10M | 667.503 ms | 4,449.835 ms | **6.666x** | 1.89707813 / 0.64651052 | FASTER |
+
+The two-row geomean is 8.114x. Absolute median time saved grows from
+406.294 ms to 3.782 seconds, while the ratio contracts 32.5%. This is a
+decisive ordered rolling-callback incumbent win, not a ratio-amplifying
+Class-1 result on this ELF. The exact pandas API's much larger idiom penalty
+is route-screen evidence only and is not the headline.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T025159.104971Z-pid3510691
+measured_ratio=6.666x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=30ad2f887b84c55faf7ef921c1d1b21f17b8ec941927b80a17ea6eadd500f11d
+(70357352 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The worker's direct post-run SHA-256 matched the in-process self-report. The
+committed harness source SHA-256 is
+`6330f14ab9fcd4d189d5609bbc4d40c007fd50bee3fc03c5c7a38ff97929b51f`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.995149,1.079558]/[0.946752,1.083780] at 1M and
+[0.723789,1.364822]/[0.980225,1.027574] at 10M.
+
+**Median-CI decision:** median effect 2.29023087 cleared the required
+log-effect threshold 0.16091064 at 1M; median effect 1.89707813 cleared the
+required log-effect threshold 0.64651052 at 10M.
+
+**CV role:** provenance only; CV had no vote, including the 78.22% FP CV at
+10M.
+
+**Decision: KEEP** the incumbent harness coverage and both admitted rows.
+This is measurement-only campaign output, not an FP-before/FP-after
+self-speedup or production source lever. The strict-remote recurrence fixture
+test passed 1/1; the canonical raw artifact passed the schema-v4 contract and
+its remote/local SHA-256 matched.
+
+**Concrete retry predicates:** keep the ratios until the rolling width, input
+sequence, recurrence, FrankenPandas rolling callback implementation, harness
+source, pandas or NumPy artifact, allocator, compiler, worker ISA, or
+executing ELF changes. Re-open a ratio-growth claim only when one
+self-identified ELF runs both sizes on one worker in one invocation and two
+independent gates put the 10M ratio above the 1M ratio outside the combined
+A/A intervals. Re-screen callable pandas routes after a pandas or NumPy
+version change. Retry 10M for a tail-latency claim only with fresh child
+processes plus peak RSS and major-fault counters. Do not infer a production
+`Rolling::apply` lever without a current profile naming a non-zero-self frame
+and a computed Amdahl ceiling.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_rolling_apply_stateful_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_rolling_apply_stateful_1m_10m_20260728.json`
+(SHA-256
+`811a0c96f76d12e31ef4f72feaaf0a2e0c57401264fa9a6e80ca52a324de305b`).

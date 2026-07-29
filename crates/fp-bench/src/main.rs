@@ -254,6 +254,17 @@ fn stateful_apply_step(state: &Cell<i64>, value: &Scalar) -> Scalar {
     Scalar::Int64(next)
 }
 
+/// Ordered callback for the large-N `Rolling.apply` incumbent gate.
+///
+/// The running state makes every callback invocation observable, while the
+/// window sum forces the workload to preserve rolling-window semantics.
+fn stateful_rolling_step(state: &Cell<i64>, values: &[f64]) -> f64 {
+    let window_sum = values.iter().sum::<f64>() as i64;
+    let next = state.get().wrapping_mul(31).wrapping_add(window_sum) & 0x7fff_ffff;
+    state.set(next);
+    next as f64
+}
+
 fn gen_datetime64_column(rows: usize, column: usize) -> Vec<i64> {
     let base = 1_609_459_200_000_000_000_i64;
     (0..rows)
@@ -2117,6 +2128,25 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Paired
                 let _ = series.rolling(50, Some(50)).std().expect("rolling std");
             })
         }
+        ("rolling", "rolling_apply_stateful") => {
+            // pandas task-equivalent winner after an eight-route 1M screen:
+            // rolling(10).sum() followed by an ordered stateful callback. The
+            // callback output depends on every earlier valid window.
+            let series = Series::new(
+                "s",
+                Index::new_known_unique_int64_unit_range(0, rows),
+                Column::from_f64_values_owned((0..rows).map(|row| (row % 997) as f64).collect()),
+            )
+            .expect("stateful rolling series");
+            time_us(|| {
+                let state = Cell::new(0_i64);
+                let result = series
+                    .rolling(10, Some(10))
+                    .apply(|values| stateful_rolling_step(&state, values))
+                    .expect("stateful rolling apply");
+                (result, state.get())
+            })
+        }
         ("rolling", "expanding_sum") => {
             let series = df.get_column("col_0");
             time_us(|| {
@@ -2935,7 +2965,10 @@ mod harness_contract_tests {
 
     use fp_types::Scalar;
 
-    use super::{ITERS, paired_time_us, self_identity, size_rows_cols, stateful_apply_step};
+    use super::{
+        ITERS, paired_time_us, self_identity, size_rows_cols, stateful_apply_step,
+        stateful_rolling_step,
+    };
 
     #[test]
     fn executable_identity_is_a_lowercase_sha256() {
@@ -2999,6 +3032,18 @@ mod harness_contract_tests {
             ]
         );
         assert_eq!(state.get(), 947_656_708);
+    }
+
+    #[test]
+    fn stateful_rolling_fixture_preserves_window_and_callback_order() {
+        let state = Cell::new(0_i64);
+        let actual = [
+            stateful_rolling_step(&state, &[0.0, 1.0, 2.0]),
+            stateful_rolling_step(&state, &[1.0, 2.0, 3.0]),
+            stateful_rolling_step(&state, &[2.0, 3.0, 4.0]),
+        ];
+        assert_eq!(actual, [3.0, 99.0, 3_078.0]);
+        assert_eq!(state.get(), 3_078);
     }
 }
 

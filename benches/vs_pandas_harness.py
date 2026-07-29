@@ -870,6 +870,49 @@ def bench_rolling_mean_w10_pandas(df: pd.DataFrame) -> list[float]:
 def bench_rolling_std_w50_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df["col_0"].rolling(50).std())
 
+
+def bench_rolling_apply_stateful_pandas(df: pd.DataFrame) -> PairedSamples:
+    """Run the fastest pandas route for an ordered rolling callback.
+
+    An eight-route 1M screen compared exact ``Rolling.apply`` with ``raw=True``
+    and ``raw=False`` against task-equivalent ``rolling.sum()`` followed by
+    ``Series.map``, ``Series.apply``, ``Series.transform``, ``np.fromiter``,
+    ``itertools.accumulate``, and ``ufunc.accumulate``. Building the rolling
+    sums once and driving a stateful generator into ``np.fromiter`` was
+    fastest. Every screened route produced the same Float64 Series and final
+    state.
+    """
+    window = 10
+    mask = 0x7FFF_FFFF
+    series = pd.Series(np.arange(len(df), dtype=np.int64) % 997, copy=False)
+
+    def op():
+        state = 0
+        valid_sums = (
+            series.rolling(window, min_periods=window)
+            .sum()
+            .to_numpy(copy=False)[window - 1 :]
+        )
+
+        def values():
+            nonlocal state
+            for value in valid_sums:
+                state = (state * 31 + int(value)) & mask
+                yield float(state)
+
+        computed = np.fromiter(
+            values(),
+            dtype=np.float64,
+            count=len(valid_sums),
+        )
+        output = np.empty(len(series), dtype=np.float64)
+        output[: window - 1] = np.nan
+        output[window - 1 :] = computed
+        return pd.Series(output, index=series.index, copy=False), state
+
+    return time_operation(op)
+
+
 def bench_expanding_sum_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df["col_0"].expanding().sum())
 
@@ -1192,6 +1235,7 @@ PANDAS_WORKLOADS = {
     "rolling": {
         "rolling_mean_w10": bench_rolling_mean_w10_pandas,
         "rolling_std_w50": bench_rolling_std_w50_pandas,
+        "rolling_apply_stateful": bench_rolling_apply_stateful_pandas,
         "expanding_sum": bench_expanding_sum_pandas,
         "ewm_mean": bench_ewm_mean_pandas,
     },
