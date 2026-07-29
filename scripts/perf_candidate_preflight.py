@@ -131,7 +131,7 @@ MAINTENANCE_COMPETITIVE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 RETRY_MARK = re.compile(
-    r"retry predicate|retry condition|retry only|re-?open only|do not retry|"
+    r"retry predicate|retry condition|retry only|re-?open\b|do not retry|"
     r"do not attempt|closing [^.]{0,160} needs|resume:",
     re.IGNORECASE,
 )
@@ -611,6 +611,58 @@ def retry_predicate(body: str) -> str:
     return "NOT_RECORDED"
 
 
+def retry_predicate_for_surface(
+    entry: LedgerEntry, surface_terms: list[str]
+) -> str | None:
+    """Return only a retry paragraph that is scoped to the requested surface.
+
+    Resurrection annotations and newer measurement rows can supersede an old
+    entry's missing retry predicate without rewriting that historical entry.
+    A broad multi-surface section is safe only when the retry paragraph itself
+    names the surface; a single-surface title may scope its body's predicate.
+    """
+    title_scopes_surface = all(
+        contains_surface_term(entry.title, term) for term in surface_terms
+    )
+    paragraphs = re.split(r"\n\s*\n", entry.body)
+    for paragraph in paragraphs:
+        compact = re.sub(r"\s+", " ", paragraph).strip()
+        retry_matches = list(RETRY_MARK.finditer(compact))
+        if not retry_matches:
+            continue
+        paragraph_scopes_surface = all(
+            contains_surface_term(compact, term) for term in surface_terms
+        )
+        if title_scopes_surface or paragraph_scopes_surface:
+            surface_positions = [
+                match.start()
+                for term in surface_terms
+                for match in re.finditer(
+                    rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])",
+                    compact,
+                    re.IGNORECASE,
+                )
+            ]
+            match = (
+                min(
+                    retry_matches,
+                    key=lambda item: min(
+                        abs(item.start() - position) for position in surface_positions
+                    ),
+                )
+                if surface_positions
+                else retry_matches[0]
+            )
+            predicate = compact[match.start() :]
+            sentence = re.split(
+                r"(?<=[.!?])\s+(?=[A-Z*`])",
+                predicate,
+                maxsplit=1,
+            )[0]
+            return sentence[:700]
+    return None
+
+
 def entry_rejects_surface(entry: LedgerEntry, surface_terms: list[str]) -> bool:
     """Require the surface and negative decision to occur in one decision unit.
 
@@ -655,10 +707,30 @@ def check_candidate(candidate: str, surface: str | None) -> int:
         )
         return 1
 
-    hits: list[tuple[int, str, str]] = []
-    for entry in ledger_entries():
+    entries = ledger_entries()
+    supplemental_predicates = [
+        (entry.line_no, predicate)
+        for entry in entries
+        if (predicate := retry_predicate_for_surface(entry, surface_terms)) is not None
+    ]
+
+    hits: list[tuple[int, str, str, int]] = []
+    for entry in entries:
         if entry_rejects_surface(entry, surface_terms):
-            hits.append((entry.line_no, entry.title, retry_predicate(entry.body)))
+            predicate = retry_predicate(entry.body)
+            predicate_line = entry.line_no
+            if predicate == "NOT_RECORDED" and supplemental_predicates:
+                later_predicate = next(
+                    (
+                        (line_no, value)
+                        for line_no, value in reversed(supplemental_predicates)
+                        if line_no > entry.line_no
+                    ),
+                    None,
+                )
+                if later_predicate is not None:
+                    predicate_line, predicate = later_predicate
+            hits.append((entry.line_no, entry.title, predicate, predicate_line))
 
     if hits:
         print(
@@ -666,10 +738,11 @@ def check_candidate(candidate: str, surface: str | None) -> int:
             f"{len(hits)} prior REJECT row(s) match target_surface={surface or candidate!r}"
         )
         print(f"proposed_lever={candidate!r}\n")
-        for line_no, title, predicate in hits[:10]:
+        for line_no, title, predicate, predicate_line in hits[:10]:
             print(
                 f"match decision=REJECT ledger=docs/NEGATIVE_EVIDENCE.md:{line_no}\n"
                 f"  title={title[:180]}\n"
+                f"  retry_condition_source=docs/NEGATIVE_EVIDENCE.md:{predicate_line}\n"
                 f"  retry_condition={predicate}\n"
             )
         print(
@@ -841,6 +914,59 @@ def self_test() -> int:
             failed.append(
                 f"{name}: unexpected {[(item.code, item.detail) for item in violations]}"
             )
+
+    def expect_surface_retry(
+        name: str,
+        candidate: LedgerEntry,
+        surface: str,
+        expected: str | None,
+    ) -> None:
+        nonlocal checks
+        checks += 1
+        actual = retry_predicate_for_surface(candidate, terms_for(surface))
+        if actual != expected:
+            failed.append(f"{name}: expected {expected!r}, got {actual!r}")
+
+    expect_surface_retry(
+        "surface_retry_from_named_paragraph",
+        entry(
+            "Multi-surface trj sweep",
+            "For `df_abs`, re-open only after a row-chunk path exists.\n\n"
+            "For `join_inner`, re-open only after scheduler-aware pinning exists.",
+        ),
+        "df_abs",
+        "re-open only after a row-chunk path exists.",
+    )
+    expect_surface_retry(
+        "surface_retry_does_not_borrow_sibling",
+        entry(
+            "Multi-surface trj sweep",
+            "For `join_inner`, re-open only after scheduler-aware pinning exists.",
+        ),
+        "df_abs",
+        None,
+    )
+    expect_surface_retry(
+        "surface_retry_scoped_by_title",
+        entry(
+            "df_abs follow-up",
+            "Re-open only after a named-frame profile and a row-chunk path.",
+        ),
+        "df_abs",
+        "Re-open only after a named-frame profile and a row-chunk path.",
+    )
+    expect_surface_retry(
+        "surface_retry_prefers_closest_marker_across_wrapped_lines",
+        entry(
+            "Multi-surface trj sweep",
+            "**Concrete retry predicates:** for GroupBy, do not resweep until\n"
+            "actual workers exceed one. For `df_abs`, re-open beyond ten\n"
+            "workers only after a row-chunk path and bandwidth profile. For\n"
+            "join, retry only after scheduler-aware pinning.",
+        ),
+        "df_abs",
+        "re-open beyond ten workers only after a row-chunk path and bandwidth profile.",
+    )
 
     expect_block(
         "reject_without_basis",
