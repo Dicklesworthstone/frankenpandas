@@ -21568,3 +21568,146 @@ frontier is the serial argsort residual named by the trj sweep's routing item
 4, and any future lever must name a non-zero-self frame and an Amdahl ceiling
 inside that residual. A thread-cap lift is not available because there is no
 thread cap.
+
+### 2026-07-29 ProudChapel — bounded Float64 telemetry display strings beat the fastest exact pandas/NumPy route by 3.961x geomean at 1M/10M — KEEP
+
+Lane M added a realistic Class-1 sink for all-valid finite Float64 telemetry:
+format `value[i] = i * 1.5`, preserve the global `RangeIndex` and Series name
+`s`, materialize and consume complete string Series in 250,000-row batches,
+observe cardinality and endpoints, then destroy each batch. Population remains
+outside timing; result creation, observation, and destruction are timed.
+
+A same-worker nine-route screen named the incumbent instead of defaulting to a
+favorable pandas spelling. At 1M rows, seven interleaved medians were
+168.554 ms for NumPy 2.4.3
+`np.frompyfunc("{:.1f}".format)` plus complete pandas 2.2.3 Series
+construction, 190.744 ms for `frompyfunc(str)`, 219.202 ms for
+`Series.transform(str)`, 220.342 ms for `Series.map(str)`, 237.962 ms for
+`Series.apply(str)`, 390.377 ms for NumPy `astype(str)` plus Series,
+460.534 ms for direct `Series.astype(str)`, 477.775 ms for `np.char.mod`, and
+596.663 ms for Arrow string followed by object. All nine outputs were exactly
+equal in every value, object dtype, index, name, cardinality, and endpoints.
+Only the fastest task-equivalent arm advanced.
+
+**Campaign result class:** `incumbent-win`.
+
+The chooser-facing subtype is `realistic-workload-win`: this is a complete
+application-shaped sink rather than a maintenance self-speedup.
+
+| size | FP p50 / p95 / p99 | fastest incumbent p50 / p95 / p99 | pandas/FP ratio | absolute p50 saving | effect / required |
+|---:|---:|---:|---:|---:|---:|
+| 1M | 49.975 / 55.757 / 60.546 ms | 205.205 / 241.198 / 258.769 ms | **4.106x** | 155.230 ms | 1.41248836 / 0.25873895 |
+| 10M | 510.755 / 677.284 / 994.424 ms | 1,952.351 / 2,160.928 / 2,265.398 ms | **3.822x** | **1,441.596 ms** | 1.34089870 / 0.08428759 |
+
+The two-row geomean is 3.961x. The ratio narrows at 10M and is not presented
+as ratio-amplifying. The useful large-N gap is absolute: median time saved
+grows 9.287x, from 155.230 ms to 1.442 s.
+
+**Incumbent isolation proof:** the subject is FrankenPandas
+`Series::astype(DType::Utf8)` over each prebuilt 250,000-row Float64 Series.
+The incumbent is pandas 2.2.3 Series construction over NumPy 2.4.3
+`np.frompyfunc("{:.1f}".format)` output with the same batch labels and name.
+Both sides observe and destroy the complete result. Direct
+`Series.astype(str)` is a weaker secondary diagnostic and does not headline.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3 numpy_version=2.4.3
+artifact_sha256=f8760652a7b02d2f3f03be104a86e68bcf259353c2b4fd626548c542ff9df9cf
+invocation_id=vs-pandas-20260730T034525.887023Z-pid1518869
+measured_ratio=3.822x
+
+**Hardware and runtime provenance:** `vmi1149989`, AMD EPYC Processor (with
+IBPB), 10 physical/10 logical cores, SMT inactive, CPUs 0-9, 63,196,901,376
+bytes RAM, one NUMA node, kernel `6.17.0-40-generic`. Runtime-present host ISA
+was SSE2, AVX, AVX2, FMA, BMI1, BMI2, and AES; VAES and AVX-512F were absent.
+FrankenPandas reported scalar, SSE2, AVX2, FMA, and BMI2. Actual operation
+threads were eight for FrankenPandas and one for the incumbent at both sizes.
+
+**Builder/execution provenance:** remote fleet worker `vmi1152480` built the
+FrankenPandas ELF; `vmi1149989` executed it. FrankenPandas ELF SHA-256
+`c585d7fa4e7df9bb880317158609e56644402d6a6a6fa2a3b9d3db480869e0b4`
+(73,472,496 bytes); Python 3.13 ELF
+`efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e`
+(6,894,448 bytes); harness source
+`eea8716f3b0a3815ed6feddb58e2a1af395c40ea783341534edfaebe0a4589cf`;
+Rust benchmark source
+`dca845060b208a857387caf669aa98033b4dcc24c9568f90a8df991d01b5b809`.
+The worker's stale Git metadata is not used for attribution: the compiled
+closure had no diff from local base `6774e9a37`, and the two changed sources
+were overlaid and matched byte-for-byte.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=c585d7fa4e7df9bb880317158609e56644402d6a6a6fa2a3b9d3db480869e0b4
+(73472496 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1149989-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+`[0.878649,1.073213]`/`[0.946530,1.028709]` at 1M and
+`[0.958732,1.015645]`/`[0.988441,1.042336]` at 10M. Both claim effects clear
+the two-times-null threshold by wide margins.
+
+**Median-CI decision:** the median effect log deviation 1.41248836 cleared
+the required log-effect threshold 0.25873895 at 1M, and the median effect log
+deviation 1.34089870 cleared the required log-effect threshold 0.08428759 at
+10M. Both decisions are `FASTER`.
+
+**Primitive-transfer gate audit:** the current harness does not require either
+A/A null confidence interval to straddle 1.0. `compute_comparison` decides from
+the claim's log deviation versus twice the larger null log-CI half-width; there
+is no `nulls_hold` or CI-straddle veto. The final FP/pandas null medians were
+0.996454/0.983506 at 1M and 0.996087/1.016231 at 10M, all within the corrected
+2% arm-order-bias bound. Both workload verdicts were `FASTER`, as they were in
+the earlier fully admitted invocations, so the verdict is stable rather than
+randomly moving with null precision. The transferred defect is therefore not
+exhibited here and the gate was left unchanged. Null CIs remain reported as
+telemetry.
+
+**CV role:** provenance only; CV had no vote. FP/incumbent CVs were
+11.01%/10.64% at 1M and 20.61%/6.23% at 10M.
+
+**Lifecycle/exclusivity:** linked mimalloc v2 normally delays page purges.
+The admitted arm sets `MIMALLOC_PURGE_DELAY=0`, making purge immediate when
+the timed drop frees rendered-batch pages. This charges cleanup at the
+semantic boundary; it does not add a post-arm grace period. All ten all-CPU
+pre/post checkpoints cleared the unchanged 20% threshold, with 8.081% maximum
+observed busy. Twelve earlier invocations either failed closed or were superseded
+for incomplete machine-readable provenance. None contributes a row or ratio.
+
+**Chooser statement:** choose FrankenPandas for this measured shape only:
+formatting 1M or 10M all-valid finite half-integer Float64 telemetry values
+into complete ordered string Series, preserving the global `RangeIndex` and
+name `s`, then consuming/destroying results in 250,000-row batches on the
+recorded 10-core EPYC/AVX2 host. Do not generalize to arbitrary Float64
+spelling; null/NaN/infinity; scientific notation; locale or precision;
+retained monolithic output; Python bindings; Arrow-native output; another
+batch size; a thread-normalized comparison; other hardware; or other APIs.
+
+**Decision: KEEP** the competitive workload claim and its strongest-incumbent
+coverage. Production source did not change.
+
+**Concrete retry predicate:** do not rerun this exact shape to seek a larger
+ratio. Reopen only for a different chooser question: arbitrary/nullable
+Float64 semantics, retained monolithic output, another batch size,
+thread-normalized incumbents, or another hardware class. Any revalidation
+must re-screen complete task-equivalent incumbents on the final worker, name
+both arms, retain exact output and executable/ISA provenance, give both
+engines same-invocation A/A controls, and clear the unchanged median-CI and
+all-CPU gates.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_astype_str_f64_realistic_1m_10m_20260729.md`
+and
+`artifacts/bench/proud_lane_m_astype_str_f64_realistic_1m_10m_20260729.json`
+(SHA-256
+`257ef3dc7015976ac291cf2179e219405a7ba41cc573abe36b186f49c8b33b10`).
+
+**Reset-safe handoff:** this lane proved the bounded 3.961x geomean telemetry
+display-string win, strongest task-equivalent incumbent, complete-output
+parity, runtime ISA/executable provenance, A/A margin, and the absence of the
+CI-straddle gate defect. It did **not** prove the exact trj cap-1/cap-32 10M
+sort residual profile, and ProudChapel does not hold a trj claim. That work
+remains queued at the canonical back in Agent Mail message 6423 after the
+formal predecessors. The single next step is: after every predecessor posts
+`[trj] RELEASE`, post a fresh claim and capture exact-current named cap-1 and
+cap-32 sort frames plus an Amdahl ceiling before any source edit.

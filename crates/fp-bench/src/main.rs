@@ -38,6 +38,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 const WARMUP: usize = 3;
 const ITERS: usize = 25;
 const TAKE_BATCH: usize = 256;
+const TELEMETRY_STRING_BATCH_ROWS: usize = 250_000;
 
 #[derive(Debug)]
 struct PairedSamples {
@@ -329,6 +330,27 @@ fn arithmetic_take_positions(rows: usize) -> Vec<usize> {
     let start = rows / 8;
     let stop = rows - start;
     (start..stop).step_by(2).collect()
+}
+
+fn telemetry_string_batch_ranges(rows: usize) -> Vec<(usize, usize)> {
+    (0..rows)
+        .step_by(TELEMETRY_STRING_BATCH_ROWS)
+        .map(|start| (start, (start + TELEMETRY_STRING_BATCH_ROWS).min(rows)))
+        .collect()
+}
+
+fn build_telemetry_string_batches(rows: usize) -> Vec<Series> {
+    telemetry_string_batch_ranges(rows)
+        .into_iter()
+        .map(|(start, stop)| {
+            let len = stop - start;
+            let index = Index::new_known_unique_int64_affine_range(start as i64, 1, len)
+                .expect("telemetry batch index");
+            let values = (start..stop).map(|row| row as f64 * 1.5).collect();
+            Series::new("s", index, Column::from_f64_values_owned(values))
+                .expect("telemetry batch series")
+        })
+        .collect()
 }
 
 /// Build one Float64 column of `rows` values per the requested dtype, advancing
@@ -858,7 +880,18 @@ where
 
 fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<PairedSamples> {
     let (rows, cols) = size_rows_cols(size);
-    let (df, raw) = build_frame(rows, cols, dtype);
+    // The astype workloads construct their exact one-column input below.
+    // Avoid retaining an unrelated ten-column frame during measurement.
+    let base_cols = if category == "dataframe_ops"
+        && matches!(
+            workload,
+            "astype_str_f64" | "astype_str_f64_telemetry_batches"
+        ) {
+        0
+    } else {
+        cols
+    };
+    let (df, raw) = build_frame(rows, base_cols, dtype);
     #[cfg(feature = "lazy-transpose-prototype")]
     let transpose_block = PrototypeF64Block::from_column_vectors(&raw);
 
@@ -1230,6 +1263,27 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Paired
             let series = Series::new("s", index, col).expect("astype series");
             time_us(|| {
                 let _ = series.astype(fp_types::DType::Utf8).expect("astype str");
+            })
+        }
+        ("dataframe_ops", "astype_str_f64_telemetry_batches") => {
+            // Realistic bounded-memory sink: format every finite telemetry
+            // value into an ordered Utf8 Series, consume each 250k-row batch,
+            // then release it before advancing. Input population is untimed.
+            let batches = build_telemetry_string_batches(rows);
+            time_us(|| {
+                let mut observed_rows = 0_usize;
+                for batch in &batches {
+                    let rendered = batch
+                        .astype(fp_types::DType::Utf8)
+                        .expect("telemetry batch astype str");
+                    black_box((
+                        rendered.values().first().expect("nonempty batch"),
+                        rendered.values().last().expect("nonempty batch"),
+                    ));
+                    observed_rows += rendered.len();
+                    black_box(rendered);
+                }
+                black_box(observed_rows)
             })
         }
         ("dataframe_ops", "df_melt") => time_us(|| {
@@ -3153,8 +3207,9 @@ mod harness_contract_tests {
     use fp_types::Scalar;
 
     use super::{
-        ITERS, paired_time_us, runtime_isa_features, self_identity, size_rows_cols,
-        stateful_apply_step, stateful_expanding_step, stateful_rolling_step,
+        ITERS, TELEMETRY_STRING_BATCH_ROWS, paired_time_us, runtime_isa_features, self_identity,
+        size_rows_cols, stateful_apply_step, stateful_expanding_step, stateful_rolling_step,
+        telemetry_string_batch_ranges,
     };
 
     #[test]
@@ -3212,6 +3267,26 @@ mod harness_contract_tests {
         assert_eq!(size_rows_cols("6M"), (6_000_000, 10));
         assert_eq!(size_rows_cols("8M"), (8_000_000, 10));
         assert_eq!(size_rows_cols("10M"), (10_000_000, 10));
+    }
+
+    #[test]
+    fn telemetry_string_batches_cover_each_row_once() {
+        assert!(telemetry_string_batch_ranges(0).is_empty());
+        assert_eq!(
+            telemetry_string_batch_ranges(TELEMETRY_STRING_BATCH_ROWS),
+            vec![(0, TELEMETRY_STRING_BATCH_ROWS)]
+        );
+        assert_eq!(
+            telemetry_string_batch_ranges(TELEMETRY_STRING_BATCH_ROWS * 2 + 1),
+            vec![
+                (0, TELEMETRY_STRING_BATCH_ROWS),
+                (TELEMETRY_STRING_BATCH_ROWS, TELEMETRY_STRING_BATCH_ROWS * 2,),
+                (
+                    TELEMETRY_STRING_BATCH_ROWS * 2,
+                    TELEMETRY_STRING_BATCH_ROWS * 2 + 1,
+                ),
+            ]
+        );
     }
 
     #[test]

@@ -93,8 +93,11 @@ WARMUP_ITERATIONS = 3
 CPU_SAMPLE_INTERVAL_SECONDS = 1.0
 MAX_HOST_WIDE_BUSY_FRACTION = 0.20
 SETUP_QUIESCENCE_SETTLE_SECONDS = 1.0
+PROVENANCE_QUIESCENCE_SETTLE_SECONDS = 5.0
 TAKE_BATCH = 256
 TRANSPOSE_BATCH = 8192
+TELEMETRY_STRING_BATCH_ROWS = 250_000
+TELEMETRY_MIMALLOC_PURGE_DELAY_MS = "0"
 
 
 @dataclass
@@ -1143,12 +1146,89 @@ def bench_df_explode_string_arrow_pandas(df: pd.DataFrame) -> PairedSamples:
     return _bench_df_explode_pandas(df, "string[pyarrow]")
 
 
-def bench_astype_str_f64_pandas(df: pd.DataFrame) -> list[float]:
-    # Mirrors fp-bench dataframe_ops/astype_str_f64 exactly: a Float64 column
-    # holding i * 1.5 for i in 0..rows, cast to str. Built here (not taken from
-    # `df`) so both engines format the identical value sequence.
-    series = pd.Series(np.arange(len(df), dtype="float64") * 1.5)
-    return time_operation(lambda: series.astype(str))
+def bench_astype_str_f64_pandas(df: pd.DataFrame) -> PairedSamples:
+    """Materialize the exact Float64 display strings through the fastest route.
+
+    A same-worker nine-route screen on the exact 1M-row fixture selected a
+    complete pandas Series built from ``np.frompyfunc("{:.1f}".format)``:
+    168.554 ms median versus 460.534 ms for direct ``Series.astype(str)``.
+    Every route produced the same object-dtype Series, RangeIndex, name, and
+    ordered values, and each timed call included result destruction.
+
+    This task-equivalent route is valid only for this deliberately bounded
+    fixture: finite ``i * 1.5`` values through 10M rows are exact binary
+    half-integers, so fixed one-decimal spelling equals pandas' shortest
+    Float64 spelling. It must not headline arbitrary Float64, null, infinity,
+    scientific-notation, locale, or precision workloads without a new screen.
+    """
+    values = np.arange(len(df), dtype="float64") * 1.5
+    series = pd.Series(values, name="s", copy=False)
+    formatter = "{:.1f}".format
+    format_ufunc = np.frompyfunc(formatter, 1, 1)
+
+    def operation():
+        rendered = format_ufunc(values)
+        result = pd.Series(
+            rendered,
+            index=series.index,
+            name=series.name,
+            copy=False,
+        )
+        # Rust's timed closure drops its Utf8 Series before returning. Observe
+        # and drop the complete pandas result here as well so both arms include
+        # result destruction instead of leaving Python's 10M-object teardown
+        # outside the timer and immediately before the host-wide post gate.
+        return len(result), result.iat[0], result.iat[-1]
+
+    return time_operation(operation)
+
+
+def bench_astype_str_f64_telemetry_batches_pandas(
+    df: pd.DataFrame,
+) -> PairedSamples:
+    """Format and consume ordered telemetry strings in bounded-memory batches.
+
+    Both engines prebuild the same finite ``i * 1.5`` Float64 sequence, retain
+    global RangeIndex labels, and materialize one complete 250k-row string
+    Series at a time. Each timed call observes cardinality and endpoints and
+    destroys every batch before returning. This is a streaming sink contract,
+    not a claim about retaining one monolithic 1M/10M object Series.
+    """
+    rows = len(df)
+    values = np.arange(rows, dtype="float64") * 1.5
+    batches = [
+        pd.Series(
+            values[start:stop],
+            index=pd.RangeIndex(start, stop),
+            name="s",
+            copy=False,
+        )
+        for start in range(0, rows, TELEMETRY_STRING_BATCH_ROWS)
+        for stop in [min(start + TELEMETRY_STRING_BATCH_ROWS, rows)]
+    ]
+    formatter = "{:.1f}".format
+    format_ufunc = np.frompyfunc(formatter, 1, 1)
+
+    def operation():
+        observed_rows = 0
+        first = None
+        last = None
+        for batch in batches:
+            rendered = format_ufunc(batch.to_numpy(copy=False))
+            result = pd.Series(
+                rendered,
+                index=batch.index,
+                name=batch.name,
+                copy=False,
+            )
+            if first is None:
+                first = result.iat[0]
+            last = result.iat[-1]
+            observed_rows += len(result)
+            del result
+        return observed_rows, first, last
+
+    return time_operation(operation)
 
 
 # GroupBy Workloads (pandas)
@@ -1822,6 +1902,9 @@ PANDAS_WORKLOADS = {
         "df_transpose_materialize": bench_df_transpose_materialize_pandas,
         "df_to_dict_index_materialize": bench_df_to_dict_index_materialize_pandas,
         "astype_str_f64": bench_astype_str_f64_pandas,
+        "astype_str_f64_telemetry_batches": (
+            bench_astype_str_f64_telemetry_batches_pandas
+        ),
         "df_iterrows": bench_df_iterrows_pandas,
         "df_itertuples": bench_df_itertuples_pandas,
         "df_row_tuples_fastest": bench_df_row_tuples_fastest_pandas,
@@ -1927,7 +2010,17 @@ def run_pandas_workload(
 ) -> tuple[TimingResult, dict[str, Any]]:
     """Run a single pandas workload and return timing result."""
     config = SIZE_CONFIGS[size]
-    df = generate_test_data(config["rows"], config["cols"], dtype)
+    if category == "dataframe_ops" and workload in {
+        "astype_str_f64",
+        "astype_str_f64_telemetry_batches",
+    }:
+        # The workload constructs its exact one-column Float64 Series below and
+        # uses only this frame's row count. Avoid populating an unrelated dense
+        # 10-column frame whose setup-only allocator work can outlive the
+        # settle window and correctly trip the immediate pre-arm host gate.
+        df = pd.DataFrame(index=pd.RangeIndex(config["rows"]))
+    else:
+        df = generate_test_data(config["rows"], config["cols"], dtype)
     # Population is outside the timed arm but can leave short-lived allocator
     # or kernel page work on CPUs outside this process's affinity. Let that
     # setup-only activity drain before the mandatory immediate pre-arm sample;
@@ -2020,6 +2113,15 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
     if bench_binary.name != "fp-bench":
         raise ValueError(f"Unexpected fp-bench executable path: {bench_binary}")
 
+    child_env = os.environ.copy()
+    if workload == "astype_str_f64_telemetry_batches":
+        # The linked mimalloc v2 otherwise schedules purges after a delay.
+        # This workload explicitly drops each rendered batch inside the timed
+        # closure, so purge immediately at that free boundary as well. A
+        # delayed purge can escape both the timer and the child lifetime and
+        # correctly trip the mandatory all-CPU post-arm gate.
+        child_env["MIMALLOC_PURGE_DELAY"] = TELEMETRY_MIMALLOC_PURGE_DELAY_MS
+
     # nosec B603: fp-bench is resolved, confined to the project root, and
     # name-checked above; shell=False and category/workload values are selected
     # from the static workload matrix.
@@ -2028,6 +2130,7 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
          "--size", size, "--dtype", dtype, "--json"],
         capture_output=True,
         check=False,
+        env=child_env,
         text=True,
         timeout=1800 if size == "10M" else 300,
     )
@@ -2282,6 +2385,19 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                     "frankenpandas": fp_quiescence,
                     "valid": True,
                 }
+                if workload == "astype_str_f64_telemetry_batches":
+                    comparison["allocator_provenance"] = {
+                        "frankenpandas": {
+                            "allocator": "mimalloc",
+                            "purge_delay_ms": int(
+                                TELEMETRY_MIMALLOC_PURGE_DELAY_MS
+                            ),
+                            "reason": (
+                                "purge rendered-batch pages at the timed "
+                                "drop boundary"
+                            ),
+                        }
+                    }
                 comparison["thread_provenance"] = build_thread_provenance(
                     fingerprint,
                     requested_thread_count,
@@ -2359,6 +2475,13 @@ def main():
         "--expected-logical-threads",
         type=int,
         help="Fail closed unless host topology reports this logical-thread count",
+    )
+    parser.add_argument(
+        "--frankenpandas-build-worker",
+        help=(
+            "Remote worker identity that built the measured FrankenPandas ELF; "
+            "recorded beside its executable SHA-256"
+        ),
     )
     parser.add_argument(
         "--host-exclusivity-self-test",
@@ -2486,6 +2609,7 @@ def main():
     # kernel workers outside this process's affinity mask. Keep that provenance
     # work outside the admitted region: invocation preflight is the final
     # substantive action before fixture setup and the first per-arm bracket.
+    time.sleep(PROVENANCE_QUIESCENCE_SETTLE_SECONDS)
     exclusivity_gate.require_quiet("invocation_preflight")
 
     sizes = [s.strip() for s in args.sizes.split(",")]
@@ -2527,6 +2651,10 @@ def main():
             )
             for result in results:
                 result["invocation_id"] = invocation_id
+                if args.frankenpandas_build_worker is not None:
+                    result["frankenpandas"]["executable"]["build_worker"] = (
+                        args.frankenpandas_build_worker
+                    )
             all_results.extend(results)
 
         exclusivity_gate.require_quiet("invocation_postflight")
@@ -2539,6 +2667,7 @@ def main():
                     "version": "0.1.2",
                     "profile": "release-perf",
                     "role": "Subject",
+                    "build_worker": args.frankenpandas_build_worker,
                 },
                 "pandas": {
                     "version": pd.__version__,
@@ -2577,6 +2706,9 @@ def main():
                     "post_setup_settle_ms": round(
                         SETUP_QUIESCENCE_SETTLE_SECONDS * 1000
                     ),
+                    "post_provenance_hash_settle_ms": round(
+                        PROVENANCE_QUIESCENCE_SETTLE_SECONDS * 1000
+                    ),
                     "checks": (
                         "invocation preflight, immediately before and after "
                         "each pandas and FrankenPandas arm, and invocation "
@@ -2589,6 +2721,13 @@ def main():
                         "_object": "object",
                         "_arrow": "string[pyarrow]",
                     },
+                },
+                "workload_allocator_policy": {
+                    "astype_str_f64_telemetry_batches": {
+                        "frankenpandas_mimalloc_purge_delay_ms": int(
+                            TELEMETRY_MIMALLOC_PURGE_DELAY_MS
+                        )
+                    }
                 },
                 "shared_invocation_id": invocation_id,
                 "thread_provenance_contract": {
