@@ -1,0 +1,75 @@
+diff --git a/crates/fp-columnar/src/lib.rs b/crates/fp-columnar/src/lib.rs
+index 372c5757e..a31015fe1 100644
+--- a/crates/fp-columnar/src/lib.rs
++++ b/crates/fp-columnar/src/lib.rs
+@@ -7592,18 +7592,44 @@ fn radix_sort_i64_values(data: &[i64], ascending: bool) -> Vec<i64> {
+ /// comparator for all-valid numeric columns.
+ fn radix_argsort_u64(keys: &[u64]) -> Vec<usize> {
+     let n = keys.len();
+-    let mut idx: Vec<usize> = (0..n).collect();
+     if n < 2 {
+-        return idx;
+-    }
+-    let mut scratch: Vec<usize> = vec![0; n];
++        return (0..n).collect();
++    }
++    // CO-PERMUTED KEY PAYLOAD (br-frankenpandas-radixpay). The previous shape
++    // permuted `idx: Vec<usize>` alone and re-read the key through it
++    // (`keys[i]`) inside the scatter. That indirect read is a RANDOM 8-byte load
++    // over the whole key buffer — at 10M rows an 80 MB working set no prefetcher
++    // can predict — and the bucket, hence the `count[bucket]` address and the
++    // store address, all depend on it. A 10M `sort_values` profile put 94.33% of
++    // this function in the scatter loop against 5.18% in the histogram, with
++    // 70.32% of the whole function landing on the single instruction directly
++    // after `mov (%r13,%rdi,8),%rdx` — i.e. the skid of that dependent random
++    // load. Parallelizing the histogram would therefore have chased ~5% of the
++    // cost; the load itself is the target.
++    //
++    // Carrying each key NEXT TO its index and permuting the pair converts that
++    // dependent random read into a sequential one: pass k+1 reads the keys pass
++    // k already placed. The pair is one 16-byte tuple, so the scatter still
++    // touches a SINGLE destination cache line per element rather than two
++    // parallel 8-byte streams.
++    //
++    // BIT-IDENTICAL to the index-only shape: the visited order is the same
++    // (`cur` is in `idx` order), each element's bucket is computed from the same
++    // key, and the stable counting scatter is unchanged, so the emitted
++    // permutation is identical element for element. The pass-skip test is also
++    // unchanged: `cur` always holds a permutation of the same key multiset as
++    // `keys`, and a histogram is invariant under permutation, so `count` — and
++    // therefore both `count.contains(&n)` and every prefix offset — matches the
++    // value the old code computed off `keys` directly.
++    let mut cur: Vec<(u64, usize)> = keys.iter().copied().zip(0..n).collect();
++    let mut scratch: Vec<(u64, usize)> = vec![(0, 0); n];
+     for shift in (0..64).step_by(8) {
+         let mut count = [0usize; 256];
+-        for &k in keys {
++        for &(k, _) in &cur {
+             count[((k >> shift) & 0xff) as usize] += 1;
+         }
+         // Skip a pass whose byte is constant across the whole column (common
+-        // for clustered / small-magnitude data) — keeps `idx` in place.
++        // for clustered / small-magnitude data) — keeps `cur` in place.
+         if count.contains(&n) {
+             continue;
+         }
+@@ -7613,14 +7639,14 @@ fn radix_argsort_u64(keys: &[u64]) -> Vec<usize> {
+             *slot = running;
+             running += c;
+         }
+-        for &i in &idx {
+-            let bucket = ((keys[i] >> shift) & 0xff) as usize;
+-            scratch[count[bucket]] = i;
++        for &entry in &cur {
++            let bucket = ((entry.0 >> shift) & 0xff) as usize;
++            scratch[count[bucket]] = entry;
+             count[bucket] += 1;
+         }
+-        std::mem::swap(&mut idx, &mut scratch);
++        std::mem::swap(&mut cur, &mut scratch);
+     }
+-    idx
++    cur.into_iter().map(|(_, position)| position).collect()
+ }
+ 
+ /// Stable LSD radix argsort of an `i64` slice (br-frankenpandas-y5s15): the
