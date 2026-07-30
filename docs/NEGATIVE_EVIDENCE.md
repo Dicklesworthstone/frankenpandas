@@ -21476,3 +21476,95 @@ profile, invalid fail-closed attempt, ten admission retries, and 65 copied raw
 files. Eighteen canonical JSON files / 44 rows passed the mechanical contract
 audit, and the local raw tree matched the released `trj` tree recursively by
 SHA-256 before Agent Mail release 6264.
+
+### 2026-07-29 cod-pandas — the "ten worker thread cap" is `ncols`, not a thread pool: source-provenance correction, no lift exists to take
+
+A thread-cap hunt was opened on the premise that FrankenPandas is limited to
+ten worker threads by a hardcoded constant, a rayon `ThreadPoolBuilder`
+`num_threads` call, an environment default, or a config file, and that lifting
+it would unlock the remaining core count. **No such cap exists.** The ten is
+the benchmark frame's column count meeting a per-column decomposition. This
+entry banks the source coordinates so the next agent does not spend another
+exclusive-host sweep rediscovering it.
+
+**Absence is mechanically established, not assumed.** The tree has no rayon
+dependency at all: `grep -c rayon Cargo.lock` is `0`. `ThreadPoolBuilder`,
+`num_threads`, and `RAYON_NUM_THREADS` have zero occurrences anywhere in the
+repository, source or config. No `usize` constant in any crate equals ten, and
+no `.min(10)` exists. Every parallel path in the tree derives its width from
+`std::thread::available_parallelism()` over `std::thread::scope` workers; there
+is no process-global pool to reconfigure.
+
+**Where the ten actually comes from — two coordinates at `d44b1e419`:**
+
+1. `crates/fp-bench/src/main.rs:314-326` — `size_rows_cols` returns a fixed
+   ten columns for *every* size: `10k`, `100k`, `1M`, `2M`, `4M`, `6M`, `8M`,
+   `10M`, and the fallback all pair their row count with `10`.
+2. `crates/fp-frame/src/lib.rs:70948-70953` — `par_map_columns_min` computes
+   `worker_count = available_parallelism().min(ncols)`. The unit of parallel
+   work is one column, claimed off an `AtomicUsize` cursor by scoped workers.
+
+The full chain for the sort surface is
+`DataFrame::sort_values` (`crates/fp-frame/src/lib.rs:58192`) →
+`sort_values_na` (`:58199`) →
+`reorder_rows_by_positions_unchecked` (`:54749`, gather at `:54763`) →
+`par_map_columns` (`:70919`, default floor 16 384) →
+`par_map_columns_min` (`:70936`). `DataFrame::abs` (`:73212`) reaches the same
+`.min(ncols)` through `apply_per_column_min(131_072, …)` at `:73229`.
+`ncols = 10` therefore yields exactly ten workers no matter how many logical
+CPUs the affinity mask exposes — which is precisely the actual-worker plateau
+the trj sweep observed and recorded.
+
+**Classification: LOAD-BEARING, structurally — not inherited.** `.min(ncols)`
+is not a throttle someone chose conservatively and forgot; it is the arity of
+the decomposition. Ten column tasks cannot occupy thirty-two workers. The
+number is not tunable in the sense the premise assumes: raising it requires
+replacing the decomposition, not editing a bound. Deleting the `.min(ncols)`
+clamp alone would only spawn idle threads that immediately observe an exhausted
+cursor and exit, paying spawn cost for no work — a strict regression with no
+scheduling change.
+
+**The lift the premise asks for was already built and already measured.** The
+row×column scheduler that breaks the ten-column ceiling is banked immediately
+above as *`df_abs` row×column scheduler exceeds the ten-column worker ceiling
+but is 18.9% slower at its best raised cap — REJECTED* (commit `d44b1e419`).
+It did remove the ceiling mechanically — candidate actual workers reached
+13→128 — and was 18.9% slower than current at the same cap, 20.7% slower than
+current's best row, and 75.4% above the budget a 5x incumbent result needs.
+The 128-SMT row did not improve on 64 physical threads. The ceiling is not what
+costs the time.
+
+**The requested sort thread sweep also already exists, at fleet-standard
+provenance.** `artifacts/bench/cod_trj_5995wx_partitionable_thread_sweep_20260729.md`
+(machine-readable manifest alongside as `.json`) carries the full
+`1/2/4/8/16/32/64/128` affinity sweep of `sort_values_single` at 1M and 10M
+against the live pandas 2.2.3 incumbent in the same invocation, with host
+identity, physical/logical core counts, RAM, NUMA-node count, per-row affinity
+mask, actual-observed operation workers, both engine artifact SHA-256s, and a
+bootstrap median-CI gate at a 2x null margin with CV as provenance only. Its
+sort rows report FP/pandas actual workers of `1/1, 2/1, 4/1, 8/1, 10/1, 10/1,
+10/1, 10/1` — the plateau from cap 16 upward is the ten columns, and the
+residual cost is the serial argsort, not the parallel gather.
+
+**Two reasons this sweep was not re-run on `thinkstation1` this turn.** First,
+the premise's "128-thread box" is `threadripperje`, not this host:
+`thinkstation1` is an AMD Ryzen Threadripper PRO 5975WX, 32 physical cores, 64
+logical threads, two threads per core, 231,691,894,784 bytes RAM, one NUMA
+node, kernel `6.17.0-35-generic`. A row at 128 observed worker threads is
+physically unreachable here, and rows at 32 and 64 would reproduce the same ten
+actual workers the banked trj table already reports. Second, the host was
+neither exclusive nor comparable: load average 4.41 with a 233%-CPU `ast-grep`
+and several peer agent processes active, and the governor is `powersave` where
+every banked trj row was taken under `performance`. The `df_abs` retry banked
+above was invalidated in full for two CPUs merely exceeding the 20% busy
+ceiling, so a sweep taken under this load would fail the project's own
+admission contract before it could support any claim, and a `powersave` number
+would not be commensurable with the trj table even if it passed.
+
+**Result class:** source-provenance correction. No timing was taken and no
+competitive claim is made or withdrawn; the cited ratios are the already-banked
+trj measurements, unchanged. The actionable consequence is that the sort
+frontier is the serial argsort residual named by the trj sweep's routing item
+4, and any future lever must name a non-zero-self frame and an Amdahl ceiling
+inside that residual. A thread-cap lift is not available because there is no
+thread cap.
