@@ -1,0 +1,111 @@
+{
+  "workload": "dataframe_ops/sort_values_single 10M float64",
+  "host_provenance": {
+    "hostname": "thinkstation1",
+    "model_name": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "sockets": 1,
+    "physical_cores": 32,
+    "logical_threads": 64,
+    "threads_per_core": 2,
+    "ram_bytes": 231691894784,
+    "numa_nodes": 1,
+    "kernel": "6.17.0-35-generic",
+    "governor": "powersave",
+    "affinity_mask": [
+      5,
+      6,
+      7,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      31,
+      33,
+      34,
+      36,
+      56,
+      57,
+      58
+    ],
+    "affinity_cpu_count": 16
+  },
+  "observed_operation_threads": [
+    10
+  ],
+  "runtime_detected_isa_features": [
+    "scalar",
+    "sse2",
+    "avx2",
+    "fma",
+    "bmi2",
+    "vaes"
+  ],
+  "output_checksums": [
+    "4957dea0fe3e2ed1"
+  ],
+  "checksums_agree": true,
+  "arms": {
+    "baseline": {
+      "path": "bin/fp-bench-baseline-local",
+      "elf_sha256": "13f630df76b91078a6dafb66476d2e2e9b55e2edf5213206c02bad077c9e950a",
+      "bytes": 73731872,
+      "n": 150,
+      "p50_ms": 1374.637963,
+      "cv_provenance_only": 0.13725831274535805
+    },
+    "candidate": {
+      "path": "bin/fp-bench-candidate",
+      "elf_sha256": "505520c4903f68ae6f8d695d82d197f090a51a76afb846f38484e480362c5021",
+      "bytes": 73738256,
+      "n": 150,
+      "p50_ms": 636.968753,
+      "cv_provenance_only": 0.07392909194703026
+    }
+  },
+  "per_round_ratios": [
+    1.9849734433056787,
+    2.1715773429984786,
+    2.3200437692255926
+  ],
+  "null_telemetry": {
+    "n": 150,
+    "median": 0.9995418113655092,
+    "bootstrap_ci95": [
+      0.9885599021177363,
+      1.0190718320378982
+    ],
+    "half_width": 0.01525596496008097,
+    "max_abs_dev_from_one": 0.43468472630998745
+  },
+  "corrected_fleet_rule": {
+    "c1_effect_ci_excludes_1.0": true,
+    "c2_effect_dev_exceeds_2x_null_half_width": true,
+    "c2_detail": {
+      "effect_dev": 1.1580932448031716,
+      "2x_null_half_width": 0.03051192992016194
+    },
+    "c3_null_median_within_2pct_of_1.0": true,
+    "c3_detail": {
+      "null_median_dev": 0.00045818863449076375
+    },
+    "decidable": true,
+    "agrees_with_local_gate": true
+  },
+  "gate": {
+    "ratio_baseline_over_candidate": 2.1580932448031716,
+    "bootstrap_ci95": [
+      2.104865016064416,
+      2.2131480114602273
+    ],
+    "bootstrap_resamples": 20000,
+    "null_margin_eps": 0.43468472630998745,
+    "null_band_2x": [
+      0.1306305473800251,
+      1.869369452619975
+    ],
+    "decided": true,
+    "verdict": "FASTER"
+  }
+}
