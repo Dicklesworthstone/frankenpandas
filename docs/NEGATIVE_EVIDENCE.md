@@ -21711,3 +21711,128 @@ remains queued at the canonical back in Agent Mail message 6423 after the
 formal predecessors. The single next step is: after every predecessor posts
 `[trj] RELEASE`, post a fresh claim and capture exact-current named cap-1 and
 cap-32 sort frames plus an Amdahl ceiling before any source edit.
+
+### 2026-07-30 CyanLynx — co-permuted radix key payload converts a 2.16–2.39x maintenance self-speedup into a 5.110x live-pandas 10M sort win — KEEP
+
+The landed `radix_argsort_u64` lever carries `(u64, usize)` as one payload
+through the eight stable LSD passes, replacing the dependent random
+`keys[idx]` load on every pass with a sequential read of the key already
+placed by the previous pass. The earlier same-host baseline/candidate proof was
+bit-identical and improved the complete 10M×10 Float64
+`sort_values_single` operation by 2.391x and 2.158x on two affinities, with
+fp-columnar 592/0 and fp-frame 3207/0 green. **That result is a `SELF-speedup`,
+so its campaign class is MAINTENANCE, not a win.**
+
+**Campaign result class:** `incumbent-win`.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+invocation_id=vs-pandas-20260730T062823.212746Z-pid1749690
+measured_ratio=5.110x
+
+The conversion used the live pandas 2.2.3 arm in the same canonical invocation
+as the exact FrankenPandas ELF. Every sample times the complete
+`df.sort_values("col_0")` operation over the identical 10M-row,
+ten-Float64-column fixture; population is outside timing. Each engine supplied
+50 samples from 25 alternating A/A pairs.
+
+| row | invocation | FP p50 / p95 / p99 | pandas p50 / p95 / p99 | pandas / FP | independent effect CI95 | 2x-null upper | verdict |
+|---|---|---:|---:|---:|---|---:|---|
+| primary | `vs-pandas-20260730T062823.212746Z-pid1749690` | 547.572 / 1,160.802 / 1,745.289 ms | 2,798.268 / 3,238.291 / 3,440.199 ms | **5.110x** | **[4.543, 5.737]** | 1.454x | **FASTER** |
+| replication | `vs-pandas-20260730T063725.213861Z-pid1759655` | 493.561 / 1,067.227 / 1,352.823 ms | 2,911.805 / 3,345.684 / 3,650.424 ms | **5.900x** | **[5.408, 6.309]** | 1.976x | **FASTER** |
+
+The primary 5.110x ratio is the conservative headline. The effect intervals
+use 20,000 independent bootstrap resamples of
+`median(pandas) / median(FrankenPandas)`, seed `0xF2A_2026_0725`. Point
+log-effect / required two-times-null log-effect was
+`1.63126103 / 0.37418856` and `1.77488231 / 0.68106454`; both complete effect
+CIs sit above the ratio bound induced by twice the larger per-engine null
+log-CI half-width.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. Primary FrankenPandas/pandas bootstrap-median 95% CIs were
+`[0.829366,1.186423]`/`[0.968692,1.038915]`; replication CIs were
+`[0.711392,1.218157]`/`[0.981589,1.028369]`.
+
+**Median-CI decision:** the primary median log effect 1.63126103 cleared the
+required two-times-null log-effect threshold 0.37418856, and its independent
+effect CI was `[4.543053,5.737131]`; the replication median log effect
+1.77488231 cleared 0.68106454, with effect CI
+`[5.407723,6.309032]`. Both decisions are `FASTER`.
+
+**Actual observed threads, not requested threads:** the affinity cap was ten,
+but FrankenPandas observed `10` operation threads and pandas observed `1` in
+both rows. Execution host for every row was `vmi1149989`, AMD EPYC Processor
+(with IBPB), 10 physical/10 logical cores, SMT inactive, CPUs 0-9,
+63,196,901,376 bytes RAM, one NUMA node, kernel `6.17.0-40-generic`. Host ISA
+was SSE2/AVX/AVX2/FMA/BMI1/BMI2/AES, with VAES and AVX-512F absent.
+
+**Artifact provenance:** the subject was built only through
+`RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 rch exec --no-self-healing
+--base 9d21f64314042f31d4e09327390e403f87e068d1 --clean-overlay --no-overlay --
+cargo build -p fp-bench --profile release-perf`. Worker `vmi1153651` produced
+the exact measured artifact.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=088ce5728aedce97a589f927032dfb16468a43797d65d7e6b71f8367df1a6ecc
+(73771288 bytes)
+/data/tmp/cod-cyanlynx-frankenpandas-radix-vs-pandas-20260730/target/release-perf/fp-bench`.
+
+Pandas distribution SHA-256 was
+`c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f`
+(70,681,559 bytes, 2,922 files); Python ELF was
+`efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e`;
+harness source was
+`eea8716f3b0a3815ed6feddb58e2a1af395c40ea783341534edfaebe0a4589cf`.
+
+**CV role:** provenance only; CV had no vote. FP/pandas CV was 49.37%/8.33%
+in the primary and 39.94%/8.65% in the replication. The high FP dispersion
+is already charged in the wide effect and null intervals; both decisions
+remain far outside the 2x null bound.
+
+**Primitive-transfer gate audit — no change:** neither the maintenance A/B
+gate nor `benches/vs_pandas_harness.py` vetoes a row because an A/A null CI
+fails to straddle 1.0. The canonical gate reports null bootstrap CIs and
+compares claim log-effect with twice the larger null log-CI half-width; there
+is no `nulls_hold`, and CV has no vote. Two fully admitted invocations retained
+the same FASTER verdict, so the transferred precision-coupled/moving-verdict
+defect is not exhibited. The missing effect-CI clause was checked
+independently above; the harness was not changed.
+
+For full disclosure, the note's alternative three-clause rule would mark both
+rows undecidable on its additional null-median-within-2% clause:
+FrankenPandas null medians were 1.028251 and 1.033124, while pandas null
+medians were 1.005420 and 1.008509. Its effect-CI and 2x-margin clauses pass.
+Because the live gates have no CI-straddle defect, the verdict is stable, and
+the order was to report rather than change the gate, that stricter clause is
+diagnostic only here. Do not reuse these rows as proof under a campaign that
+explicitly adopts the alternative rule.
+
+Every admitted row cleared invocation preflight, immediate pre/post checks for
+both arms, and invocation postflight across every online CPU; maximum observed
+busy fraction was 16.67% and 19.00% against the unchanged 20% ceiling.
+Twenty-four earlier invocations refused at a checkpoint and wrote no result;
+none contributes a timing or ratio.
+
+**Decision: KEEP** the source optimization as maintenance and keep the
+competitive **5.110x** whole-operation claim for this exact 10M×10 Float64
+shape.
+
+**Concrete retry predicate:** do not rerun this exact shape to seek a larger
+ratio. Reopen only for another dtype, null/NaN semantics, another column width,
+thread-normalized execution, another hardware class, or changed
+pandas/harness artifacts. Any new claim must use a strict RCH-built exact ELF,
+live pandas in the same invocation, complete host/actual-thread/artifact
+provenance, an effect bootstrap CI that clears the 2x null margin, and CV as
+provenance only.
+
+Full evidence:
+`artifacts/bench/cod_thinkstation1_radix_payload_ab_20260730.md`,
+`artifacts/bench/cod_vmi1149989_radix_payload_vs_pandas_10m_20260730.json`
+(SHA-256
+`58831b9ed14a34a3502e56b834c612c0bb4ee41bf5442dcb2e1947821808ea77`),
+and
+`artifacts/bench/cod_vmi1149989_radix_payload_vs_pandas_10m_20260730_replication.json`
+(SHA-256
+`ef1ff9728a75778cdfa390029c62043a70648c2ecd4fec512a86a4ec59ea87cb`).
