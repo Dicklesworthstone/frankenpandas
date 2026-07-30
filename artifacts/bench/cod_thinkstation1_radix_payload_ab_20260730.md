@@ -37,6 +37,9 @@ untouched and unbreakable without changing algorithm.
   arm of *every* round of both runs — 18 invocations, both ELFs, identical.
 - `cargo test -p fp-columnar --profile release-perf`: **592 passed, 0 failed**,
   57 ignored.
+- `cargo test -p fp-frame --profile release-perf`: **3207 passed, 0 failed**,
+  26 ignored — the consumer crate that owns `sort_values`, `nlargest`/`nsmallest`,
+  `rank` and every other `radix_argsort_u64` caller. **3799 tests green in total.**
 
 ## Provenance
 
