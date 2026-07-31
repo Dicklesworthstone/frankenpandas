@@ -974,6 +974,46 @@ fn run_pipeline(workload: &str, data_dir: Option<&Path>) -> Option<PairedSamples
     }))
 }
 
+/// The math-unary family the ledger recorded as blocked on the build target.
+///
+/// `docs/NEGATIVE_EVIDENCE.md` (2026-06-26) records floor 0.089x, ceil 0.11x,
+/// trunc 0.13x, round(decimals) 0.090x, sqrt ~0.085x, log 0.20x vs pandas, with
+/// the explicit finding that they are "NOT source-fixable": they need `vroundpd`
+/// / wide `vsqrtpd`, and FrankenPandas builds for generic x86-64, so
+/// `f64::floor/ceil/trunc/round_ties_even` lower to libm libcalls and sqrt to
+/// scalar `sqrtsd`, while numpy runtime-dispatches AVX regardless of compile
+/// target. That row ends: "This is the ceiling for the math-unary family until
+/// that build-target call is revisited."
+///
+/// The fleet's ISA floor moved to x86-64-v3 on 2026-07-25 (workers.toml: ovh-b,
+/// the only non-AVX2 worker, dropped the `rust` tag), which satisfies that
+/// retry condition. This lane exists so the re-test is a whole-binary timed A/B
+/// rather than an instruction count -- fewer instructions is the mechanism, not
+/// a proxy for the result.
+///
+/// Input is deliberately NON-INTEGRAL: an integral-valued Float64 column hits
+/// the `floor`/`ceil`/`trunc` semantic-identity bit witness (landed 2026-06-26)
+/// and short-circuits the kernel entirely, so an integral fixture would measure
+/// the guard instead of the arithmetic. It is also strictly positive so `sqrt`
+/// and `log` stay finite and neither engine drifts onto a NaN path.
+fn run_math_unary(workload: &str, rows: usize) -> Option<PairedSamples> {
+    let mut rng = SplitMix64(0x1234_5678_9ABC_DEF0);
+    let data: Vec<f64> = (0..rows).map(|_| 1.0 + rng.unit() * 99_999.0).collect();
+    let index = Index::new_known_unique_int64_unit_range(0, rows);
+    let series = Series::new("s", index, Column::from_f64_values(data)).expect("math series");
+
+    let samples = match workload {
+        "floor" => time_us(|| series.floor().expect("floor")),
+        "ceil" => time_us(|| series.ceil().expect("ceil")),
+        "trunc" => time_us(|| series.trunc().expect("trunc")),
+        "round2" => time_us(|| series.round(2).expect("round")),
+        "sqrt" => time_us(|| series.sqrt().expect("sqrt")),
+        "log" => time_us(|| series.log().expect("log")),
+        _ => return None,
+    };
+    Some(samples)
+}
+
 fn run(
     category: &str,
     workload: &str,
@@ -988,6 +1028,10 @@ fn run(
     // for the whole measurement.
     if category == "pipeline" {
         return run_pipeline(workload, data_dir);
+    }
+    // Same reason: math_unary builds its exact one-column input below.
+    if category == "math_unary" {
+        return run_math_unary(workload, rows);
     }
     // The astype workloads construct their exact one-column input below.
     // Avoid retaining an unrelated ten-column frame during measurement.

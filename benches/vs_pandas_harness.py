@@ -83,6 +83,7 @@ CATEGORIES = {
 # every existing baseline stays comparable; ask for it by name.
 EXTRA_CATEGORIES = {
     "pipeline": "whole-job ETL: load/filter/groupby/join/sort/write",
+    "math_unary": "floor/ceil/trunc/round/sqrt/log -- the ISA-blocked ledger family",
 }
 
 SIZE_CONFIGS = {
@@ -1166,6 +1167,58 @@ def compare_pipeline_outputs(tmp_path: Path) -> dict[str, Any]:
     return report
 
 
+# Math-unary workloads (pandas)
+#
+# The family docs/NEGATIVE_EVIDENCE.md recorded as blocked on the build target:
+# floor 0.089x, ceil 0.11x, trunc 0.13x, round(decimals) 0.090x, sqrt ~0.085x,
+# log 0.20x vs pandas -- "NOT source-fixable ... the ceiling for the math-unary
+# family until that build-target call is revisited". numpy runtime-dispatches
+# AVX regardless of compile target; FrankenPandas built for generic x86-64, so
+# these lower to libm libcalls and scalar sqrtsd. The fleet ISA floor moved to
+# x86-64-v3 on 2026-07-25, satisfying that retry condition.
+#
+# Input matches the Rust arm: strictly positive and NON-INTEGRAL, so the
+# integral-value floor/ceil/trunc identity witness cannot short-circuit the
+# kernel and sqrt/log stay finite.
+MATH_UNARY_SEED = 0x1234_5678
+MATH_UNARY_LOW = 1.0
+MATH_UNARY_HIGH = 100_000.0
+
+
+def _math_unary_input(rows: int) -> pd.Series:
+    rng = np.random.default_rng(MATH_UNARY_SEED)
+    return pd.Series(rng.uniform(MATH_UNARY_LOW, MATH_UNARY_HIGH, size=rows))
+
+
+def _bench_math_unary(df: pd.DataFrame, op) -> PairedSamples:
+    s = _math_unary_input(len(df))
+    return time_operation(partial(op, s))
+
+
+def bench_math_floor_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_unary(df, np.floor)
+
+
+def bench_math_ceil_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_unary(df, np.ceil)
+
+
+def bench_math_trunc_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_unary(df, np.trunc)
+
+
+def bench_math_round2_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_unary(df, lambda s: s.round(2))
+
+
+def bench_math_sqrt_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_unary(df, np.sqrt)
+
+
+def bench_math_log_pandas(df: pd.DataFrame) -> PairedSamples:
+    return _bench_math_unary(df, np.log)
+
+
 # DataFrame Ops Workloads (pandas)
 def bench_sort_values_single_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df.sort_values("col_0"))
@@ -2086,6 +2139,14 @@ PANDAS_WORKLOADS = {
     "pipeline": {
         "etl_job": bench_pipeline_etl_job_pandas,
     },
+    "math_unary": {
+        "floor": bench_math_floor_pandas,
+        "ceil": bench_math_ceil_pandas,
+        "trunc": bench_math_trunc_pandas,
+        "round2": bench_math_round2_pandas,
+        "sqrt": bench_math_sqrt_pandas,
+        "log": bench_math_log_pandas,
+    },
     "dataframe_ops": {
         "sort_values_single": bench_sort_values_single_pandas,
         "sort_values_multi": bench_sort_values_multi_pandas,
@@ -2207,8 +2268,8 @@ def run_pandas_workload(
 ) -> tuple[TimingResult, dict[str, Any]]:
     """Run a single pandas workload and return timing result."""
     config = SIZE_CONFIGS[size]
-    if category == "pipeline":
-        # The pipeline workload builds its own star-schema inputs, writes them
+    if category in ("pipeline", "math_unary"):
+        # These build their own exact inputs. The pipeline workload writes them
         # to CSV, and reads them back inside the timed job. It never touches
         # the synthetic ten-column frame; populating one at 10M rows would
         # cost ~800 MB for nothing and leave setup allocator work that can
