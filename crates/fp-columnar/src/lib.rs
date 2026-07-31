@@ -2240,6 +2240,20 @@ enum ScalarValues {
         expanded: OnceLock<Vec<f64>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Deferred arbitrary permutation over shared all-valid Float64 data.
+    ///
+    /// Sorts already own an output-row -> source-row permutation. Keeping that
+    /// immutable tape shared across every Float64 payload column removes the
+    /// eager random gather from the sort critical path; a consumer that needs a
+    /// contiguous typed/scalar view materializes the exact same gather once.
+    LazyGatherFloat64 {
+        data: Arc<[f64]>,
+        source_start: usize,
+        positions: Arc<Vec<usize>>,
+        gathered: OnceLock<Vec<f64>>,
+        all_finite: OnceLock<bool>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyNullableFloat64 {
         data: Vec<f64>,
         validity: ValidityMask,
@@ -2744,7 +2758,8 @@ impl ScalarValues {
             Self::LazyAllValidFloat64 { all_finite, .. }
             | Self::LazyAllValidFloat64Vec { all_finite, .. }
             | Self::LazyAllValidFloat64Chunks { all_finite, .. }
-            | Self::LazyAllValidFloat64Slice { all_finite, .. } => all_finite.get().copied(),
+            | Self::LazyAllValidFloat64Slice { all_finite, .. }
+            | Self::LazyGatherFloat64 { all_finite, .. } => all_finite.get().copied(),
             _ => None,
         }
     }
@@ -2787,6 +2802,22 @@ impl ScalarValues {
             step,
             len,
             expanded: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_gather_float64(
+        data: Arc<[f64]>,
+        source_start: usize,
+        positions: Arc<Vec<usize>>,
+        all_finite: Option<bool>,
+    ) -> Self {
+        Self::LazyGatherFloat64 {
+            data,
+            source_start,
+            positions,
+            gathered: OnceLock::new(),
+            all_finite: Self::bool_once_lock(all_finite),
             values: OnceLock::new(),
         }
     }
@@ -3983,6 +4014,29 @@ impl ScalarValues {
         None
     }
 
+    fn gather_float64_data(&self) -> Option<&[f64]> {
+        if let Self::LazyGatherFloat64 {
+            data,
+            source_start,
+            positions,
+            gathered,
+            ..
+        } = self
+        {
+            return Some(
+                gathered
+                    .get_or_init(|| {
+                        positions
+                            .iter()
+                            .map(|&position| data[source_start + position])
+                            .collect()
+                    })
+                    .as_slice(),
+            );
+        }
+        None
+    }
+
     fn materialize_float64_dot(a_cols: &[Float64DotInput], b_col: &[f64], len: usize) -> Vec<f64> {
         debug_assert_eq!(a_cols.len(), b_col.len());
         // AXPY loop order: outer over the k A-columns, inner streaming over the
@@ -4371,6 +4425,28 @@ impl ScalarValues {
                 .get_or_init(|| {
                     expanded
                         .get_or_init(|| Self::expand_strided_float64(data, *start, *step, *len))
+                        .iter()
+                        .copied()
+                        .map(Scalar::Float64)
+                        .collect()
+                })
+                .as_slice(),
+            Self::LazyGatherFloat64 {
+                data,
+                source_start,
+                positions,
+                gathered,
+                values,
+                ..
+            } => values
+                .get_or_init(|| {
+                    gathered
+                        .get_or_init(|| {
+                            positions
+                                .iter()
+                                .map(|&position| data[source_start + position])
+                                .collect()
+                        })
                         .iter()
                         .copied()
                         .map(Scalar::Float64)
@@ -4973,6 +5049,7 @@ impl ScalarValues {
             Self::LazyAllValidFloat64TransposeRow { plan, .. } => plan.column_len(),
             Self::LazyCombineFirstFloat64 { len, .. } => *len,
             Self::LazyStridedFloat64 { len, .. } => *len,
+            Self::LazyGatherFloat64 { positions, .. } => positions.len(),
             Self::LazyNullableFloat64 { data, .. } => data.len(),
             Self::LazyAllValidBool { data, .. } => data.len(),
             Self::LazyShiftedBool { len, .. } => *len,
@@ -5314,6 +5391,18 @@ impl Clone for ScalarValues {
                 len,
                 ..
             } => Self::lazy_strided_float64(Arc::clone(data), *start, *step, *len),
+            Self::LazyGatherFloat64 {
+                data,
+                source_start,
+                positions,
+                all_finite,
+                ..
+            } => Self::lazy_gather_float64(
+                Arc::clone(data),
+                *source_start,
+                Arc::clone(positions),
+                all_finite.get().copied(),
+            ),
             Self::LazyNullableFloat64 { data, validity, .. } => {
                 Self::lazy_nullable_float64(data.clone(), validity.clone())
             }
@@ -10038,6 +10127,9 @@ impl Column {
             if let Some(data) = self.values.strided_float64_data() {
                 return Some(data);
             }
+            if let Some(data) = self.values.gather_float64_data() {
+                return Some(data);
+            }
             if let Some(data) = self.values.repeated_slices_f64_data() {
                 return Some(data);
             }
@@ -11218,6 +11310,46 @@ impl Column {
             validity: ValidityMask::from_words(words, n),
             data: None,
         }
+    }
+
+    /// Whether this column can share an arbitrary row-permutation tape and
+    /// defer its all-valid Float64 gather.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn can_defer_all_valid_float64_take(&self) -> bool {
+        self.dtype == DType::Float64
+            && self.validity.all()
+            && self.float64_arc_view_source().is_some()
+    }
+
+    /// Build an all-valid Float64 permutation view over a caller-owned shared
+    /// position tape. The caller guarantees every position is in bounds.
+    ///
+    /// This is observationally identical to [`Self::take_positions`]: output
+    /// row `i` is the source value at `positions[i]`, with the same raw f64
+    /// bits and all-valid mask. Only materialization timing changes.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn take_positions_deferred_all_valid_float64(
+        &self,
+        positions: Arc<Vec<usize>>,
+    ) -> Option<Self> {
+        if self.dtype != DType::Float64 || !self.validity.all() {
+            return None;
+        }
+        let (data, source_start) = self.float64_arc_view_source()?;
+        let len = positions.len();
+        Some(Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_gather_float64(
+                data,
+                source_start,
+                positions,
+                self.f64_finite_witness(),
+            ),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        })
     }
 
     /// Whether [`Self::take_position_runs`] can gather this column without
@@ -13256,6 +13388,11 @@ impl Column {
             }
             ScalarValues::LazyStridedFloat64 { len, .. } if *len == self.validity.len() => {
                 self.values.strided_float64_data()
+            }
+            ScalarValues::LazyGatherFloat64 { positions, .. }
+                if positions.len() == self.validity.len() =>
+            {
+                self.values.gather_float64_data()
             }
             ScalarValues::LazyNullableFloat64 { data, .. } if data.len() == self.validity.len() => {
                 Some(data.as_slice())
@@ -27975,6 +28112,49 @@ mod tests {
             assert!(values.get().is_some());
         }
         assert_eq!(gathered.validity(), expected.validity());
+    }
+
+    #[test]
+    fn deferred_sort_gather_column_matches_eager_bits() {
+        let source = Column::from_f64_values(vec![
+            8.5,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(1),
+            3.25,
+        ]);
+        let positions = Arc::new(vec![4, 1, 5, 0, 3, 2, 4]);
+        let eager = source.take_positions(positions.as_slice());
+        let deferred = source
+            .take_positions_deferred_all_valid_float64(Arc::clone(&positions))
+            .expect("all-valid Arc-backed Float64 supports deferred gather");
+
+        assert!(matches!(
+            &deferred.values,
+            ScalarValues::LazyGatherFloat64 {
+                gathered,
+                values,
+                ..
+            } if gathered.get().is_none() && values.get().is_none()
+        ));
+        assert_eq!(deferred.len(), positions.len());
+        assert_eq!(deferred.validity(), eager.validity());
+        assert_eq!(
+            deferred
+                .as_f64_slice()
+                .expect("deferred gather materializes a typed slice")
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            eager
+                .as_f64_slice()
+                .expect("eager gather has a typed slice")
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(deferred.values(), eager.values());
     }
 
     #[test]

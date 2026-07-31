@@ -54781,6 +54781,55 @@ impl DataFrame {
         )
     }
 
+    /// Owned-permutation sibling used by large all-valid Float64 sorts.
+    ///
+    /// The radix kernel already produced this permutation as an owned vector.
+    /// Share it across lazy payload-column views instead of running one eager
+    /// random gather per column. A later typed/scalar consumer observes the
+    /// exact same values in the exact same order; only the gather boundary is
+    /// deferred. Frames outside this narrow representation keep the existing
+    /// eager, column-parallel path.
+    fn reorder_rows_by_owned_positions_unchecked(
+        &self,
+        positions: Vec<usize>,
+    ) -> Result<Self, FrameError> {
+        const DEFERRED_GATHER_MIN_ROWS: usize = 1 << 18;
+
+        let can_defer = positions.len() >= DEFERRED_GATHER_MIN_ROWS
+            && self.row_multiindex.is_none()
+            && !self.column_order.is_empty()
+            && self.column_order.iter().all(|name| {
+                self.columns
+                    .get(name)
+                    .expect("column name listed in order must exist")
+                    .can_defer_all_valid_float64_take()
+            });
+        if !can_defer {
+            return self.reorder_rows_by_positions_unchecked(&positions);
+        }
+
+        let index = self.index.take(&positions);
+        let positions = Arc::new(positions);
+        let mut columns = BTreeMap::new();
+        for name in &self.column_order {
+            let column = self
+                .columns
+                .get(name)
+                .expect("column name listed in order must exist")
+                .take_positions_deferred_all_valid_float64(Arc::clone(&positions))
+                .expect("can_defer_all_valid_float64_take was checked for every column");
+            columns.insert(name.clone(), column);
+        }
+
+        Self::new_with_axes(
+            index,
+            None,
+            columns,
+            self.column_order.clone(),
+            self.column_multiindex.clone(),
+        )
+    }
+
     fn take_rows_by_positions(&self, positions: &[usize]) -> Result<Self, FrameError> {
         for &position in positions {
             if position >= self.len() {
@@ -58289,8 +58338,10 @@ impl DataFrame {
             order
         };
 
-        // order is a permutation of 0..len(), always valid
-        self.reorder_rows_by_positions_unchecked(&order)
+        // order is a permutation of 0..len(), always valid. Preserve ownership
+        // so large homogeneous Float64 frames can share the tape across lazy
+        // payload gathers without copying it into every column operation.
+        self.reorder_rows_by_owned_positions_unchecked(order)
     }
 
     /// Sort by multiple columns with per-column ascending flags.
@@ -125687,6 +125738,41 @@ mod tests {
     }
 
     // ── sort_values_multi ──
+
+    #[test]
+    fn deferred_sort_gather_frame_matches_eager_order() {
+        const N: usize = 1 << 18;
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "key".to_owned(),
+            Column::from_f64_values((0..N).rev().map(|value| value as f64).collect()),
+        );
+        columns.insert(
+            "payload".to_owned(),
+            Column::from_f64_values((0..N).map(|row| row as f64 + 0.25).collect()),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, N),
+            columns,
+            vec!["key".to_owned(), "payload".to_owned()],
+        )
+        .expect("large all-valid Float64 frame");
+
+        let sorted = df.sort_values("key", true).expect("sort succeeds");
+        let keys = sorted.columns["key"]
+            .as_f64_slice()
+            .expect("sorted key stays typed");
+        let payload = sorted.columns["payload"]
+            .as_f64_slice()
+            .expect("deferred payload materializes as typed Float64");
+        for &row in &[0, 1, N / 2, N - 2, N - 1] {
+            assert_eq!(keys[row].to_bits(), (row as f64).to_bits());
+            assert_eq!(
+                payload[row].to_bits(),
+                ((N - 1 - row) as f64 + 0.25).to_bits()
+            );
+        }
+    }
 
     #[test]
     fn df_sort_values_multi() {
