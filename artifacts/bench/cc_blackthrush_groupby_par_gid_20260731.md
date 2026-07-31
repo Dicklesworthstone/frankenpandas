@@ -107,6 +107,36 @@ anti-dead-code-elimination guard and is value-blind: it would agree happily whil
 a change corrupted every value, since the result type is unchanged. Any parity
 claim resting on this field needs re-deriving. Reported to its owner.
 
+## MEASURED — it lost. Reverted.
+
+vs **live pandas 2.2.3, same invocation**, corrected three-clause gate, on
+`threadripperje` (64 physical / 128 logical, performance governor, quiet):
+
+| binary | workload @1M | ratio vs pandas | fp p50 |
+|---|---|---:|---:|
+| HEAD baseline | `groupby_mean_float64` | **3.587x FASTER** | 2456.9 us |
+| this lever | `groupby_mean_float64` | 3.217x FASTER | 2765.4 us |
+| HEAD baseline | `groupby_sum_int64` | **4.341x FASTER** | 2104.5 us |
+
+**The lever is 12.6% SLOWER than the code it replaced.** Bit-identical, verified,
+and still a regression — so it goes.
+
+**Why, and it is worth keeping:** the lever *adds* a second read of the key array
+to buy parallelism. At 1M rows the keys plus a 100-entry direct-address table are
+cache-resident, so the serial build was already running near memory speed; there
+was no stall for extra cores to hide. Parallelism was spread over work that was
+not the bottleneck, and the extra pass was pure cost. Bead `gsr9j`'s own closing
+line — *"Not obviously worth it"* — was right, for a reason it did not state.
+
+The diagnosis is the useful output: the cost is **memory traffic**, not core
+starvation. A one-column `groupby(int64).mean()` walks memory four times and
+materializes an n-element `gid_per_row` (8 MB at 1M) purely to hand the gid to
+the very next pass. That points at deleting the traffic rather than parallelising
+it — see the fused-fold lever, which removes both the write and its read-back.
+
+These are also the **first same-invocation vs-pandas groupby numbers this repo
+holds**: FrankenPandas at HEAD is 3.59x pandas on `mean` and 4.34x on `sum` at 1M.
+
 ## Expected magnitude — stated before measuring
 
 This is **one of three serial O(n) passes** in the op: the `i64_dense_histogram_range`
