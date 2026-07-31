@@ -106,6 +106,36 @@ there was no stall for extra cores to hide. **The cost was memory traffic, not
 core starvation** — so the payoff came from deleting the traffic, not spreading
 it. Same op, opposite strategy, 1.5-1.7× instead of 0.87×.
 
+## Follow-up that was REJECTED: extending the fusion to `count` and Int64 columns
+
+The obvious next step — widen the fused gate to `count` and to Int64 value columns
+— was implemented, passed **211/211** groupby tests, and **measured worse**. It is
+not shipped (stashed as `rejected-count-i64-extension-measured-slower`).
+
+FP-side A/B, shipped ELF `4225b3fb…` vs extended ELF `b40f3117…`:
+
+| workload | size | shipped | extended | ratio |
+|---|---|---:|---:|---|
+| `groupby_count` | 1M | 2520.6 µs | 2516.3 µs | 1.002 — no change |
+| `groupby_mean_float64` | 1M | 1430.0 µs | 1793.4 µs | **0.797** |
+| `groupby_sum_int64` | 1M | 1458.9 µs | 1799.9 µs | **0.811** |
+| `groupby_count` | 10M | 24674.8 µs | 24034.7 µs | 1.027 — no change |
+| `groupby_mean_float64` | 10M | 15865.7 µs | 17717.1 µs | 0.895 |
+| `groupby_sum_int64` | 10M | 14452.4 µs | 16666.8 µs | **0.867 SLOWER** |
+
+Two separate findings, and both are worth keeping:
+
+1. **`count` did not move at all**, at either size. It never reaches the fused
+   path — `try_count_dense` intercepts `count` earlier in `aggregate_named_func`.
+   Widening the fused gate to include `"count"` was dead code. **Check what
+   already intercepts a func before widening a gate to cover it.**
+2. **The already-winning `sum`/`mean` paths got ~20% SLOWER.** Adding the Int64
+   arm turned a single tight typed loop into a `match` over two `Option` slices
+   with an extra range-sized `i128` accumulator allocated on every call — cost
+   paid by the common f64 path to serve a case that was never measured to need
+   it. The lesson mirrors the parallel-gid failure: **a hot fused loop is fragile;
+   generalising it has a price, and that price has to be measured, not assumed.**
+
 ⚠️ **Do not witness this with `fp-bench`'s `checksum` field.** It hashes
 `size_of_val(&result)`, not the data, and returns the same value for every
 groupby workload — it is an anti-DCE guard, not a digest. The correctness
