@@ -914,13 +914,18 @@ python scripts/gen_perf_scorecard.py --input artifacts/bench/latest.json --forma
 
 Five named optimization rounds with formal evidence, plus an ongoing complexity sweep that converted dozens of O(n²) hot paths to O(n) or O(n + k) via HashMap/HashSet/IsinIndex.
 
-| Round | Optimization | Speedup |
+Every figure in the table below is a **FrankenPandas-vs-FrankenPandas** improvement —
+each round measured against the round before it. **None of these are comparisons
+against pandas**, and none should be read as one. For vs-pandas numbers see
+[`artifacts/perf/SCORECARD.md`](artifacts/perf/SCORECARD.md).
+
+| Round | Optimization | FP-side effect (not vs pandas) |
 |-------|-------------|---------|
 | Round 1 | Remove duplicate `run_fixture_operation` invocation inside `run_fixture` | Eliminates redundant per-fixture work |
 | Round 2 | `align_union` borrowed-key HashMap (AG-02) | Eliminates index clones |
 | Round 3 | GroupBy identity-alignment fast path (AG-11) | Skips reindex when indexes match |
 | Round 4 | Dense Int64 aggregation path (AG-06) | O(1) array access, no HashMap |
-| Round 5 | `has_duplicates` OnceLock memoization | **87% faster** on groupby benchmark |
+| Round 5 | `has_duplicates` OnceLock memoization | **87% faster than Round 4**, i.e. FP-side only — `groupby-bench --rows 100000 --key-cardinality 512`, mean 0.2906 s → 0.0372 s ([ROUND5_BASELINE.md](artifacts/perf/ROUND5_BASELINE.md)). No pandas arm was run. |
 
 ### Recent complexity sweep (2026-05)
 
