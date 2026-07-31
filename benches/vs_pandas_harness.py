@@ -8,7 +8,8 @@ Per BENCH_MATRIX_SPEC.md:
 - Uses release-perf profile for FP (not --release)
 - Emits executable SHA-256 provenance for both engines
 - Measures an interleaved A/A null control inside each engine invocation
-- Gates claims on the null-median bootstrap 95% CI, never on cv
+- Gates claims on an effect-median bootstrap CI, a 2x null-CI margin, and
+  A/A medians within 2% of unity; never on cv
 - Population/setup OUTSIDE the timed window
 - EngineIdentity Subject!=Oracle on every artifact
 
@@ -101,12 +102,15 @@ PAIRED_ROUNDS = 25
 BOOTSTRAP_RESAMPLES = 10_000
 NULL_CI_CONFIDENCE = 0.95
 DECIDABILITY_MARGIN = 2.0
+NULL_MEDIAN_MAX_ABS_DEVIATION = 0.02
 WARMUP_ITERATIONS = 3
 # One second distinguishes sustained host tenancy from ordinary sub-100 ms
 # scheduler/kernel bursts on the 128-thread measurement host. The per-CPU 20%
 # ceiling still rejects a competing build, benchmark, or repository scan.
 CPU_SAMPLE_INTERVAL_SECONDS = 1.0
 MAX_HOST_WIDE_BUSY_FRACTION = 0.20
+QUIESCENCE_WAIT_MAX_ATTEMPTS = 20
+QUIESCENCE_WAIT_RETRY_SECONDS = 0.5
 SETUP_QUIESCENCE_SETTLE_SECONDS = 1.0
 PROVENANCE_QUIESCENCE_SETTLE_SECONDS = 5.0
 TAKE_BATCH = 256
@@ -242,7 +246,7 @@ class HostWideExclusivityGate:
     expected_cpu_ids: list[int]
     observations: list[dict[str, Any]] = field(default_factory=list)
 
-    def require_quiet(self, phase: str) -> dict[str, Any]:
+    def _sample(self, phase: str, role: str) -> dict[str, Any]:
         try:
             busy_fractions = _sample_host_cpu_busy()
         except RuntimeError as error:
@@ -256,7 +260,12 @@ class HostWideExclusivityGate:
             self.expected_cpu_ids,
             busy_fractions,
         )
+        observation["role"] = role
         self.observations.append(observation)
+        return observation
+
+    def require_quiet(self, phase: str) -> dict[str, Any]:
+        observation = self._sample(phase, "adjudicating_checkpoint")
         if observation["verdict"] != "clear":
             print(
                 "ERROR: host-wide benchmark exclusivity requires every online "
@@ -276,18 +285,71 @@ class HostWideExclusivityGate:
         )
         return observation
 
+    def wait_until_quiet(self, phase: str) -> dict[str, Any]:
+        """Wait boundedly for self-induced setup residue, then re-adjudicate.
+
+        Readiness probes are retained in the artifact but do not replace the
+        immediate adjudicating checkpoint. A sustained peer workload still
+        fails closed after the predeclared attempt budget.
+        """
+        previous_probe_was_clear = False
+        for attempt in range(1, QUIESCENCE_WAIT_MAX_ATTEMPTS + 1):
+            readiness = self._sample(
+                f"readiness:{phase}:attempt_{attempt}",
+                "readiness_probe",
+            )
+            readiness["readiness_attempt"] = attempt
+            probe_is_clear = readiness["verdict"] == "clear"
+            if previous_probe_was_clear and probe_is_clear:
+                readiness["readiness_phase"] = readiness["phase"]
+                readiness["phase"] = phase
+                readiness["role"] = "adjudicating_checkpoint"
+                print(
+                    "host_wide_quiescence="
+                    f"phase={phase} "
+                    f"online_cpu_count={len(self.expected_cpu_ids)} "
+                    f"maximum_busy_fraction="
+                    f"{MAX_HOST_WIDE_BUSY_FRACTION:.3f} "
+                    "busy_cpu_count_above_limit=0 verdict=clear"
+                )
+                return readiness
+            previous_probe_was_clear = probe_is_clear
+            if attempt < QUIESCENCE_WAIT_MAX_ATTEMPTS and not probe_is_clear:
+                time.sleep(QUIESCENCE_WAIT_RETRY_SECONDS)
+
+        print(
+            "ERROR: host-wide benchmark exclusivity did not reach a clear "
+            f"readiness window for phase={phase} after "
+            f"{QUIESCENCE_WAIT_MAX_ATTEMPTS} attempts",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
     def artifact(self) -> dict[str, Any]:
+        adjudicating = [
+            observation
+            for observation in self.observations
+            if observation.get("role") == "adjudicating_checkpoint"
+        ]
         return {
             "required": True,
             "scope": "all_online_host_cpus",
             "online_cpu_ids": self.expected_cpu_ids,
             "maximum_busy_fraction": MAX_HOST_WIDE_BUSY_FRACTION,
             "sample_interval_ms": round(CPU_SAMPLE_INTERVAL_SECONDS * 1000),
+            "readiness_wait": {
+                "maximum_attempts": QUIESCENCE_WAIT_MAX_ATTEMPTS,
+                "retry_interval_ms": round(
+                    QUIESCENCE_WAIT_RETRY_SECONDS * 1000
+                ),
+                "readiness_probes_are_adjudicating": False,
+                "clear_probe_is_followed_by_immediate_checkpoint": True,
+            },
             "observations": self.observations,
-            "valid": bool(self.observations)
+            "valid": bool(adjudicating)
             and all(
                 observation["verdict"] == "clear"
-                for observation in self.observations
+                for observation in adjudicating
             ),
         }
 
@@ -298,7 +360,7 @@ def _run_host_exclusive_arm(
     operation: Callable[[], Any],
 ) -> tuple[Any, dict[str, Any]]:
     """Run one untimed outer arm only when both host-wide guards are clear."""
-    pre_quiescence = exclusivity_gate.require_quiet(
+    pre_quiescence = exclusivity_gate.wait_until_quiet(
         f"pre_measurement:{phase_suffix}"
     )
     result = operation()
@@ -353,6 +415,10 @@ def _host_wide_exclusivity_self_test() -> None:
             self.phases.append(phase)
             return {"phase": phase, "verdict": "clear"}
 
+        def wait_until_quiet(self, phase: str) -> dict[str, Any]:
+            self.phases.append(f"wait:{phase}")
+            return {"phase": phase, "verdict": "clear"}
+
     gate = RecordingGate()
     result, artifact = _run_host_exclusive_arm(
         gate,
@@ -362,7 +428,7 @@ def _host_wide_exclusivity_self_test() -> None:
     if result != "completed":
         raise RuntimeError("exclusive arm must return the operation result")
     if gate.phases != [
-        "pre_measurement:frankenpandas:self-test",
+        "wait:pre_measurement:frankenpandas:self-test",
         "post_measurement:frankenpandas:self-test",
     ]:
         raise RuntimeError("every exclusive arm must be bracketed by two guards")
@@ -372,6 +438,43 @@ def _host_wide_exclusivity_self_test() -> None:
         or not artifact["valid"]
     ):
         raise RuntimeError("exclusive arm artifact must retain both clear guards")
+
+    class SequenceGate(HostWideExclusivityGate):
+        def __init__(self) -> None:
+            super().__init__([0])
+            self.verdicts = iter(["clear", "blocked", "clear", "clear"])
+
+        def _sample(self, phase: str, role: str) -> dict[str, Any]:
+            verdict = next(self.verdicts)
+            observation = {
+                "phase": phase,
+                "role": role,
+                "verdict": verdict,
+            }
+            self.observations.append(observation)
+            return observation
+
+    sequence_gate = SequenceGate()
+    sequence_checkpoint = sequence_gate.wait_until_quiet("sequence-test")
+    if (
+        sequence_checkpoint["role"] != "adjudicating_checkpoint"
+        or len(sequence_gate.observations) != 4
+    ):
+        raise RuntimeError(
+            "a busy confirmation must resume readiness until two clear "
+            "samples are consecutive"
+        )
+
+    classification_gate = HostWideExclusivityGate([0])
+    classification_gate.observations = [
+        {"role": "readiness_probe", "verdict": "blocked"},
+        {"role": "adjudicating_checkpoint", "verdict": "clear"},
+    ]
+    if not classification_gate.artifact()["valid"]:
+        raise RuntimeError(
+            "recorded readiness retries must not invalidate a later clear "
+            "adjudicating checkpoint"
+        )
 
 
 def _cpu_flags() -> set[str]:
@@ -667,6 +770,158 @@ def bootstrap_median_ci(values: list[float]) -> tuple[float, float]:
     tail_pct = (1.0 - NULL_CI_CONFIDENCE) * 50.0
     low, high = np.percentile(medians, [tail_pct, 100.0 - tail_pct])
     return float(low), float(high)
+
+
+def bootstrap_median_ratio_ci(
+    numerator: list[float],
+    denominator: list[float],
+) -> tuple[float, float]:
+    """Independent-sample bootstrap CI for a ratio of engine medians."""
+    if not numerator or not denominator:
+        raise ValueError("cannot bootstrap an empty effect sample")
+    numerator_sample = np.asarray(numerator, dtype=np.float64)
+    denominator_sample = np.asarray(denominator, dtype=np.float64)
+    if np.any(numerator_sample <= 0.0) or np.any(denominator_sample <= 0.0):
+        raise ValueError("effect timing samples must be positive")
+
+    rng = np.random.default_rng(0xF2A_2026_0731)
+    numerator_indices = rng.integers(
+        0,
+        len(numerator_sample),
+        size=(BOOTSTRAP_RESAMPLES, len(numerator_sample)),
+    )
+    denominator_indices = rng.integers(
+        0,
+        len(denominator_sample),
+        size=(BOOTSTRAP_RESAMPLES, len(denominator_sample)),
+    )
+    ratios = np.median(numerator_sample[numerator_indices], axis=1) / np.median(
+        denominator_sample[denominator_indices],
+        axis=1,
+    )
+    tail_pct = (1.0 - NULL_CI_CONFIDENCE) * 50.0
+    low, high = np.percentile(ratios, [tail_pct, 100.0 - tail_pct])
+    return float(low), float(high)
+
+
+def corrected_null_gate(
+    ratio: float,
+    effect_ci: tuple[float, float],
+    required_log_effect: float,
+    subject_null_median: float,
+    incumbent_null_median: float,
+    subject_label: str = "frankenpandas",
+    incumbent_label: str = "pandas",
+) -> dict[str, Any]:
+    """Apply the fleet's corrected three-clause null-control gate."""
+    effect_ci_low, effect_ci_high = effect_ci
+    claim_log_effect = abs(math.log(ratio)) if ratio > 0.0 else math.inf
+    effect_ci_excludes_unity = effect_ci_high < 1.0 or effect_ci_low > 1.0
+    effect_exceeds_null_margin = claim_log_effect >= required_log_effect
+    subject_null_median_within_limit = (
+        abs(subject_null_median - 1.0) <= NULL_MEDIAN_MAX_ABS_DEVIATION
+    )
+    incumbent_null_median_within_limit = (
+        abs(incumbent_null_median - 1.0) <= NULL_MEDIAN_MAX_ABS_DEVIATION
+    )
+    null_medians_within_limit = (
+        subject_null_median_within_limit
+        and incumbent_null_median_within_limit
+    )
+    return {
+        "decidable": (
+            effect_ci_excludes_unity
+            and effect_exceeds_null_margin
+            and null_medians_within_limit
+        ),
+        "effect_median_ratio_ci_95": [
+            round(effect_ci_low, 8),
+            round(effect_ci_high, 8),
+        ],
+        "clauses": {
+            "effect_ci_excludes_unity": effect_ci_excludes_unity,
+            "effect_exceeds_two_x_null_margin": effect_exceeds_null_margin,
+            "null_medians_within_2pct_unity": null_medians_within_limit,
+        },
+        "null_median_unity": {
+            "maximum_absolute_deviation": NULL_MEDIAN_MAX_ABS_DEVIATION,
+            subject_label: round(subject_null_median, 8),
+            f"{subject_label}_within_limit": subject_null_median_within_limit,
+            incumbent_label: round(incumbent_null_median, 8),
+            f"{incumbent_label}_within_limit": (
+                incumbent_null_median_within_limit
+            ),
+        },
+        "claim_log_effect": round(claim_log_effect, 8),
+        "required_log_effect": round(required_log_effect, 8),
+    }
+
+
+def _corrected_null_gate_self_test() -> None:
+    _math_unary_input_self_test()
+    assert bootstrap_median_ratio_ci([4.0] * 5, [2.0] * 5) == (2.0, 2.0)
+
+    passing = corrected_null_gate(1.5, (1.4, 1.6), 0.1, 1.01, 0.99)
+    assert passing["decidable"]
+
+    ci_straddles = corrected_null_gate(1.5, (0.99, 1.6), 0.1, 1.0, 1.0)
+    assert not ci_straddles["decidable"]
+    assert not ci_straddles["clauses"]["effect_ci_excludes_unity"]
+
+    below_margin = corrected_null_gate(1.01, (1.001, 1.02), 0.1, 1.0, 1.0)
+    assert not below_margin["decidable"]
+    assert not below_margin["clauses"]["effect_exceeds_two_x_null_margin"]
+
+    fp_median_outside = corrected_null_gate(1.5, (1.4, 1.6), 0.1, 1.021, 1.0)
+    assert not fp_median_outside["decidable"]
+    assert not fp_median_outside["clauses"]["null_medians_within_2pct_unity"]
+
+    pandas_median_outside = corrected_null_gate(
+        1.5,
+        (1.4, 1.6),
+        0.1,
+        1.0,
+        0.979,
+    )
+    assert not pandas_median_outside["decidable"]
+    assert not pandas_median_outside["clauses"]["null_medians_within_2pct_unity"]
+
+    labeled = corrected_null_gate(
+        1.5,
+        (1.4, 1.6),
+        0.1,
+        1.0,
+        1.0,
+        "candidate",
+        "reference",
+    )
+    assert labeled["null_median_unity"]["candidate"] == 1.0
+    assert labeled["null_median_unity"]["reference"] == 1.0
+
+    def synthetic_result(times_us: list[float], executable: str) -> TimingResult:
+        return TimingResult(
+            workload="synthetic",
+            category="math_unary",
+            size="1M",
+            dtype="float64",
+            engine="frankenpandas",
+            times_us=times_us,
+            null_arm_a_us=[1.0] * 5,
+            null_arm_b_us=[1.0] * 5,
+            null_ratios=[1.0] * 5,
+            checksum="contract-witness",
+            executable_sha256=executable,
+            runtime_available_parallelism=10,
+            operation_threads_used=1,
+            runtime_detected_isa_features=["avx2"],
+        )
+
+    whole_binary = compute_candidate_vs_reference(
+        synthetic_result([2.0] * 10, "candidate"),
+        synthetic_result([4.0] * 10, "reference"),
+    )
+    assert whole_binary["ratio"] == 2.0
+    assert whole_binary["verdict"] == "CANDIDATE_FASTER"
 
 
 @dataclass
@@ -1230,17 +1485,50 @@ def compare_pipeline_outputs(tmp_path: Path,
 # these lower to libm libcalls and scalar sqrtsd. The fleet ISA floor moved to
 # x86-64-v3 on 2026-07-25, satisfying that retry condition.
 #
-# Input matches the Rust arm: strictly positive and NON-INTEGRAL, so the
-# integral-value floor/ceil/trunc identity witness cannot short-circuit the
+# Input is bit-identical to the Rust arm: the vectorized generator below
+# reproduces `SplitMix64::unit` rather than merely choosing a similar random
+# distribution. It is strictly positive and overwhelmingly NON-INTEGRAL, so
+# the integral-value floor/ceil/trunc identity witness cannot short-circuit the
 # kernel and sqrt/log stay finite.
-MATH_UNARY_SEED = 0x1234_5678
+MATH_UNARY_SEED = 0x1234_5678_9ABC_DEF0
 MATH_UNARY_LOW = 1.0
 MATH_UNARY_HIGH = 100_000.0
+SPLITMIX64_GAMMA = 0x9E37_79B9_7F4A_7C15
+SPLITMIX64_MUL1 = 0xBF58_476D_1CE4_E5B9
+SPLITMIX64_MUL2 = 0x94D0_49BB_1331_11EB
+SPLITMIX64_MASK = (1 << 64) - 1
+
+
+def _math_unary_values(rows: int) -> np.ndarray:
+    """Reproduce fp-bench's SplitMix64-generated f64 input exactly."""
+    steps = np.arange(1, rows + 1, dtype=np.uint64)
+    z = np.uint64(MATH_UNARY_SEED) + steps * np.uint64(SPLITMIX64_GAMMA)
+    z = (z ^ (z >> np.uint64(30))) * np.uint64(SPLITMIX64_MUL1)
+    z = (z ^ (z >> np.uint64(27))) * np.uint64(SPLITMIX64_MUL2)
+    z ^= z >> np.uint64(31)
+    units = (z >> np.uint64(11)).astype(np.float64) / float(1 << 53)
+    return MATH_UNARY_LOW + units * (MATH_UNARY_HIGH - MATH_UNARY_LOW)
+
+
+def _math_unary_input_self_test() -> None:
+    """Cross-check the vector stream against scalar Rust-equivalent steps."""
+    expected = []
+    state = MATH_UNARY_SEED
+    for _ in range(257):
+        state = (state + SPLITMIX64_GAMMA) & SPLITMIX64_MASK
+        z = state
+        z = ((z ^ (z >> 30)) * SPLITMIX64_MUL1) & SPLITMIX64_MASK
+        z = ((z ^ (z >> 27)) * SPLITMIX64_MUL2) & SPLITMIX64_MASK
+        z ^= z >> 31
+        unit = (z >> 11) / float(1 << 53)
+        expected.append(MATH_UNARY_LOW + unit * (MATH_UNARY_HIGH - MATH_UNARY_LOW))
+    actual = _math_unary_values(len(expected))
+    assert actual.dtype == np.float64
+    assert np.array_equal(actual, np.asarray(expected, dtype=np.float64))
 
 
 def _math_unary_input(rows: int) -> pd.Series:
-    rng = np.random.default_rng(MATH_UNARY_SEED)
-    return pd.Series(rng.uniform(MATH_UNARY_LOW, MATH_UNARY_HIGH, size=rows))
+    return pd.Series(_math_unary_values(rows), copy=False)
 
 
 def _bench_math_unary(df: pd.DataFrame, op) -> PairedSamples:
@@ -2387,14 +2675,28 @@ def run_pandas_workload(
     )
 
 
-def run_fp_workload_subprocess(category: str, workload: str, size: str,
-                               dtype: str,
-                               data_dir: Path | None = None) -> TimingResult:
+def run_fp_workload_subprocess(
+    category: str,
+    workload: str,
+    size: str,
+    dtype: str,
+    data_dir: Path | None = None,
+    bench_binary_override: Path | None = None,
+) -> TimingResult:
     """Run FrankenPandas workload via subprocess."""
-    # Respect CARGO_TARGET_DIR (rch/remote builds set a custom target dir);
-    # fall back to the in-tree ./target.
-    target_dir = Path(os.environ.get("CARGO_TARGET_DIR", str(PROJECT_ROOT / "target")))
-    bench_binary = target_dir / "release-perf" / "fp-bench"
+    if bench_binary_override is None:
+        # Respect CARGO_TARGET_DIR (rch/remote builds set a custom target dir);
+        # fall back to the in-tree ./target.
+        target_dir = Path(
+            os.environ.get("CARGO_TARGET_DIR", str(PROJECT_ROOT / "target"))
+        )
+        bench_binary = target_dir / "release-perf" / "fp-bench"
+    else:
+        # An explicit path lets a whole-binary experiment retain two immutable
+        # RCH-built ELFs without minting two Cargo target directories. The
+        # subprocess still proves the executing file through its mandatory
+        # line-one self-hash, and shell execution remains disabled below.
+        bench_binary = bench_binary_override
 
     if not bench_binary.exists():
         print(f"[WARN] fp-bench binary not found at {bench_binary}", file=sys.stderr)
@@ -2425,12 +2727,18 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
             trusted_roots.append(Path(configured_target).resolve(strict=True))
         except OSError:
             pass
-    if not any(bench_binary.is_relative_to(root) for root in trusted_roots):
+    explicit_binary = bench_binary_override is not None
+    if not explicit_binary and not any(
+        bench_binary.is_relative_to(root) for root in trusted_roots
+    ):
         raise ValueError(
             "Refusing fp-bench executable outside the project root and the "
             f"configured CARGO_TARGET_DIR: {bench_binary}"
         )
-    if bench_binary.name != "fp-bench":
+    if not (
+        bench_binary.name == "fp-bench"
+        or (explicit_binary and bench_binary.name.startswith("fp-bench-"))
+    ):
         raise ValueError(f"Unexpected fp-bench executable path: {bench_binary}")
 
     child_env = os.environ.copy()
@@ -2574,19 +2882,25 @@ def compute_comparison(fp_result: TimingResult, pd_result: TimingResult,
     if fp_result.times_us and pd_result.times_us:
         if fp_result.is_valid and pd_result.is_valid:
             ratio = pd_result.p50_us / fp_result.p50_us if fp_result.p50_us > 0 else 0
+            effect_ci = bootstrap_median_ratio_ci(
+                pd_result.times_us,
+                fp_result.times_us,
+            )
             combined_null_log_half_width = max(
                 fp_result.null_log_half_width,
                 pd_result.null_log_half_width,
             )
-            claim_log_effect = abs(math.log(ratio)) if ratio > 0.0 else math.inf
             required_log_effect = DECIDABILITY_MARGIN * combined_null_log_half_width
-            decidable = claim_log_effect >= required_log_effect
+            gate = corrected_null_gate(
+                ratio,
+                effect_ci,
+                required_log_effect,
+                fp_result.null_median_ratio,
+                pd_result.null_median_ratio,
+            )
             result["ratio"] = round(ratio, 3)
-            result["median_ci_gate"] = {
-                "decidable": decidable,
+            result["median_ci_gate"] = gate | {
                 "margin_multiplier": DECIDABILITY_MARGIN,
-                "claim_log_effect": round(claim_log_effect, 8),
-                "required_log_effect": round(required_log_effect, 8),
                 "combined_two_x_null_interval": [
                     round(math.exp(-required_log_effect), 6),
                     round(math.exp(required_log_effect), 6),
@@ -2594,8 +2908,8 @@ def compute_comparison(fp_result: TimingResult, pd_result: TimingResult,
                 "cv_is_provenance_only": True,
             }
             result["verdict"] = (
-                "FASTER" if decidable and ratio > 1.0 else
-                "SLOWER" if decidable else
+                "FASTER" if gate["decidable"] and ratio > 1.0 else
+                "SLOWER" if gate["decidable"] else
                 "NULL_UNDECIDABLE"
             )
         else:
@@ -2606,6 +2920,61 @@ def compute_comparison(fp_result: TimingResult, pd_result: TimingResult,
         result["verdict"] = "INCOMPLETE"
 
     return result
+
+
+def compute_candidate_vs_reference(
+    candidate: TimingResult,
+    reference: TimingResult,
+) -> dict[str, Any]:
+    """Adjudicate a whole-binary candidate against its default-build control.
+
+    The ratio is reference/candidate, so values above one mean the candidate
+    is faster. Both subprocesses execute inside the same harness invocation,
+    and each contributes its own same-process A/A null control.
+    """
+    if not candidate.is_valid or not reference.is_valid:
+        return {
+            "ratio": None,
+            "ratio_definition": "reference_p50 / candidate_p50",
+            "verdict": "CONTRACT_INVALID",
+        }
+
+    ratio = reference.p50_us / candidate.p50_us
+    effect_ci = bootstrap_median_ratio_ci(
+        reference.times_us,
+        candidate.times_us,
+    )
+    combined_null_log_half_width = max(
+        candidate.null_log_half_width,
+        reference.null_log_half_width,
+    )
+    required_log_effect = DECIDABILITY_MARGIN * combined_null_log_half_width
+    gate = corrected_null_gate(
+        ratio,
+        effect_ci,
+        required_log_effect,
+        candidate.null_median_ratio,
+        reference.null_median_ratio,
+        "candidate",
+        "reference",
+    )
+    return {
+        "ratio": round(ratio, 8),
+        "ratio_definition": "reference_p50 / candidate_p50",
+        "median_ci_gate": gate | {
+            "margin_multiplier": DECIDABILITY_MARGIN,
+            "combined_two_x_null_interval": [
+                round(math.exp(-required_log_effect), 6),
+                round(math.exp(required_log_effect), 6),
+            ],
+            "cv_is_provenance_only": True,
+        },
+        "verdict": (
+            "CANDIDATE_FASTER" if gate["decidable"] and ratio > 1.0 else
+            "CANDIDATE_SLOWER" if gate["decidable"] else
+            "NULL_UNDECIDABLE"
+        ),
+    }
 
 
 def build_thread_provenance(
@@ -2669,6 +3038,8 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                  tmp_path: Path, fingerprint: dict[str, Any],
                  requested_thread_count: int | None,
                  exclusivity_gate: HostWideExclusivityGate,
+                 fp_binary: Path | None = None,
+                 fp_reference_binary: Path | None = None,
                  workload_filter: set[str] | None = None) -> list[dict[str, Any]]:
     """Run all workloads in a category for given sizes and dtypes."""
     results = []
@@ -2679,6 +3050,7 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
             raise ValueError(f"Unknown workload(s) for {category}: {sorted(unknown)}")
         workloads = {name: func for name, func in workloads.items() if name in workload_filter}
 
+    cell_index = 0
     for workload in workloads:
         for size in sizes:
             for dtype in dtypes:
@@ -2694,18 +3066,40 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                     fingerprint,
                     exclusivity_gate,
                 )
-                fp_result, fp_quiescence = _run_host_exclusive_arm(
-                    exclusivity_gate,
-                    f"frankenpandas:{category}/{workload}/{size}/{dtype}",
-                    partial(
-                        run_fp_workload_subprocess,
-                        category,
-                        workload,
-                        size,
-                        dtype,
-                        tmp_path if category == "pipeline" else None,
-                    ),
-                )
+                fp_arms = [("candidate", fp_binary)]
+                if fp_reference_binary is not None:
+                    reference_arm = ("reference", fp_reference_binary)
+                    # Alternate whole-binary order across cells so a fixed
+                    # candidate-first drift cannot decide the family result.
+                    fp_arms = (
+                        [reference_arm, fp_arms[0]]
+                        if cell_index % 2 == 0
+                        else [fp_arms[0], reference_arm]
+                    )
+                fp_results: dict[str, TimingResult] = {}
+                fp_quiescence_by_arm: dict[str, dict[str, Any]] = {}
+                for arm_label, arm_binary in fp_arms:
+                    arm_result, arm_quiescence = _run_host_exclusive_arm(
+                        exclusivity_gate,
+                        (
+                            f"frankenpandas-{arm_label}:"
+                            f"{category}/{workload}/{size}/{dtype}"
+                        ),
+                        partial(
+                            run_fp_workload_subprocess,
+                            category,
+                            workload,
+                            size,
+                            dtype,
+                            tmp_path if category == "pipeline" else None,
+                            arm_binary,
+                        ),
+                    )
+                    fp_results[arm_label] = arm_result
+                    fp_quiescence_by_arm[arm_label] = arm_quiescence
+
+                fp_result = fp_results["candidate"]
+                fp_quiescence = fp_quiescence_by_arm["candidate"]
 
                 comparison = compute_comparison(fp_result, pd_result, config["rows"])
                 comparison["host_wide_quiescence"] = {
@@ -2713,6 +3107,56 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                     "frankenpandas": fp_quiescence,
                     "valid": True,
                 }
+                if fp_reference_binary is not None:
+                    reference_result = fp_results["reference"]
+                    reference_comparison = compute_comparison(
+                        reference_result,
+                        pd_result,
+                        config["rows"],
+                    )
+                    reference_thread_provenance = build_thread_provenance(
+                        fingerprint,
+                        requested_thread_count,
+                        reference_result,
+                        pd_result,
+                    )
+                    comparison["whole_binary_reference"] = {
+                        "frankenpandas": reference_comparison["frankenpandas"],
+                        "ratio_vs_pandas": reference_comparison["ratio"],
+                        "median_ci_gate_vs_pandas": reference_comparison.get(
+                            "median_ci_gate"
+                        ),
+                        "verdict_vs_pandas": reference_comparison["verdict"],
+                        "thread_provenance_vs_pandas": (
+                            reference_thread_provenance
+                        ),
+                    }
+                    comparison["candidate_vs_reference"] = (
+                        compute_candidate_vs_reference(
+                            fp_result,
+                            reference_result,
+                        )
+                    )
+                    comparison["whole_binary_execution_order"] = [
+                        label for label, _ in fp_arms
+                    ]
+                    comparison["host_wide_quiescence"]["reference"] = (
+                        fp_quiescence_by_arm["reference"]
+                    )
+                    if not reference_thread_provenance["valid"]:
+                        comparison["whole_binary_reference"][
+                            "ratio_vs_pandas"
+                        ] = None
+                        comparison["whole_binary_reference"][
+                            "verdict_vs_pandas"
+                        ] = "CONTRACT_INVALID"
+                        comparison["candidate_vs_reference"] = {
+                            "ratio": None,
+                            "ratio_definition": (
+                                "reference_p50 / candidate_p50"
+                            ),
+                            "verdict": "CONTRACT_INVALID",
+                        }
                 if category == "pipeline":
                     # A whole-job ratio is only meaningful if both arms did the
                     # same job. The per-engine `checksum` is a liveness token,
@@ -2746,7 +3190,16 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                 if not comparison["thread_provenance"]["valid"]:
                     comparison["verdict"] = "CONTRACT_INVALID"
                     comparison["ratio"] = None
+                    if "candidate_vs_reference" in comparison:
+                        comparison["candidate_vs_reference"] = {
+                            "ratio": None,
+                            "ratio_definition": (
+                                "reference_p50 / candidate_p50"
+                            ),
+                            "verdict": "CONTRACT_INVALID",
+                        }
                 results.append(comparison)
+                cell_index += 1
 
                 verdict = comparison.get("verdict", "N/A")
                 ratio = comparison.get("ratio")
@@ -2825,15 +3278,48 @@ def main():
         ),
     )
     parser.add_argument(
+        "--frankenpandas-binary",
+        type=Path,
+        help=(
+            "Explicit immutable fp-bench ELF to execute; avoids separate Cargo "
+            "target directories in whole-binary experiments"
+        ),
+    )
+    parser.add_argument(
+        "--frankenpandas-reference-binary",
+        type=Path,
+        help=(
+            "Optional immutable default-build fp-bench ELF; executes beside "
+            "the candidate and live pandas in the same invocation"
+        ),
+    )
+    parser.add_argument(
+        "--frankenpandas-reference-build-worker",
+        help=(
+            "Remote worker identity that built the optional whole-binary "
+            "reference ELF"
+        ),
+    )
+    parser.add_argument(
         "--host-exclusivity-self-test",
         action="store_true",
         help="Exercise the fail-closed host-wide quiescence adjudicator and exit",
+    )
+    parser.add_argument(
+        "--corrected-null-gate-self-test",
+        action="store_true",
+        help="Exercise the corrected three-clause null gate and exit",
     )
     args = parser.parse_args()
 
     if args.host_exclusivity_self_test:
         _host_wide_exclusivity_self_test()
         print("host_wide_exclusivity_self_test=pass")
+        return
+
+    if args.corrected_null_gate_self_test:
+        _corrected_null_gate_self_test()
+        print("corrected_null_gate_self_test=pass")
         return
 
     if args.dependency_probe:
@@ -2860,6 +3346,22 @@ def main():
             f"version={pd.__version__} pyarrow_version={pa.__version__}"
         )
         return
+
+    if (
+        args.frankenpandas_reference_binary is not None
+        and args.frankenpandas_binary is None
+    ):
+        parser.error(
+            "--frankenpandas-reference-binary requires "
+            "--frankenpandas-binary"
+        )
+    if (
+        args.frankenpandas_reference_binary is not None
+        and args.frankenpandas_binary is not None
+        and args.frankenpandas_reference_binary.resolve(strict=True)
+        == args.frankenpandas_binary.resolve(strict=True)
+    ):
+        parser.error("candidate and reference binaries must be distinct files")
 
     if not args.category and not args.all:
         parser.error("Specify --category or --all")
@@ -2918,6 +3420,10 @@ def main():
         )
         sys.exit(2)
     exclusivity_gate = HostWideExclusivityGate(online_cpu_ids)
+    # Admission must precede our own 228 MiB provenance hash. Otherwise the
+    # first host sample can reject an idle machine for work this harness just
+    # created, misclassifying self-load as a co-tenant.
+    exclusivity_gate.wait_until_quiet("invocation_preflight")
 
     timestamp = datetime.now(timezone.utc).isoformat()
     invocation_id = (
@@ -2946,12 +3452,12 @@ def main():
         "benchmark_host_fingerprint_json="
         + json.dumps(fingerprint, separators=(",", ":"), sort_keys=True)
     )
-    # Hashing the 228 MiB pandas + pyarrow installation can wake filesystem
-    # kernel workers outside this process's affinity mask. Keep that provenance
-    # work outside the admitted region: invocation preflight is the final
-    # substantive action before fixture setup and the first per-arm bracket.
+    # Hashing the pandas + pyarrow installation can wake filesystem kernel
+    # workers outside this process's affinity mask. Wait boundedly for that
+    # self-induced residue, then demand a fresh immediate checkpoint before
+    # fixture setup. Readiness retries are retained in the JSON artifact.
     time.sleep(PROVENANCE_QUIESCENCE_SETTLE_SECONDS)
-    exclusivity_gate.require_quiet("invocation_preflight")
+    exclusivity_gate.wait_until_quiet("post_provenance")
 
     sizes = [s.strip() for s in args.sizes.split(",")]
     dtypes = [d.strip() for d in args.dtypes.split(",")]
@@ -2993,6 +3499,8 @@ def main():
                 fingerprint,
                 args.thread_count,
                 exclusivity_gate,
+                args.frankenpandas_binary,
+                args.frankenpandas_reference_binary,
                 workload_filter,
             )
             for result in results:
@@ -3000,6 +3508,15 @@ def main():
                 if args.frankenpandas_build_worker is not None:
                     result["frankenpandas"]["executable"]["build_worker"] = (
                         args.frankenpandas_build_worker
+                    )
+                if (
+                    args.frankenpandas_reference_build_worker is not None
+                    and "whole_binary_reference" in result
+                ):
+                    result["whole_binary_reference"]["frankenpandas"][
+                        "executable"
+                    ]["build_worker"] = (
+                        args.frankenpandas_reference_build_worker
                     )
             all_results.extend(results)
 
@@ -3015,6 +3532,18 @@ def main():
                     "role": "Subject",
                     "build_worker": args.frankenpandas_build_worker,
                 },
+                "frankenpandas_reference": (
+                    {
+                        "version": "0.1.2",
+                        "profile": "release-perf",
+                        "role": "Whole-binary default-build control",
+                        "build_worker": (
+                            args.frankenpandas_reference_build_worker
+                        ),
+                    }
+                    if args.frankenpandas_reference_binary is not None
+                    else None
+                ),
                 "pandas": {
                     "version": pd.__version__,
                     "role": "Oracle",
@@ -3040,8 +3569,30 @@ def main():
                 "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
                 "null_ci_confidence": NULL_CI_CONFIDENCE,
                 "decidability_margin": DECIDABILITY_MARGIN,
-                "gate": "median_bootstrap_ci",
+                "gate": "corrected_three_clause_median_bootstrap_ci",
+                "null_median_maximum_absolute_deviation": (
+                    NULL_MEDIAN_MAX_ABS_DEVIATION
+                ),
                 "cv_role": "provenance_only",
+                "frankenpandas_binary_requested": (
+                    str(args.frankenpandas_binary.resolve(strict=True))
+                    if args.frankenpandas_binary is not None
+                    else None
+                ),
+                "frankenpandas_reference_binary_requested": (
+                    str(
+                        args.frankenpandas_reference_binary.resolve(
+                            strict=True
+                        )
+                    )
+                    if args.frankenpandas_reference_binary is not None
+                    else None
+                ),
+                "whole_binary_order_policy": (
+                    "alternate reference/candidate order by benchmark cell"
+                    if args.frankenpandas_reference_binary is not None
+                    else None
+                ),
                 "host_wide_exclusivity_contract": {
                     "required": True,
                     "scope": "all_online_host_cpus",
@@ -3055,10 +3606,18 @@ def main():
                     "post_provenance_hash_settle_ms": round(
                         PROVENANCE_QUIESCENCE_SETTLE_SECONDS * 1000
                     ),
+                    "readiness_wait_maximum_attempts": (
+                        QUIESCENCE_WAIT_MAX_ATTEMPTS
+                    ),
+                    "readiness_wait_retry_ms": round(
+                        QUIESCENCE_WAIT_RETRY_SECONDS * 1000
+                    ),
                     "checks": (
-                        "invocation preflight, immediately before and after "
-                        "each pandas and FrankenPandas arm, and invocation "
-                        "postflight"
+                        "invocation admission before provenance hashing; "
+                        "post-provenance readiness plus immediate checkpoint; "
+                        "bounded readiness plus immediate checkpoint before "
+                        "each pandas and FrankenPandas arm; immediate "
+                        "post-arm checkpoints; invocation postflight"
                     ),
                 },
                 "pandas_string_backend_policy": {
