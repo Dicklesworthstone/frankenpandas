@@ -47,6 +47,11 @@ from typing import Any
 import numpy as np
 
 try:
+    from pandas.api.types import is_numeric_dtype
+except ImportError:
+    is_numeric_dtype = None
+
+try:
     import pandas as pd
 except ImportError:
     pd = None
@@ -69,6 +74,15 @@ CATEGORIES = {
     "strings": 0.10,
     "linalg": 0.10,
     "datetime": 0.10,
+}
+
+# Runnable and fully reported, but deliberately OUTSIDE the weighted kernel
+# score above. A six-stage end-to-end job's ratio is not commensurable with a
+# geomean over single-op categories, and folding it in would let one whole-job
+# number move a headline that means something else. `--all` is unchanged, so
+# every existing baseline stays comparable; ask for it by name.
+EXTRA_CATEGORIES = {
+    "pipeline": "whole-job ETL: load/filter/groupby/join/sort/write",
 }
 
 SIZE_CONFIGS = {
@@ -970,6 +984,186 @@ def bench_parquet_read_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
 def bench_parquet_write_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
     pq_path = tmp_path / "bench_out.parquet"
     return time_operation(lambda: df.to_parquet(pq_path, index=False))
+
+
+# Whole-job pipeline workload (pandas)
+#
+# Not a kernel benchmark: one timed closure is a complete star-schema rollup of
+# the shape a pandas user actually writes -- load, filter, groupby, join, sort,
+# write. The FrankenPandas arm (fp-bench --category pipeline) runs the same six
+# stages over the same two input CSVs and writes its own output, which
+# `compare_pipeline_outputs` then diffs. Whole-job wall time is the headline;
+# the per-stage split is reported separately as a diagnostic, because a job
+# this shape is normally dominated by one stage and a reader who is not told
+# which one will misread the ratio.
+PIPELINE_ROWS_PER_STORE = 200
+PIPELINE_REGIONS = 12
+# Amounts sit on a $0.25 tick, which is exactly representable in binary
+# float64. Sums of such values are therefore exact and order-independent, so
+# the two engines' outputs can be required to agree EXACTLY instead of within
+# a tolerance -- pandas and FrankenPandas reduce each group in their own
+# order, and on arbitrary decimal cents that alone would shift the last ULP
+# and make a legitimate result look like a mismatch.
+PIPELINE_AMOUNT_TICK = 0.25
+PIPELINE_TICK_LOW = -3000   # -$750.00 (refunds)
+PIPELINE_TICK_HIGH = 7000   # +$1750.00
+PIPELINE_SEED = 20260730
+
+
+def pipeline_input_paths(tmp_path: Path) -> tuple[Path, Path]:
+    return tmp_path / "sales.csv", tmp_path / "stores.csv"
+
+
+def materialize_pipeline_inputs(rows: int, tmp_path: Path) -> tuple[Path, Path]:
+    """Write the job's two input CSVs once, OUTSIDE every timed window.
+
+    Both engines read these exact bytes, so the comparison cannot be an
+    artifact of one engine getting easier input than the other.
+    """
+    sales_path, stores_path = pipeline_input_paths(tmp_path)
+    n_stores = max(1, rows // PIPELINE_ROWS_PER_STORE)
+    rng = np.random.default_rng(PIPELINE_SEED)
+    ticks = rng.integers(
+        PIPELINE_TICK_LOW, PIPELINE_TICK_HIGH, size=rows, dtype=np.int64
+    )
+    pd.DataFrame(
+        {
+            "store_id": rng.integers(0, n_stores, size=rows, dtype=np.int64),
+            "units": rng.integers(1, 50, size=rows, dtype=np.int64),
+            "amount": ticks * PIPELINE_AMOUNT_TICK,
+        }
+    ).to_csv(sales_path, index=False)
+
+    store_ids = np.arange(n_stores, dtype=np.int64)
+    pd.DataFrame(
+        {
+            "store_id": store_ids,
+            "store_name": [f"store_{i:06d}" for i in store_ids],
+            "region": [f"region_{i % PIPELINE_REGIONS:02d}" for i in store_ids],
+        }
+    ).to_csv(stores_path, index=False)
+    return sales_path, stores_path
+
+
+def _pipeline_job_pandas(sales_path: Path, stores_path: Path, out_path: Path):
+    """The six stages, in idiomatic pandas 2.2.3."""
+    sales = pd.read_csv(sales_path)                                   # 1. load
+    stores = pd.read_csv(stores_path)
+    kept = sales[sales["amount"] > 0.0]                               # 2. filter
+    agg = kept.groupby("store_id", as_index=False).sum()              # 3. groupby
+    joined = agg.merge(stores, on="store_id", how="inner")            # 4. join
+    ranked = joined.sort_values(                                      # 5. sort
+        ["amount", "store_id"], ascending=[False, True]
+    )
+    ranked.to_csv(out_path, index=False)                              # 6. write
+    return ranked
+
+
+def bench_pipeline_etl_job_pandas(
+    df: pd.DataFrame, tmp_path: Path
+) -> PairedSamples:
+    rows = len(df)
+    sales_path, stores_path = materialize_pipeline_inputs(rows, tmp_path)
+    out_path = tmp_path / "out_pandas.csv"
+    return time_operation(
+        partial(_pipeline_job_pandas, sales_path, stores_path, out_path)
+    )
+
+
+def _pipeline_columns_equal(left: pd.Series, right: pd.Series) -> bool:
+    """Same values, ignoring how each engine chose to render them."""
+    if is_numeric_dtype(left) and is_numeric_dtype(right):
+        lhs = left.to_numpy(dtype=np.float64, copy=False)
+        rhs = right.to_numpy(dtype=np.float64, copy=False)
+        # Exact equality is the right test here, not a tolerance: the $0.25
+        # amount tick makes every group sum exactly representable, so any
+        # real difference is a difference in the work, not in rounding.
+        return bool(
+            np.array_equal(lhs, rhs)
+            or np.array_equal(lhs, rhs, equal_nan=True)
+        )
+    return bool(left.astype(str).equals(right.astype(str)))
+
+
+def compare_pipeline_outputs(tmp_path: Path) -> dict[str, Any]:
+    """Diff what the two engines actually produced.
+
+    Byte identity is the strong result, and the $0.25 amount tick is chosen to
+    make it attainable. When the bytes differ, say exactly how: a column-order
+    or rendering difference is a very different finding from a value
+    difference, and collapsing both into "mismatch" would bury the useful one.
+    """
+    fp_path = tmp_path / "out_frankenpandas.csv"
+    pd_path = tmp_path / "out_pandas.csv"
+    report: dict[str, Any] = {
+        "frankenpandas_output": str(fp_path),
+        "pandas_output": str(pd_path),
+    }
+    for label, path in (("frankenpandas", fp_path), ("pandas", pd_path)):
+        if not path.is_file():
+            report["equivalent"] = False
+            report["reason"] = f"{label} arm wrote no output at {path}"
+            return report
+
+    fp_bytes = fp_path.read_bytes()
+    pd_bytes = pd_path.read_bytes()
+    report["frankenpandas_sha256"] = hashlib.sha256(fp_bytes).hexdigest()
+    report["pandas_sha256"] = hashlib.sha256(pd_bytes).hexdigest()
+    report["frankenpandas_bytes"] = len(fp_bytes)
+    report["pandas_bytes"] = len(pd_bytes)
+    if fp_bytes == pd_bytes:
+        report["equivalent"] = True
+        report["match"] = "byte_identical"
+        return report
+
+    fp_df = pd.read_csv(fp_path)
+    pd_df = pd.read_csv(pd_path)
+    report["frankenpandas_shape"] = list(fp_df.shape)
+    report["pandas_shape"] = list(pd_df.shape)
+    report["frankenpandas_columns"] = list(fp_df.columns)
+    report["pandas_columns"] = list(pd_df.columns)
+
+    if set(fp_df.columns) != set(pd_df.columns):
+        report["equivalent"] = False
+        report["reason"] = "output column sets differ"
+        return report
+    if len(fp_df) != len(pd_df):
+        report["equivalent"] = False
+        report["reason"] = "output row counts differ"
+        return report
+
+    # Same columns and same row count. Compare values in row order -- row
+    # order IS part of this job's output, because stage 5 is the ranking.
+    mismatched: list[dict[str, Any]] = []
+    for col in pd_df.columns:
+        lhs = fp_df[col].reset_index(drop=True)
+        rhs = pd_df[col].reset_index(drop=True)
+        if _pipeline_columns_equal(lhs, rhs):
+            continue
+        differing = np.flatnonzero(
+            (lhs.astype(str) != rhs.astype(str)).to_numpy()
+        )
+        first = int(differing[0]) if differing.size else 0
+        mismatched.append({
+            "column": col,
+            "differing_rows": int(differing.size),
+            "first_differing_row": first,
+            "frankenpandas_value": str(lhs.iloc[first]),
+            "pandas_value": str(rhs.iloc[first]),
+        })
+    if mismatched:
+        report["equivalent"] = False
+        report["reason"] = "value mismatch"
+        report["mismatched_columns"] = mismatched
+        return report
+
+    report["equivalent"] = True
+    report["match"] = (
+        "values_identical_column_order_differs"
+        if list(fp_df.columns) != list(pd_df.columns)
+        else "values_identical_rendering_differs"
+    )
+    return report
 
 
 # DataFrame Ops Workloads (pandas)
@@ -1889,6 +2083,9 @@ PANDAS_WORKLOADS = {
         "parquet_read": bench_parquet_read_pandas,
         "parquet_write": bench_parquet_write_pandas,
     },
+    "pipeline": {
+        "etl_job": bench_pipeline_etl_job_pandas,
+    },
     "dataframe_ops": {
         "sort_values_single": bench_sort_values_single_pandas,
         "sort_values_multi": bench_sort_values_multi_pandas,
@@ -2010,7 +2207,14 @@ def run_pandas_workload(
 ) -> tuple[TimingResult, dict[str, Any]]:
     """Run a single pandas workload and return timing result."""
     config = SIZE_CONFIGS[size]
-    if category == "dataframe_ops" and workload in {
+    if category == "pipeline":
+        # The pipeline workload builds its own star-schema inputs, writes them
+        # to CSV, and reads them back inside the timed job. It never touches
+        # the synthetic ten-column frame; populating one at 10M rows would
+        # cost ~800 MB for nothing and leave setup allocator work that can
+        # outlive the settle window and trip the immediate pre-arm host gate.
+        df = pd.DataFrame(index=pd.RangeIndex(config["rows"]))
+    elif category == "dataframe_ops" and workload in {
         "astype_str_f64",
         "astype_str_f64_telemetry_batches",
     }:
@@ -2028,7 +2232,7 @@ def run_pandas_workload(
     time.sleep(SETUP_QUIESCENCE_SETTLE_SECONDS)
 
     bench_func = PANDAS_WORKLOADS[category][workload]
-    if category == "io":
+    if category in ("io", "pipeline"):
         operation = partial(bench_func, df, tmp_path)
     else:
         operation = partial(bench_func, df)
@@ -2069,7 +2273,8 @@ def run_pandas_workload(
 
 
 def run_fp_workload_subprocess(category: str, workload: str, size: str,
-                               dtype: str) -> TimingResult:
+                               dtype: str,
+                               data_dir: Path | None = None) -> TimingResult:
     """Run FrankenPandas workload via subprocess."""
     # Respect CARGO_TARGET_DIR (rch/remote builds set a custom target dir);
     # fall back to the in-tree ./target.
@@ -2125,9 +2330,16 @@ def run_fp_workload_subprocess(category: str, workload: str, size: str,
     # nosec B603: fp-bench is resolved, confined to the project root, and
     # name-checked above; shell=False and category/workload values are selected
     # from the static workload matrix.
+    argv = [str(bench_binary), "--category", category, "--workload", workload,
+            "--size", size, "--dtype", dtype, "--json"]
+    if data_dir is not None:
+        # Only the pipeline category consumes this. The pandas arm has already
+        # materialized the job's inputs here, so both engines read identical
+        # bytes and each writes an output the driver can diff.
+        argv += ["--data-dir", str(data_dir)]
+
     result = subprocess.run(
-        [str(bench_binary), "--category", category, "--workload", workload,
-         "--size", size, "--dtype", dtype, "--json"],
+        argv,
         capture_output=True,
         check=False,
         env=child_env,
@@ -2376,6 +2588,7 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                         workload,
                         size,
                         dtype,
+                        tmp_path if category == "pipeline" else None,
                     ),
                 )
 
@@ -2385,6 +2598,17 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                     "frankenpandas": fp_quiescence,
                     "valid": True,
                 }
+                if category == "pipeline":
+                    # A whole-job ratio is only meaningful if both arms did the
+                    # same job. The per-engine `checksum` is a liveness token,
+                    # not a content hash, and cannot compare across engines --
+                    # so diff what the job actually produced. Disagreement
+                    # voids the verdict rather than being reported alongside a
+                    # number that no longer means anything.
+                    equivalence = compare_pipeline_outputs(tmp_path)
+                    comparison["output_equivalence"] = equivalence
+                    if not equivalence["equivalent"]:
+                        comparison["verdict"] = "OUTPUT_MISMATCH"
                 if workload == "astype_str_f64_telemetry_batches":
                     comparison["allocator_provenance"] = {
                         "frankenpandas": {
@@ -2434,7 +2658,9 @@ def main():
     )
 
     parser = argparse.ArgumentParser(description="vs-pandas head-to-head timing harness")
-    parser.add_argument("--category", choices=list(CATEGORIES.keys()),
+    parser.add_argument("--category",
+                        choices=list(CATEGORIES.keys())
+                        + list(EXTRA_CATEGORIES.keys()),
                         help="Run specific category")
     parser.add_argument("--all", action="store_true", help="Run all categories")
     parser.add_argument("--sizes", default="10k,100k,1M",
@@ -2638,7 +2864,12 @@ def main():
         print()
 
         for category in categories:
-            print(f"\n[{category.upper()}] (weight: {CATEGORIES[category]})")
+            weight = CATEGORIES.get(category)
+            label = (
+                f"weight: {weight}" if weight is not None
+                else "outside the weighted score"
+            )
+            print(f"\n[{category.upper()}] ({label})")
             results = run_category(
                 category,
                 sizes,

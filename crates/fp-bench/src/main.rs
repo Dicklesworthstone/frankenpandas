@@ -878,8 +878,117 @@ where
     paired_time_us(op, repeat, false)
 }
 
-fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<PairedSamples> {
+/// Whole-job ETL pipeline — deliberately NOT a kernel benchmark.
+///
+/// One timed closure runs a complete job of the shape a pandas user actually
+/// writes, end to end. The Python driver runs this exact job on live pandas
+/// in the same invocation:
+///
+/// ```python
+/// sales  = pd.read_csv(sales_path)
+/// stores = pd.read_csv(stores_path)
+/// kept   = sales[sales["amount"] > 0.0]
+/// agg    = kept.groupby("store_id", as_index=False).sum()
+/// joined = agg.merge(stores, on="store_id", how="inner")
+/// ranked = joined.sort_values(["amount", "store_id"], ascending=[False, True])
+/// ranked.to_csv(out_path, index=False)
+/// ```
+///
+/// Both engines read the SAME two input CSVs, materialized once by the driver
+/// outside every timed window, and each writes its own output CSV that the
+/// driver then diffs byte-for-byte. A whole-job ratio only means something if
+/// both arms did the same job; that diff is what proves it, because the
+/// per-engine `checksum` is a liveness token (`size_of_val`) and cannot
+/// compare content across engines.
+///
+/// The sort carries an explicit `store_id` tiebreak so the row order is total
+/// and the byte diff cannot fail on tied `amount` sums alone — pandas'
+/// default `quicksort` is not stable, so ties would otherwise be free to
+/// disagree without either engine being wrong.
+fn run_pipeline(workload: &str, data_dir: Option<&Path>) -> Option<PairedSamples> {
+    if workload != "etl_job" {
+        return None;
+    }
+    let dir = data_dir.expect(
+        "pipeline/etl_job requires --data-dir; the Python driver materializes \
+         sales.csv and stores.csv there before either arm is timed",
+    );
+    let sales_path = dir.join("sales.csv");
+    let stores_path = dir.join("stores.csv");
+    let out_path = dir.join("out_frankenpandas.csv");
+    assert!(
+        sales_path.is_file(),
+        "pipeline: missing input {}",
+        sales_path.display()
+    );
+    assert!(
+        stores_path.is_file(),
+        "pipeline: missing input {}",
+        stores_path.display()
+    );
+
+    Some(time_us(|| {
+        // 1. load
+        let sales = fp_io::read_csv(&sales_path).expect("pipeline: read sales.csv");
+        let stores = fp_io::read_csv(&stores_path).expect("pipeline: read stores.csv");
+
+        // 2. filter -- sales[sales["amount"] > 0.0]
+        let keep = sales
+            .get_column("amount")
+            .gt_scalar(&Scalar::Float64(0.0))
+            .expect("pipeline: amount > 0");
+        let mask = keep
+            .column()
+            .as_bool_slice()
+            .expect("pipeline: filter mask is an all-valid Bool column");
+        let kept = sales.loc_bool(mask).expect("pipeline: filter");
+
+        // 3. groupby -- kept.groupby("store_id", as_index=False).sum()
+        let agg = kept
+            .groupby_with_as_index(&["store_id"], false)
+            .expect("pipeline: groupby store_id")
+            .sum()
+            .expect("pipeline: sum");
+
+        // 4. join -- agg.merge(stores, on="store_id", how="inner")
+        let merged = merge_dataframes_on_with(
+            &agg,
+            &stores,
+            &["store_id"],
+            &["store_id"],
+            JoinType::Inner,
+        )
+        .expect("pipeline: merge stores");
+        let joined =
+            DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+                .expect("pipeline: materialize merge");
+
+        // 5. sort -- descending revenue, store_id tiebreak
+        let ranked = joined
+            .sort_values_multi(&["amount", "store_id"], &[false, true], "last")
+            .expect("pipeline: rank");
+
+        // 6. write
+        fp_io::write_csv(&ranked, &out_path).expect("pipeline: write output");
+        ranked
+    }))
+}
+
+fn run(
+    category: &str,
+    workload: &str,
+    size: &str,
+    dtype: &str,
+    data_dir: Option<&Path>,
+) -> Option<PairedSamples> {
     let (rows, cols) = size_rows_cols(size);
+    // The pipeline category reads its inputs from disk and never touches the
+    // synthetic ten-column frame. Dispatch before `build_frame` so a 10M-row
+    // run does not allocate ~800 MB of unrelated columns and hold them live
+    // for the whole measurement.
+    if category == "pipeline" {
+        return run_pipeline(workload, data_dir);
+    }
     // The astype workloads construct their exact one-column input below.
     // Avoid retaining an unrelated ten-column frame during measurement.
     let base_cols = if category == "dataframe_ops"
@@ -3141,8 +3250,11 @@ fn main() {
     let workload = arg(&args, "--workload").unwrap_or("sort_single");
     let size = arg(&args, "--size").unwrap_or("100k");
     let dtype = arg(&args, "--dtype").unwrap_or("float64");
+    // Only the pipeline category consumes this: the driver materializes the
+    // job's input CSVs there so both engines read byte-identical inputs.
+    let data_dir = arg(&args, "--data-dir").map(Path::new);
 
-    match run(category, workload, size, dtype) {
+    match run(category, workload, size, dtype, data_dir) {
         Some(samples) => {
             let times: Vec<String> = samples.times_us.iter().map(|t| format!("{t}")).collect();
             let null_arm_a: Vec<String> = samples

@@ -1,0 +1,48 @@
+{
+  "10k": {
+    "rows": 10000,
+    "input_provenance": {
+      "sales.csv": {
+        "bytes": 126243,
+        "sha256": "00729bc66adfd5a97aac2e8da40b36c33774e1cf0e99cbeb51f7fe6a6c3ea663"
+      },
+      "stores.csv": {
+        "bytes": 1317,
+        "sha256": "3b587942a4785c145da24f1f85edeb0570fd2123fc7cdab0c2b47f023050e55f"
+      }
+    },
+    "output_equivalence": {
+      "frankenpandas_output": "pipetest/out_frankenpandas.csv",
+      "pandas_output": "pipetest/out_pandas.csv",
+      "frankenpandas_sha256": "3398968f18148f575e7ab7d41ba75ebebd8961df9c0e2d46365a6c7faa32399e",
+      "pandas_sha256": "3398968f18148f575e7ab7d41ba75ebebd8961df9c0e2d46365a6c7faa32399e",
+      "frankenpandas_bytes": 2061,
+      "pandas_bytes": 2061,
+      "equivalent": true,
+      "match": "byte_identical"
+    }
+  },
+  "1M": {
+    "rows": 1000000,
+    "input_provenance": {
+      "sales.csv": {
+        "bytes": 14608802,
+        "sha256": "75b5cc15200588fe4483bac8e7aa5225cac1d2f34b3905b705f9e5b47be86b2f"
+      },
+      "stores.csv": {
+        "bytes": 138917,
+        "sha256": "b015dddf36d595d69f1f83966a50f5293442046e1694d23d38fa0b7a4edb0701"
+      }
+    },
+    "output_equivalence": {
+      "frankenpandas_output": "pipe1m/out_frankenpandas.csv",
+      "pandas_output": "pipe1m/out_pandas.csv",
+      "frankenpandas_sha256": "04bae1d757c33c5e2eae36ccb00c3bfb3732e4d10632b499b0ebf845c63f35ce",
+      "pandas_sha256": "04bae1d757c33c5e2eae36ccb00c3bfb3732e4d10632b499b0ebf845c63f35ce",
+      "frankenpandas_bytes": 211304,
+      "pandas_bytes": 211304,
+      "equivalent": true,
+      "match": "byte_identical"
+    }
+  }
+}
