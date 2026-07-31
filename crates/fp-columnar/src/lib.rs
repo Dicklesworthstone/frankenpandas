@@ -7604,6 +7604,85 @@ fn par_map_vec_f64<G: Fn(usize) -> f64 + Sync>(n: usize, g: G) -> Vec<f64> {
     out
 }
 
+/// Fused sibling of [`par_map_vec_f64`] for maps that may yield NaN: each worker
+/// writes its own value chunk AND that chunk's packed validity words in the SAME
+/// pass, and the `(all_valid, all_finite)` witness comes back as a reduction.
+///
+/// The unfused shape — `par_map_vec_f64`, then a serial `for` over the result to
+/// derive validity — pays an extra full read of the output on a serial dependence
+/// the parallel map already spent threads to avoid. On 1M Float64 `sqrt` that scan
+/// is a serial 8 MB pass whose 128 KB of words are then DISCARDED outright, because
+/// a strictly-positive input leaves the mask all-valid. Fusing deletes the pass.
+///
+/// Bit-identical to the unfused form: `g` is unchanged and per-index, the
+/// NaN ⇒ invalid rule is per-index, and `all_valid`/`all_finite` are boolean AND
+/// reductions — so neither the values, the mask, nor the witness depends on how
+/// the range is split.
+///
+/// Chunking is rounded UP to a multiple of 64 so each worker owns whole validity
+/// words and no two workers ever touch the same `u64`. The nested-ceiling identity
+/// `ceil(ceil(n/64) / (c/64)) == ceil(n/c)` for `64 | c` makes the value-chunk and
+/// word-chunk iterators yield the same count, so the `zip` below drops no work.
+fn par_map_vec_f64_with_witness<G: Fn(usize) -> f64 + Sync>(
+    n: usize,
+    g: G,
+) -> (Vec<f64>, Vec<u64>, bool, bool) {
+    const PAR_MIN: usize = 200_000;
+    let mut out = vec![0.0_f64; n];
+    let mut words = vec![0_u64; n.div_ceil(64)];
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(8);
+
+    if workers <= 1 || n < PAR_MIN {
+        let (mut all_valid, mut all_finite) = (true, true);
+        for (i, o) in out.iter_mut().enumerate() {
+            let y = g(i);
+            all_finite &= y.is_finite();
+            if y.is_nan() {
+                all_valid = false;
+            } else {
+                words[i / 64] |= 1_u64 << (i % 64);
+            }
+            *o = y;
+        }
+        return (out, words, all_valid, all_finite);
+    }
+
+    let chunk = n.div_ceil(workers).div_ceil(64) * 64;
+    let mut flags = vec![(true, true); n.div_ceil(chunk)];
+    std::thread::scope(|scope| {
+        for (ci, ((out_c, words_c), flag)) in out
+            .chunks_mut(chunk)
+            .zip(words.chunks_mut(chunk / 64))
+            .zip(flags.iter_mut())
+            .enumerate()
+        {
+            let g = &g;
+            let base = ci * chunk;
+            scope.spawn(move || {
+                let (mut all_valid, mut all_finite) = (true, true);
+                for (j, o) in out_c.iter_mut().enumerate() {
+                    let y = g(base + j);
+                    all_finite &= y.is_finite();
+                    if y.is_nan() {
+                        all_valid = false;
+                    } else {
+                        words_c[j / 64] |= 1_u64 << (j % 64);
+                    }
+                    *o = y;
+                }
+                *flag = (all_valid, all_finite);
+            });
+        }
+    });
+
+    let all_valid = flags.iter().all(|&(valid, _)| valid);
+    let all_finite = flags.iter().all(|&(_, finite)| finite);
+    (out, words, all_valid, all_finite)
+}
+
 /// `i64` sibling of [`par_map_vec_f64`] for compute-bound i64 index maps
 /// (python_mod_i64 / python_floor_div_i64 — integer idiv + sign adjustment).
 fn par_map_vec_i64<G: Fn(usize) -> i64 + Sync>(n: usize, g: G) -> Vec<i64> {
@@ -24326,16 +24405,17 @@ impl Column {
     }
 
     /// Parallel sibling of [`typed_float_unary_nullable_owned`] for compute-bound
-    /// maps that may yield NaN (sqrt/ln of negatives → NaN → missing). The
-    /// expensive `f(x)` runs in parallel (par_map_vec_f64); the validity/finiteness
-    /// scan stays a single cheap serial pass over the result. Bit-identical to the
-    /// serial helper (same `f`, same NaN→invalid rule, same order/witness).
+    /// maps that may yield NaN (sqrt/ln of negatives → NaN → missing). Both the
+    /// expensive `f(x)` and the validity/finiteness witness run in parallel, FUSED
+    /// into one pass by [`par_map_vec_f64_with_witness`]; the witness used to be a
+    /// second, serial read of the whole output. Bit-identical to the serial helper
+    /// (same `f`, same NaN→invalid rule, same order/witness).
     fn typed_float_unary_nullable_owned_par<F: Fn(f64) -> f64 + Sync>(&self, f: F) -> Option<Self> {
         let len = self.len();
-        let out = if let Some(data) = self.as_f64_slice() {
-            par_map_vec_f64(len, |i| f(data[i]))
+        let (out, validity_words, all_valid, all_finite) = if let Some(data) = self.as_f64_slice() {
+            par_map_vec_f64_with_witness(len, |i| f(data[i]))
         } else if let Some(data) = self.as_i64_slice() {
-            par_map_vec_f64(len, |i| f(data[i] as f64))
+            par_map_vec_f64_with_witness(len, |i| f(data[i] as f64))
         } else if self.dtype == DType::Float64
             && let Some((data, validity)) = self.as_f64_slice_with_validity()
         {
@@ -24345,7 +24425,7 @@ impl Column {
             // the validity scan below marks missing — bit-identical to those ops'
             // Scalar arm (`missing ⇒ Float64(NaN)`); valid slot ⇒ f(v), itself NaN
             // for e.g. sqrt(negative), also ⇒ missing (same as the Scalar path).
-            par_map_vec_f64(len, |i| {
+            par_map_vec_f64_with_witness(len, |i| {
                 if validity.get(i) {
                     f(data[i])
                 } else {
@@ -24361,7 +24441,7 @@ impl Column {
             // validity scan below marks missing — bit-identical to those ops' Scalar
             // arm (`missing ⇒ Float64(NaN)`); valid slot ⇒ f(v as f64) (== the Scalar
             // arm's f(x as f64)), itself NaN for e.g. sqrt(negative) ⇒ also missing.
-            par_map_vec_f64(len, |i| {
+            par_map_vec_f64_with_witness(len, |i| {
                 if validity.get(i) {
                     f(data[i] as f64)
                 } else {
@@ -24371,17 +24451,6 @@ impl Column {
         } else {
             return None;
         };
-        let mut validity_words = vec![0_u64; len.div_ceil(64)];
-        let mut all_valid = true;
-        let mut all_finite = true;
-        for (idx, &y) in out.iter().enumerate() {
-            all_finite &= y.is_finite();
-            if y.is_nan() {
-                all_valid = false;
-            } else {
-                validity_words[idx / 64] |= 1_u64 << (idx % 64);
-            }
-        }
         let validity = if all_valid {
             ValidityMask::all_valid(len)
         } else {
@@ -39201,6 +39270,103 @@ mod tests {
                     check(&col.sin().unwrap(), &ref_op(&vals, f64::sin), "sin", trial);
                     check(&col.cbrt().unwrap(), &ref_op(&vals, f64::cbrt), "cbrt", trial);
                     check(&col.arctan().unwrap(), &ref_op(&vals, f64::atan), "atan", trial);
+                }
+            }
+        }
+
+        #[test]
+        fn fused_par_witness_matches_scalar_reference_across_chunk_boundaries() {
+            // `par_map_vec_f64_with_witness` packs validity words per WORKER CHUNK, so a
+            // boundary bug (a chunk not owning whole `u64` words, or a `zip` dropping a
+            // tail) can only appear at or above its 200_000-row parallel threshold. Every
+            // other nullable-unary test in this file uses n < 200 — the SERIAL fallback —
+            // so this is the only coverage of the chunked packing. Lengths straddle the
+            // threshold and avoid multiples of 64 and of the worker count, exercising a
+            // ragged final chunk and a ragged final validity word together.
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            // Replica of the ops' Scalar path + Self::new (missing ⇒ NaN ⇒ missing).
+            fn ref_op(vals: &[Scalar], f: impl Fn(f64) -> f64) -> Column {
+                let out: Vec<Scalar> = vals
+                    .iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            Scalar::Float64(f64::NAN)
+                        } else {
+                            match v {
+                                Scalar::Float64(x) => Scalar::Float64(f(*x)),
+                                Scalar::Int64(x) => Scalar::Float64(f(*x as f64)),
+                                _ => unreachable!(),
+                            }
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Float64, out).unwrap()
+            }
+
+            let mut state: u64 = 0x0BAD_5EED_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+
+            for &n in &[199_999_usize, 200_003, 262_145, 393_281] {
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        // Force NaN-producing slots onto the first and last row of every
+                        // 64-bit validity word, where a mis-owned word would corrupt.
+                        let boundary = i % 64 == 0 || i % 64 == 63;
+                        match r % 16 {
+                            0 => {
+                                vf.set(i, false); // gap: missing INPUT
+                                0.0
+                            }
+                            1 => f64::NAN, // valid bit set, NaN payload
+                            2 => -1.5,     // sqrt/log ⇒ NaN ⇒ missing OUTPUT
+                            _ if boundary && (r >> 8) % 3 == 0 => -2.5,
+                            _ => ((r % 300) as f64) + 0.5,
+                        }
+                    })
+                    .collect();
+                let col = Column::from_f64_values_with_validity(fdata, vf);
+                let vals = col.values().to_vec();
+
+                for (name, got, want) in [
+                    ("sqrt", col.sqrt().unwrap(), ref_op(&vals, f64::sqrt)),
+                    ("log", col.log().unwrap(), ref_op(&vals, f64::ln)),
+                ] {
+                    let gv = got.values();
+                    let wv = want.values();
+                    assert_eq!(gv.len(), wv.len(), "{name} n={n} len");
+                    for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                        assert!(bit_eq(g, w), "{name} n={n} idx {k}: {g:?} != {w:?}");
+                    }
+                }
+            }
+
+            // All-valid, NaN-free input at the same scale must take the `all_valid`
+            // witness branch and stay all-valid — the shape the sqrt benchmark measures,
+            // and the one where the discarded validity words used to cost a serial pass.
+            let n = 300_007_usize;
+            let clean: Vec<f64> = (0..n).map(|i| 1.0 + (i % 9973) as f64).collect();
+            let got = Column::from_f64_values(clean.clone()).sqrt().unwrap();
+            assert_eq!(got.len(), n, "clean sqrt len");
+            let gv = got.values();
+            for (i, x) in clean.iter().enumerate() {
+                match &gv[i] {
+                    Scalar::Float64(y) => {
+                        assert_eq!(y.to_bits(), x.sqrt().to_bits(), "clean sqrt idx {i}");
+                    }
+                    other => panic!("clean sqrt idx {i} unexpectedly missing: {other:?}"),
                 }
             }
         }
