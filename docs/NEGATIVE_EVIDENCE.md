@@ -21836,3 +21836,119 @@ and
 `artifacts/bench/cod_vmi1149989_radix_payload_vs_pandas_10m_20260730_replication.json`
 (SHA-256
 `ef1ff9728a75778cdfa390029c62043a70648c2ecd4fec512a86a4ec59ea87cb`).
+
+### 2026-07-31 CyanLynx — parallel stable lower-radix scatter is a corrected-gate 1.475x maintenance self-speedup — KEEP
+
+The exact-current 10M Float64 profile named the main-thread residual instead
+of treating the ten-column fixture width as a thread cap. The main thread held
+20.703% of aggregate cycles. `radix_argsort_u64` alone held 17.61%; within
+that kernel, instruction samples attributed 73.26% to stable scatter, 20.57%
+to histograms, and 6.17% to initialization/prefix/copy work. The eight LSD
+digits are inherently ordered because each digit consumes the previous
+digit's permutation. Work within a digit is not inherently serial.
+
+The one-lever candidate performs a stable high-16-bit partition, then gives
+disjoint prefix slices to scoped workers for the six lower-byte stable passes.
+It uses no unsafe code, shared output writes, or atomics, and falls back to the
+serial implementation when fewer than two non-trivial prefixes exist.
+
+**Campaign result class:** `maintenance-self-speedup`.
+
+**Accepted same-host A/B:** on `vmi1149989`, the exact-base ELF improved from
+508.580 ms to 344.811 ms p50, a **1.474951x** median speedup with independent
+20,000-resample bootstrap CI **[1.428928, 1.533264]**. All sixteen interleaved
+round ratios exceeded one. Both arms observed ten operation threads and returned
+checksum `4957dea0fe3e2ed1`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=2bb3b92f2e5ccaa258868ce1613c9e0c2716f31bc29f7dfa6e946ea6c894a5d3
+(73873472 bytes)
+/data/tmp/cod-j5841-final-target/release-perf/fp-bench`.
+
+**A/A null control (same invocation):** 800 samples gave median ratio
+1.002850 and bootstrap CI [0.971527, 1.033379], only 0.2850% from unity.
+
+**Median-CI decision:** the median effect ratio was 1.474951 with independent
+CI [1.428928, 1.533264]; its effect deviation 0.474951 cleared the required
+two-times-null-CI threshold 0.061852.
+
+**CV role:** provenance only; CV had no vote. Baseline/candidate CV was
+42.07%/57.77%, already charged through the median and null intervals.
+
+The first final-ELF eight-round invocation is retained as rejected evidence:
+its effect was 1.383108x with CI [1.336659, 1.447884], but its A/A median
+1.023310 was 2.3310% from unity, so corrected clause 3 failed. After the
+host's one-minute load returned below 1 and no RCH work remained on that host,
+one predeclared confirmatory retry doubled sampling to sixteen rounds. That
+higher-information retry is the accepted row above; no third attempt ran.
+
+**Host identity for the accepted row:** `vmi1149989`, AMD EPYC Processor
+(with IBPB), 10 physical/10 logical cores, SMT inactive, CPUs 0-9,
+63,196,901,376 bytes RAM, one NUMA node, kernel `6.17.0-40-generic`. The
+headline thread count is the observed ten, not the requested ten-CPU affinity
+cap.
+
+**Strict build provenance:** worker `vmi1264463` built the measured candidate
+and worker `vmi1153651` built the exact-source focused test from base
+`7a5bf7143bc996d7956dc5faf38628a71390c331` with `--clean-overlay` and only
+`crates/fp-columnar/src/lib.rs` overlaid. A final exact-base, clean-overlay
+`release-perf` confirmation on `vmi1264463` exited zero after Cargo reported
+39m52s; local fallback was disabled. Baseline ELF SHA-256 was
+`4aa06eda20230eb79ff02d29ba00f9cba4839db8451034cca9cd84c19a852f8d`;
+candidate ELF SHA-256 was
+`2bb3b92f2e5ccaa258868ce1613c9e0c2716f31bc29f7dfa6e946ea6c894a5d3`.
+
+**Post-change routing profile:** the candidate main-thread share fell to
+5.560% of aggregate cycles and main-thread `radix_argsort_u64` fell to 3.203%.
+Lower-byte `radix_scatter_entries` appears on workers at 6.69% aggregate.
+Parallel `Column::take_positions` is now the aggregate leader at 84.92%.
+Baseline profiling was on `vmi1227854` and candidate profiling on
+`vmi1149989`, so this symbol transfer is routing evidence only; the accepted
+timing above is same-host. The candidate profile used the algorithm-identical
+pre-lint ELF
+`df5aff7e7f0c79190182c5ecd1cbe5040eb716b12dbb452d112d57b72c0af346`;
+the accepted timing uses the final ELF named above.
+
+**Decision: KEEP** the source change as a corrected-gate maintenance
+self-speedup. It is not campaign output.
+
+Full evidence:
+`artifacts/bench/cod_vmi1149989_radix_parallel_residual_20260731.md` and
+`artifacts/bench/cod_vmi1149989_radix_parallel_residual_20260731_ab.json`.
+
+### 2026-07-31 CyanLynx — live-pandas corrected-null reruns remain inadmissible — REJECT
+
+Six complete live-pandas same-invocation rows cleared every host-wide
+checkpoint and the older log-margin gate, but each failed the explicit
+A/A-median-within-2% clause for at least one engine:
+
+**A/A null control (same invocation):** every row below used numeric
+within-invocation A/A median ratios. At least one engine in every row lay more
+than 2% from unity, so all six corrected verdicts are reject.
+
+| host | pandas / FP diagnostic ratio | observed operation threads, FP / pandas | FP A/A median | pandas A/A median | corrected verdict |
+|---|---:|---:|---:|---:|---|
+| `vmi1149989` | 7.745x | 10 / 1 | 0.916468 | 0.985557 | reject |
+| `vmi1149989` | 6.391x | 10 / 1 | 1.072611 | 0.988726 | reject |
+| `vmi1149989` | 7.120x | 10 / 1 | 1.071710 | 0.992730 | reject |
+| `vmi1227854` | 7.664x | 10 / 1 | 1.114704 | 1.043016 | reject |
+| `vmi1227854` | 7.882x | 10 / 1 | 0.971774 | 1.053060 | reject |
+| `vmi1227854` | 9.014x | 10 / 1 | 0.894001 | 0.989966 | reject |
+
+These ratios are diagnostic only. No live-incumbent headline is published from
+this run. These rows used the algorithm-identical pre-lint candidate ELF
+`df5aff7e7f0c79190182c5ecd1cbe5040eb716b12dbb452d112d57b72c0af346`;
+the final maintenance ELF does not promote them.
+
+**Concrete retry predicate:** retry the live incumbent comparison only after
+the infrastructure supplies a whole-invocation exclusive worker window that
+prevents periodic RCH capability-probe `npm` processes, or after the canonical
+harness predeclares and implements randomized within-engine A/A arm order to
+remove fixed-order bias while enforcing the same three corrected clauses.
+Reuse the exact candidate, pandas 2.2.3, Python, and harness hashes or declare
+any changed artifact as a new campaign. A retry must again clear every
+all-online-CPU checkpoint and report observed, not requested, threads.
+
+Full evidence:
+`artifacts/bench/cod_vmi1149989_radix_parallel_residual_20260731.md` and
+`artifacts/bench/cod_vmi1149989_radix_parallel_residual_20260731_ab.json`.

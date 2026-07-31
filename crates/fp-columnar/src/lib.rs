@@ -7588,12 +7588,168 @@ fn radix_sort_i64_values(data: &[i64], ascending: bool) -> Vec<i64> {
     out
 }
 
+#[inline]
+fn radix_scatter_entries(input: &[(u64, usize)], output: &mut [(u64, usize)], shift: u32) {
+    debug_assert_eq!(input.len(), output.len());
+    let mut count = [0usize; 256];
+    for &(key, _) in input {
+        count[((key >> shift) & 0xff) as usize] += 1;
+    }
+    // Keep the ping-pong orientation fixed even when this byte is constant.
+    // A contiguous copy is cheaper than the bucket-addressed scatter and lets
+    // every independently sorted prefix finish in the same backing buffer.
+    if count.contains(&input.len()) {
+        output.copy_from_slice(input);
+        return;
+    }
+    let mut running = 0usize;
+    for slot in &mut count {
+        let bucket_len = *slot;
+        *slot = running;
+        running += bucket_len;
+    }
+    for &entry in input {
+        let bucket = ((entry.0 >> shift) & 0xff) as usize;
+        output[count[bucket]] = entry;
+        count[bucket] += 1;
+    }
+}
+
+/// Sort the lower 48 bits of one fixed-high-16-bit prefix.
+///
+/// Six stable LSD passes start and finish in `entries`; `scratch` is only the
+/// alternate backing. Prefix buckets are disjoint, so callers may run this on
+/// separate bucket slices concurrently without synchronization.
+fn radix_sort_lower_48(entries: &mut [(u64, usize)], scratch: &mut [(u64, usize)]) {
+    debug_assert_eq!(entries.len(), scratch.len());
+    for (pass, shift) in (0..48).step_by(8).enumerate() {
+        if pass % 2 == 0 {
+            radix_scatter_entries(entries, scratch, shift);
+        } else {
+            radix_scatter_entries(scratch, entries, shift);
+        }
+    }
+}
+
+type RadixSlicePair<'a> = (&'a mut [(u64, usize)], &'a mut [(u64, usize)]);
+
+/// Safe stable parallel radix argsort for large, high-prefix-diverse inputs.
+///
+/// One stable 16-bit prefix scatter establishes the final order between
+/// prefixes. The resulting contiguous prefix buckets are independent: each is
+/// sorted by its lower 48 bits in a scoped worker, using paired disjoint slices
+/// from the two existing ping-pong buffers. No shared output writes, atomics, or
+/// unsafe code are needed. Returns `None` when fewer than two non-trivial prefix
+/// buckets exist, because that shape has no useful bucket-level parallelism.
+fn parallel_radix_argsort_u64(keys: &[u64], workers: usize) -> Option<Vec<usize>> {
+    const PREFIX_BUCKETS: usize = 1 << 16;
+
+    let n = keys.len();
+    let mut prefix_counts = vec![0usize; PREFIX_BUCKETS];
+    for &key in keys {
+        prefix_counts[(key >> 48) as usize] += 1;
+    }
+    let sortable_prefixes = prefix_counts.iter().filter(|&&len| len > 1).count();
+    if sortable_prefixes < 2 {
+        return None;
+    }
+
+    let mut running = 0usize;
+    for slot in &mut prefix_counts {
+        let bucket_len = *slot;
+        *slot = running;
+        running += bucket_len;
+    }
+
+    let mut cur: Vec<(u64, usize)> = keys.iter().copied().zip(0..n).collect();
+    let mut partitioned = vec![(0, 0); n];
+    let mut prefix_ends = prefix_counts.clone();
+    for &entry in &cur {
+        let prefix = (entry.0 >> 48) as usize;
+        partitioned[prefix_ends[prefix]] = entry;
+        prefix_ends[prefix] += 1;
+    }
+
+    let ranges: Vec<(usize, usize)> = prefix_counts
+        .into_iter()
+        .zip(prefix_ends)
+        .filter(|(start, end)| *end - *start > 1)
+        .collect();
+    let worker_count = workers.min(ranges.len()).max(1);
+
+    let mut items = Vec::with_capacity(ranges.len());
+    let mut entries_rest = partitioned.as_mut_slice();
+    let mut scratch_rest = cur.as_mut_slice();
+    let mut consumed = 0usize;
+    for (start, end) in ranges {
+        let skip = start - consumed;
+        let (_, entries_after_skip) = entries_rest.split_at_mut(skip);
+        let (_, scratch_after_skip) = scratch_rest.split_at_mut(skip);
+        let len = end - start;
+        let (entries, entries_tail) = entries_after_skip.split_at_mut(len);
+        let (scratch, scratch_tail) = scratch_after_skip.split_at_mut(len);
+        entries_rest = entries_tail;
+        scratch_rest = scratch_tail;
+        consumed = end;
+        items.push((entries, scratch));
+    }
+
+    // Largest-prefix-first greedy assignment keeps the scoped workers balanced
+    // when the high bits are skewed (for example, positive finite floats).
+    items.sort_by_key(|item| std::cmp::Reverse(item.0.len()));
+    let mut groups: Vec<Vec<RadixSlicePair<'_>>> = (0..worker_count).map(|_| Vec::new()).collect();
+    let mut group_loads = vec![0usize; worker_count];
+    for item in items {
+        let worker = group_loads
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, load)| **load)
+            .map_or(0, |(worker, _)| worker);
+        group_loads[worker] += item.0.len();
+        groups[worker].push(item);
+    }
+
+    std::thread::scope(|scope| {
+        for group in groups {
+            scope.spawn(move || {
+                for (entries, scratch) in group {
+                    radix_sort_lower_48(entries, scratch);
+                }
+            });
+        }
+    });
+
+    Some(
+        partitioned
+            .into_iter()
+            .map(|(_, position)| position)
+            .collect(),
+    )
+}
+
 /// O(n) per pass, comparison-free — replaces the O(n log n) `Scalar`-enum
 /// comparator for all-valid numeric columns.
 fn radix_argsort_u64(keys: &[u64]) -> Vec<usize> {
     let n = keys.len();
     if n < 2 {
         return (0..n).collect();
+    }
+    // The exact-current 10M Float64 profile after the co-permuted-payload keep
+    // put 73.3% of this kernel in the stable scatter and 20.6% in its histogram.
+    // The eight LSD passes are dependent, but elements WITHIN a pass are not.
+    // A two-byte stable prefix partition exposes disjoint buckets, then the
+    // remaining six passes run concurrently without changing the permutation.
+    const PARALLEL_MIN_LEN: usize = 1 << 20;
+    const PARALLEL_MAX_WORKERS: usize = 16;
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(PARALLEL_MAX_WORKERS)
+        .min(n);
+    if n >= PARALLEL_MIN_LEN
+        && workers >= 2
+        && let Some(order) = parallel_radix_argsort_u64(keys, workers)
+    {
+        return order;
     }
     // CO-PERMUTED KEY PAYLOAD (br-frankenpandas-radixpay). The previous shape
     // permuted `idx: Vec<usize>` alone and re-read the key through it
@@ -34980,6 +35136,35 @@ mod tests {
                     "parallel radix != stable byte sort (asc={ascending})"
                 );
             }
+        }
+
+        #[test]
+        fn parallel_numeric_radix_matches_stable_reference_j5841() {
+            // Exercise the parallel helper directly at a test-sized N. The
+            // high 16 bits span many non-trivial prefixes (parallel work), while
+            // the narrow low-bit domain forces exact-key ties (stability).
+            let n = 50_000usize;
+            let mut state = 0xA076_1D64_78BD_642F_u64;
+            let keys: Vec<u64> = (0..n)
+                .map(|i| {
+                    state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                    let mut z = state;
+                    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    z ^= z >> 31;
+                    (((i % 257) as u64) << 48) | (z % 4_096)
+                })
+                .collect();
+
+            let got = crate::parallel_radix_argsort_u64(&keys, 4).expect("diverse prefix fan-out");
+            let mut want: Vec<usize> = (0..n).collect();
+            want.sort_by_key(|&position| keys[position]);
+            assert_eq!(got, want);
+
+            assert!(
+                crate::parallel_radix_argsort_u64(&vec![7; n], 4).is_none(),
+                "one non-trivial prefix must retain the serial fallback"
+            );
         }
 
         #[test]
