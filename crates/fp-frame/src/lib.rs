@@ -58402,7 +58402,7 @@ impl DataFrame {
             .collect();
         if let Some(keys) = radix_keys {
             let order = fp_columnar::radix_argsort_multi_u64(&keys);
-            return self.reorder_rows_by_positions_unchecked(&order);
+            return self.reorder_rows_by_owned_positions_unchecked(order);
         }
 
         // Per-column typed sort key (br-frankenpandas-1tuf5): an all-valid Int64
@@ -58478,8 +58478,10 @@ impl DataFrame {
             Ordering::Equal
         });
 
-        // order is a permutation of 0..len(), always valid
-        self.reorder_rows_by_positions_unchecked(&order)
+        // order is a permutation of 0..len(), always valid. Preserve ownership
+        // so the multi-key path shares the same deferred payload-gather tape as
+        // the single-key radix path.
+        self.reorder_rows_by_owned_positions_unchecked(order)
     }
 
     /// Label-based row selection for list-like indexers.
@@ -125770,6 +125772,72 @@ mod tests {
             assert_eq!(
                 payload[row].to_bits(),
                 ((N - 1 - row) as f64 + 0.25).to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn deferred_multi_sort_gather_matches_stable_lexicographic_order() {
+        const N: usize = 1 << 18;
+        let key_a: Vec<f64> = (0..N).map(|row| (row % 257) as f64).collect();
+        let key_b: Vec<f64> = (0..N).map(|row| ((row / 257) % 1021) as f64).collect();
+        let payload: Vec<f64> = (0..N).map(|row| row as f64 + 0.25).collect();
+
+        let mut expected_order: Vec<usize> = (0..N).collect();
+        expected_order.sort_by(|&left, &right| {
+            key_a[left]
+                .partial_cmp(&key_a[right])
+                .expect("finite primary key")
+                .then_with(|| {
+                    key_b[right]
+                        .partial_cmp(&key_b[left])
+                        .expect("finite secondary key")
+                })
+        });
+
+        let mut columns = BTreeMap::new();
+        columns.insert("key_a".to_owned(), Column::from_f64_values(key_a.clone()));
+        columns.insert("key_b".to_owned(), Column::from_f64_values(key_b.clone()));
+        columns.insert(
+            "payload".to_owned(),
+            Column::from_f64_values(payload.clone()),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, N),
+            columns,
+            vec![
+                "key_a".to_owned(),
+                "key_b".to_owned(),
+                "payload".to_owned(),
+            ],
+        )
+        .expect("large all-valid Float64 frame");
+
+        let sorted = df
+            .sort_values_multi(&["key_a", "key_b"], &[true, false], "last")
+            .expect("multi-key sort succeeds");
+        let sorted_a = sorted.columns["key_a"]
+            .as_f64_slice()
+            .expect("deferred primary key materializes");
+        let sorted_b = sorted.columns["key_b"]
+            .as_f64_slice()
+            .expect("deferred secondary key materializes");
+        let sorted_payload = sorted.columns["payload"]
+            .as_f64_slice()
+            .expect("deferred payload materializes");
+
+        for (output_row, &source_row) in expected_order.iter().enumerate() {
+            assert_eq!(
+                sorted_a[output_row].to_bits(),
+                key_a[source_row].to_bits()
+            );
+            assert_eq!(
+                sorted_b[output_row].to_bits(),
+                key_b[source_row].to_bits()
+            );
+            assert_eq!(
+                sorted_payload[output_row].to_bits(),
+                payload[source_row].to_bits()
             );
         }
     }

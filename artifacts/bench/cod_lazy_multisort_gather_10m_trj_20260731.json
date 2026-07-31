@@ -1,0 +1,65 @@
+{
+  "schema": "directional_same_driver_v1",
+  "timestamp": "2026-07-31T20:19:56Z",
+  "decision": "KEEP",
+  "workload": "dataframe_ops/sort_values_multi/10M/float64",
+  "source_base": "f37890e6a96e3de5d092d86cbe3c35f00afa52ff",
+  "source_overlay": "crates/fp-frame/src/lib.rs",
+  "host": {
+    "hostname": "threadripperje",
+    "cpu": "AMD Ryzen Threadripper PRO 5995WX 64-Cores",
+    "physical_cores": 64,
+    "logical_threads": 128,
+    "affinity": "0-63",
+    "kernel": "6.17.0-41-generic",
+    "governor": "performance",
+    "isa": ["sse2", "avx", "avx2", "fma", "bmi1", "bmi2", "aes", "vaes"]
+  },
+  "candidate": {
+    "elf_sha256": "40853cd87541b699e58a382498732a3871377408ea7dbb6377082d51b8a8be2f",
+    "elf_bytes": 75300144,
+    "build_worker": "vmi1264463",
+    "p50_us": 5602070.32,
+    "p95_us": 5719555.81,
+    "p99_us": 24994686.96,
+    "cv_pct": 80.56,
+    "operation_threads": 1,
+    "null_median": 1.003174,
+    "checksum": "4957dea0fe3e2ed1",
+    "cold_outlier_us": 41883853.49
+  },
+  "reference": {
+    "elf_sha256": "df6eabdf7de0ac848953a007a9be3c76ddf395e1491ae13b31bd5571fe111f85",
+    "elf_bytes": 75293824,
+    "build_worker": "vmi1264463",
+    "p50_us": 7591408.24,
+    "p95_us": 7773873.27,
+    "p99_us": 7873145.72,
+    "cv_pct": 6.31,
+    "operation_threads": 10,
+    "null_median": 1.009579,
+    "checksum": "4957dea0fe3e2ed1"
+  },
+  "pandas": {
+    "version": "2.2.3",
+    "python_elf_sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+    "p50_us": 16558532.22,
+    "p95_us": 17229121.91,
+    "p99_us": 17283448.82,
+    "cv_pct": 2.38,
+    "operation_threads": 1,
+    "null_median": 0.995943
+  },
+  "candidate_vs_reference": {
+    "ratio": 1.35510763,
+    "median_ratio_ci_95": [1.34117841, 1.36545266],
+    "corrected_null_gate": "pass"
+  },
+  "candidate_vs_pandas": {
+    "ratio": 2.956,
+    "median_ratio_ci_95": [2.91916199, 2.99403279],
+    "corrected_null_gate": "pass"
+  },
+  "harness_sha256": "b9affde33c6e14a19ad118d6d3f0252c72fd38ee4cc9983517f5d244ebf859d4",
+  "classification": "directional same-driver; canonical host-wide preflight unavailable before timing"
+}
