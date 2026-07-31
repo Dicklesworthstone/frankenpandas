@@ -95,10 +95,37 @@ When those 16 Lane M rows were actually re-adjudicated under the corrected gate:
 
 So ~**267 same-invocation measurement rows, spread over 82 artifact files, are
 sitting unadjudicated under a superseded gate**, and the one sample that was
-re-run converted at 14/16. This is the cheapest conversion path in the repo: the
-measurements already exist and already meet the same-invocation bar — they need
-re-adjudication, not re-measurement. It is also a satisfied retry predicate under
-the standing priority order.
+re-run converted at 14/16.
+
+### ⚠️ Correction — these need RE-MEASUREMENT, not re-adjudication
+
+An earlier revision of this audit called this "the cheapest conversion path in
+the repo … they need re-adjudication, not re-measurement." **That was wrong, and
+checking it is what disproved it.**
+
+Every CV-dropped row was inspected. **0 of 283 carry a `null_control` block or
+raw `times_us`** — they store only summary statistics:
+
+```
+frankenpandas / pandas keys:
+  cv_pct, iterations, mean_us, p50_us, p95_us, p99_us, stddev_us,
+  throughput_rows_sec, valid          # no null_control, no times_us
+```
+
+The corrected gate needs the interleaved A/A null-control ratios to bootstrap a
+median CI and apply the decidability margin. Summary statistics cannot
+reconstruct them. These artifacts predate the schema that records them.
+
+This also re-reads the Lane M precedent correctly: its heading says the 16 rows
+**"ran on strict-remote worker `vmi1149989` under schema v4"** — they were
+*re-run*, not recomputed. The evidence was there; the earlier inference was not.
+
+Consequence for the queue: these 267 rows move from *cheapest* to **gated behind
+host quiescence**, which is currently the most expensive constraint in the repo
+(a 60-second probe found 0/60 clear samples; an 8-minute watch never caught a
+15-second lull). The 14/16 conversion rate from Lane M still makes them the
+highest-*expected-value* target once a quiet host exists — but the cost estimate
+was wrong by the full price of re-running 283 same-invocation benchmarks.
 
 ## What cannot be converted, and why that is a different problem
 
@@ -116,6 +143,9 @@ against" are different failures:
   "FP-side Nx vs ORIG" phrasing). These are maintenance records, not campaign
   wins, and the honest fix is to relabel them as such rather than to manufacture
   an incumbent number retroactively.
+- **The 283 CV-dropped rows** cannot be converted from stored data at all — see
+  the correction above. Not "nobody got round to it": the bytes needed to
+  re-decide them were never written.
 
 ## Not done in this turn
 
