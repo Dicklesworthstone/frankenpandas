@@ -5590,8 +5590,124 @@ fn i64_dense_histogram_range(data: &[i64]) -> Option<(i64, usize)> {
 /// Datetime64/Timedelta64 keys (whose `as_i64_slice` is Int64-gated) reuse the
 /// exact same numbering + probing without duplicating it. `None` only when the
 /// open-addr capacity math overflows or `n > u32::MAX` (caller falls back).
+/// Morsel-parallel first-seen group numbering for a bounded direct-address key.
+///
+/// The serial builder below is a single `O(n)` pass carrying a loop-carried
+/// dependency (`ngroups` increments in first-seen order), so it pins one core
+/// while the rest idle. `dense_aggregate_emit`'s own note records the
+/// consequence: the cheap one-pass aggs (`sum`/`mean`/`count`/`min`/`max`) only
+/// reached 1.07-1.33x from column-parallelism because "their cost is the shared
+/// serial group-build, not this fold". This removes that shared serial cost.
+///
+/// BIT-IDENTICAL, and the reason is the whole design: gids must be numbered in
+/// first-seen ROW order, which a naive per-chunk numbering would not reproduce.
+/// Instead each worker records, for its own row range, the lowest row index at
+/// which it saw each offset; those are combined by `min`, and gids are then
+/// handed out in ascending first-row order. That is exactly the serial
+/// numbering, so `gid_per_row`, `ngroups`, group order and every downstream
+/// aggregate are unchanged — no float arithmetic is reordered anywhere here.
+///
+/// Two parallel passes replace one serial pass, so the ceiling is ~T/2.
+/// Returns `None` (caller runs the serial builder) unless the row count pays
+/// for threads and the direct-address table is small enough that per-worker
+/// tables stay cheap — worker count is additionally capped so total scratch
+/// stays bounded regardless of key range.
+/// Returns `(gid_per_row, ngroups, key_of_gid)`; `key_of_gid[g]` is group `g`'s
+/// first-seen Int64 key, which `int64_dense_grouping` needs for its output
+/// labels and `sort=True` ordering.
+fn par_dense_gids_direct(
+    data: &[i64],
+    min: i64,
+    range: usize,
+) -> Option<(Vec<usize>, usize, Vec<i64>)> {
+    const PAR_MIN_ROWS: usize = 1 << 18;
+    const PAR_MAX_RANGE: usize = 1 << 16;
+    const PAR_MAX_SCRATCH_ENTRIES: usize = 1 << 21;
+
+    let n = data.len();
+    if n < PAR_MIN_ROWS || range == 0 || range > PAR_MAX_RANGE {
+        return None;
+    }
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(n / (1 << 16))
+        .min(PAR_MAX_SCRATCH_ENTRIES / range);
+    if workers < 2 {
+        return None;
+    }
+    let chunk = n.div_ceil(workers);
+
+    // Pass 1 (parallel): per-worker lowest row index per key offset.
+    let firsts: Vec<Vec<usize>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = data
+            .chunks(chunk)
+            .enumerate()
+            .map(|(w, part)| {
+                scope.spawn(move || {
+                    let base = w * chunk;
+                    let mut first = vec![usize::MAX; range];
+                    for (i, &v) in part.iter().enumerate() {
+                        let off = (v as i128 - min as i128) as usize;
+                        if first[off] == usize::MAX {
+                            first[off] = base + i;
+                        }
+                    }
+                    first
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().ok())
+            .collect::<Option<Vec<_>>>()
+    })?;
+
+    let mut first_row = vec![usize::MAX; range];
+    for part in &firsts {
+        for (slot, &row) in first_row.iter_mut().zip(part.iter()) {
+            if row < *slot {
+                *slot = row;
+            }
+        }
+    }
+
+    // Hand out gids in ascending first-seen row order == the serial numbering.
+    let mut present: Vec<(usize, usize)> = first_row
+        .iter()
+        .enumerate()
+        .filter(|&(_, &row)| row != usize::MAX)
+        .map(|(off, &row)| (row, off))
+        .collect();
+    present.sort_unstable();
+    let ngroups = present.len();
+    let mut gid_of = vec![0usize; range];
+    let mut key_of_gid: Vec<i64> = Vec::with_capacity(ngroups);
+    for (gid, &(_, off)) in present.iter().enumerate() {
+        gid_of[off] = gid;
+        key_of_gid.push((min as i128 + off as i128) as i64);
+    }
+
+    // Pass 2 (parallel): pure map, no dependency between rows.
+    let mut gid_per_row = vec![0usize; n];
+    std::thread::scope(|scope| {
+        for (out, part) in gid_per_row.chunks_mut(chunk).zip(data.chunks(chunk)) {
+            let gid_of = &gid_of;
+            scope.spawn(move || {
+                for (slot, &v) in out.iter_mut().zip(part.iter()) {
+                    *slot = gid_of[(v as i128 - min as i128) as usize];
+                }
+            });
+        }
+    });
+
+    Some((gid_per_row, ngroups, key_of_gid))
+}
+
 fn dense_gids_from_i64(data: &[i64]) -> Option<(Vec<usize>, usize)> {
     if let Some((min, range)) = i64_dense_histogram_range(data) {
+        if let Some((gid_per_row, ngroups, _)) = par_dense_gids_direct(data, min, range) {
+            return Some((gid_per_row, ngroups));
+        }
         let mut gid_of = vec![usize::MAX; range];
         let mut gid_per_row = vec![0usize; data.len()];
         let mut ngroups = 0usize;
@@ -80503,25 +80619,36 @@ impl DataFrameGroupBy<'_> {
         range: usize,
     ) -> (Vec<usize>, usize, Vec<usize>, Index) {
         let nrows = keys.len();
-        let mut gid_table = vec![usize::MAX; range];
-        let mut gid_per_row = vec![0usize; nrows];
-        // `key_of_gid[g]` = the Int64 key value of group `g` (its first-seen
-        // representative). Built alongside the gid assignment in one pass.
-        let mut key_of_gid: Vec<i64> = Vec::new();
-        let mut ngroups = 0usize;
-        for (row, &k) in keys.iter().enumerate() {
-            let slot = (k as i128 - min as i128) as usize;
-            let g = if gid_table[slot] == usize::MAX {
-                gid_table[slot] = ngroups;
-                key_of_gid.push(k);
-                ngroups += 1;
-                ngroups - 1
+        // Morsel-parallel first-seen numbering when it pays (see
+        // `par_dense_gids_direct`): this grouping pass is the shared serial cost
+        // that held the cheap one-pass aggs to 1.07-1.33x despite
+        // `dense_aggregate_emit` already being column-parallel. Bit-identical
+        // gids/ngroups/key_of_gid, so `order`, labels and every aggregate below
+        // are untouched.
+        let (gid_per_row, ng, key_of_gid) =
+            if let Some(parallel) = par_dense_gids_direct(keys, min, range) {
+                parallel
             } else {
-                gid_table[slot]
+                let mut gid_table = vec![usize::MAX; range];
+                let mut gid_per_row = vec![0usize; nrows];
+                // `key_of_gid[g]` = the Int64 key value of group `g` (its first-seen
+                // representative). Built alongside the gid assignment in one pass.
+                let mut key_of_gid: Vec<i64> = Vec::new();
+                let mut ngroups = 0usize;
+                for (row, &k) in keys.iter().enumerate() {
+                    let slot = (k as i128 - min as i128) as usize;
+                    let g = if gid_table[slot] == usize::MAX {
+                        gid_table[slot] = ngroups;
+                        key_of_gid.push(k);
+                        ngroups += 1;
+                        ngroups - 1
+                    } else {
+                        gid_table[slot]
+                    };
+                    gid_per_row[row] = g;
+                }
+                (gid_per_row, ngroups, key_of_gid)
             };
-            gid_per_row[row] = g;
-        }
-        let ng = ngroups;
 
         // Output gid order: first-seen, or ascending-key when sort=True (matches
         // build_groups' `composite_key_cmp` over a single Int64 key).
@@ -182387,6 +182514,88 @@ mod axis1_moment_void_audit_cod_fp {
             self_pct >= 0.1,
             "candidate self-time must be at least 0.1%; got {self_pct:.6}%"
         );
+    }
+}
+
+#[cfg(test)]
+mod par_dense_gids_bit_identity {
+    use super::par_dense_gids_direct;
+
+    /// The serial first-seen builder, transcribed from `int64_dense_grouping`.
+    /// This is the reference the parallel path must reproduce EXACTLY.
+    fn serial(keys: &[i64], min: i64, range: usize) -> (Vec<usize>, usize, Vec<i64>) {
+        let mut gid_table = vec![usize::MAX; range];
+        let mut gid_per_row = vec![0usize; keys.len()];
+        let mut key_of_gid: Vec<i64> = Vec::new();
+        let mut ngroups = 0usize;
+        for (row, &k) in keys.iter().enumerate() {
+            let slot = (k as i128 - min as i128) as usize;
+            let g = if gid_table[slot] == usize::MAX {
+                gid_table[slot] = ngroups;
+                key_of_gid.push(k);
+                ngroups += 1;
+                ngroups - 1
+            } else {
+                gid_table[slot]
+            };
+            gid_per_row[row] = g;
+        }
+        (gid_per_row, ngroups, key_of_gid)
+    }
+
+    /// Seeded LCG — no `rand` dependency, and the failing case is reproducible.
+    fn lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state >> 11
+    }
+
+    /// The parallel builder must agree with the serial one on `gid_per_row`,
+    /// `ngroups` AND `key_of_gid` — the three things every downstream aggregate,
+    /// output label and `sort=True` ordering is derived from. Naive per-chunk
+    /// numbering renumbers the groups and fails this immediately.
+    #[test]
+    fn parallel_gids_match_serial_first_seen_numbering() {
+        let mut state = 0x5DEE_CE66_D1CE_4B9Du64;
+        let mut checked = 0usize;
+        // Row counts straddle the >= 2^18 gate so both the parallel path and the
+        // None-fallback are exercised; ranges cover degenerate and wide keys.
+        for &n in &[1usize, 2, 1_000, 262_143, 262_144, 300_000, 700_001] {
+            for &range in &[1usize, 2, 97, 1_000, 65_536] {
+                for &min in &[-77_i64, 0, 1_000_003] {
+                    let keys: Vec<i64> = (0..n)
+                        .map(|_| min + (lcg(&mut state) % range as u64) as i64)
+                        .collect();
+                    let Some(parallel) = par_dense_gids_direct(&keys, min, range) else {
+                        continue; // below the gate: caller uses the serial builder
+                    };
+                    assert_eq!(parallel, serial(&keys, min, range), "n={n} range={range} min={min}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "gate never opened; the parallel path went untested");
+    }
+
+    /// A key span the workers see in different orders still numbers groups by
+    /// GLOBAL first appearance, not by which worker happened to finish first.
+    #[test]
+    fn group_numbering_follows_global_first_appearance() {
+        let n = 400_000usize;
+        let range = 4usize;
+        // Row 0 is the only 3; every later row cycles 0,1,2. Serial numbering is
+        // therefore 3 -> gid 0, then 0,1,2 in first-appearance order.
+        let mut keys: Vec<i64> = Vec::with_capacity(n);
+        keys.push(3);
+        for i in 1..n {
+            keys.push((i % 3) as i64);
+        }
+        let Some((gid_per_row, ngroups, key_of_gid)) = par_dense_gids_direct(&keys, 0, range)
+        else {
+            panic!("gate should be open at 400k rows / range 4");
+        };
+        assert_eq!((gid_per_row, ngroups, key_of_gid), serial(&keys, 0, range));
     }
 }
 
