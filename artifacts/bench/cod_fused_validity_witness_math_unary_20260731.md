@@ -98,7 +98,12 @@ every round of both workloads** — reference and candidate, sqrt and log.
 
 ## Semantic evidence
 
-- `cargo test -p fp-columnar --profile release-perf`: **595 passed, 0 failed**, 57 ignored.
+Re-run against the committed state (`f5c4c35ba`):
+
+- `cargo test -p fp-columnar --profile release-perf`: **595 passed, 0 failed**, 58 ignored.
+- `cargo test -p fp-frame --profile release-perf` (all targets, the consumer crate
+  owning `Series::sqrt`/`exp`/`log`): **3357 passed, 0 failed**, 27 ignored.
+- **3952 tests green in total.**
 - New test `fused_par_witness_matches_scalar_reference_across_chunk_boundaries`
   compares `sqrt` and `log` bit-for-bit (`f64::to_bits`) against the ops' Scalar
   reference path at n = 199,999 / 200,003 / 262,145 / 393,281 — lengths chosen to
@@ -129,6 +134,9 @@ clear 1 s samples, re-adjudicated per phase, fail-closed) never cleared:
   frankenredis `redis-benchmark`. None are this agent's to kill.
 - **`threadripperje`**: sampled 8 consecutive seconds, **0/8 clear**, with three
   CPUs pinned at 1.00 (an `asupersync` `git fsck` and a peer python job).
+- A dedicated watcher sampling all 64 CPUs every ~5 s for **one full hour** and
+  reporting only on two consecutive all-clear samples fired **zero** times. Host
+  load average reached **76.65** during the session. This is not a near miss.
 
 Useful finding for successors: **`thinkstation1` already satisfies the harness's
 exact incumbent pins with no setup** — `--dependency-probe` reports
