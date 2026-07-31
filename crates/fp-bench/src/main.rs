@@ -906,16 +906,35 @@ where
 /// default `quicksort` is not stable, so ties would otherwise be free to
 /// disagree without either engine being wrong.
 fn run_pipeline(workload: &str, data_dir: Option<&Path>) -> Option<PairedSamples> {
-    if workload != "etl_job" {
+    if !matches!(workload, "etl_job" | "etl_job_parquet") {
         return None;
     }
+    // `etl_job` at 1M is 82.3% read_csv on the pandas side (measured; see
+    // artifacts/bench/cc_thinkstation1_pipeline_whole_job_20260730.md), so a
+    // whole-job ratio from it is mostly a CSV-parse ratio. That is realistic --
+    // real ETL is parse-dominated -- but it means the shape cannot answer
+    // whether a whole-job win survives when parsing is NOT the bulk of the job.
+    // `etl_job_parquet` runs the identical six stages off Parquet, where load
+    // is cheap, so the compute stages carry real weight. Same job, same
+    // outputs, different input format: the pair brackets the answer.
+    let parquet = workload == "etl_job_parquet";
     let dir = data_dir.expect(
         "pipeline/etl_job requires --data-dir; the Python driver materializes \
          sales.csv and stores.csv there before either arm is timed",
     );
-    let sales_path = dir.join("sales.csv");
-    let stores_path = dir.join("stores.csv");
-    let out_path = dir.join("out_frankenpandas.csv");
+    let (sales_path, stores_path, out_path) = if parquet {
+        (
+            dir.join("sales.parquet"),
+            dir.join("stores.parquet"),
+            dir.join("out_frankenpandas_parquet.csv"),
+        )
+    } else {
+        (
+            dir.join("sales.csv"),
+            dir.join("stores.csv"),
+            dir.join("out_frankenpandas.csv"),
+        )
+    };
     assert!(
         sales_path.is_file(),
         "pipeline: missing input {}",
@@ -929,8 +948,17 @@ fn run_pipeline(workload: &str, data_dir: Option<&Path>) -> Option<PairedSamples
 
     Some(time_us(|| {
         // 1. load
-        let sales = fp_io::read_csv(&sales_path).expect("pipeline: read sales.csv");
-        let stores = fp_io::read_csv(&stores_path).expect("pipeline: read stores.csv");
+        let (sales, stores) = if parquet {
+            (
+                fp_io::read_parquet(&sales_path).expect("pipeline: read sales.parquet"),
+                fp_io::read_parquet(&stores_path).expect("pipeline: read stores.parquet"),
+            )
+        } else {
+            (
+                fp_io::read_csv(&sales_path).expect("pipeline: read sales.csv"),
+                fp_io::read_csv(&stores_path).expect("pipeline: read stores.csv"),
+            )
+        };
 
         // 2. filter -- sales[sales["amount"] > 0.0]
         let keep = sales

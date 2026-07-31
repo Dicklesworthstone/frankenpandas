@@ -1046,10 +1046,47 @@ def materialize_pipeline_inputs(rows: int, tmp_path: Path) -> tuple[Path, Path]:
     return sales_path, stores_path
 
 
+def materialize_pipeline_inputs_parquet(
+    rows: int, tmp_path: Path
+) -> tuple[Path, Path]:
+    """Same two tables, Parquet-encoded, written outside every timed window.
+
+    `etl_job` at 1M is 82.3% read_csv on the pandas side, so its whole-job ratio
+    is mostly a CSV-parse ratio. This variant runs the identical six stages off
+    Parquet, where load is cheap and the compute stages carry real weight. The
+    pair brackets the question a single shape cannot answer: does a whole-job
+    win survive when parsing is not the bulk of the job?
+
+    Derived by re-reading the CSVs rather than re-generating, so both formats
+    provably carry the same values.
+    """
+    sales_csv, stores_csv = materialize_pipeline_inputs(rows, tmp_path)
+    sales_pq = tmp_path / "sales.parquet"
+    stores_pq = tmp_path / "stores.parquet"
+    pd.read_csv(sales_csv).to_parquet(sales_pq, index=False)
+    pd.read_csv(stores_csv).to_parquet(stores_pq, index=False)
+    return sales_pq, stores_pq
+
+
 def _pipeline_job_pandas(sales_path: Path, stores_path: Path, out_path: Path):
     """The six stages, in idiomatic pandas 2.2.3."""
     sales = pd.read_csv(sales_path)                                   # 1. load
     stores = pd.read_csv(stores_path)
+    kept = sales[sales["amount"] > 0.0]                               # 2. filter
+    agg = kept.groupby("store_id", as_index=False).sum()              # 3. groupby
+    joined = agg.merge(stores, on="store_id", how="inner")            # 4. join
+    ranked = joined.sort_values(                                      # 5. sort
+        ["amount", "store_id"], ascending=[False, True]
+    )
+    ranked.to_csv(out_path, index=False)                              # 6. write
+    return ranked
+
+
+def _pipeline_job_pandas_parquet(sales_path: Path, stores_path: Path,
+                                 out_path: Path):
+    """Identical six stages; only the load format differs."""
+    sales = pd.read_parquet(sales_path)                               # 1. load
+    stores = pd.read_parquet(stores_path)
     kept = sales[sales["amount"] > 0.0]                               # 2. filter
     agg = kept.groupby("store_id", as_index=False).sum()              # 3. groupby
     joined = agg.merge(stores, on="store_id", how="inner")            # 4. join
@@ -1071,6 +1108,17 @@ def bench_pipeline_etl_job_pandas(
     )
 
 
+def bench_pipeline_etl_job_parquet_pandas(
+    df: pd.DataFrame, tmp_path: Path
+) -> PairedSamples:
+    rows = len(df)
+    sales_path, stores_path = materialize_pipeline_inputs_parquet(rows, tmp_path)
+    out_path = tmp_path / "out_pandas_parquet.csv"
+    return time_operation(
+        partial(_pipeline_job_pandas_parquet, sales_path, stores_path, out_path)
+    )
+
+
 def _pipeline_columns_equal(left: pd.Series, right: pd.Series) -> bool:
     """Same values, ignoring how each engine chose to render them."""
     if is_numeric_dtype(left) and is_numeric_dtype(right):
@@ -1086,7 +1134,8 @@ def _pipeline_columns_equal(left: pd.Series, right: pd.Series) -> bool:
     return bool(left.astype(str).equals(right.astype(str)))
 
 
-def compare_pipeline_outputs(tmp_path: Path) -> dict[str, Any]:
+def compare_pipeline_outputs(tmp_path: Path,
+                             workload: str = "etl_job") -> dict[str, Any]:
     """Diff what the two engines actually produced.
 
     Byte identity is the strong result, and the $0.25 amount tick is chosen to
@@ -1094,8 +1143,12 @@ def compare_pipeline_outputs(tmp_path: Path) -> dict[str, Any]:
     or rendering difference is a very different finding from a value
     difference, and collapsing both into "mismatch" would bury the useful one.
     """
-    fp_path = tmp_path / "out_frankenpandas.csv"
-    pd_path = tmp_path / "out_pandas.csv"
+    if workload == "etl_job_parquet":
+        fp_path = tmp_path / "out_frankenpandas_parquet.csv"
+        pd_path = tmp_path / "out_pandas_parquet.csv"
+    else:
+        fp_path = tmp_path / "out_frankenpandas.csv"
+        pd_path = tmp_path / "out_pandas.csv"
     report: dict[str, Any] = {
         "frankenpandas_output": str(fp_path),
         "pandas_output": str(pd_path),
@@ -2138,6 +2191,7 @@ PANDAS_WORKLOADS = {
     },
     "pipeline": {
         "etl_job": bench_pipeline_etl_job_pandas,
+        "etl_job_parquet": bench_pipeline_etl_job_parquet_pandas,
     },
     "math_unary": {
         "floor": bench_math_floor_pandas,
@@ -2666,7 +2720,7 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                     # so diff what the job actually produced. Disagreement
                     # voids the verdict rather than being reported alongside a
                     # number that no longer means anything.
-                    equivalence = compare_pipeline_outputs(tmp_path)
+                    equivalence = compare_pipeline_outputs(tmp_path, workload)
                     comparison["output_equivalence"] = equivalence
                     if not equivalence["equivalent"]:
                         comparison["verdict"] = "OUTPUT_MISMATCH"
