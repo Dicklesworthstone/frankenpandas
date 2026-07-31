@@ -107,6 +107,27 @@ correct and I did not modify it, scope it down, or route around it. A number
 obtained by relaxing the instrument that exists to make numbers trustworthy would
 be worth less than no number.
 
+### The block was retested, not assumed
+
+The whole 1M run takes only ~60–90 s, so a short lull would in principle be
+enough. It was worth waiting for, and I did:
+
+1. **Named the blocker.** The persistent offender was not ambient load but a
+   *peer agent's* criterion run pinned at 100% on CPU 8:
+   `perf_matrix-ad95d11065ec2143 --bench` out of `/data/tmp/cargo-target-h3-scaling/`.
+   Not mine to kill.
+2. **Waited on a 5-second-clear trigger.** It fired at 21:11:15 after five
+   consecutive clear seconds — and the harness *still* blocked ~1 s later on a
+   fresh set, `busy=[16, 18, 19, 22, 54]`. Five seconds is not predictive.
+3. **Waited 8 minutes on a 15-second sustained-clear trigger.** It never fired:
+   **0 launch attempts in 480 s**. The host does not offer a 15-second sustained
+   lull while the swarm is running.
+
+Runner preserved as `cc_thinkstation1_pipeline_whole_job_20260730.await_quiet.sh`
+so the next agent can simply start it and walk away; it waits for the gate's own
+condition to hold on its own, then hands off to the harness, which re-checks
+independently. It never touches the gate.
+
 This is the same wall the cod pane hit on the 10M sort A/B
 (`cod_thinkstation1_sort_serial_residual_profile_20260729.md`). It is systemic,
 not a one-off: **while the swarm is active, this host cannot produce a gate-valid
@@ -194,3 +215,12 @@ To finish, on a quiet host:
 python3 benches/vs_pandas_harness.py --category pipeline --sizes 1M,10M \
     --expected-hostname thinkstation1
 ```
+
+or, to have it wait for its own window and fire unattended:
+
+```bash
+artifacts/bench/cc_thinkstation1_pipeline_whole_job_20260730.await_quiet.sh
+```
+
+Everything except the ratio is already banked. The remaining step needs a quiet
+host, not more code.
