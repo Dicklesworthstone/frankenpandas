@@ -27,6 +27,25 @@ A/A null medians must sit within 2% of unity):
 undecidable at both sizes. A change that had accidentally sped up *everything*
 would have been measuring the host, not the lever.
 
+## vs LIVE pandas, same invocation — the gated before/after
+
+Same host, corrected three-clause gate, **all three clauses satisfied on every
+row** (`clauses=111`), pandas 2.2.3 in-process, shipped ELF `4225b3fb…`:
+
+| binary | `groupby_mean_float64` @1M | fp p50 | pandas p50 |
+|---|---:|---:|---:|
+| HEAD baseline | 3.513x FASTER | 2454.25 µs | 8621.96 µs |
+| **shipped (fused)** | **6.968x FASTER** | **1361.73 µs** | 9488.3 µs |
+| HEAD baseline, `groupby_sum_int64` @1M | 3.953x FASTER | 2089.86 µs | 8261.93 µs |
+
+⚠️ **Read the ratio jump carefully.** The pandas arm drifted between the two
+invocations — 8621.96 → 9488.3 µs, about +10% — so part of 3.513 → 6.968 is
+incumbent variance, not our gain. The robust figure is the FrankenPandas side:
+**2454.25 → 1361.73 µs = 1.80x**, which agrees with the independent FP-side A/B
+below (1.776x on this same ELF). Holding the incumbent fixed at the baseline
+invocation's 8621.96 µs, the fused ratio is **~6.3x**, and that is the number to
+quote rather than 6.97x.
+
 ## What it does
 
 A one-column `df.groupby(int64_key).mean()` walked memory four times:
