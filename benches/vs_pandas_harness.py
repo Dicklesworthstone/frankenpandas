@@ -2323,6 +2323,13 @@ def bench_str_groupby_sum_arrow_pandas(df: pd.DataFrame) -> PairedSamples:
     return _bench_str_groupby_sum_pandas(df, "arrow")
 
 
+def bench_str_len_arrow_pandas(df: pd.DataFrame) -> PairedSamples:
+    """Measure character counts on pandas' Arrow-backed string storage."""
+    names = [f"item_{i:010d}" for i in range(len(df))]
+    series = pd.Series(_as_string_column(names, "arrow"))
+    return time_operation(lambda: series.str.len())
+
+
 def bench_str_contains_arrow_pandas(df: pd.DataFrame) -> PairedSamples:
     """Run literal contains on the fastest screened pandas string backend.
 
@@ -2581,6 +2588,7 @@ PANDAS_WORKLOADS = {
         "str_groupby_sum": bench_str_groupby_sum_pandas,
         "str_groupby_sum_object": bench_str_groupby_sum_object_pandas,
         "str_groupby_sum_arrow": bench_str_groupby_sum_arrow_pandas,
+        "str_len": bench_str_len_arrow_pandas,
         "str_contains_arrow": bench_str_contains_arrow_pandas,
         "str_startswith_arrow": bench_str_startswith_arrow_pandas,
     },

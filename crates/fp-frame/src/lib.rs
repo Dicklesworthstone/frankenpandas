@@ -41845,7 +41845,7 @@ impl StringAccessor<'_> {
     /// the column to `Float64` only when a null forced the promotion.
     fn apply_str_int<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
     where
-        F: Fn(&str) -> i64,
+        F: Fn(&str) -> i64 + Sync,
     {
         // Typed fast path (br-frankenpandas-2krr0, mirrors apply_str_bool in
         // 42da7556): an all-valid Utf8 column can never trigger the
@@ -41859,11 +41859,36 @@ impl StringAccessor<'_> {
         // Chained-read fast path (rung 3): int op over a contiguous Utf8
         // input without materializing its Scalar view.
         if let Some((in_bytes, in_offsets)) = column.as_utf8_contiguous() {
-            let mut out = Vec::with_capacity(in_offsets.len() - 1);
-            for w in in_offsets.windows(2) {
-                let s = std::str::from_utf8(&in_bytes[w[0]..w[1]])
-                    .expect("contiguous utf8 buffer is valid by construction");
-                out.push(func(s));
+            const PARALLEL_MIN_BYTES: usize = 8 * 1024 * 1024;
+            const MIN_ROWS_PER_WORKER: usize = 131_072;
+            let n = in_offsets.len() - 1;
+            let workers = if in_bytes.len() >= PARALLEL_MIN_BYTES {
+                std::thread::available_parallelism()
+                    .map_or(1, std::num::NonZeroUsize::get)
+                    .min(64)
+                    .min(n.div_ceil(MIN_ROWS_PER_WORKER))
+            } else {
+                1
+            };
+            let mut out = vec![0_i64; n];
+            let map_rows = |out: &mut [i64], start_row: usize| {
+                let offsets = &in_offsets[start_row..=start_row + out.len()];
+                for (slot, w) in out.iter_mut().zip(offsets.windows(2)) {
+                    let s = std::str::from_utf8(&in_bytes[w[0]..w[1]])
+                        .expect("contiguous utf8 buffer is valid by construction");
+                    *slot = func(s);
+                }
+            };
+            if workers < 2 {
+                map_rows(&mut out, 0);
+            } else {
+                let rows_per_worker = n.div_ceil(workers);
+                std::thread::scope(|scope| {
+                    for (part, out_chunk) in out.chunks_mut(rows_per_worker).enumerate() {
+                        let map_rows = &map_rows;
+                        scope.spawn(move || map_rows(out_chunk, part * rows_per_worker));
+                    }
+                });
             }
             let index = self.series.index().clone();
             return Series::new(name, index, Column::from_i64_values_owned(out));
@@ -93500,14 +93525,15 @@ mod tests {
             .column()
             .as_utf8_contiguous()
             .expect("upper must retain contiguous Utf8 output");
+        let lengths = series.str().len().unwrap();
+        let length_values = lengths
+            .column()
+            .as_i64_slice()
+            .expect("len must retain typed Int64 output");
         assert_eq!(contains_flags.len(), ROWS);
         for row in 0..ROWS {
             assert_eq!(contains_flags[row], row % 3 == 0, "contains row {row}");
-            assert_eq!(
-                startswith_flags[row],
-                row % 3 == 0,
-                "startswith row {row}"
-            );
+            assert_eq!(startswith_flags[row], row % 3 == 0, "startswith row {row}");
             assert!(endswith_flags[row], "endswith row {row}");
             let expected: &[u8] = if row % 3 == 0 {
                 b"ITEM_5XXXXXXXXXX"
@@ -93519,6 +93545,7 @@ mod tests {
                 expected,
                 "upper row {row}"
             );
+            assert_eq!(length_values[row], WIDTH as i64, "len row {row}");
         }
 
         let unicode = Series::new(
@@ -93530,10 +93557,11 @@ mod tests {
         let unicode_upper = unicode.str().upper().unwrap();
         assert_eq!(
             unicode_upper.values(),
-            &[
-                Scalar::Utf8("STRASSE".into()),
-                Scalar::Utf8("Σ".into()),
-            ]
+            &[Scalar::Utf8("STRASSE".into()), Scalar::Utf8("Σ".into()),]
+        );
+        assert_eq!(
+            unicode.str().len().unwrap().values(),
+            &[Scalar::Int64(6), Scalar::Int64(1)]
         );
     }
 
