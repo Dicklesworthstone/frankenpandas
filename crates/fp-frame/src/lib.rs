@@ -80642,8 +80642,8 @@ impl DataFrameGroupBy<'_> {
     /// ascending key, which for a direct-address table is ascending slot.
     ///
     /// Deliberately narrow: one all-valid Float64 value column and a
-    /// single-accumulator func. `median`/`std`/`var` need a second pass over the
-    /// values and are left on the split path.
+    /// single-accumulator func. `median` needs a second pass over the values;
+    /// large `std`/`var` workloads use the stable radix-partitioned path below.
     fn try_fused_int64_dense(
         &self,
         value_cols: &[String],
@@ -80719,6 +80719,236 @@ impl DataFrameGroupBy<'_> {
         .ok()
     }
 
+    /// Stable shared-nothing variance/std for a bounded Int64 key and all-valid
+    /// Float64 value columns. Each row morsel counting-partitions its values by
+    /// direct-address key slot. Group workers then consume the morsel partitions
+    /// in input order, so every group's sum and squared-deviation folds are
+    /// bit-identical to the serial dense reducer while independent groups run on
+    /// separate cores without locks. Unlike column-only parallelism, this can use
+    /// all available CPUs even for a one-column frame, and it never materializes
+    /// the input-sized `gid_per_row` bridge.
+    fn try_parallel_int64_dense_var(
+        &self,
+        value_cols: &[String],
+        keys: &[i64],
+        min: i64,
+        range: usize,
+        func_name: &str,
+    ) -> Result<Option<DataFrame>, FrameError> {
+        const PAR_MIN_ROWS: usize = 2_000_000;
+        const MAX_RADIX_SLOTS: usize = 16_384;
+        const MAX_PARTITION_VALUES: usize = 64 * 1024 * 1024;
+        const MIN_ROWS_PER_WORKER: usize = 131_072;
+        const MIN_SLOTS_PER_WORKER: usize = 8;
+
+        if !matches!(func_name, "var" | "std")
+            || keys.len() < PAR_MIN_ROWS
+            || range == 0
+            || range > MAX_RADIX_SLOTS
+            || value_cols.is_empty()
+            || u32::try_from(keys.len()).is_err()
+            || keys
+                .len()
+                .checked_mul(value_cols.len())
+                .is_none_or(|n| n > MAX_PARTITION_VALUES)
+        {
+            return Ok(None);
+        }
+
+        let mut value_slices = Vec::with_capacity(value_cols.len());
+        for name in value_cols {
+            let Some(values) = self.df.columns[name].as_f64_slice() else {
+                return Ok(None);
+            };
+            if values.len() != keys.len() {
+                return Ok(None);
+            }
+            value_slices.push(values);
+        }
+
+        let available = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get);
+        let worker_count = available
+            .min((keys.len() / MIN_ROWS_PER_WORKER).max(1))
+            .min(range.div_ceil(MIN_SLOTS_PER_WORKER).max(1));
+        if worker_count < 2 {
+            return Ok(None);
+        }
+
+        let ncols = value_slices.len();
+        let row_chunk = keys.len().div_ceil(worker_count);
+        // One flat, group-major row-id buffer per morsel. A u32 id is enough for
+        // this gated path and is six times smaller than copying three f64 value
+        // columns; stage two gathers the shared typed columns by these stable ids.
+        let partitions: Vec<(Vec<u32>, Vec<usize>, Vec<usize>)> =
+            std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(worker_count);
+                for (worker, key_chunk) in keys.chunks(row_chunk).enumerate() {
+                    let start = worker * row_chunk;
+                    handles.push(scope.spawn(move || {
+                        let mut counts = vec![0usize; range];
+                        let mut first = vec![usize::MAX; range];
+                        for (local_row, &key) in key_chunk.iter().enumerate() {
+                            let slot = (key as i128 - min as i128) as usize;
+                            counts[slot] += 1;
+                            if first[slot] == usize::MAX {
+                                first[slot] = start + local_row;
+                            }
+                        }
+
+                        let mut offsets = Vec::with_capacity(range + 1);
+                        offsets.push(0usize);
+                        for &count in &counts {
+                            offsets.push(offsets.last().copied().unwrap_or(0) + count);
+                        }
+                        let mut cursor = offsets[..range].to_vec();
+                        let mut row_ids = vec![0_u32; key_chunk.len()];
+                        for (local_row, &key) in key_chunk.iter().enumerate() {
+                            let global_row = start + local_row;
+                            let slot = (key as i128 - min as i128) as usize;
+                            let dst = cursor[slot];
+                            cursor[slot] += 1;
+                            row_ids[dst] = global_row as u32;
+                        }
+                        (row_ids, offsets, first)
+                    }));
+                }
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle.join().map_err(|_| {
+                            FrameError::CompatibilityRejected(
+                                "dense variance partition worker panicked".into(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, FrameError>>()
+            })?;
+
+        let mut first_row = vec![usize::MAX; range];
+        for (_, _, local_first) in &partitions {
+            for (slot, &row) in local_first.iter().enumerate() {
+                first_row[slot] = first_row[slot].min(row);
+            }
+        }
+        let mut slots: Vec<usize> = first_row
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, &row)| (row != usize::MAX).then_some(slot))
+            .collect();
+        if self.sort {
+            slots.sort_unstable();
+        } else {
+            slots.sort_unstable_by_key(|&slot| first_row[slot]);
+        }
+
+        let group_workers = worker_count.min(slots.len()).max(1);
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let partial_results: Vec<Vec<(usize, usize, Vec<f64>)>> =
+            std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(group_workers);
+                for _ in 0..group_workers {
+                    let next = &next;
+                    let partitions = &partitions;
+                    let slots = &slots;
+                    let value_slices = &value_slices;
+                    handles.push(scope.spawn(move || {
+                        let mut results = Vec::new();
+                        loop {
+                            let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(&slot) = slots.get(index) else {
+                                break;
+                            };
+                            let mut count = 0usize;
+                            let mut sums = vec![0.0_f64; ncols];
+                            for (row_ids, offsets, _) in partitions {
+                                let rows = &row_ids[offsets[slot]..offsets[slot + 1]];
+                                count += rows.len();
+                                for &row in rows {
+                                    let row = row as usize;
+                                    for column in 0..ncols {
+                                        sums[column] += value_slices[column][row];
+                                    }
+                                }
+                            }
+                            let means: Vec<f64> =
+                                sums.iter().map(|sum| *sum / count as f64).collect();
+                            let mut sumsq = vec![0.0_f64; ncols];
+                            for (row_ids, offsets, _) in partitions {
+                                let rows = &row_ids[offsets[slot]..offsets[slot + 1]];
+                                for &row in rows {
+                                    let row = row as usize;
+                                    for column in 0..ncols {
+                                        sumsq[column] +=
+                                            (value_slices[column][row] - means[column]).powi(2);
+                                    }
+                                }
+                            }
+                            if func_name == "std" && count > 1 {
+                                for value in &mut sumsq {
+                                    *value = (*value / (count - 1) as f64).sqrt();
+                                }
+                            } else if count > 1 {
+                                for value in &mut sumsq {
+                                    *value /= (count - 1) as f64;
+                                }
+                            }
+                            results.push((slot, count, sumsq));
+                        }
+                        results
+                    }));
+                }
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle.join().map_err(|_| {
+                            FrameError::CompatibilityRejected(
+                                "dense variance group worker panicked".into(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, FrameError>>()
+            })?;
+
+        let mut by_slot: Vec<Option<(usize, Vec<f64>)>> =
+            std::iter::repeat_with(|| None).take(range).collect();
+        for results in partial_results {
+            for (slot, count, values) in results {
+                by_slot[slot] = Some((count, values));
+            }
+        }
+
+        let labels: Vec<IndexLabel> = slots
+            .iter()
+            .map(|&slot| IndexLabel::Int64((min as i128 + slot as i128) as i64))
+            .collect();
+        let out_index = Index::new(labels).rename_index(Some(self.by[0].as_str()));
+        let mut result_cols = BTreeMap::new();
+        for (column, name) in value_cols.iter().enumerate() {
+            let output: Vec<Scalar> = slots
+                .iter()
+                .map(|&slot| {
+                    let (count, values) = by_slot[slot]
+                        .as_ref()
+                        .expect("present radix slot has a result");
+                    if *count <= 1 {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Float64(values[column])
+                    }
+                })
+                .collect();
+            result_cols.insert(name.clone(), Column::from_values(output)?);
+        }
+        Ok(Some(DataFrame::new_with_axes(
+            out_index,
+            None,
+            result_cols,
+            value_cols.to_vec(),
+            None,
+        )?))
+    }
+
     fn aggregate_int64_dense(
         &self,
         value_cols: &[String],
@@ -80727,22 +80957,26 @@ impl DataFrameGroupBy<'_> {
         range: usize,
         func_name: &str,
     ) -> Result<DataFrame, FrameError> {
-        let indexed =
-            if let Some(fused) = self.try_fused_int64_dense(value_cols, keys, min, range, func_name)
-            {
-                fused
-            } else {
-                let (gid_per_row, ng, order, out_index) =
-                    self.int64_dense_grouping(keys, min, range);
-                self.dense_aggregate_emit(
-                    value_cols,
-                    &gid_per_row,
-                    ng,
-                    &order,
-                    func_name,
-                    out_index,
-                )?
-            };
+        let indexed = if let Some(parallel) =
+            self.try_parallel_int64_dense_var(value_cols, keys, min, range, func_name)?
+        {
+            parallel
+        } else if let Some(fused) =
+            self.try_fused_int64_dense(value_cols, keys, min, range, func_name)
+        {
+            fused
+        } else {
+            let (gid_per_row, ng, order, out_index) =
+                self.int64_dense_grouping(keys, min, range);
+            self.dense_aggregate_emit(
+                value_cols,
+                &gid_per_row,
+                ng,
+                &order,
+                func_name,
+                out_index,
+            )?
+        };
         if self.as_index {
             return Ok(indexed);
         }
