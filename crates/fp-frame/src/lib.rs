@@ -41980,7 +41980,11 @@ impl StringAccessor<'_> {
         // the needle across the ENTIRE byte buffer in one pass (the regex
         // crate's literal searcher is a vectorized memmem) instead of one
         // two-way-search call per ~24-byte row, then bound each hit to a row
-        // by the offsets table. Boundary handling is the correctness crux:
+        // by the offsets table. Matches arrive in ascending byte order, so a
+        // monotone row cursor advances across the offsets at most once. The
+        // previous `partition_point` per hit made this O(matches * log(rows));
+        // on the 10M exact-literal workload, that binary search consumed 74.3%
+        // of whole-job cycles. Boundary handling is the correctness crux:
         // a match CROSSING a row boundary is rejected and the search resumes
         // at match_start+1 (a real in-row occurrence can otherwise be
         // shadowed by a non-overlapping crossing match — e.g. rows
@@ -41999,14 +42003,18 @@ impl StringAccessor<'_> {
                 out.fill(true);
             } else if let Ok(re) = regex::bytes::Regex::new(&regex::escape(pat)) {
                 let mut pos = 0usize;
+                let mut row = 0usize;
                 while pos < bytes.len() {
                     let Some(m) = re.find_at(bytes, pos) else {
                         break;
                     };
-                    // Row containing the match start: offsets is ascending
-                    // with offsets[0] == 0, so partition_point gives the
-                    // first offset > start; minus one is the row.
-                    let row = offsets.partition_point(|&o| o <= m.start()) - 1;
+                    // Advance through every row boundary at or before the
+                    // match. `<=` skips empty rows and selects the last row
+                    // beginning at this byte, exactly matching the former
+                    // `partition_point(...)-1` behavior for duplicate offsets.
+                    while offsets[row + 1] <= m.start() {
+                        row += 1;
+                    }
                     let row_end = offsets[row + 1];
                     if m.end() <= row_end {
                         out[row] = true;
