@@ -6562,7 +6562,14 @@ fn build_single_key_ordered_unique_left_merge_output(
     let overlapping_names =
         collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
-    let right_utf8_plan = shared_optional_utf8_gather_plan(right_positions, right.len());
+    // Building the shared Utf8 gather plan is O(output_rows): it scans every
+    // optional position and, for a non-contiguous match pattern, allocates an
+    // additional position tape plus validity bitmap. Most ordered Int64 joins
+    // have only numeric payloads, where every column ignores that plan and uses
+    // its typed reindexer. Defer the work until the first Utf8 payload actually
+    // asks for it; subsequent Utf8 columns still share the single immutable
+    // plan exactly as before.
+    let right_utf8_plan: OnceLock<Option<SharedOptionalUtf8GatherPlan>> = OnceLock::new();
 
     for name in left.column_names() {
         let col = left
@@ -6589,8 +6596,14 @@ fn build_single_key_ordered_unique_left_merge_output(
             continue;
         }
 
-        let reindexed =
-            reindex_with_shared_utf8_plan(col, right_positions, right_utf8_plan.as_ref())?;
+        let utf8_plan = if col.dtype() == DType::Utf8 {
+            right_utf8_plan
+                .get_or_init(|| shared_optional_utf8_gather_plan(right_positions, right.len()))
+                .as_ref()
+        } else {
+            None
+        };
+        let reindexed = reindex_with_shared_utf8_plan(col, right_positions, utf8_plan)?;
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
@@ -14973,6 +14986,43 @@ mod tests {
         assert_eq!(right_values[2], Scalar::Int64(200));
         assert!(right_values[3].is_missing());
         assert_eq!(right_values[4], Scalar::Int64(300));
+    }
+
+    #[test]
+    fn merge_left_ordered_unique_int64_retains_lazy_utf8_payload_plan() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                ("id", (0..5_i64).map(Scalar::Int64).collect::<Vec<_>>()),
+                ("v", (10..15_i64).map(Scalar::Int64).collect::<Vec<_>>()),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "tag"],
+            vec![
+                (
+                    "id",
+                    [0_i64, 2, 4, 6].into_iter().map(Scalar::Int64).collect(),
+                ),
+                (
+                    "tag",
+                    ["zero", "two", "four", "six"]
+                        .into_iter()
+                        .map(|value| Scalar::Utf8(value.to_owned()))
+                        .collect(),
+                ),
+            ],
+        )
+        .unwrap();
+
+        let merged = merge_dataframes(&left, &right, "id", JoinType::Left).unwrap();
+        let tags = merged.columns.get("tag").unwrap().values();
+        assert_eq!(tags[0], Scalar::Utf8("zero".to_owned()));
+        assert!(tags[1].is_missing());
+        assert_eq!(tags[2], Scalar::Utf8("two".to_owned()));
+        assert!(tags[3].is_missing());
+        assert_eq!(tags[4], Scalar::Utf8("four".to_owned()));
     }
 
     #[test]
