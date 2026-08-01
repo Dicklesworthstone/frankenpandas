@@ -41997,36 +41997,91 @@ impl StringAccessor<'_> {
         // `str::contains`.
         if let Some((bytes, offsets)) = self.series.column().as_utf8_contiguous() {
             let n = offsets.len() - 1;
-            let mut out = vec![false; n];
-            if pat.is_empty() {
+            let out = if pat.is_empty() {
                 // `s.contains("")` is true for every row, including empty.
-                out.fill(true);
+                vec![true; n]
             } else if let Ok(re) = regex::bytes::Regex::new(&regex::escape(pat)) {
-                let mut pos = 0usize;
-                let mut row = 0usize;
-                while pos < bytes.len() {
-                    let Some(m) = re.find_at(bytes, pos) else {
-                        break;
+                // Every row range is independent: worker byte slices begin
+                // and end at semantic row boundaries, so no valid match can
+                // cross between workers. Each worker owns its result buffer;
+                // concatenation is ordered and needs no locks or atomics.
+                let scan_rows =
+                    |re: &regex::bytes::Regex, start_row: usize, end_row: usize| {
+                        let byte_base = offsets[start_row];
+                        let chunk_bytes = &bytes[byte_base..offsets[end_row]];
+                        let chunk_offsets = &offsets[start_row..=end_row];
+                        let mut chunk_out = vec![false; end_row - start_row];
+                        let mut pos = 0usize;
+                        let mut row = 0usize;
+                        while pos < chunk_bytes.len() {
+                            let Some(m) = re.find_at(chunk_bytes, pos) else {
+                                break;
+                            };
+                            let absolute_start = byte_base + m.start();
+                            // Advance through every row boundary at or before
+                            // the match. `<=` skips empty rows and selects the
+                            // last row beginning at this byte, exactly matching
+                            // `partition_point(...)-1` for duplicate offsets.
+                            while chunk_offsets[row + 1] <= absolute_start {
+                                row += 1;
+                            }
+                            let row_end = chunk_offsets[row + 1] - byte_base;
+                            if m.end() <= row_end {
+                                chunk_out[row] = true;
+                                pos = row_end;
+                            } else {
+                                pos = m.start() + 1;
+                            }
+                        }
+                        chunk_out
                     };
-                    // Advance through every row boundary at or before the
-                    // match. `<=` skips empty rows and selects the last row
-                    // beginning at this byte, exactly matching the former
-                    // `partition_point(...)-1` behavior for duplicate offsets.
-                    while offsets[row + 1] <= m.start() {
-                        row += 1;
+
+                const PARALLEL_MIN_BYTES: usize = 8 * 1024 * 1024;
+                const MIN_ROWS_PER_WORKER: usize = 131_072;
+                let workers = if bytes.len() >= PARALLEL_MIN_BYTES {
+                    std::thread::available_parallelism()
+                        .map_or(1, std::num::NonZeroUsize::get)
+                        .min(64)
+                        .min(n.div_ceil(MIN_ROWS_PER_WORKER))
+                } else {
+                    1
+                };
+                if workers < 2 {
+                    scan_rows(&re, 0, n)
+                } else {
+                    let rows_per_worker = n.div_ceil(workers);
+                    let parts = std::thread::scope(|scope| {
+                        let mut handles = Vec::with_capacity(workers);
+                        for start_row in (0..n).step_by(rows_per_worker) {
+                            let end_row = (start_row + rows_per_worker).min(n);
+                            // regex documents per-thread clones as the
+                            // contention-free form: compiled read-only state
+                            // remains shared while mutable search state is local.
+                            let worker_re = re.clone();
+                            let scan_rows = &scan_rows;
+                            handles.push(scope.spawn(move || {
+                                scan_rows(&worker_re, start_row, end_row)
+                            }));
+                        }
+                        handles
+                            .into_iter()
+                            .map(|handle| {
+                                handle
+                                    .join()
+                                    .expect("literal contains worker thread panicked")
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    let mut merged = Vec::with_capacity(n);
+                    for part in parts {
+                        merged.extend(part);
                     }
-                    let row_end = offsets[row + 1];
-                    if m.end() <= row_end {
-                        out[row] = true;
-                        pos = row_end;
-                    } else {
-                        pos = m.start() + 1;
-                    }
+                    merged
                 }
             } else {
                 // Unreachable for an escaped literal; keep the safe fallback.
                 return self.apply_str_bool(|s| s.contains(pat), self.series.name());
-            }
+            };
             let index = self.series.index().clone();
             return Series::new(self.series.name(), index, Column::from_bool_values(out));
         }
@@ -93302,6 +93357,39 @@ mod tests {
         // Empty needle: true everywhere, including the empty row.
         let all = lowered.str().contains("").unwrap();
         assert!(all.values().iter().all(|v| *v == Scalar::Bool(true)));
+    }
+
+    #[test]
+    fn str_contains_parallel_row_morsels_preserve_order_and_values() {
+        const ROWS: usize = 600_000;
+        const WIDTH: usize = 16;
+        let mut bytes = Vec::with_capacity(ROWS * WIDTH);
+        let mut offsets = Vec::with_capacity(ROWS + 1);
+        offsets.push(0);
+        for row in 0..ROWS {
+            if row % 3 == 0 {
+                bytes.extend_from_slice(b"item_5xxxxxxxxxx");
+            } else {
+                bytes.extend_from_slice(b"item_xxxxxxxxxxx");
+            }
+            offsets.push(bytes.len());
+        }
+        let series = Series::new(
+            "s",
+            Index::new_known_unique_int64_unit_range(0, ROWS),
+            Column::from_utf8_contiguous(bytes, offsets),
+        )
+        .unwrap();
+
+        let result = series.str().contains("5").unwrap();
+        let flags = result
+            .column()
+            .as_bool_slice()
+            .expect("literal contains must retain typed Bool output");
+        assert_eq!(flags.len(), ROWS);
+        for (row, &matched) in flags.iter().enumerate() {
+            assert_eq!(matched, row % 3 == 0, "mismatch at row {row}");
+        }
     }
 
     #[test]
