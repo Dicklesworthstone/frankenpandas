@@ -5,8 +5,50 @@
 **Host:** `thinkstation1`, AMD Ryzen Threadripper PRO 5975WX, 32 physical / 64 logical
 **Base commit:** `f00b8da8016c569ccd02bbedc1dc8a715d265dc5`
 
-Status: **lever derived and implemented; correctness established; routing proof and
-timing NOT yet obtained.** Nothing here claims a speedup.
+Decision: **KEEP.** Routing proof obtained and the whole job is **1.4373x** faster
+FP-side. No vs-pandas ratio is claimed for the whole job — that row is still open.
+
+## Routing proof (the claim this lever actually rested on)
+
+The shape-invariance test proves the two paths agree; it would pass even if the
+bypass never fired. The decisive evidence is the re-profile, same workload, same
+inputs, candidate ELF `f0c89e0e…` vs reference `7aef9c95…`:
+
+| symbol | reference | candidate |
+|---|---:|---:|
+| `DataFrameGroupBy::build_groups` | 14.2% (**#1 entry**) | **absent** |
+| `DataFrameGroupBy::aggregate_named_func` | 10.0% | **absent** |
+| `DataFrameGroupBy::format_output` | 1.5% | **absent** |
+| `DataFrameGroupBy::int64_dense_grouping` | — | **2.11%** (new) |
+| `DataFrameGroupBy::dense_aggregate_emit` | — | **2.62%** (new) |
+| `OnceLock<Vec<Scalar>>::call_once_force` | 3.9% | 2.7% |
+
+The generic hash-grouping path is gone and the dense bypass is in its place: the
+groupby cluster fell from **~25.7% to ~4.7%** of whole-job self time. The residual
+leaders are now exactly the shared costs ruled out above (filter gather, Parquet
+decode, memset/memmove), whose *relative* shares rise precisely because the total
+shrank.
+
+## Whole-job measurement (interleaved, A/A null control)
+
+Candidate and reference interleaved within one window, order alternated per round,
+plus an A/A control running the candidate twice at the same cadence.
+
+| arm | p50 | n |
+|---|---:|---:|
+| reference (pre-change) | 40,162.4 us | 10 |
+| candidate | **27,942.5 us** | 10 |
+
+- **Whole-job self-speedup 1.4373x**, bootstrap 95% CI **[1.2273, 1.7897]**.
+- A/A null control **1.0002x**, CI **[0.8456, 1.1800]**.
+- Separated — but the margin is narrow (1.2273 vs 1.1800) and the A/A interval is
+  wide because the host was not quiet. Treat 1.4373x as directional, not as a
+  gate-admitted figure. Operation threads observed: 3–5.
+
+This is a **whole-job** number on a six-stage ETL job, from a single routing fix —
+not a kernel microbenchmark.
+
+⚠️ Not claimed: any vs-pandas whole-job ratio. That needs the host-wide gate.
 
 ## Method: profile the whole job, then ask who else pays
 

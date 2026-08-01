@@ -78689,8 +78689,19 @@ impl DataFrameGroupBy<'_> {
         // positions/groups map and force a redundant second gid table). The
         // generic `build_groups`-then-inline-dense path below still serves
         // multi-key Int64 groupings and frames with a non-dense value column.
-        if self.as_index
-            && self.by.len() == 1
+        //
+        // `as_index` is deliberately NOT part of this gate. It selects only the
+        // OUTPUT SHAPE — whether the grouping key is returned as the index or as
+        // a leading regular column — and cannot change which groups exist or what
+        // the aggregation computes, so gating a compute fast path on it stranded
+        // the canonical ETL idiom `groupby(k, as_index=False).sum()` on the slow
+        // path. Whole-job profile of `pipeline/etl_job_parquet` at 1M:
+        // `build_groups` was the #1 self-time entry at 17%, reachable only
+        // because of that flag, and `format_output`'s as_index=False branch then
+        // forced a full `Vec<Scalar>` expansion of the 1M-row key column just to
+        // pick one representative per group. `aggregate_int64_dense` reshapes
+        // instead, from typed keys it already holds.
+        if self.by.len() == 1
             && matches!(
                 func_name,
                 "sum"
@@ -80529,11 +80540,35 @@ impl DataFrameGroupBy<'_> {
         range: usize,
         func_name: &str,
     ) -> Result<DataFrame, FrameError> {
-        if let Some(fused) = self.try_fused_int64_dense(value_cols, keys, min, range, func_name) {
-            return Ok(fused);
+        let indexed =
+            if let Some(fused) = self.try_fused_int64_dense(value_cols, keys, min, range, func_name)
+            {
+                fused
+            } else {
+                let (gid_per_row, ng, order, out_index) =
+                    self.int64_dense_grouping(keys, min, range);
+                self.dense_aggregate_emit(
+                    value_cols,
+                    &gid_per_row,
+                    ng,
+                    &order,
+                    func_name,
+                    out_index,
+                )?
+            };
+        if self.as_index {
+            return Ok(indexed);
         }
-        let (gid_per_row, ng, order, out_index) = self.int64_dense_grouping(keys, min, range);
-        self.dense_aggregate_emit(value_cols, &gid_per_row, ng, &order, func_name, out_index)
+        // as_index=False: pandas returns the grouping key as the FIRST regular
+        // column over a default integer-range index. That is exactly
+        // `reset_index(false)` applied to the as_index=True result — the dense
+        // grouping already named the output index after the key column, and
+        // `reset_index` has a typed `int64_label_values` path, so the key goes
+        // back to a column with NO Scalar round trip. This reshapes `ng` output
+        // rows; the generic `format_output` branch instead reads
+        // `src_col.values()[first_row]` on the INPUT column, materializing one
+        // boxed `Scalar` for every input row to pick `ng` representatives.
+        indexed.reset_index(false)
     }
 
     /// Multi-key analogue of `aggregate_int64_dense` (br-frankenpandas-1q4q4):
@@ -105432,6 +105467,93 @@ mod tests {
         assert_eq!(r2.num_columns(), 1);
         assert_eq!(r1.column_names(), &["x"]);
         assert_eq!(r2.column_names(), &["x"]);
+    }
+
+    #[test]
+    fn groupby_as_index_false_int64_dense_bypass_changes_shape_only() {
+        // The Int64-key dense bypass now also serves `as_index=False`. `as_index`
+        // selects only the OUTPUT SHAPE, so the two results must agree on every
+        // group and every aggregated value; only the key's placement may differ.
+        // A bounded-range all-valid Int64 key with dense Int64 + Float64 value
+        // columns is exactly the shape that takes the bypass (and exactly the
+        // shape the ETL pipeline's `groupby(store_id, as_index=False).sum()` has).
+        let idx: Vec<IndexLabel> = (0..6_i64).map(IndexLabel::Int64).collect();
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "store_id",
+                idx.clone(),
+                vec![7, 3, 7, 3, 5, 7]
+                    .into_iter()
+                    .map(Scalar::Int64)
+                    .collect(),
+            )
+            .unwrap(),
+            Series::from_values(
+                "units",
+                idx.clone(),
+                vec![10, 20, 30, 40, 50, 60]
+                    .into_iter()
+                    .map(Scalar::Int64)
+                    .collect(),
+            )
+            .unwrap(),
+            Series::from_values(
+                "amount",
+                idx,
+                vec![1.5, 2.5, 3.0, 4.0, 0.5, 1.0]
+                    .into_iter()
+                    .map(Scalar::Float64)
+                    .collect(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let indexed = df
+            .groupby_with_as_index(&["store_id"], true)
+            .unwrap()
+            .sum()
+            .unwrap();
+        let flat = df
+            .groupby_with_as_index(&["store_id"], false)
+            .unwrap()
+            .sum()
+            .unwrap();
+
+        // Same groups, ascending key order (groupby sort=True default).
+        assert_eq!(
+            indexed.index().labels(),
+            &[IndexLabel::Int64(3), IndexLabel::Int64(5), IndexLabel::Int64(7)]
+        );
+        // as_index=False: key becomes the FIRST regular column, index is 0..ng.
+        assert_eq!(flat.column_names(), &["store_id", "units", "amount"]);
+        assert_eq!(
+            flat.index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(1), IndexLabel::Int64(2)]
+        );
+        assert_eq!(
+            flat.column("store_id").unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(7)]
+        );
+
+        // The aggregation itself is untouched by `as_index`: every value column
+        // must be bit-for-bit what the as_index=True arm produced.
+        for name in ["units", "amount"] {
+            assert_eq!(
+                flat.column(name).unwrap().values(),
+                indexed.column(name).unwrap().values(),
+                "as_index=False changed aggregated column {name}"
+            );
+        }
+        // And the values are correct on their own terms.
+        assert_eq!(
+            flat.column("units").unwrap().values(),
+            &[Scalar::Int64(60), Scalar::Int64(50), Scalar::Int64(100)]
+        );
+        assert_eq!(
+            flat.column("amount").unwrap().values(),
+            &[Scalar::Float64(6.5), Scalar::Float64(0.5), Scalar::Float64(5.5)]
+        );
     }
 
     // ── sample tests ──
