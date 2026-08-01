@@ -41911,6 +41911,59 @@ impl StringAccessor<'_> {
         Series::new(name, index, column)
     }
 
+    /// Allocation-once ASCII case conversion for contiguous Utf8 storage.
+    ///
+    /// ASCII case mapping is byte-local and length-preserving, so workers can
+    /// mutate disjoint raw-byte chunks without consulting row boundaries. The
+    /// offsets are copied once unchanged; there are no worker-local output
+    /// buffers, allocator contention, locks, or merge pass. Non-ASCII input
+    /// returns `None` so the Unicode-aware row kernel remains authoritative.
+    fn apply_ascii_case_contiguous(
+        &self,
+        uppercase: bool,
+    ) -> Option<Result<Series, FrameError>> {
+        let (in_bytes, in_offsets) = self.series.column().as_utf8_contiguous()?;
+        if !in_bytes.is_ascii() {
+            return None;
+        }
+
+        let mut bytes = in_bytes.to_vec();
+        const PARALLEL_MIN_BYTES: usize = 8 * 1024 * 1024;
+        const MIN_BYTES_PER_WORKER: usize = 512 * 1024;
+        let workers = if bytes.len() >= PARALLEL_MIN_BYTES {
+            std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(32)
+                .min(bytes.len().div_ceil(MIN_BYTES_PER_WORKER))
+        } else {
+            1
+        };
+        if workers < 2 {
+            if uppercase {
+                bytes.make_ascii_uppercase();
+            } else {
+                bytes.make_ascii_lowercase();
+            }
+        } else {
+            let bytes_per_worker = bytes.len().div_ceil(workers);
+            std::thread::scope(|scope| {
+                for chunk in bytes.chunks_mut(bytes_per_worker) {
+                    scope.spawn(move || {
+                        if uppercase {
+                            chunk.make_ascii_uppercase();
+                        } else {
+                            chunk.make_ascii_lowercase();
+                        }
+                    });
+                }
+            });
+        }
+
+        let index = self.series.index().clone();
+        let column = Column::from_utf8_contiguous(bytes, in_offsets.to_vec());
+        Some(Series::new(self.series.name(), index, column))
+    }
+
     /// Convert strings to lowercase.
     pub fn lower(&self) -> Result<Series, FrameError> {
         // ASCII fast path (br-frankenpandas-2krr0 rung 6): an all-ASCII row
@@ -41920,6 +41973,9 @@ impl StringAccessor<'_> {
         // ASCII IS the ASCII mapping, and the context-sensitive final-sigma
         // rule needs a non-ASCII Σ, which an all-ASCII row cannot contain.
         // Any non-ASCII row falls back to std's to_lowercase verbatim.
+        if let Some(result) = self.apply_ascii_case_contiguous(false) {
+            return result;
+        }
         self.apply_str_utf8(
             |s, buf| {
                 if s.is_ascii() {
@@ -41939,6 +41995,9 @@ impl StringAccessor<'_> {
     pub fn upper(&self) -> Result<Series, FrameError> {
         // Same ASCII fast path as lower(); to_uppercase on pure ASCII is
         // the ASCII mapping (no context-sensitive cases for ASCII input).
+        if let Some(result) = self.apply_ascii_case_contiguous(true) {
+            return result;
+        }
         self.apply_str_utf8(
             |s, buf| {
                 if s.is_ascii() {
@@ -93400,7 +93459,7 @@ mod tests {
     }
 
     #[test]
-    fn str_predicate_parallel_row_morsels_preserve_order_and_values() {
+    fn str_parallel_kernels_preserve_order_and_values() {
         const ROWS: usize = 600_000;
         const WIDTH: usize = 16;
         let mut bytes = Vec::with_capacity(ROWS * WIDTH);
@@ -93436,6 +93495,11 @@ mod tests {
             .column()
             .as_bool_slice()
             .expect("endswith must retain typed Bool output");
+        let upper = series.str().upper().unwrap();
+        let (upper_bytes, upper_offsets) = upper
+            .column()
+            .as_utf8_contiguous()
+            .expect("upper must retain contiguous Utf8 output");
         assert_eq!(contains_flags.len(), ROWS);
         for row in 0..ROWS {
             assert_eq!(contains_flags[row], row % 3 == 0, "contains row {row}");
@@ -93445,7 +93509,32 @@ mod tests {
                 "startswith row {row}"
             );
             assert!(endswith_flags[row], "endswith row {row}");
+            let expected: &[u8] = if row % 3 == 0 {
+                b"ITEM_5XXXXXXXXXX"
+            } else {
+                b"ITEM_XXXXXXXXXXX"
+            };
+            assert_eq!(
+                &upper_bytes[upper_offsets[row]..upper_offsets[row + 1]],
+                expected,
+                "upper row {row}"
+            );
         }
+
+        let unicode = Series::new(
+            "u",
+            Index::new_known_unique_int64_unit_range(0, 2),
+            Column::from_utf8_contiguous("straßeΣ".as_bytes().to_vec(), vec![0, 7, 9]),
+        )
+        .unwrap();
+        let unicode_upper = unicode.str().upper().unwrap();
+        assert_eq!(
+            unicode_upper.values(),
+            &[
+                Scalar::Utf8("STRASSE".into()),
+                Scalar::Utf8("Σ".into()),
+            ]
+        );
     }
 
     #[test]
