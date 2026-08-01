@@ -7683,6 +7683,108 @@ fn par_map_vec_f64_with_witness<G: Fn(usize) -> f64 + Sync>(
     (out, words, all_valid, all_finite)
 }
 
+/// Mask of the low `len` bits (`len <= 64`); `u64::MAX` for a full word.
+#[inline(always)]
+fn low_bit_mask(len: usize) -> u64 {
+    debug_assert!(len <= 64);
+    if len >= 64 {
+        u64::MAX
+    } else {
+        (1_u64 << len) - 1
+    }
+}
+
+/// Map one worker's input slice into its output slice and pack that slice's
+/// validity words, 64 values at a time.
+///
+/// The value loop is a pure slice zip over a 64-value block, so it carries no
+/// per-element bounds check and LLVM vectorizes it (`vsqrtpd` for `sqrt`); the
+/// witness loop then reads those same 64 values while they are still in L1
+/// rather than re-reading the output from DRAM.
+///
+/// Bit-identical to the per-element form: `f` is unchanged and per-index, and
+/// bit `k` of word `b` is set iff `!f(x).is_nan()` for the element at chunk
+/// offset `b * 64 + k` — exactly the `words[j / 64] |= 1 << (j % 64)` rule.
+#[inline(always)]
+fn map_block_with_witness<T: Copy, F: Fn(T) -> f64>(
+    out_c: &mut [f64],
+    words_c: &mut [u64],
+    in_c: &[T],
+    f: &F,
+) -> (bool, bool) {
+    let (mut all_valid, mut all_finite) = (true, true);
+    for ((word, out_b), in_b) in words_c
+        .iter_mut()
+        .zip(out_c.chunks_mut(64))
+        .zip(in_c.chunks(64))
+    {
+        for (o, &x) in out_b.iter_mut().zip(in_b.iter()) {
+            *o = f(x);
+        }
+        let mut bits = 0_u64;
+        for (k, &y) in out_b.iter().enumerate() {
+            all_finite &= y.is_finite();
+            bits |= u64::from(!y.is_nan()) << k;
+        }
+        all_valid &= bits == low_bit_mask(out_b.len());
+        *word = bits;
+    }
+    (all_valid, all_finite)
+}
+
+/// Slice-shaped sibling of [`par_map_vec_f64_with_witness`] for the contiguous,
+/// all-valid inputs that dominate `sqrt`/`ln`/`exp`.
+///
+/// The by-index form hands each worker a closure `g(base + j)` that indexes a
+/// captured slice. LLVM cannot prove those accesses stay in bounds, so the loop
+/// keeps a **per-element bounds check** and lowers to scalar `movsd` — profiling
+/// 1M `sqrt` on the shipped binary shows exactly that: `cmp`/`jae` then `movsd`,
+/// one f64 per iteration, no AVX. Handing each worker its own input SLICE
+/// removes the check and lets the value loop vectorize.
+///
+/// Chunking is rounded UP to a multiple of 64 so each worker owns whole validity
+/// words and no two workers touch the same `u64`. With `64 | chunk`, the value,
+/// word, and input chunk iterators all yield `ceil(n / chunk)` items, so the
+/// zips drop no work.
+fn par_map_slice_f64_with_witness<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
+    input: &[T],
+    f: F,
+) -> (Vec<f64>, Vec<u64>, bool, bool) {
+    const PAR_MIN: usize = 200_000;
+    let n = input.len();
+    let mut out = vec![0.0_f64; n];
+    let mut words = vec![0_u64; n.div_ceil(64)];
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(8);
+
+    if workers <= 1 || n < PAR_MIN {
+        let (all_valid, all_finite) = map_block_with_witness(&mut out, &mut words, input, &f);
+        return (out, words, all_valid, all_finite);
+    }
+
+    let chunk = n.div_ceil(workers).div_ceil(64) * 64;
+    let mut flags = vec![(true, true); n.div_ceil(chunk)];
+    std::thread::scope(|scope| {
+        for (((out_c, words_c), in_c), flag) in out
+            .chunks_mut(chunk)
+            .zip(words.chunks_mut(chunk / 64))
+            .zip(input.chunks(chunk))
+            .zip(flags.iter_mut())
+        {
+            let f = &f;
+            scope.spawn(move || {
+                *flag = map_block_with_witness(out_c, words_c, in_c, f);
+            });
+        }
+    });
+
+    let all_valid = flags.iter().all(|&(valid, _)| valid);
+    let all_finite = flags.iter().all(|&(_, finite)| finite);
+    (out, words, all_valid, all_finite)
+}
+
 /// `i64` sibling of [`par_map_vec_f64`] for compute-bound i64 index maps
 /// (python_mod_i64 / python_floor_div_i64 — integer idiv + sign adjustment).
 fn par_map_vec_i64<G: Fn(usize) -> i64 + Sync>(n: usize, g: G) -> Vec<i64> {
@@ -24413,9 +24515,13 @@ impl Column {
     fn typed_float_unary_nullable_owned_par<F: Fn(f64) -> f64 + Sync>(&self, f: F) -> Option<Self> {
         let len = self.len();
         let (out, validity_words, all_valid, all_finite) = if let Some(data) = self.as_f64_slice() {
-            par_map_vec_f64_with_witness(len, |i| f(data[i]))
+            // Contiguous + all-valid: hand each worker its own INPUT SLICE so the
+            // value loop is a bounds-check-free slice zip that vectorizes. The
+            // by-index sibling below stays for the nullable arms, whose per-element
+            // validity lookup is inherently indexed.
+            par_map_slice_f64_with_witness(data, |x| f(x))
         } else if let Some(data) = self.as_i64_slice() {
-            par_map_vec_f64_with_witness(len, |i| f(data[i] as f64))
+            par_map_slice_f64_with_witness(data, |x: i64| f(x as f64))
         } else if self.dtype == DType::Float64
             && let Some((data, validity)) = self.as_f64_slice_with_validity()
         {
@@ -39367,6 +39473,80 @@ mod tests {
                         assert_eq!(y.to_bits(), x.sqrt().to_bits(), "clean sqrt idx {i}");
                     }
                     other => panic!("clean sqrt idx {i} unexpectedly missing: {other:?}"),
+                }
+            }
+        }
+
+        #[test]
+        fn slice_par_witness_all_valid_input_producing_nan_matches_scalar_reference() {
+            // The ALL-VALID CONTIGUOUS arms (`as_f64_slice` / `as_i64_slice`) are served
+            // by `par_map_slice_f64_with_witness`, which packs each 64-value block's word
+            // as `bits |= !y.is_nan() << k` and folds `all_valid &= bits == low_bit_mask`.
+            // The test above cannot reach it: its NaN-heavy columns carry input gaps, so
+            // `as_f64_slice` bails and they take the nullable by-index arm, and its only
+            // all-valid column is NaN-FREE — which leaves `bits` full and `all_valid` true
+            // no matter how the packing is written. Coverage of the slice kernel therefore
+            // needs an input with NO missing slots whose OUTPUT is NaN, above the 200_000
+            // parallel threshold. Lengths avoid multiples of 64 and of the worker count so
+            // the final worker chunk and the final validity word are both ragged, and the
+            // NaN-producing rows are forced onto word boundaries (k = 0 and k = 63), where
+            // an off-by-one in the shift or the mask would corrupt a neighbouring word.
+            for &n in &[200_003_usize, 262_145, 393_281] {
+                let negative_at = |i: usize| i % 64 == 0 || i % 64 == 63 || i % 1021 == 7;
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        if negative_at(i) {
+                            -((i % 97) as f64) - 1.5
+                        } else {
+                            1.0 + (i % 9973) as f64
+                        }
+                    })
+                    .collect();
+
+                for (name, got, want) in [
+                    (
+                        "f64 sqrt",
+                        Column::from_f64_values(fdata.clone()).sqrt().unwrap(),
+                        fdata.iter().map(|x| x.sqrt()).collect::<Vec<f64>>(),
+                    ),
+                    (
+                        "f64 log",
+                        Column::from_f64_values(fdata.clone()).log().unwrap(),
+                        fdata.iter().map(|x| x.ln()).collect::<Vec<f64>>(),
+                    ),
+                    (
+                        "i64 sqrt",
+                        Column::from_i64_values(fdata.iter().map(|&x| x as i64).collect())
+                            .sqrt()
+                            .unwrap(),
+                        fdata.iter().map(|&x| (x as i64 as f64).sqrt()).collect(),
+                    ),
+                ] {
+                    assert_eq!(got.len(), n, "{name} n={n} len");
+                    let gv = got.values();
+                    let mut saw_missing = false;
+                    for (i, y) in want.iter().enumerate() {
+                        if y.is_nan() {
+                            // A NaN result must surface as MISSING, exactly as the
+                            // per-element `if y.is_nan() { all_valid = false }` rule does.
+                            saw_missing = true;
+                            assert!(
+                                gv[i].is_missing(),
+                                "{name} n={n} idx {i}: NaN result must be missing, got {:?}",
+                                gv[i]
+                            );
+                        } else {
+                            match &gv[i] {
+                                Scalar::Float64(g) => assert_eq!(
+                                    g.to_bits(),
+                                    y.to_bits(),
+                                    "{name} n={n} idx {i} bits"
+                                ),
+                                other => panic!("{name} n={n} idx {i}: {other:?}"),
+                            }
+                        }
+                    }
+                    assert!(saw_missing, "{name} n={n} produced no NaN — test is vacuous");
                 }
             }
         }
