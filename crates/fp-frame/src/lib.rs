@@ -41735,18 +41735,58 @@ impl StringAccessor<'_> {
 
     fn apply_str_bool<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
     where
-        F: Fn(&str) -> bool,
+        F: Fn(&str) -> bool + Sync,
     {
         let column = self.series.column();
         // Chained-read fast path (rung 3): predicate over a contiguous Utf8
         // input without materializing its Scalar view.
         if let Some((in_bytes, in_offsets)) = column.as_utf8_contiguous() {
-            let mut out = Vec::with_capacity(in_offsets.len() - 1);
-            for w in in_offsets.windows(2) {
-                let s = std::str::from_utf8(&in_bytes[w[0]..w[1]])
-                    .expect("contiguous utf8 buffer is valid by construction");
-                out.push(func(s));
-            }
+            const PARALLEL_MIN_BYTES: usize = 8 * 1024 * 1024;
+            const MIN_ROWS_PER_WORKER: usize = 131_072;
+            let n = in_offsets.len() - 1;
+            let workers = if in_bytes.len() >= PARALLEL_MIN_BYTES {
+                std::thread::available_parallelism()
+                    .map_or(1, std::num::NonZeroUsize::get)
+                    .min(64)
+                    .min(n.div_ceil(MIN_ROWS_PER_WORKER))
+            } else {
+                1
+            };
+            let map_rows = |start_row: usize, end_row: usize| {
+                let mut part = Vec::with_capacity(end_row - start_row);
+                for w in in_offsets[start_row..=end_row].windows(2) {
+                    let s = std::str::from_utf8(&in_bytes[w[0]..w[1]])
+                        .expect("contiguous utf8 buffer is valid by construction");
+                    part.push(func(s));
+                }
+                part
+            };
+            let out = if workers < 2 {
+                map_rows(0, n)
+            } else {
+                let rows_per_worker = n.div_ceil(workers);
+                let parts = std::thread::scope(|scope| {
+                    let mut handles = Vec::with_capacity(workers);
+                    for start_row in (0..n).step_by(rows_per_worker) {
+                        let end_row = (start_row + rows_per_worker).min(n);
+                        let map_rows = &map_rows;
+                        handles.push(scope.spawn(move || map_rows(start_row, end_row)));
+                    }
+                    handles
+                        .into_iter()
+                        .map(|handle| {
+                            handle
+                                .join()
+                                .expect("string predicate worker thread panicked")
+                        })
+                        .collect::<Vec<_>>()
+                });
+                let mut merged = Vec::with_capacity(n);
+                for part in parts {
+                    merged.extend(part);
+                }
+                merged
+            };
             let index = self.series.index().clone();
             return Series::new(name, index, Column::from_bool_values(out));
         }
@@ -93360,7 +93400,7 @@ mod tests {
     }
 
     #[test]
-    fn str_contains_parallel_row_morsels_preserve_order_and_values() {
+    fn str_predicate_parallel_row_morsels_preserve_order_and_values() {
         const ROWS: usize = 600_000;
         const WIDTH: usize = 16;
         let mut bytes = Vec::with_capacity(ROWS * WIDTH);
@@ -93381,14 +93421,30 @@ mod tests {
         )
         .unwrap();
 
-        let result = series.str().contains("5").unwrap();
-        let flags = result
+        let contains = series.str().contains("5").unwrap();
+        let contains_flags = contains
             .column()
             .as_bool_slice()
             .expect("literal contains must retain typed Bool output");
-        assert_eq!(flags.len(), ROWS);
-        for (row, &matched) in flags.iter().enumerate() {
-            assert_eq!(matched, row % 3 == 0, "mismatch at row {row}");
+        let startswith = series.str().startswith("item_5").unwrap();
+        let startswith_flags = startswith
+            .column()
+            .as_bool_slice()
+            .expect("startswith must retain typed Bool output");
+        let endswith = series.str().endswith("xxx").unwrap();
+        let endswith_flags = endswith
+            .column()
+            .as_bool_slice()
+            .expect("endswith must retain typed Bool output");
+        assert_eq!(contains_flags.len(), ROWS);
+        for row in 0..ROWS {
+            assert_eq!(contains_flags[row], row % 3 == 0, "contains row {row}");
+            assert_eq!(
+                startswith_flags[row],
+                row % 3 == 0,
+                "startswith row {row}"
+            );
+            assert!(endswith_flags[row], "endswith row {row}");
         }
     }
 
