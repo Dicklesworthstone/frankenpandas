@@ -6,8 +6,43 @@
 logical cores, kernel `6.17.0-35-generic`
 **Base commit:** `f37890e6a96e3de5d092d86cbe3c35f00afa52ff`
 
-Decision: **KEEP the FP-side self-speedup. The vs-pandas ratio is NOT measured
-and no competitive claim is made here.**
+Decision: **KEEP — 1.585x gate-admitted same-invocation self-speedup. `sqrt`
+nevertheless REMAINS A LOSS against live pandas at 0.805x (improved from 0.508x).
+No competitive win is claimed.**
+
+## Gate-admitted result (added after the fact — the window finally opened)
+
+The host-wide gate cleared on retry attempt 9 of a 200-attempt loop, and the
+`math_unary/sqrt` 1M row was measured with candidate, immutable pre-change
+reference, and live pandas 2.2.3 **in one invocation**:
+
+| arm | p50 | operation threads | CV |
+|---|---:|---:|---:|
+| candidate (fused witness) | **1338.8 us** | 8 | 7.13% |
+| immutable pre-change reference | 2121.6 us (derived) | 8 | — |
+| pandas 2.2.3 | **1078.2 us** | 1 | 1.16% |
+
+- **candidate vs reference: 1.58510601x CANDIDATE_FASTER** — the change works, and
+  this independently confirms the 1.5268x interleaved FP-side figure below.
+- **candidate vs pandas: 0.805x — SLOWER.** Bootstrap effect-median 95% CI
+  **[0.78591051, 0.81874983]**, `decidable: true`.
+- reference vs pandas: **0.508x** — so the fusion moved the row from 0.508x to
+  0.805x and did **not** flip it to a win.
+- A/A null controls within the 2% limit: FrankenPandas **0.99287555**, pandas
+  **1.00104569**. CV is provenance only under the corrected gate.
+- Output checksum `e700f53534db5c6d`, identical to every earlier arm.
+
+**Host admission:** `thinkstation1`, 32 physical / 64 logical, scope
+`all_online_host_cpus` over 64 CPUs, **9 adjudicating checkpoints all clear**,
+maximum observed busy fraction **0.1818** against the 0.20 ceiling. Runtime ISA
+for FrankenPandas: scalar, sse2, avx2, fma, bmi2, vaes.
+
+**What this settles and what it opens.** The lever is real and its size is now
+pinned by a gate-valid same-invocation measurement. But FrankenPandas is using
+**eight threads to pandas' one and is still 24% slower**, which says the residual
+is not the witness pass — it is whatever else the 1M `sqrt` path spends on
+allocation, zeroing, and per-call thread spawning. That is the next lever, not a
+conclusion of this one.
 
 > **Ledger-bound entry.** `docs/NEGATIVE_EVIDENCE.md` carried 67 lines of a peer's
 > uncommitted work (CyanLynx's math-unary ISA retest) at commit time, and this is a
