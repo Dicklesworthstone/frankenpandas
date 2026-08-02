@@ -8108,6 +8108,157 @@ pub fn radix_argsort_f64(values: &[f64], ascending: bool) -> Vec<usize> {
     radix_argsort_u64(&keys)
 }
 
+#[inline]
+fn radix_scatter_positions(
+    input: &[usize],
+    output: &mut [usize],
+    keys: &[u64],
+    shift: u32,
+) -> bool {
+    debug_assert_eq!(input.len(), output.len());
+    let mut count = [0usize; 256];
+    for &position in input {
+        count[((keys[position] >> shift) & 0xff) as usize] += 1;
+    }
+    if count.contains(&input.len()) {
+        return false;
+    }
+    let mut running = 0usize;
+    for slot in &mut count {
+        let bucket_len = *slot;
+        *slot = running;
+        running += bucket_len;
+    }
+    for &position in input {
+        let bucket = ((keys[position] >> shift) & 0xff) as usize;
+        output[count[bucket]] = position;
+        count[bucket] += 1;
+    }
+    true
+}
+
+/// Finish one multi-key lexsort bucket after the primary key's high 16 bits
+/// have already placed the bucket in its final global range. Secondary columns
+/// retain all eight stable LSD passes; the primary needs only its lower six.
+fn radix_sort_multi_prefix_bucket(
+    entries: &mut [usize],
+    scratch: &mut [usize],
+    keys_by_col: &[Vec<u64>],
+) {
+    debug_assert_eq!(entries.len(), scratch.len());
+    let mut entries_are_input = true;
+    for (column, keys) in keys_by_col.iter().enumerate().rev() {
+        let upper_shift = if column == 0 { 48 } else { 64 };
+        for shift in (0..upper_shift).step_by(8) {
+            let scattered = if entries_are_input {
+                radix_scatter_positions(entries, scratch, keys, shift)
+            } else {
+                radix_scatter_positions(scratch, entries, keys, shift)
+            };
+            if scattered {
+                entries_are_input = !entries_are_input;
+            }
+        }
+    }
+    if !entries_are_input {
+        entries.copy_from_slice(scratch);
+    }
+}
+
+type RadixIndexSlicePair<'a> = (&'a mut [usize], &'a mut [usize]);
+
+/// Stable shared-nothing multi-key radix sort for large inputs.
+///
+/// A stable scatter on the primary key's high 16 bits establishes final,
+/// disjoint output ranges. Every range can then complete the remaining
+/// lexicographic digits independently on a scoped worker. No lock, atomic, or
+/// shared output write is needed; stability inside the prefix scatter plus the
+/// stable per-bucket LSD passes preserves the serial permutation exactly.
+fn parallel_radix_argsort_multi_u64(
+    keys_by_col: &[Vec<u64>],
+    workers: usize,
+) -> Option<Vec<usize>> {
+    const PREFIX_BUCKETS: usize = 1 << 16;
+
+    let primary = keys_by_col.first()?;
+    let n = primary.len();
+    let mut prefix_counts = vec![0usize; PREFIX_BUCKETS];
+    for &key in primary {
+        prefix_counts[(key >> 48) as usize] += 1;
+    }
+    let sortable_prefixes = prefix_counts.iter().filter(|&&len| len > 1).count();
+    if sortable_prefixes < 2 {
+        return None;
+    }
+
+    let mut running = 0usize;
+    for slot in &mut prefix_counts {
+        let bucket_len = *slot;
+        *slot = running;
+        running += bucket_len;
+    }
+
+    let mut partitioned = vec![0usize; n];
+    let mut prefix_ends = prefix_counts.clone();
+    for (position, &key) in primary.iter().enumerate() {
+        let prefix = (key >> 48) as usize;
+        partitioned[prefix_ends[prefix]] = position;
+        prefix_ends[prefix] += 1;
+    }
+
+    let ranges: Vec<(usize, usize)> = prefix_counts
+        .into_iter()
+        .zip(prefix_ends)
+        .filter(|(start, end)| *end - *start > 1)
+        .collect();
+    let worker_count = workers.min(ranges.len()).max(1);
+    let mut scratch = vec![0usize; n];
+    let mut items = Vec::with_capacity(ranges.len());
+    let mut entries_rest = partitioned.as_mut_slice();
+    let mut scratch_rest = scratch.as_mut_slice();
+    let mut consumed = 0usize;
+    for (start, end) in ranges {
+        let skip = start - consumed;
+        let (_, entries_after_skip) = entries_rest.split_at_mut(skip);
+        let (_, scratch_after_skip) = scratch_rest.split_at_mut(skip);
+        let len = end - start;
+        let (entries, entries_tail) = entries_after_skip.split_at_mut(len);
+        let (scratch, scratch_tail) = scratch_after_skip.split_at_mut(len);
+        entries_rest = entries_tail;
+        scratch_rest = scratch_tail;
+        consumed = end;
+        items.push((entries, scratch));
+    }
+
+    // Largest-prefix-first greedy placement balances skewed Float64 exponent
+    // ranges while preserving complete ownership of every destination slice.
+    items.sort_by_key(|item| std::cmp::Reverse(item.0.len()));
+    let mut groups: Vec<Vec<RadixIndexSlicePair<'_>>> =
+        (0..worker_count).map(|_| Vec::new()).collect();
+    let mut group_loads = vec![0usize; worker_count];
+    for item in items {
+        let worker = group_loads
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, load)| **load)
+            .map_or(0, |(worker, _)| worker);
+        group_loads[worker] += item.0.len();
+        groups[worker].push(item);
+    }
+
+    std::thread::scope(|scope| {
+        for group in groups {
+            scope.spawn(move || {
+                for (entries, scratch) in group {
+                    radix_sort_multi_prefix_bucket(entries, scratch, keys_by_col);
+                }
+            });
+        }
+    });
+
+    Some(partitioned)
+}
+
 /// Stable LSD radix lexsort over several `u64` key columns
 /// (br-frankenpandas-lnsu6). Returns the permutation that orders rows
 /// lexicographically by `keys_by_col[0]`, then `keys_by_col[1]`, …, with equal
@@ -8122,6 +8273,23 @@ pub fn radix_argsort_multi_u64(keys_by_col: &[Vec<u64>]) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..n).collect();
     if n < 2 || keys_by_col.is_empty() {
         return idx;
+    }
+    // The exact-current whole-job profile put 95.12% of 1M multi-key sort
+    // self-time here, with one operation thread. The digit dependencies are
+    // serial, but primary-prefix buckets are final disjoint ranges, so complete
+    // the remaining lexsort independently across all available CPUs.
+    const PARALLEL_MIN_LEN: usize = 1 << 19;
+    const PARALLEL_MAX_WORKERS: usize = 64;
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(PARALLEL_MAX_WORKERS)
+        .min(n);
+    if n >= PARALLEL_MIN_LEN
+        && workers >= 2
+        && keys_by_col.iter().all(|keys| keys.len() == n)
+        && let Some(order) = parallel_radix_argsort_multi_u64(keys_by_col, workers)
+    {
+        return order;
     }
     let mut scratch: Vec<usize> = vec![0; n];
     for keys in keys_by_col.iter().rev() {
@@ -35519,6 +35687,46 @@ mod tests {
             assert!(
                 crate::parallel_radix_argsort_u64(&vec![7; n], 4).is_none(),
                 "one non-trivial prefix must retain the serial fallback"
+            );
+        }
+
+        #[test]
+        fn parallel_multi_numeric_radix_matches_stable_reference() {
+            // Exercise the shared-nothing multi-key helper directly below its
+            // production size gate. Primary prefixes provide parallel ranges;
+            // narrow low-bit domains create ties that pin stable row order.
+            let n = 50_000usize;
+            let mut state = 0xD1B5_4A32_D192_ED03_u64;
+            let mut primary = Vec::with_capacity(n);
+            let mut secondary = Vec::with_capacity(n);
+            let mut tertiary = Vec::with_capacity(n);
+            for row in 0..n {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                primary.push((((row % 257) as u64) << 48) | (z % 1_024));
+                secondary.push(z.rotate_left(19) % 127);
+                tertiary.push(z.rotate_right(11) % 17);
+            }
+            let keys = vec![primary, secondary, tertiary];
+
+            let got = crate::parallel_radix_argsort_multi_u64(&keys, 8)
+                .expect("diverse primary prefixes expose independent buckets");
+            let mut want: Vec<usize> = (0..n).collect();
+            want.sort_by(|&left, &right| {
+                keys.iter()
+                    .map(|column| column[left].cmp(&column[right]))
+                    .find(|order| *order != std::cmp::Ordering::Equal)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            assert_eq!(got, want);
+
+            let one_prefix = vec![vec![7; n], keys[1].clone()];
+            assert!(
+                crate::parallel_radix_argsort_multi_u64(&one_prefix, 8).is_none(),
+                "one primary prefix must retain the serial fallback"
             );
         }
 
