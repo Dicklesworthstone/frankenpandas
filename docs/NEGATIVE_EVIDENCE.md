@@ -21916,6 +21916,50 @@ Full evidence:
 `artifacts/bench/cod_vmi1149989_radix_parallel_residual_20260731.md` and
 `artifacts/bench/cod_vmi1149989_radix_parallel_residual_20260731_ab.json`.
 
+### 2026-07-31 CyanLynx — math-unary x86-64-v3 wins floor/ceil/trunc/round vs live pandas — KEEP
+
+The 2026-06-26 math-unary predicate (generic x86-64 cannot emit the needed wide
+round/sqrt instructions) is now satisfied by the fleet floor of x86-64-v3.
+Immutable v3 whole-binary candidate vs live pandas 2.2.3 and default-target
+control, one workload per invocation.
+
+**Campaign result class:** `incumbent-win`.
+
+| workload, 1M Float64 | pandas / v3 | effect-median 95% CI | observed threads, v3 / pandas | v3/default |
+|---|---:|---:|---:|---:|
+| floor | **1.285x** | [1.277046, 1.339627] | 1 / 1 | 10.849x |
+| ceil | **1.452x** | [1.442989, 1.461650] | 1 / 1 | 11.742x |
+| trunc | **1.303x** | [1.273292, 1.341008] | 1 / 1 | 13.539x |
+| round(decimals=2) | **1.098x** | [1.083005, 1.102684] | 1 / 1 | 2.381x |
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=97d30b363332e7f687ea74331973461fade550898202f988b1f4bdc34cd545ee (75329736 bytes) /data/tmp/cargo-target/release-perf/fp-bench
+
+**A/A null control (same invocation):** 6 pairs across four KEEP workloads; FrankenPandas median ratio 0.996x CI [0.990, 1.004]; pandas median ratio 0.999x CI [0.992, 1.004]. Per-workload FP/pandas A/A medians were 0.996101/0.998843, 0.990558/1.003823, 0.998107/0.999936, and 0.989954/1.000172.
+
+**Median-CI decision:** median effect 1.285x (floor) cleared required threshold; CI [1.277046, 1.339627] excludes unity and is above twice the A/A null half-width. Companion workloads ceil 1.452x [1.442989, 1.461650], trunc 1.303x [1.273292, 1.341008], round 1.098x [1.083005, 1.102684] each clear the same floor.
+
+**CV role:** provenance only; CV had no vote.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 artifact_sha256=a5747a243aba6bcbe01fdb4bcfd77c2dea7ac4ca801f7b1cf32cc8d866a31489 invocation_id=math-unary-v3-threadripperje-20260731 measured_ratio=1.285x
+
+**Host:** threadripperje, Threadripper PRO 5995WX, affinity 0-9, 54 admission checkpoints, max busy 16%/20%. Built on vmi1227854 from base e7eb7b5a0edcbf16a891f59d0b80ef85d2c0d932. Full evidence: `artifacts/bench/cod_math_unary_isa_retest_20260731.*`.
+
+### 2026-07-31 CyanLynx — math-unary x86-64-v3 loses sqrt and log vs live pandas — REJECT
+
+Same host/ELF family as the KEEP companion. Under immutable v3 vs live pandas 2.2.3:
+
+| workload | pandas / v3 | effect-median 95% CI | v3/default |
+|---|---:|---:|---:|
+| sqrt | **0.361x** | [0.357630, 0.364423] | 1.443x |
+| log | **0.630x** | [0.625947, 0.638700] | 0.758x |
+
+**A/A null control (same invocation):** sqrt FP/pandas A/A medians 0.996720/0.992018; log 1.001090/1.000209; median ratio 0.997x CI [0.990, 1.010] — within 2% of unity, so the losses are not null noise.
+
+**Counted mechanism:** 0 additional instructions from a blanket target flag can close the residual: log regresses versus the default-target binary (0.758x) and sqrt remains a 0.361x loss despite 7 `vsqrtpd` emissions in the v3 ELF; required predeclared gate is competitive win vs pandas and was failed.
+
+**Decision: REJECT** blanket global x86-64-v3 Cargo target policy. No production policy changed. Retry predicates: profile residual for sqrt; explain 3-worker log routing or ship a vector-log before reopening.
+
 ### 2026-07-31 CyanLynx — live-pandas corrected-null reruns remain inadmissible — REJECT
 
 Six complete live-pandas same-invocation rows cleared every host-wide
