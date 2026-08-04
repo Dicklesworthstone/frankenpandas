@@ -77059,17 +77059,23 @@ impl DataFrame {
         per_column: &BTreeMap<String, Vec<Scalar>>,
     ) -> Result<Self, FrameError> {
         // Per br-frankenpandas-f7201: build a per-column IsinIndex once
-        // outside the value loop.
-        let mut new_cols = BTreeMap::new();
-        for name in &self.column_order {
+        // outside the value loop. Each column's index/bitset build and
+        // membership scan is independent, so use the same ordered
+        // column-parallel helper as `isin`; the result is reassembled in the
+        // original column order below. Missing dictionary entries retain the
+        // all-False column required by pandas `DataFrame.isin(dict)`.
+        let columns = self.par_map_columns(&self.column_order, |name| {
             let col = &self.columns[name];
-            let column = if let Some(allowed) = per_column.get(name) {
+            if let Some(allowed) = per_column.get(name) {
                 let idx = IsinIndex::build(allowed);
                 let bitset = int_needle_membership_bitset(allowed);
-                isin_apply_column(col, &idx, bitset.as_ref())?
+                isin_apply_column(col, &idx, bitset.as_ref())
             } else {
-                Column::from_bool_values(vec![false; col.len()])
-            };
+                Ok(Column::from_bool_values(vec![false; col.len()]))
+            }
+        })?;
+        let mut new_cols = BTreeMap::new();
+        for (name, column) in self.column_order.iter().zip(columns) {
             new_cols.insert(name.clone(), column);
         }
         Self::new_with_column_order(self.index.clone(), new_cols, self.column_order.clone())
@@ -140991,6 +140997,66 @@ mod tests {
             result.columns["b"].values(),
             &[Scalar::Bool(false), Scalar::Bool(false)]
         );
+    }
+
+    #[test]
+    fn dataframe_isin_dict_parallel_columns_preserve_order_and_fallback_gza0b() {
+        // Three 8192-row columns clear `par_map_columns`' 16K-cell threshold.
+        // The dictionary intentionally omits the middle column, so this covers
+        // both independent membership builds and the required all-False arm.
+        const ROWS: usize = 8_192;
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                (
+                    "a",
+                    (0..ROWS)
+                        .map(|row| Scalar::Int64(row as i64))
+                        .collect(),
+                ),
+                (
+                    "b",
+                    (0..ROWS)
+                        .map(|row| Scalar::Int64(10_000 + row as i64))
+                        .collect(),
+                ),
+                (
+                    "c",
+                    (0..ROWS)
+                        .map(|row| Scalar::Int64(20_000 + row as i64))
+                        .collect(),
+                ),
+            ],
+        )
+        .unwrap();
+        let mut per_column = BTreeMap::new();
+        per_column.insert(
+            "a".to_owned(),
+            vec![Scalar::Int64(0), Scalar::Int64((ROWS - 1) as i64)],
+        );
+        per_column.insert(
+            "c".to_owned(),
+            vec![Scalar::Int64(20_257), Scalar::Int64(20_511)],
+        );
+
+        let result = df.isin_dict(&per_column).unwrap();
+
+        assert_eq!(result.column_names(), &["a", "b", "c"]);
+        assert_eq!(result.columns["a"].values()[0], Scalar::Bool(true));
+        assert_eq!(
+            result.columns["a"].values()[ROWS - 1],
+            Scalar::Bool(true)
+        );
+        assert_eq!(result.columns["a"].values()[257], Scalar::Bool(false));
+        assert!(
+            result.columns["b"]
+                .values()
+                .iter()
+                .all(|value| *value == Scalar::Bool(false))
+        );
+        assert_eq!(result.columns["c"].values()[257], Scalar::Bool(true));
+        assert_eq!(result.columns["c"].values()[511], Scalar::Bool(true));
+        assert_eq!(result.columns["c"].values()[0], Scalar::Bool(false));
     }
 
     #[test]
