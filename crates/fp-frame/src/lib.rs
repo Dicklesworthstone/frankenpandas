@@ -505,8 +505,8 @@ fn f64_argmax_first_index(data: &[f64]) -> Option<usize> {
     let mut lane_values = [f64::NEG_INFINITY; 8];
     let mut lane_indices = [0_usize; 8];
     let mut base = 0_usize;
-    let mut chunks = data.chunks_exact(8);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = data.as_chunks::<8>();
+    for chunk in chunks {
         for lane in 0..8 {
             let value = chunk[lane];
             if value > lane_values[lane] {
@@ -516,7 +516,7 @@ fn f64_argmax_first_index(data: &[f64]) -> Option<usize> {
         }
         base += 8;
     }
-    for (lane, &value) in chunks.remainder().iter().enumerate() {
+    for (lane, &value) in remainder.iter().enumerate() {
         if value > lane_values[lane] {
             lane_values[lane] = value;
             lane_indices[lane] = base + lane;
@@ -544,8 +544,8 @@ fn f64_argmin_first_index(data: &[f64]) -> Option<usize> {
     let mut lane_values = [f64::INFINITY; 8];
     let mut lane_indices = [0_usize; 8];
     let mut base = 0_usize;
-    let mut chunks = data.chunks_exact(8);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = data.as_chunks::<8>();
+    for chunk in chunks {
         for lane in 0..8 {
             let value = chunk[lane];
             if value < lane_values[lane] {
@@ -555,7 +555,7 @@ fn f64_argmin_first_index(data: &[f64]) -> Option<usize> {
         }
         base += 8;
     }
-    for (lane, &value) in chunks.remainder().iter().enumerate() {
+    for (lane, &value) in remainder.iter().enumerate() {
         if value < lane_values[lane] {
             lane_values[lane] = value;
             lane_indices[lane] = base + lane;
@@ -4963,8 +4963,8 @@ fn boolean_mask_positions(mask: &[bool]) -> (Vec<usize>, Option<AffineSelectionC
     let mut affine = AffineSelectionBuilder::default();
     let mut positions = Vec::with_capacity(mask.len());
     let mut base = 0usize;
-    let mut chunks = mask.chunks_exact(8);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = mask.as_chunks::<8>();
+    for chunk in chunks {
         if chunk[0] {
             affine.push(base);
             positions.push(base);
@@ -4999,7 +4999,7 @@ fn boolean_mask_positions(mask: &[bool]) -> (Vec<usize>, Option<AffineSelectionC
         }
         base += 8;
     }
-    for &keep in chunks.remainder() {
+    for &keep in remainder {
         if keep {
             affine.push(base);
             positions.push(base);
@@ -5157,8 +5157,8 @@ fn boolean_mask_affine_certificate(mask: &[bool]) -> Option<AffineSelectionCerti
 
     let mut affine = AffineSelectionBuilder::default();
     let mut base = 0usize;
-    let mut chunks = mask.chunks_exact(8);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = mask.as_chunks::<8>();
+    for chunk in chunks {
         if chunk[0] {
             affine.push(base);
             if !affine.is_affine {
@@ -5209,7 +5209,7 @@ fn boolean_mask_affine_certificate(mask: &[bool]) -> Option<AffineSelectionCerti
         }
         base += 8;
     }
-    for &keep in chunks.remainder() {
+    for &keep in remainder {
         if keep {
             affine.push(base);
             if !affine.is_affine {
@@ -5251,14 +5251,13 @@ fn boolean_mask_every_other_affine_certificate(
 
 #[inline]
 fn boolean_mask_matches_repeated_octet(mask: &[bool], pattern: &[bool; 8]) -> bool {
-    let mut chunks = mask.chunks_exact(8);
-    for chunk in &mut chunks {
-        if chunk != pattern.as_slice() {
+    let (chunks, remainder) = mask.as_chunks::<8>();
+    for chunk in chunks {
+        if chunk.as_slice() != pattern.as_slice() {
             return false;
         }
     }
-    chunks
-        .remainder()
+    remainder
         .iter()
         .zip(pattern)
         .all(|(actual, expected)| actual == expected)
@@ -13806,22 +13805,22 @@ impl Series {
     /// left-fold) forms — LLVM cannot auto-vectorize that fold because f64 add is
     /// non-associative. Pandas/numpy sum via a pairwise/blocked algorithm too, so
     /// this ALSO tracks numpy's value more closely than the left-fold did. For
-    /// `data.len() < 8` the `chunks_exact(8)` iterator is empty and the whole
-    /// slice flows through the `remainder()` left-fold, so the result is
+    /// `data.len() < 8` the `as_chunks::<8>()` chunk slice is empty and the whole
+    /// slice flows through the remainder left-fold, so the result is
     /// BIT-IDENTICAL to `iter().sum()` on short arrays (every reduction
     /// conformance fixture is tiny); it diverges (in the last ~ULP, more
     /// accurately) only on large arrays where no exact value is pinned.
     fn blocked_sum_f64(data: &[f64]) -> f64 {
         let mut acc = [0.0_f64; 8];
-        let mut chunks = data.chunks_exact(8);
-        for c in &mut chunks {
+        let (chunks, remainder) = data.as_chunks::<8>();
+        for c in chunks {
             for l in 0..8 {
                 acc[l] += c[l];
             }
         }
         let mut total =
             ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-        for &x in chunks.remainder() {
+        for &x in remainder {
             total += x;
         }
         total
@@ -13831,20 +13830,20 @@ impl Series {
     /// analogue of [`Self::blocked_sum_f64`]. Breaks the `result += a*b`
     /// dependency chain into 8 independent `acc[l] += a[l]*b[l]` lanes so the
     /// multiply-accumulate AUTO-VECTORIZES (fma). Degenerates to the sequential
-    /// left-fold for `len < 8` (empty `chunks_exact`), so it's bit-identical to
+    /// left-fold for `len < 8` (empty `as_chunks`), so it's bit-identical to
     /// the scalar dot loop on short arrays and more accurate on long ones.
     fn blocked_dot_f64(a: &[f64], b: &[f64]) -> f64 {
         let mut acc = [0.0_f64; 8];
-        let mut ca = a.chunks_exact(8);
-        let mut cb = b.chunks_exact(8);
-        for (x, y) in (&mut ca).zip(&mut cb) {
+        let (ca, ca_rem) = a.as_chunks::<8>();
+        let (cb, cb_rem) = b.as_chunks::<8>();
+        for (x, y) in ca.iter().zip(cb) {
             for l in 0..8 {
                 acc[l] += x[l] * y[l];
             }
         }
         let mut total =
             ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-        for (&x, &y) in ca.remainder().iter().zip(cb.remainder()) {
+        for (&x, &y) in ca_rem.iter().zip(cb_rem) {
             total += x * y;
         }
         total
@@ -23847,7 +23846,7 @@ impl Series {
             let mut update_idx = block + 1;
             while update_idx <= block_count {
                 block_counts[update_idx] += 1;
-                update_idx += update_idx & update_idx.wrapping_neg();
+                update_idx += update_idx.isolate_lowest_one();
             }
         }
 
@@ -23883,7 +23882,7 @@ impl Series {
             let mut update_idx = rank + 1;
             while update_idx <= len {
                 ranks_seen[update_idx] += 1;
-                update_idx += update_idx & update_idx.wrapping_neg();
+                update_idx += update_idx.isolate_lowest_one();
             }
         }
 
@@ -25961,7 +25960,7 @@ impl Rolling<'_> {
             i += 1;
             while i <= u {
                 tree[i] += delta;
-                i += i & i.wrapping_neg();
+                i += i.isolate_lowest_one();
             }
         };
         // 0-indexed k-th order statistic -> compressed index.
@@ -26720,7 +26719,7 @@ impl Rolling<'_> {
             let mut i = r + 1;
             while i <= u {
                 tree[i] += delta;
-                i += i & i.wrapping_neg();
+                i += i.isolate_lowest_one();
             }
         };
         let fen_prefix = |tree: &[i64], idx0: i64| -> i64 {
@@ -26731,7 +26730,7 @@ impl Rolling<'_> {
             let mut s = 0_i64;
             while i > 0 {
                 s += tree[i];
-                i -= i & i.wrapping_neg();
+                i -= i.isolate_lowest_one();
             }
             s
         };
@@ -27290,7 +27289,7 @@ impl Expanding<'_> {
             i += 1;
             while i <= u {
                 tree[i] += delta;
-                i += i & i.wrapping_neg();
+                i += i.isolate_lowest_one();
             }
         };
         let mut top_bit = 0_usize;
@@ -27795,7 +27794,7 @@ impl Expanding<'_> {
             let mut i = r + 1;
             while i <= u {
                 tree[i] += delta;
-                i += i & i.wrapping_neg();
+                i += i.isolate_lowest_one();
             }
         };
         // Sum of tree over compressed indices [0, idx0]; idx0 == -1 -> 0.
@@ -27807,7 +27806,7 @@ impl Expanding<'_> {
             let mut s = 0_i64;
             while i > 0 {
                 s += tree[i];
-                i -= i & i.wrapping_neg();
+                i -= i.isolate_lowest_one();
             }
             s
         };
@@ -30817,11 +30816,10 @@ impl Resample<'_> {
                 return None;
             }
             v
-        } else if let Some(d) = self.series.column().as_i64_slice() {
+        } else {
+            let d = self.series.column().as_i64_slice()?;
             owned_i64 = d.iter().map(|&x| x as f64).collect();
             &owned_i64
-        } else {
-            return None;
         };
         Some((|| -> Result<Series, FrameError> {
             self.validate()?;
@@ -34518,11 +34516,10 @@ impl SeriesGroupBy<'_> {
                 return None;
             }
             d
-        } else if let Some(d) = self.series.column.as_i64_slice() {
+        } else {
+            let d = self.series.column.as_i64_slice()?;
             i64_as_f64 = d.iter().map(|&v| v as f64).collect();
             &i64_as_f64
-        } else {
-            return None;
         };
         let n = data.len();
         let index = self.series.index.clone();
@@ -37010,11 +37007,10 @@ impl SeriesGroupBy<'_> {
         let owned_i64: Vec<f64>;
         let data: &[f64] = if let Some(f) = self.series.column.as_f64_slice() {
             f
-        } else if let Some(d) = self.series.column.as_i64_slice() {
+        } else {
+            let d = self.series.column.as_i64_slice()?;
             owned_i64 = d.iter().map(|&x| x as f64).collect();
             &owned_i64
-        } else {
-            return None;
         };
         let (gids, ng) = self.dense_group_ids()?;
         let n = gids.len();
@@ -51125,9 +51121,9 @@ fn i64_slice_max_simd(data: &[i64]) -> Option<i64> {
         return None;
     }
     const LANES: usize = 16;
-    let mut chunks = data.chunks_exact(LANES);
+    let (chunks, remainder) = data.as_chunks::<LANES>();
     let mut acc = [i64::MIN; LANES];
-    for c in &mut chunks {
+    for c in chunks {
         for i in 0..LANES {
             acc[i] = acc[i].max(c[i]);
         }
@@ -51136,7 +51132,7 @@ fn i64_slice_max_simd(data: &[i64]) -> Option<i64> {
     for &v in &acc[1..] {
         best = best.max(v);
     }
-    for &v in chunks.remainder() {
+    for &v in remainder {
         best = best.max(v);
     }
     Some(best)
@@ -51149,9 +51145,9 @@ fn i64_slice_min_simd(data: &[i64]) -> Option<i64> {
         return None;
     }
     const LANES: usize = 16;
-    let mut chunks = data.chunks_exact(LANES);
+    let (chunks, remainder) = data.as_chunks::<LANES>();
     let mut acc = [i64::MAX; LANES];
-    for c in &mut chunks {
+    for c in chunks {
         for i in 0..LANES {
             acc[i] = acc[i].min(c[i]);
         }
@@ -51160,7 +51156,7 @@ fn i64_slice_min_simd(data: &[i64]) -> Option<i64> {
     for &v in &acc[1..] {
         best = best.min(v);
     }
-    for &v in chunks.remainder() {
+    for &v in remainder {
         best = best.min(v);
     }
     Some(best)
@@ -54041,9 +54037,10 @@ impl DataFrameDictResult {
         // SET and the collect is bit-identical to serial insertion.
         let build_pairs = |lo: usize, hi: usize| -> Vec<(String, Vec<Scalar>)> {
             let mut out = Vec::with_capacity(hi - lo);
-            for row_idx in lo..hi {
+            for (offset, label) in labels[lo..hi].iter().enumerate() {
+                let row_idx = lo + offset;
                 out.push((
-                    labels[row_idx].clone(),
+                    label.clone(),
                     col_sources
                         .iter()
                         .map(|source| source.cell(row_idx))
@@ -85540,11 +85537,10 @@ impl DataFrameGroupBy<'_> {
                     return None;
                 }
                 d
-            } else if let Some(d) = col.as_i64_slice() {
+            } else {
+                let d = col.as_i64_slice()?;
                 i64_as_f64 = d.iter().map(|&v| v as f64).collect();
                 &i64_as_f64
-            } else {
-                return None;
             };
             let (out, mask) = if let Some((keys, min, range)) = by_key {
                 dense_groupby_pct_change_f64_by_key(keys, min, range, vals, periods)
