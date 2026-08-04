@@ -930,6 +930,36 @@ fn build_typed_numeric_csv_frame(
     typed_columns: Vec<CsvTypedColumnValues>,
     row_count: i64,
 ) -> Result<DataFrame, IoError> {
+    // The parser has already proved that this narrow shape is homogeneous,
+    // null-free Float64. Under the opt-in block-storage representation, retain
+    // the column-major parser result as the frame's backing block so a first
+    // `.values` / `.to_numpy` observation does not have to consolidate it
+    // again. Integer, mixed, nullable, and object CSVs keep the eager route
+    // below, preserving their existing dtype and null semantics.
+    #[cfg(feature = "block-storage")]
+    if typed_columns
+        .iter()
+        .all(|values| matches!(values, CsvTypedColumnValues::Float64(_)))
+    {
+        let row_len = usize::try_from(row_count).expect("CSV row count must be non-negative");
+        let capacity = row_len
+            .checked_mul(headers.len())
+            .expect("parsed CSV dimensions must fit usize");
+        let mut block = Vec::with_capacity(capacity);
+        for values in typed_columns {
+            let CsvTypedColumnValues::Float64(mut values) = values else {
+                unreachable!("all typed CSV columns were checked as Float64");
+            };
+            block.append(&mut values);
+        }
+        return DataFrame::from_f64_block_columns(
+            csv_default_unit_range_index(row_count),
+            headers.to_vec(),
+            block,
+        )
+        .map_err(IoError::from);
+    }
+
     let mut out_columns = BTreeMap::new();
     let mut column_order = Vec::with_capacity(headers.len());
     for (name, values) in headers.iter().cloned().zip(typed_columns) {
@@ -14450,6 +14480,37 @@ mod tests {
                 "round-trip field={field:?} written={s2:?}"
             );
         }
+    }
+
+    #[cfg(feature = "block-storage")]
+    #[test]
+    fn float_csv_uses_column_major_block_only_when_homogeneous_l6uyi() {
+        // The block route is intentionally narrow: every parsed column must be
+        // all-valid Float64. It preserves parser column order and f64 bits,
+        // including signed zero, while an all-Int64 CSV must keep its eager
+        // representation instead of silently changing dtype.
+        let floats = read_csv_str("a,b\n1.5,-0.0\n2.25,4.0\n").expect("float CSV");
+        let view = floats
+            .to_numpy_block_view()
+            .expect("homogeneous Float64 CSV is block-backed");
+        assert_eq!((view.rows, view.cols), (2, 2));
+        assert_eq!(view.block[0].to_bits(), 1.5_f64.to_bits());
+        assert_eq!(view.block[1].to_bits(), 2.25_f64.to_bits());
+        assert_eq!(view.block[2].to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(view.block[3].to_bits(), 4.0_f64.to_bits());
+
+        let (flat, rows, cols) = floats.to_numpy_flat();
+        assert_eq!((rows, cols), (2, 2));
+        assert_eq!(flat[0].to_bits(), 1.5_f64.to_bits());
+        assert_eq!(flat[1].to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(flat[2].to_bits(), 2.25_f64.to_bits());
+        assert_eq!(flat[3].to_bits(), 4.0_f64.to_bits());
+
+        let ints = read_csv_str("a,b\n1,2\n3,4\n").expect("integer CSV");
+        assert!(
+            ints.to_numpy_block_view().is_none(),
+            "all-Int64 CSVs keep the existing eager typed representation"
+        );
     }
 
     #[test]
