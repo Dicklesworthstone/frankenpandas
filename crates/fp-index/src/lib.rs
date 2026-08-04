@@ -15813,11 +15813,11 @@ pub fn multi_way_align(indexes: &[&Index]) -> MultiAlignmentPlan {
     // into an owned HashSet<IndexLabel> (even duplicates) — clone-bound. Borrowed
     // keys + FxHashSet leave only the unique-label output clones. The borrow is
     // valid: every &IndexLabel comes from `indexes`, which outlives this scan.
-    let mut seen: FxHashSet<&IndexLabel> = FxHashSet::with_capacity_and_hasher(
-        aggregate_output_capacity(indexes.iter().map(|idx| idx.labels().len())),
-        Default::default(),
-    );
-    let mut union_labels: Vec<IndexLabel> = Vec::new();
+    let aggregate_capacity =
+        aggregate_output_capacity(indexes.iter().map(|idx| idx.labels().len()));
+    let mut seen: FxHashSet<&IndexLabel> =
+        FxHashSet::with_capacity_and_hasher(aggregate_capacity, Default::default());
+    let mut union_labels: Vec<IndexLabel> = Vec::with_capacity(aggregate_capacity);
     for idx in indexes {
         for label in idx.labels() {
             if seen.insert(label) {
@@ -21731,6 +21731,25 @@ mod tests {
         assert_eq!(plan.positions[1], vec![None, Some(1), Some(0)]);
         // c has 1 at pos 0, no 3, 2 at pos 1
         assert_eq!(plan.positions[2], vec![Some(0), None, Some(1)]);
+    }
+
+    #[test]
+    fn multi_way_align_deduplicates_repeated_labels_uza04186() {
+        let a = Index::from_i64(vec![1, 1, 3]);
+        let b = Index::from_i64(vec![3, 2, 2]);
+
+        let plan = multi_way_align(&[&a, &b]);
+
+        assert_eq!(
+            plan.union_index.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(2)
+            ]
+        );
+        assert_eq!(plan.positions[0], vec![Some(0), Some(2), None]);
+        assert_eq!(plan.positions[1], vec![None, Some(0), Some(1)]);
     }
 
     #[test]
