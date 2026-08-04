@@ -54,7 +54,7 @@ fn main() {
     let mut state: u64 = 0x1234_9E37;
     for _ in 0..n {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        if (state >> 40) % 5 == 0 {
+        if (state >> 40).is_multiple_of(5) {
             validity.set(present.len(), false);
             present.push(false);
         } else {

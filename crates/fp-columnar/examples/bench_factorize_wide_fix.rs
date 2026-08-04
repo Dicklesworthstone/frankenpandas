@@ -12,7 +12,6 @@
 use std::io::Write;
 
 use fp_columnar::Column;
-use fp_types::Scalar;
 use rustc_hash::FxHashMap;
 
 fn new_codes_len(col: &Column) -> (usize, usize) {

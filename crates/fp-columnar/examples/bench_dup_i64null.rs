@@ -16,12 +16,12 @@ fn main() {
     let mut state: u64 = 0xD0B1E5;
     let mut data = vec![0i64; n];
     let mut validity = ValidityMask::all_valid(n);
-    for i in 0..n {
+    for (i, slot) in data.iter_mut().enumerate() {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        if (state >> 40) % 3 == 0 {
+        if (state >> 40).is_multiple_of(3) {
             validity.set(i, false);
         } else {
-            data[i] = ((state >> 20) % 500_000) as i64; // moderate cardinality → many dups
+            *slot = ((state >> 20) % 500_000) as i64; // moderate cardinality → many dups
         }
     }
     let col = Column::from_i64_values_with_validity(data.clone(), validity.clone());

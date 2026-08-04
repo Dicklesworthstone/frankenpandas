@@ -123,10 +123,10 @@ fn per_column_reads_agree_with_the_block_layout() {
         let name = format!("c{c}");
         let col = df.column(&name).expect("column present");
         let values = col.values();
-        for r in 0..ROWS {
+        for (r, value) in values.iter().enumerate().take(ROWS) {
             let expected = view.block[c * ROWS + r];
             assert_eq!(
-                values[r],
+                *value,
                 fp_types::Scalar::Float64(expected),
                 "column {name} row {r} disagrees with block[{c}*{ROWS}+{r}]"
             );

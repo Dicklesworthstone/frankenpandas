@@ -188,9 +188,9 @@ mod tests {
         let (aa_low, aa_high) = bootstrap_median_ci(&aa_ratios);
         let (ab_low, ab_high) = bootstrap_median_ci(&ab_ratios);
         let executable = std::fs::read("/proc/self/exe").expect("read executing test ELF");
-        let elf_sha256 = sha2::digest::Digest::digest(&sha2::Sha256::new(), executable);
+        let elf_sha256 = crate::sha256_hex(&executable);
         eprintln!(
-            "FNV1A_HEX_1ELYS elf_sha256={elf_sha256:x} batch={BATCH} blocks={BLOCKS} aa_median={aa_median:.4} aa_median_ci95=[{aa_low:.4},{aa_high:.4}] candidate_speedup_median={ab_median:.4} candidate_speedup_median_ci95=[{ab_low:.4},{ab_high:.4}]"
+            "FNV1A_HEX_1ELYS elf_sha256={elf_sha256} batch={BATCH} blocks={BLOCKS} aa_median={aa_median:.4} aa_median_ci95=[{aa_low:.4},{aa_high:.4}] candidate_speedup_median={ab_median:.4} candidate_speedup_median_ci95=[{ab_low:.4},{ab_high:.4}]"
         );
         assert!(
             (0.95..=1.05).contains(&aa_median) && aa_low <= 1.0 && aa_high >= 1.0,

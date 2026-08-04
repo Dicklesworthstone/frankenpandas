@@ -88925,7 +88925,7 @@ mod tests {
                 // single value with no nested unbalanced parens in practice;
                 // matches up to the first ')').
                 let after = &rest[pos + marker.len()..];
-                let close = after.find(')').map_or(after.len(), |i| i);
+                let close = after.find(')').unwrap_or(after.len());
                 next.push_str("_)");
                 rest = after[close..].strip_prefix(')').unwrap_or(&after[close..]);
             }
@@ -169644,7 +169644,7 @@ mod tests {
         let lazy = mixed.transpose().unwrap();
         assert!(lazy.is_lazy_transpose_storage());
         for name in eager.column_names() {
-            assert_eq!(eager.column(&name).unwrap().dtype(), DType::Float64);
+            assert_eq!(eager.column(name).unwrap().dtype(), DType::Float64);
         }
         assert_eq!(
             serde_json::to_value(&lazy).unwrap(),
@@ -169746,7 +169746,7 @@ mod tests {
         let lazy = source.transpose().unwrap();
         assert!(lazy.is_lazy_transpose_storage());
         for name in eager.column_names() {
-            assert_eq!(eager.column(&name).unwrap().dtype(), DType::Utf8);
+            assert_eq!(eager.column(name).unwrap().dtype(), DType::Utf8);
         }
         assert_eq!(
             serde_json::to_value(&lazy).unwrap(),
@@ -169873,8 +169873,8 @@ mod tests {
         fn assert_frames_scalar_identical(left: &DataFrame, right: &DataFrame) {
             assert_eq!(left.column_names(), right.column_names());
             for name in left.column_names() {
-                let l = left.column(&name).unwrap();
-                let r = right.column(&name).unwrap();
+                let l = left.column(name).unwrap();
+                let r = right.column(name).unwrap();
                 assert_eq!(l.dtype(), r.dtype(), "dtype of {name}");
                 assert_eq!(l.values().len(), r.values().len());
                 for (i, (a, b)) in l.values().iter().zip(r.values().iter()).enumerate() {

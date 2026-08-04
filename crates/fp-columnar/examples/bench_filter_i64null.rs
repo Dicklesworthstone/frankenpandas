@@ -16,14 +16,14 @@ fn main() {
     let mut validity = ValidityMask::all_valid(n);
     let mut mask_sc: Vec<Scalar> = Vec::with_capacity(n);
     let mut col_sc: Vec<Scalar> = Vec::with_capacity(n);
-    for i in 0..n {
+    for (i, slot) in data.iter_mut().enumerate() {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        if (state >> 40) % 3 == 0 {
+        if (state >> 40).is_multiple_of(3) {
             validity.set(i, false);
             col_sc.push(Scalar::Null(NullKind::Null));
         } else {
-            data[i] = ((state >> 20) % 1_000_000) as i64;
-            col_sc.push(Scalar::Int64(data[i]));
+            *slot = ((state >> 20) % 1_000_000) as i64;
+            col_sc.push(Scalar::Int64(*slot));
         }
         mask_sc.push(Scalar::Bool((state >> 33) & 1 == 0));
     }

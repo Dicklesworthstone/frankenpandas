@@ -18551,7 +18551,7 @@ mod tests {
             f64::NAN,
             1e20,
             f64::INFINITY,
-            3.14159,
+            std::f64::consts::PI,
             f64::NEG_INFINITY,
             42.0,
         ];
@@ -18638,7 +18638,17 @@ mod tests {
         // ("1.0"), negatives, large magnitude (sci notation), i64::MIN/MAX; default +
         // na_rep configs.
         let n = 9usize;
-        let fdata: Vec<f64> = vec![1.0, -2.5, 0.0, f64::NAN, 1e20, -0.0, 3.14159, 100.0, 42.0];
+        let fdata: Vec<f64> = vec![
+            1.0,
+            -2.5,
+            0.0,
+            f64::NAN,
+            1e20,
+            -0.0,
+            std::f64::consts::PI,
+            100.0,
+            42.0,
+        ];
         let mut fv = fp_columnar::ValidityMask::all_valid(n);
         fv.set(2, false); // validity-clear (data 0.0 → must render na_rep, not "0.0")
         fv.set(7, false); // validity-clear

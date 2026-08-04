@@ -914,10 +914,6 @@ impl Float64DotInput {
         debug_assert!(start.checked_add(len).is_some_and(|end| end <= data.len()));
         Self { data, start }
     }
-
-    fn value_at(&self, row: usize) -> f64 {
-        self.data[self.start + row]
-    }
 }
 
 /// A shared left-hand (`A`) panel for `df.dot`: the `k` A-columns built once
@@ -6639,13 +6635,13 @@ fn count_distinct_i64_singletable(data: &[i64]) -> i64 {
             let nshift = 64 - ncap.trailing_zeros();
             let nmask = ncap - 1;
             let mut nkeys = vec![EMPTY; ncap];
-            for p in 0..cap {
-                if keys[p] != EMPTY {
-                    let mut q = ((keys[p] as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
+            for &k in &keys {
+                if k != EMPTY {
+                    let mut q = ((k as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
                     while nkeys[q] != EMPTY {
                         q = (q + 1) & nmask;
                     }
-                    nkeys[q] = keys[p];
+                    nkeys[q] = k;
                 }
             }
             keys = nkeys;
@@ -7082,13 +7078,13 @@ fn duplicated_first_i64_wide(data: &[i64]) -> Vec<bool> {
             let nshift = 64 - ncap.trailing_zeros();
             let nmask = ncap - 1;
             let mut nkeys = vec![EMPTY; ncap];
-            for p in 0..cap {
-                if keys[p] != EMPTY {
-                    let mut q = ((keys[p] as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
+            for &k in &keys {
+                if k != EMPTY {
+                    let mut q = ((k as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
                     while nkeys[q] != EMPTY {
                         q = (q + 1) & nmask;
                     }
-                    nkeys[q] = keys[p];
+                    nkeys[q] = k;
                 }
             }
             keys = nkeys;
@@ -7154,13 +7150,13 @@ fn unique_f64_wide(data: &[f64]) -> Vec<f64> {
             let nshift = 64 - ncap.trailing_zeros();
             let nmask = ncap - 1;
             let mut nkeys = vec![EMPTY; ncap];
-            for p in 0..cap {
-                if keys[p] != EMPTY {
-                    let mut q = ((keys[p] as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
+            for &k in &keys {
+                if k != EMPTY {
+                    let mut q = ((k as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
                     while nkeys[q] != EMPTY {
                         q = (q + 1) & nmask;
                     }
-                    nkeys[q] = keys[p];
+                    nkeys[q] = k;
                 }
             }
             keys = nkeys;
@@ -7215,13 +7211,13 @@ fn unique_i64_wide(data: &[i64]) -> Vec<i64> {
             let nshift = 64 - ncap.trailing_zeros();
             let nmask = ncap - 1;
             let mut nkeys = vec![EMPTY; ncap];
-            for p in 0..cap {
-                if keys[p] != EMPTY {
-                    let mut q = ((keys[p] as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
+            for &k in &keys {
+                if k != EMPTY {
+                    let mut q = ((k as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
                     while nkeys[q] != EMPTY {
                         q = (q + 1) & nmask;
                     }
-                    nkeys[q] = keys[p];
+                    nkeys[q] = k;
                 }
             }
             keys = nkeys;
@@ -21229,11 +21225,11 @@ impl Column {
         // prefix + typed i64 `==` tie-walk are bit-identical to the comparator rank.
         if matches!(self.dtype, DType::Datetime64 | DType::Timedelta64) {
             let ns: Option<&[i64]> = match self.dtype {
-                DType::Datetime64 => self.as_datetime64_slice().or_else(|| match &self.values {
+                DType::Datetime64 => self.as_datetime64_slice().or(match &self.values {
                     ScalarValues::LazyNullableDatetime64 { data, .. } => Some(data.as_slice()),
                     _ => None,
                 }),
-                DType::Timedelta64 => self.as_timedelta64_slice().or_else(|| match &self.values {
+                DType::Timedelta64 => self.as_timedelta64_slice().or(match &self.values {
                     ScalarValues::LazyNullableTimedelta64 { data, .. } => Some(data.as_slice()),
                     _ => None,
                 }),
@@ -22569,9 +22565,9 @@ impl Column {
             let mut present_keys: Vec<u64> = Vec::with_capacity(n);
             let mut present_idx: Vec<usize> = Vec::with_capacity(n);
             let mut missing_idx: Vec<usize> = Vec::new();
-            for i in 0..n {
+            for (i, &v) in data.iter().enumerate() {
                 if validity.get(i) {
-                    let key = i64_radix_key(data[i]);
+                    let key = i64_radix_key(v);
                     present_keys.push(if ascending { key } else { !key });
                     present_idx.push(i);
                 } else {
@@ -22605,9 +22601,9 @@ impl Column {
             let mut present_keys: Vec<u64> = Vec::with_capacity(n);
             let mut present_idx: Vec<usize> = Vec::with_capacity(n);
             let mut missing_idx: Vec<usize> = Vec::new();
-            for i in 0..n {
-                if validity.get(i) && !data[i].is_nan() {
-                    let key = f64_radix_key(data[i]);
+            for (i, &v) in data.iter().enumerate() {
+                if validity.get(i) && !v.is_nan() {
+                    let key = f64_radix_key(v);
                     present_keys.push(if ascending { key } else { !key });
                     present_idx.push(i);
                 } else {
@@ -22652,11 +22648,11 @@ impl Column {
         // na-last comparator. The buffer accessor also reaches the LazyNullable*
         // backing (as_datetime64_slice only exposes the all-valid backings).
         let temporal_ns: Option<&[i64]> = match self.dtype {
-            DType::Datetime64 => self.as_datetime64_slice().or_else(|| match &self.values {
+            DType::Datetime64 => self.as_datetime64_slice().or(match &self.values {
                 ScalarValues::LazyNullableDatetime64 { data, .. } => Some(data.as_slice()),
                 _ => None,
             }),
-            DType::Timedelta64 => self.as_timedelta64_slice().or_else(|| match &self.values {
+            DType::Timedelta64 => self.as_timedelta64_slice().or(match &self.values {
                 ScalarValues::LazyNullableTimedelta64 { data, .. } => Some(data.as_slice()),
                 _ => None,
             }),
@@ -22667,9 +22663,9 @@ impl Column {
             let mut present_keys: Vec<u64> = Vec::with_capacity(n);
             let mut present_idx: Vec<usize> = Vec::with_capacity(n);
             let mut missing_idx: Vec<usize> = Vec::new();
-            for i in 0..n {
-                if self.validity.get(i) && data[i] != i64::MIN {
-                    let key = i64_radix_key(data[i]);
+            for (i, &v) in data.iter().enumerate() {
+                if self.validity.get(i) && v != i64::MIN {
+                    let key = i64_radix_key(v);
                     present_keys.push(if ascending { key } else { !key });
                     present_idx.push(i);
                 } else {
@@ -24686,7 +24682,7 @@ impl Column {
             // value loop is a bounds-check-free slice zip that vectorizes. The
             // by-index sibling below stays for the nullable arms, whose per-element
             // validity lookup is inherently indexed.
-            par_map_slice_f64_with_witness(data, |x| f(x))
+            par_map_slice_f64_with_witness(data, &f)
         } else if let Some(data) = self.as_i64_slice() {
             par_map_slice_f64_with_witness(data, |x: i64| f(x as f64))
         } else if self.dtype == DType::Float64
@@ -28830,14 +28826,14 @@ mod tests {
             let mut validity = crate::ValidityMask::all_valid(src_n);
             let mut eager: Vec<Scalar> = Vec::with_capacity(src_n);
             let mut some_missing = false;
-            for i in 0..src_n {
+            for (i, slot) in data.iter_mut().enumerate() {
                 if next() % 3 == 0 {
                     validity.set(i, false);
                     eager.push(Scalar::Null(NullKind::Null));
                     some_missing = true;
                 } else {
                     let v = (next() % 20_000) as i64 - 10_000;
-                    data[i] = v;
+                    *slot = v;
                     eager.push(Scalar::Int64(v));
                 }
             }
@@ -28883,12 +28879,12 @@ mod tests {
             let mut data = vec![false; src_n];
             let mut validity = crate::ValidityMask::all_valid(src_n);
             let mut nullable = false;
-            for i in 0..src_n {
+            for (i, slot) in data.iter_mut().enumerate() {
                 if next() % 3 == 0 {
                     validity.set(i, false);
                     nullable = true;
                 } else {
-                    data[i] = next() % 2 == 0;
+                    *slot = next() % 2 == 0;
                 }
             }
             if !nullable || src_n == 0 {
@@ -30583,12 +30579,12 @@ mod tests {
             let mut data = Vec::with_capacity(n);
             let mut validity = ValidityMask::all_valid(n);
             let mut vbits = vec![true; n];
-            for i in 0..n {
-                if nullable && next() % 4 == 0 {
+            for (i, vb) in vbits.iter_mut().enumerate() {
+                if nullable && next().is_multiple_of(4) {
                     validity.set(i, false);
-                    vbits[i] = false;
+                    *vb = false;
                     data.push(base + (next() % 1000) as i64);
-                } else if next() % 6 == 0 {
+                } else if next().is_multiple_of(6) {
                     data.push(nat);
                 } else {
                     data.push(base + (next() % 100_000) as i64 - 50_000);
@@ -31715,13 +31711,13 @@ mod tests {
                 let mut validity = crate::ValidityMask::all_valid(n);
                 let mut eager: Vec<Scalar> = Vec::with_capacity(n);
                 let mut mask_scalars: Vec<Scalar> = Vec::with_capacity(n);
-                for i in 0..n {
+                for (i, slot) in data.iter_mut().enumerate() {
                     if next() % 3 == 0 {
                         validity.set(i, false);
                         eager.push(Scalar::Null(NullKind::Null));
                     } else {
                         let v = (next() % 20_000) as i64 - 10_000;
-                        data[i] = v;
+                        *slot = v;
                         eager.push(Scalar::Int64(v));
                     }
                     // ~15% missing mask, else a seeded bool.
@@ -32079,14 +32075,14 @@ mod tests {
                 state
             };
             // Build a contiguous-Utf8 column of `n` rows; `nullable` ⇒ ~25% missing.
-            let mut build =
+            let build =
                 |n: usize, nullable: bool, next: &mut dyn FnMut() -> u64| -> (Column, Vec<Option<String>>) {
                     let mut validity = crate::ValidityMask::all_valid(n);
                     let mut opt: Vec<Option<String>> = Vec::with_capacity(n);
                     let mut bytes: Vec<u8> = Vec::new();
                     let mut offsets: Vec<usize> = vec![0];
                     for i in 0..n {
-                        if nullable && next() % 4 == 0 {
+                        if nullable && next().is_multiple_of(4) {
                             validity.set(i, false);
                             opt.push(None);
                         } else {
@@ -32175,12 +32171,12 @@ mod tests {
                 let mut data = Vec::with_capacity(n);
                 let mut validity = crate::ValidityMask::all_valid(n);
                 let mut vbits = vec![true; n];
-                for i in 0..n {
-                    if nullable && next() % 4 == 0 {
+                for (i, vb) in vbits.iter_mut().enumerate() {
+                    if nullable && next().is_multiple_of(4) {
                         validity.set(i, false);
-                        vbits[i] = false;
+                        *vb = false;
                         data.push(base + (next() % 1000) as i64);
-                    } else if next() % 6 == 0 {
+                    } else if next().is_multiple_of(6) {
                         data.push(nat);
                     } else {
                         // Small alphabet of magnitudes ⇒ frequent ties across columns.
@@ -32265,12 +32261,12 @@ mod tests {
                 let mut opt: Vec<Option<bool>> = Vec::with_capacity(n);
                 let mut data: Vec<bool> = Vec::with_capacity(n);
                 for i in 0..n {
-                    if nullable && next() % 3 == 0 {
+                    if nullable && next().is_multiple_of(3) {
                         validity.set(i, false);
                         opt.push(None);
                         data.push(false);
                     } else {
-                        let b = next() % 2 == 0;
+                        let b = next().is_multiple_of(2);
                         opt.push(Some(b));
                         data.push(b);
                     }
@@ -32338,12 +32334,12 @@ mod tests {
                 let mut data = Vec::with_capacity(n);
                 let mut validity = crate::ValidityMask::all_valid(n);
                 let mut vbits = vec![true; n];
-                for i in 0..n {
-                    if nullable && next() % 4 == 0 {
+                for (i, vb) in vbits.iter_mut().enumerate() {
+                    if nullable && next().is_multiple_of(4) {
                         validity.set(i, false);
-                        vbits[i] = false;
+                        *vb = false;
                         data.push(base + (next() % 1000) as i64);
-                    } else if next() % 6 == 0 {
+                    } else if next().is_multiple_of(6) {
                         data.push(nat);
                     } else {
                         data.push(base + (next() % 8) as i64);
@@ -32754,24 +32750,24 @@ mod tests {
                     let mut data = vec![0i64; n];
                     let mut validity = crate::ValidityMask::all_valid(n);
                     let mut eager: Vec<Scalar> = Vec::with_capacity(n);
-                    for i in 0..n {
+                    for (i, slot) in data.iter_mut().enumerate() {
                         let r = next() % 10;
                         if r < 3 {
                             validity.set(i, false);
                             eager.push(Scalar::Null(NullKind::NaT));
                         } else if r == 3 {
-                            data[i] = nat; // NaT in buffer with validity TRUE
+                            *slot = nat; // NaT in buffer with validity TRUE
                             eager.push(if is_dt {
                                 Scalar::Datetime64(nat)
                             } else {
                                 Scalar::Timedelta64(nat)
                             });
                         } else {
-                            data[i] = base + (next() % 1_000_000) as i64;
+                            *slot = base + (next() % 1_000_000) as i64;
                             eager.push(if is_dt {
-                                Scalar::Datetime64(data[i])
+                                Scalar::Datetime64(*slot)
                             } else {
-                                Scalar::Timedelta64(data[i])
+                                Scalar::Timedelta64(*slot)
                             });
                         }
                     }
@@ -38339,12 +38335,12 @@ mod tests {
             }
             // Build a Bool column: `nullable`=false ⇒ all-valid (from_bool_values via
             // the folding constructor); true ⇒ some slots masked out.
-            let mut build = |n: usize, nullable: bool, next: &mut dyn FnMut() -> u64| -> Column {
+            let build = |n: usize, nullable: bool, next: &mut dyn FnMut() -> u64| -> Column {
                 let mut validity = crate::ValidityMask::all_valid(n);
                 let data: Vec<bool> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if nullable && r % 4 == 0 {
+                        if nullable && r.is_multiple_of(4) {
                             validity.set(i, false);
                         }
                         (r >> 19) & 1 == 1
@@ -38352,7 +38348,9 @@ mod tests {
                     .collect();
                 Column::from_bool_values_with_validity(data, validity)
             };
-            let ops: [(fn(bool, bool) -> bool, fn(&Column, &Column) -> Result<Column, ColumnError>); 3] = [
+            type BoolScalarOp = fn(bool, bool) -> bool;
+            type BoolColumnOp = fn(&Column, &Column) -> Result<Column, ColumnError>;
+            let ops: [(BoolScalarOp, BoolColumnOp); 3] = [
                 (|a, b| a && b, |a, b| a.logical_and(b)),
                 (|a, b| a || b, |a, b| a.logical_or(b)),
                 (|a, b| a ^ b, |a, b| a.logical_xor(b)),
@@ -38734,7 +38732,7 @@ mod tests {
                 let data: Vec<i64> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if r % 5 == 0 {
+                        if r.is_multiple_of(5) {
                             vi.set(i, false);
                         }
                         (r % 400) as i64 - 200
@@ -38857,7 +38855,7 @@ mod tests {
                 let data: Vec<i64> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if r % 4 == 0 {
+                        if r.is_multiple_of(4) {
                             vi.set(i, false);
                         }
                         (r % 5) as i64 - 2 // -2..2 incl 0
@@ -38938,7 +38936,7 @@ mod tests {
                 let data: Vec<i64> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if r % 4 == 0 {
+                        if r.is_multiple_of(4) {
                             vi.set(i, false);
                         }
                         r as i64
@@ -38951,7 +38949,7 @@ mod tests {
                 let data: Vec<i64> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if r % 5 == 0 {
+                        if r.is_multiple_of(5) {
                             vi.set(i, false);
                         }
                         (r % 140) as i64 - 10 // range [-10, 129] ⇒ exercises clamp both ends
@@ -39031,7 +39029,7 @@ mod tests {
                 let data: Vec<i64> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if r % 4 == 0 {
+                        if r.is_multiple_of(4) {
                             vi.set(i, false);
                         }
                         (r % 40) as i64 - 20 // negatives + zeros
@@ -39124,7 +39122,7 @@ mod tests {
                 let data: Vec<i64> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if r % 5 == 0 {
+                        if r.is_multiple_of(5) {
                             vi.set(i, false);
                         }
                         (r % 20) as i64 - 8
@@ -39218,7 +39216,7 @@ mod tests {
                 let data: Vec<i64> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if r % 5 == 0 {
+                        if r.is_multiple_of(5) {
                             vi.set(i, false);
                         }
                         (r % 400) as i64 - 200
@@ -39319,7 +39317,7 @@ mod tests {
                 let data: Vec<i64> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if r % 5 == 0 {
+                        if r.is_multiple_of(5) {
                             vi.set(i, false);
                         }
                         (r % 400) as i64 - 200
@@ -39415,7 +39413,7 @@ mod tests {
                 let data: Vec<i64> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if r % 5 == 0 {
+                        if r.is_multiple_of(5) {
                             vi.set(i, false);
                         }
                         (r % 400) as i64 - 200
@@ -39728,7 +39726,7 @@ mod tests {
             // NaN-producing rows are forced onto word boundaries (k = 0 and k = 63), where
             // an off-by-one in the shift or the mask would corrupt a neighbouring word.
             for &n in &[200_003_usize, 262_145, 393_281] {
-                let negative_at = |i: usize| i % 64 == 0 || i % 64 == 63 || i % 1021 == 7;
+                let negative_at = |i: usize| i.is_multiple_of(64) || i % 64 == 63 || i % 1021 == 7;
                 let fdata: Vec<f64> = (0..n)
                     .map(|i| {
                         if negative_at(i) {
@@ -40302,7 +40300,7 @@ mod tests {
                 let data: Vec<i64> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if r % 6 == 0 {
+                        if r.is_multiple_of(6) {
                             vi.set(i, false);
                         }
                         (r % 400) as i64 - 200
@@ -40400,7 +40398,7 @@ mod tests {
                 let data: Vec<i64> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if r % 6 == 0 {
+                        if r.is_multiple_of(6) {
                             vi.set(i, false);
                         }
                         (r % 400) as i64 - 200
@@ -40585,7 +40583,7 @@ mod tests {
                 let d: Vec<i64> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if r % 5 == 0 {
+                        if r.is_multiple_of(5) {
                             v.set(i, false);
                         }
                         (r % 400) as i64 - 200
@@ -40598,7 +40596,7 @@ mod tests {
                 let d: Vec<f64> = (0..n)
                     .map(|i| {
                         let r = next();
-                        if r % 5 == 0 {
+                        if r.is_multiple_of(5) {
                             v.set(i, false);
                             0.0
                         } else {
@@ -41051,9 +41049,9 @@ mod tests {
                     .collect();
                 // Int64 reference over present.
                 let mut ic: HashMap<i64, u64> = HashMap::new();
-                for i in 0..len {
+                for (i, &v) in idata.iter().enumerate() {
                     if vi.get(i) {
-                        *ic.entry(idata[i]).or_insert(0) += 1;
+                        *ic.entry(v).or_insert(0) += 1;
                     }
                 }
                 let mut iwant: Vec<i64> = if ic.is_empty() {
@@ -41065,9 +41063,9 @@ mod tests {
                 iwant.sort_unstable();
                 // Float64 reference over present (by bits; no -0.0 in data).
                 let mut fc: HashMap<u64, u64> = HashMap::new();
-                for i in 0..len {
-                    if vf.get(i) && !fdata[i].is_nan() {
-                        *fc.entry(fdata[i].to_bits()).or_insert(0) += 1;
+                for (i, &f) in fdata.iter().enumerate() {
+                    if vf.get(i) && !f.is_nan() {
+                        *fc.entry(f.to_bits()).or_insert(0) += 1;
                     }
                 }
                 let mut fwant: Vec<f64> = if fc.is_empty() {
@@ -43856,24 +43854,24 @@ mod tests {
                     let mut validity = crate::ValidityMask::all_valid(n);
                     let mut eager: Vec<Scalar> = Vec::with_capacity(n);
                     let mut cbits: Vec<bool> = Vec::with_capacity(n);
-                    for i in 0..n {
+                    for (i, slot) in data.iter_mut().enumerate() {
                         let r = next() % 10;
                         if r < 3 {
                             validity.set(i, false);
                             eager.push(Scalar::Null(NullKind::NaT));
                         } else if r == 3 {
-                            data[i] = nat;
+                            *slot = nat;
                             eager.push(if is_dt {
                                 Scalar::Datetime64(nat)
                             } else {
                                 Scalar::Timedelta64(nat)
                             });
                         } else {
-                            data[i] = base + (next() % 1_000_000) as i64;
+                            *slot = base + (next() % 1_000_000) as i64;
                             eager.push(if is_dt {
-                                Scalar::Datetime64(data[i])
+                                Scalar::Datetime64(*slot)
                             } else {
-                                Scalar::Timedelta64(data[i])
+                                Scalar::Timedelta64(*slot)
                             });
                         }
                         cbits.push(next() % 2 == 0);
@@ -43924,24 +43922,24 @@ mod tests {
                 let mut data = vec![0i64; n];
                 let mut validity = crate::ValidityMask::all_valid(n);
                 let mut eager: Vec<Scalar> = Vec::with_capacity(n);
-                for i in 0..n {
+                for (i, slot) in data.iter_mut().enumerate() {
                     let r = next() % 10;
                     if r < 3 {
                         validity.set(i, false);
                         eager.push(Scalar::Null(NullKind::NaT));
                     } else if r == 3 {
-                        data[i] = nat;
+                        *slot = nat;
                         eager.push(if is_dt {
                             Scalar::Datetime64(nat)
                         } else {
                             Scalar::Timedelta64(nat)
                         });
                     } else {
-                        data[i] = base + (next() % 1_000_000) as i64;
+                        *slot = base + (next() % 1_000_000) as i64;
                         eager.push(if is_dt {
-                            Scalar::Datetime64(data[i])
+                            Scalar::Datetime64(*slot)
                         } else {
-                            Scalar::Timedelta64(data[i])
+                            Scalar::Timedelta64(*slot)
                         });
                     }
                 }
@@ -43992,13 +43990,13 @@ mod tests {
                 let mut data = vec![0i64; n];
                 let mut validity = crate::ValidityMask::all_valid(n);
                 let mut eager: Vec<Scalar> = Vec::with_capacity(n);
-                for i in 0..n {
-                    if next() % 3 == 0 {
+                for (i, slot) in data.iter_mut().enumerate() {
+                    if next().is_multiple_of(3) {
                         validity.set(i, false);
                         eager.push(Scalar::Null(NullKind::Null));
                     } else {
                         let v = (next() % 10_000) as i64 - 5000;
-                        data[i] = v;
+                        *slot = v;
                         eager.push(Scalar::Int64(v));
                     }
                 }
@@ -51225,7 +51223,7 @@ mod ab_bool_sum_ccfp {
 mod ab_bool_anyall_ccfp {
     use std::{process::Command, time::Instant};
 
-    use super::{Column, Scalar, nanall, nanany};
+    use super::{Column, nanall, nanany};
 
     /// Seeded (splitmix64) bools, ~50% true.
     fn bools(n: usize) -> Vec<bool> {
@@ -51854,7 +51852,7 @@ mod ab_i64_quantile_ccfp {
 mod ab_utf8_minmax_ccfp {
     use std::{process::Command, time::Instant};
 
-    use super::{Column, Scalar, nanmax, nanmin};
+    use super::{Column, nanmax, nanmin};
 
     /// Seeded (splitmix64) contiguous-Utf8 buffer: `n` rows drawn from `distinct`
     /// fixed-width `"val_{:07}"` labels.

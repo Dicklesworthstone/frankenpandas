@@ -24505,7 +24505,7 @@ mod tests {
     use fp_runtime::RuntimeMode;
 
     use super::{
-        ArtifactId, AsupersyncCodecEvidence, CaseEvidenceEntry, CaseResult, CaseStatus, CiGate,
+        ArtifactId, CaseEvidenceEntry, CaseResult, CaseStatus, CiGate,
         CiGateResult, CiPipelineConfig, CiPipelineResult, ComparisonCategory, DecodeProofArtifact,
         DecodeProofStatus, DifferentialResult, DriftLevel, DriftRecord, E2eConfig, FailureDigest,
         FailureForensicsReport, FailureSurfaceEntry, FaultInjectionClassification,
@@ -24919,7 +24919,7 @@ mod tests {
         let payload = br#"{\"suite\":\"phase2c_packets\",\"passed\":2,\"failed\":0}"#;
         let mut sidecar: RaptorQSidecarArtifact =
             generate_raptorq_sidecar("test/artifact", "conformance", payload, 8).expect("sidecar");
-        sidecar.asupersync_codec = Some(AsupersyncCodecEvidence {
+        sidecar.asupersync_codec = Some(super::AsupersyncCodecEvidence {
             codec: "passthrough".to_owned(),
             verifier: "fnv1a64".to_owned(),
             encoded_bytes: payload.len(),

@@ -1,6 +1,6 @@
-//! Bench for `Column::argmin`/`argmax` after adding typed Float64/Int64 (all-valid
-//! + nullable) paths (scan the raw slice + validity, skipping the nanargmin/
-//! nanargmax Vec<Scalar> materialization + per-Scalar is_missing/to_f64).
+//! Bench for `Column::argmin`/`argmax` after adding typed Float64/Int64
+//! (all-valid + nullable) paths (scan the raw slice + validity, skipping the
+//! nanargmin/nanargmax Vec<Scalar> materialization + per-Scalar is_missing/to_f64).
 //!
 //! NEW = col.argmin()/argmax(). CONTROL = nanargmin/nanargmax over values()
 //! (cached ⇒ one-time materialization excluded ⇒ conservative). Results equal.

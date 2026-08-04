@@ -11,14 +11,14 @@ fn build(n: usize, seed: u64) -> (Column, Vec<Scalar>) {
     let mut data = vec![0i64; n];
     let mut validity = ValidityMask::all_valid(n);
     let mut sc: Vec<Scalar> = Vec::with_capacity(n);
-    for i in 0..n {
+    for (i, slot) in data.iter_mut().enumerate() {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        if (state >> 40) % 3 == 0 {
+        if (state >> 40).is_multiple_of(3) {
             validity.set(i, false);
             sc.push(Scalar::Null(NullKind::Null));
         } else {
-            data[i] = ((state >> 20) % 1_000_000) as i64;
-            sc.push(Scalar::Int64(data[i]));
+            *slot = ((state >> 20) % 1_000_000) as i64;
+            sc.push(Scalar::Int64(*slot));
         }
     }
     (Column::from_i64_values_with_validity(data, validity), sc)

@@ -15,12 +15,12 @@ fn main() {
     let mut state: u64 = 0xF111_5EED;
     let mut data = vec![0i64; n];
     let mut validity = ValidityMask::all_valid(n);
-    for i in 0..n {
+    for (i, slot) in data.iter_mut().enumerate() {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        if (state >> 40) % 4 == 0 {
+        if (state >> 40).is_multiple_of(4) {
             validity.set(i, false);
         } else {
-            data[i] = base + ((state >> 20) % 10_000_000) as i64;
+            *slot = base + ((state >> 20) % 10_000_000) as i64;
         }
     }
     let col = Column::from_datetime64_values_with_validity(data.clone(), validity.clone());
@@ -29,8 +29,8 @@ fn main() {
     // Correctness spot check.
     let got = col.fillna(&fill).unwrap();
     assert_eq!(got.dtype(), fp_types::DType::Datetime64);
-    for i in 0..n.min(1000) {
-        let want = if validity.get(i) { data[i] } else { base };
+    for (i, &d) in data.iter().enumerate().take(n.min(1000)) {
+        let want = if validity.get(i) { d } else { base };
         assert_eq!(got.values()[i], Scalar::Datetime64(want), "row {i}");
     }
     println!("fillna(Datetime64) OK, all-valid out = {}", !got.has_nulls());

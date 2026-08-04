@@ -21,13 +21,13 @@ fn main() {
     let mut rd = vec![false; n];
     for i in 0..n {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        if (state >> 40) % 3 == 0 {
+        if (state >> 40).is_multiple_of(3) {
             la.set(i, false);
         } else {
             ld[i] = (state >> 20) & 1 == 0;
         }
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        if (state >> 40) % 3 == 0 {
+        if (state >> 40).is_multiple_of(3) {
             ra.set(i, false);
         } else {
             rd[i] = (state >> 20) & 1 == 0;

@@ -12,7 +12,7 @@ fn build(n: usize, base: i64, seed: u64) -> (Column, Vec<Scalar>, Vec<bool>) {
     let mut vbits = vec![true; n];
     for i in 0..n {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        if (state >> 40) % 4 == 0 {
+        if (state >> 40).is_multiple_of(4) {
             validity.set(i, false);
             vbits[i] = false;
         } else {

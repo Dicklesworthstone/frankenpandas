@@ -17,7 +17,7 @@ fn main() {
     let mut cbits = vec![false; n];
     for i in 0..n {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        if (state >> 40) % 4 == 0 {
+        if (state >> 40).is_multiple_of(4) {
             validity.set(i, false);
         } else {
             data[i] = base + ((state >> 20) % 10_000_000) as i64;
