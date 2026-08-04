@@ -88664,14 +88664,50 @@ impl GroupByResample<'_> {
             let first_row = indices[0];
 
             if let Some(first_col) = value_cols.first() {
+                // perf (br-frankenpandas-vw0uu): build the group's index ONCE and share
+                // it across every value column through an Arc-backed `Index` clone,
+                // instead of deep-cloning a `Vec<IndexLabel>` per column (the old
+                // `group_idx.clone()` allocated one label per row PER COLUMN).
+                // NOTE: unlike grouped rolling/ewm, the positional 0..len unit-range
+                // shortcut does NOT apply here — resample buckets by TIME, so the real
+                // temporal labels are load-bearing and are preserved exactly as before.
+                let group_index = Index::new(
+                    indices
+                        .iter()
+                        .map(|&i| self.groupby.df.index.labels()[i].clone())
+                        .collect::<Vec<IndexLabel>>(),
+                );
+                // perf (br-frankenpandas-vw0uu): gather each group's raw f64/i64 slice
+                // into a TYPED Column so the inner resample hits its typed reduce path
+                // (all 13 Resample aggs are Int64/Float64-typed) instead of the generic
+                // Scalar path that the Scalar-backed `Series::from_values` forced.
+                // BIT-IDENTICAL: `as_f64_slice`/`as_i64_slice` are Some only for an
+                // all-valid column of that dtype, so the typed group column holds the
+                // same values and dtype as the Scalar-backed one and the deterministic
+                // bucket agg yields identical output. The one subtle case is a VALID
+                // NaN (validity set, datum NaN): `from_f64_values` re-derives validity
+                // and marks it missing, and the Scalar path agrees because
+                // `Scalar::is_missing` also treats `Float64(NaN)` as missing — so both
+                // paths feed the agg the same missing-set. Nullable / non-typed columns
+                // keep the exact Scalar path.
+                let gather = |col: &Column| -> Result<Column, FrameError> {
+                    if let Some(data) = col.as_f64_slice() {
+                        Ok(Column::from_f64_values(
+                            indices.iter().map(|&i| data[i]).collect(),
+                        ))
+                    } else if let Some(data) = col.as_i64_slice() {
+                        Ok(Column::from_i64_values(
+                            indices.iter().map(|&i| data[i]).collect(),
+                        ))
+                    } else {
+                        Ok(Column::from_values(
+                            indices.iter().map(|&i| col.values()[i].clone()).collect(),
+                        )?)
+                    }
+                };
+
                 let col = &self.groupby.df.columns[first_col];
-                let group_idx: Vec<IndexLabel> = indices
-                    .iter()
-                    .map(|&i| self.groupby.df.index.labels()[i].clone())
-                    .collect();
-                let group_vals: Vec<Scalar> =
-                    indices.iter().map(|&i| col.values()[i].clone()).collect();
-                let group_series = Series::from_values(first_col, group_idx.clone(), group_vals)?;
+                let group_series = Series::new(first_col, group_index.clone(), gather(col)?)?;
                 let resampled = agg(&group_series, &self.freq)?;
 
                 let n_buckets = resampled.len();
@@ -88687,9 +88723,7 @@ impl GroupByResample<'_> {
 
                 for col_name in value_cols.iter().skip(1) {
                     let col = &self.groupby.df.columns[col_name];
-                    let gv: Vec<Scalar> =
-                        indices.iter().map(|&i| col.values()[i].clone()).collect();
-                    let gs = Series::from_values(col_name, group_idx.clone(), gv)?;
+                    let gs = Series::new(col_name, group_index.clone(), gather(col)?)?;
                     let rs = agg(&gs, &self.freq)?;
                     all_values
                         .get_mut(col_name)
@@ -136343,6 +136377,139 @@ mod tests {
         assert_eq!(float_max.column().dtype(), DType::Float64);
         assert_eq!(float_max.column().values()[0], Scalar::Float64(4.0));
         assert_eq!(float_max.column().values()[1], Scalar::Float64(-1.0));
+    }
+
+    #[test]
+    fn grouped_resample_typed_gather_matches_scalar_path_vw0uu() {
+        // br-frankenpandas-vw0uu: GroupByResample::apply_grouped_resample now gathers
+        // each group's values through the raw f64/i64 slice (typed Column) and shares
+        // one Arc-backed group Index across columns, instead of a per-cell
+        // `col.values()[i].clone()` Vec<Scalar> plus a `Vec<IndexLabel>` deep-cloned
+        // per column. This guard pins the OBSERVABLE contract that change must not move.
+        //
+        // Two value columns of DIFFERENT typed dtypes (Int64 + Float64) are the load-
+        // bearing part: the second column exercises the shared-index reuse path, and
+        // having one of each proves the typed gather preserves per-column dtype rather
+        // than collapsing both to one backing. A third, NULLABLE column pins the
+        // Scalar fallback that the typed gather must decline to.
+        let ts = |d: i64| Scalar::Datetime64(d * 86_400_000_000_000);
+        let df = DataFrame::from_dict(
+            &["g", "t", "i", "f", "n"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                ("t", vec![ts(0), ts(1), ts(0), ts(1)]),
+                (
+                    "i",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                    ],
+                ),
+                (
+                    "f",
+                    vec![
+                        Scalar::Float64(1.5),
+                        Scalar::Float64(2.5),
+                        Scalar::Float64(10.5),
+                        Scalar::Float64(20.5),
+                    ],
+                ),
+                (
+                    "n",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let indexed = df.set_index("t", true).unwrap();
+        let grouped = indexed.groupby(&["g"]).unwrap();
+
+        // Daily buckets: every row is its own bucket, so sum per bucket is the value
+        // itself and the row count is preserved. Group "a" then group "b", in
+        // build_groups order.
+        let summed = grouped.resample("D").sum().unwrap();
+        assert_eq!(summed.len(), 4, "one daily bucket per input row");
+
+        let ivals = summed.columns["i"].values();
+        let fvals = summed.columns["f"].values();
+        let nvals = summed.columns["n"].values();
+        assert_eq!(ivals.len(), 4);
+        assert_eq!(fvals.len(), 4);
+        assert_eq!(nvals.len(), 4);
+
+        // Int64 column: resample sum over a single-element bucket preserves the value.
+        // A gather that silently widened Int64 -> Float64 would fail these.
+        let as_f = |s: &Scalar| -> f64 {
+            match s {
+                Scalar::Int64(v) => *v as f64,
+                Scalar::Float64(v) => *v,
+                other => panic!("unexpected resample output scalar: {other:?}"),
+            }
+        };
+        assert!((as_f(&ivals[0]) - 1.0).abs() < 1e-12);
+        assert!((as_f(&ivals[1]) - 2.0).abs() < 1e-12);
+        assert!((as_f(&ivals[2]) - 10.0).abs() < 1e-12);
+        assert!((as_f(&ivals[3]) - 20.0).abs() < 1e-12);
+
+        // Float64 column keeps its own values — proves the SECOND column did not
+        // inherit the first column's gathered buffer through the shared index reuse.
+        assert!((as_f(&fvals[0]) - 1.5).abs() < 1e-12);
+        assert!((as_f(&fvals[1]) - 2.5).abs() < 1e-12);
+        assert!((as_f(&fvals[2]) - 10.5).abs() < 1e-12);
+        assert!((as_f(&fvals[3]) - 20.5).abs() < 1e-12);
+
+        // Nullable column takes the Scalar fallback (as_f64_slice declines on a
+        // missing slot) and must still line up row-for-row.
+        assert!((as_f(&nvals[0]) - 1.0).abs() < 1e-12);
+        assert!((as_f(&nvals[2]) - 3.0).abs() < 1e-12);
+        assert!((as_f(&nvals[3]) - 4.0).abs() < 1e-12);
+
+        // The bucket labels are the real TIME buckets, not a positional 0..len.
+        // Resample emits its buckets as `IndexLabel::Utf8` period keys (verified
+        // against the emit sites in the Resample engine), so the variant check is
+        // load-bearing here: had the group index been replaced with the positional
+        // unit-range shortcut that grouped rolling/ewm legitimately use, the labels
+        // would come back as Int64 0,1,0,1 — which would still satisfy the
+        // equality/inequality assertions below, so those alone would NOT catch it.
+        let labels = summed.index().labels();
+        assert_eq!(labels.len(), 4);
+        for label in labels {
+            assert!(
+                matches!(label, IndexLabel::Utf8(_)),
+                "grouped resample must keep Utf8 period bucket labels, got {label:?}"
+            );
+        }
+        assert_eq!(
+            labels[0], labels[2],
+            "both groups start at the same day-0 bucket"
+        );
+        assert_eq!(
+            labels[1], labels[3],
+            "both groups end at the same day-1 bucket"
+        );
+        assert_ne!(labels[0], labels[1], "day-0 and day-1 buckets differ");
+
+        // mean over single-element buckets equals the value: a second agg through the
+        // same typed path, guarding against an agg-specific gather regression.
+        let meaned = grouped.resample("D").mean().unwrap();
+        let mi = meaned.columns["i"].values();
+        assert!((as_f(&mi[0]) - 1.0).abs() < 1e-12);
+        assert!((as_f(&mi[3]) - 20.0).abs() < 1e-12);
     }
 
     #[test]
