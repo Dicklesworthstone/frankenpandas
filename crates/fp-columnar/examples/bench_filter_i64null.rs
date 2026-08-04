@@ -8,7 +8,10 @@ use fp_types::{NullKind, Scalar};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let mut state: u64 = 0xF117E5;
@@ -29,11 +32,19 @@ fn main() {
     }
     let col = Column::from_i64_values_with_validity(data, validity);
     let col_eager = Column::new(fp_types::DType::Int64, col_sc).unwrap();
-    let mask = Column::from_bool_values(mask_sc.iter().map(|m| matches!(m, Scalar::Bool(true))).collect());
+    let mask = Column::from_bool_values(
+        mask_sc
+            .iter()
+            .map(|m| matches!(m, Scalar::Bool(true)))
+            .collect(),
+    );
 
     let got = col.filter_by_mask(&mask).unwrap();
     assert_eq!(got.dtype(), fp_types::DType::Int64);
-    assert_eq!(got.values(), col_eager.filter_by_mask(&mask).unwrap().values());
+    assert_eq!(
+        got.values(),
+        col_eager.filter_by_mask(&mask).unwrap().values()
+    );
     println!("filter_by_mask(nullable Int64) OK, out.len()={}", got.len());
 
     let mut best_new = u128::MAX;

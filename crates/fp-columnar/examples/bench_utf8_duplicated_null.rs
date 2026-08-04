@@ -18,7 +18,9 @@ fn ref_duplicated_first_cold(bytes: &[u8], offsets: &[usize], present: &[bool]) 
     let mut owned: Vec<Option<String>> = Vec::with_capacity(n);
     for (i, w) in offsets.windows(2).enumerate() {
         if present[i] {
-            owned.push(Some(std::str::from_utf8(&bytes[w[0]..w[1]]).unwrap().to_string()));
+            owned.push(Some(
+                std::str::from_utf8(&bytes[w[0]..w[1]]).unwrap().to_string(),
+            ));
         } else {
             owned.push(None);
         }
@@ -35,7 +37,10 @@ fn ref_duplicated_first_cold(bytes: &[u8], offsets: &[usize], present: &[bool]) 
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let mut bytes: Vec<u8> = Vec::with_capacity(n * 10);

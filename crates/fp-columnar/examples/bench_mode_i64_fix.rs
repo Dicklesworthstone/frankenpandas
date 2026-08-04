@@ -34,14 +34,21 @@ fn control_fxhash(data: &[i64]) -> Vec<i64> {
         *counts.entry(v).or_insert(0) += 1;
     }
     let m = counts.values().copied().max().unwrap_or(0);
-    let mut w: Vec<i64> = counts.iter().filter_map(|(&k, &c)| (c == m).then_some(k)).collect();
+    let mut w: Vec<i64> = counts
+        .iter()
+        .filter_map(|(&k, &c)| (c == m).then_some(k))
+        .collect();
     w.sort_unstable();
     w
 }
 
 fn old_openaddr(data: &[i64]) -> Vec<i64> {
     const EMPTY: i64 = i64::MIN;
-    let cap = data.len().saturating_add(data.len() / 2).checked_next_power_of_two().unwrap_or(0);
+    let cap = data
+        .len()
+        .saturating_add(data.len() / 2)
+        .checked_next_power_of_two()
+        .unwrap_or(0);
     let mask = cap - 1;
     let mut keys = vec![EMPTY; cap];
     let mut cnt = vec![0u32; cap];
@@ -120,7 +127,10 @@ fn main() {
             let w = old_openaddr(&data);
             let old_ms = t.elapsed().as_nanos() as f64 / 1e6;
             std::hint::black_box(&w);
-            format!(" OLD={old_ms:.2}ms new/old={:.1}x", old_ms / (best_t as f64 / 1e6))
+            format!(
+                " OLD={old_ms:.2}ms new/old={:.1}x",
+                old_ms / (best_t as f64 / 1e6)
+            )
         } else {
             String::new()
         };
@@ -136,7 +146,11 @@ fn main() {
                 o => panic!("not int: {o:?}"),
             })
             .collect();
-        assert_eq!(new_w, control_fxhash(&data), "card={card}: NEW != FxHashMap winners");
+        assert_eq!(
+            new_w,
+            control_fxhash(&data),
+            "card={card}: NEW != FxHashMap winners"
+        );
         println!(
             "mode_i64 card≈{card:>8} n={n} NEW={:>7.2}ms FxHashMap={:>7.2}ms new/fx={:.3}x{old_str}",
             best_t as f64 / 1e6,

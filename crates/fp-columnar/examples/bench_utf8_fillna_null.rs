@@ -28,14 +28,23 @@ fn materialize(bytes: &[u8], offsets: &[usize], present: &[bool]) -> Vec<Scalar>
 fn fill_clone(vals: &[Scalar], fill: &Scalar) -> Column {
     let out: Vec<Scalar> = vals
         .iter()
-        .map(|v| if v.is_missing() { fill.clone() } else { v.clone() })
+        .map(|v| {
+            if v.is_missing() {
+                fill.clone()
+            } else {
+                v.clone()
+            }
+        })
         .collect();
     Column::new(DType::Utf8, out).unwrap()
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let mut bytes: Vec<u8> = Vec::with_capacity(n * 10);
@@ -85,7 +94,11 @@ fn main() {
     let wv = want.values();
     assert_eq!(gv.len(), wv.len());
     for k in 0..n {
-        assert_eq!(format!("{:?}", gv.get(k)), format!("{:?}", wv.get(k)), "slot {k}");
+        assert_eq!(
+            format!("{:?}", gv.get(k)),
+            format!("{:?}", wv.get(k)),
+            "slot {k}"
+        );
     }
     println!(
         "fillna utf8_nullable n={n} NEW={:>7.2}ms COLD={:>7.2}ms(={:.2}x) WARM={:>7.2}ms(={:.2}x)",

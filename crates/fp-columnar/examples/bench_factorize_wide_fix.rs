@@ -15,9 +15,7 @@ use fp_columnar::Column;
 use rustc_hash::FxHashMap;
 
 fn new_codes_len(col: &Column) -> (usize, usize) {
-    let (codes, uniques) = col
-        .factorize_with_options(false, true)
-        .expect("factorize");
+    let (codes, uniques) = col.factorize_with_options(false, true).expect("factorize");
     let c = codes.values().len();
     let u = uniques.values().len();
     // touch a value so nothing is optimized away
@@ -50,7 +48,11 @@ fn fxhash_factorize(data: &[i64]) -> usize {
 
 fn old_factorize(data: &[i64]) -> usize {
     const EMPTY: i64 = i64::MIN;
-    let cap = data.len().saturating_add(data.len() / 2).checked_next_power_of_two().unwrap_or(0);
+    let cap = data
+        .len()
+        .saturating_add(data.len() / 2)
+        .checked_next_power_of_two()
+        .unwrap_or(0);
     let mask = cap - 1;
     let mut keys = vec![EMPTY; cap];
     let mut code_at = vec![0u32; cap];
@@ -120,7 +122,10 @@ fn main() {
             let r = old_factorize(&data);
             let old_ms = t.elapsed().as_nanos() as f64 / 1e6;
             std::hint::black_box(r);
-            format!(" OLD={old_ms:.1}ms new/old={:.1}x", old_ms / (best_t as f64 / 1e6))
+            format!(
+                " OLD={old_ms:.1}ms new/old={:.1}x",
+                old_ms / (best_t as f64 / 1e6)
+            )
         } else {
             String::new()
         };

@@ -26,7 +26,10 @@ fn build(n: usize, seed: u64) -> (Column, Vec<Scalar>) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let (s_col, s_sc) = build(n, 0x0AAA);
@@ -55,7 +58,13 @@ fn main() {
     for _ in 0..iters {
         let t = std::time::Instant::now();
         let out: Vec<Scalar> = (0..n)
-            .map(|i| if cbits[i] { s_sc[i].clone() } else { o_sc[i].clone() })
+            .map(|i| {
+                if cbits[i] {
+                    s_sc[i].clone()
+                } else {
+                    o_sc[i].clone()
+                }
+            })
             .collect();
         let o = Column::from_values(out).unwrap();
         best_ref = best_ref.min(t.elapsed().as_nanos());

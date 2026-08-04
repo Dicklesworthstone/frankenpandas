@@ -8,7 +8,10 @@ use fp_types::{NullKind, Scalar};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let mut state: u64 = 0xB001E5;
@@ -41,7 +44,10 @@ fn main() {
 
     let got = col.reindex_by_positions(&positions).unwrap();
     assert_eq!(got.dtype(), fp_types::DType::Bool);
-    assert_eq!(got.values(), col_eager.reindex_by_positions(&positions).unwrap().values());
+    assert_eq!(
+        got.values(),
+        col_eager.reindex_by_positions(&positions).unwrap().values()
+    );
     println!("reindex_by_positions(nullable Bool) OK, len={}", got.len());
 
     let mut best_new = u128::MAX;

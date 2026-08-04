@@ -16,8 +16,7 @@ fn build(n: usize, datetime: bool, plant_nat: bool) -> (DataFrame, DataFrame) {
     let mut rk: Vec<i64> = (0..n as i64).map(|i| i * 2).collect();
     if plant_nat {
         *lk.last_mut().expect("benchmark uses a non-empty left key") = fp_types::Timestamp::NAT;
-        *rk.last_mut().expect("benchmark uses a non-empty right key") =
-            fp_types::Timestamp::NAT;
+        *rk.last_mut().expect("benchmark uses a non-empty right key") = fp_types::Timestamp::NAT;
     }
     let (lkc, rkc) = if datetime {
         (col_dt(lk), col_dt(rk))

@@ -39,8 +39,14 @@ fn ref_value_counts_cold(bytes: &[u8], offsets: &[usize], present: &[bool]) -> (
         }
     }
     tally.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
-    let values: Vec<Scalar> = tally.iter().map(|(s, _)| Scalar::Utf8((*s).to_string())).collect();
-    let counts: Vec<Scalar> = tally.iter().map(|(_, c)| Scalar::Int64(*c as i64)).collect();
+    let values: Vec<Scalar> = tally
+        .iter()
+        .map(|(s, _)| Scalar::Utf8((*s).to_string()))
+        .collect();
+    let counts: Vec<Scalar> = tally
+        .iter()
+        .map(|(_, c)| Scalar::Int64(*c as i64))
+        .collect();
     (
         Column::new(DType::Utf8, values).unwrap(),
         Column::new(DType::Int64, counts).unwrap(),
@@ -49,7 +55,10 @@ fn ref_value_counts_cold(bytes: &[u8], offsets: &[usize], present: &[bool]) -> (
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     // ~1000 distinct categories, every 5th row missing.

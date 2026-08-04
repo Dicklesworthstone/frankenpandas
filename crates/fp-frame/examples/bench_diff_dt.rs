@@ -9,7 +9,10 @@ use fp_types::{DType, Scalar};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let base: i64 = 1_600_000_000_000_000_000;
@@ -53,7 +56,10 @@ fn main() {
         ],
     )
     .unwrap();
-    println!("1-ns diffs = {:?} (want [NaT, Td 1, Td 2])", tiny.diff(1).unwrap().values());
+    println!(
+        "1-ns diffs = {:?} (want [NaT, Td 1, Td 2])",
+        tiny.diff(1).unwrap().values()
+    );
 
     let mut best = u128::MAX;
     for _ in 0..iters {
@@ -62,5 +68,8 @@ fn main() {
         best = best.min(t.elapsed().as_nanos());
         std::hint::black_box(&o);
     }
-    println!("diff(Datetime64) NEW = {:.2} ms/call ({n} rows)", best as f64 / 1e6);
+    println!(
+        "diff(Datetime64) NEW = {:.2} ms/call ({n} rows)",
+        best as f64 / 1e6
+    );
 }

@@ -34,13 +34,19 @@ fn ref_mode_cold(bytes: &[u8], offsets: &[usize], present: &[bool]) -> Column {
         .filter_map(|(s, c)| if *c == max_count { Some(*s) } else { None })
         .collect();
     winners.sort_unstable();
-    let out: Vec<Scalar> = winners.iter().map(|s| Scalar::Utf8((*s).to_string())).collect();
+    let out: Vec<Scalar> = winners
+        .iter()
+        .map(|s| Scalar::Utf8((*s).to_string()))
+        .collect();
     Column::new(DType::Utf8, out).unwrap()
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     // ~997 categories, but every 3rd present row is "cat_000042" ⇒ a clear single mode.

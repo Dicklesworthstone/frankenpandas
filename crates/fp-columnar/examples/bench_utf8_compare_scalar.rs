@@ -26,7 +26,10 @@ fn ref_eq_col(vals: &[Scalar], needle: &str) -> Column {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(40);
 
     // ~1/1000 rows match the needle "cat_000300"; varied so lt/gt are non-trivial too.

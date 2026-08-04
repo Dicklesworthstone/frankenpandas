@@ -31,7 +31,10 @@ fn ref_isclose_col(a: &[Scalar], b: &[Scalar], rtol: f64, atol: f64) -> Column {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
     let (rtol, atol) = (1e-5f64, 1e-8f64);
 

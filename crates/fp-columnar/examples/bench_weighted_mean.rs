@@ -61,10 +61,7 @@ fn main() {
     let w_i64 = Column::from_i64_values_with_validity(widata, validity.clone());
     let w_f64 = Column::from_f64_values_with_validity(wfdata, validity);
 
-    for (label, vcol, wcol) in [
-        ("f64_x_i64", &v_f64, &w_i64),
-        ("f64_x_f64", &v_f64, &w_f64),
-    ] {
+    for (label, vcol, wcol) in [("f64_x_i64", &v_f64, &w_i64), ("f64_x_f64", &v_f64, &w_f64)] {
         // Warm both lazy Scalar-Vec caches so CONTROL measures loop-only.
         let vv = vcol.values().to_vec();
         let wv = wcol.values().to_vec();

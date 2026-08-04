@@ -8,7 +8,10 @@ use fp_types::{NullKind, Scalar};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let base: i64 = 1_600_000_000_000_000_000;
@@ -33,7 +36,10 @@ fn main() {
         let want = if validity.get(i) { d } else { base };
         assert_eq!(got.values()[i], Scalar::Datetime64(want), "row {i}");
     }
-    println!("fillna(Datetime64) OK, all-valid out = {}", !got.has_nulls());
+    println!(
+        "fillna(Datetime64) OK, all-valid out = {}",
+        !got.has_nulls()
+    );
 
     // Reference = the OLD generic path: materialize Vec<Scalar>, clone present / fill missing.
     let scalars: Vec<Scalar> = (0..n)
@@ -58,7 +64,13 @@ fn main() {
         let t = std::time::Instant::now();
         let out: Vec<Scalar> = scalars
             .iter()
-            .map(|v| if v.is_missing() { fill.clone() } else { v.clone() })
+            .map(|v| {
+                if v.is_missing() {
+                    fill.clone()
+                } else {
+                    v.clone()
+                }
+            })
             .collect();
         let o = Column::from_values(out).unwrap();
         best_ref = best_ref.min(t.elapsed().as_nanos());

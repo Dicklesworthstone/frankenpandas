@@ -7,7 +7,10 @@ use fp_types::Scalar;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let base: i64 = 1_600_000_000_000_000_000;
@@ -22,7 +25,10 @@ fn main() {
     let threshold = Scalar::Datetime64(base + 500_000);
 
     match col.compare_scalar(&threshold, ComparisonOp::Gt) {
-        Ok(out) => println!("compare_scalar(Datetime64 > Datetime64) OK, len={}", out.len()),
+        Ok(out) => println!(
+            "compare_scalar(Datetime64 > Datetime64) OK, len={}",
+            out.len()
+        ),
         Err(e) => {
             println!("compare_scalar(Datetime64 > Datetime64) ERRORED: {e:?}");
         }
@@ -31,7 +37,10 @@ fn main() {
     // Exactness near 1.6e18.
     let small = Column::from_datetime64_values(vec![base, base + 1, base + 2]);
     match small.compare_scalar(&Scalar::Datetime64(base + 1), ComparisonOp::Lt) {
-        Ok(out) => println!("near-1.6e18  col < base+1 = {:?} (want [t,f,f])", out.values()),
+        Ok(out) => println!(
+            "near-1.6e18  col < base+1 = {:?} (want [t,f,f])",
+            out.values()
+        ),
         Err(e) => println!("near-1.6e18 ERRORED: {e:?}"),
     }
 

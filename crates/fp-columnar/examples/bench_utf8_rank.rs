@@ -36,7 +36,10 @@ fn ref_rank_average(vals: &[Scalar]) -> Column {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     // ~2000 distinct labels ⇒ meaningful tie groups; varied for a real sort.

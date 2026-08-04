@@ -11,7 +11,10 @@ use fp_types::{NullKind, Scalar};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let mut state: u64 = 0xB0015EED;
@@ -39,10 +42,22 @@ fn main() {
     // Reference = the OLD generic path: materialize Vec<Scalar::Bool>/Null both sides,
     // per-element is_missing + scalar_compare + Scalar::Bool alloc.
     let lsc: Vec<Scalar> = (0..n)
-        .map(|i| if la.get(i) { Scalar::Bool(ld[i]) } else { Scalar::Null(NullKind::Null) })
+        .map(|i| {
+            if la.get(i) {
+                Scalar::Bool(ld[i])
+            } else {
+                Scalar::Null(NullKind::Null)
+            }
+        })
         .collect();
     let rsc: Vec<Scalar> = (0..n)
-        .map(|i| if ra.get(i) { Scalar::Bool(rd[i]) } else { Scalar::Null(NullKind::Null) })
+        .map(|i| {
+            if ra.get(i) {
+                Scalar::Bool(rd[i])
+            } else {
+                Scalar::Null(NullKind::Null)
+            }
+        })
         .collect();
 
     let bool_cmp = |a: bool, b: bool| !a && b; // Lt
@@ -78,7 +93,11 @@ fn main() {
             _ => Scalar::Null(NullKind::Null),
         })
         .collect();
-    assert_eq!(got.values(), want, "typed nullable-bool arm must match generic reference");
+    assert_eq!(
+        got.values(),
+        want,
+        "typed nullable-bool arm must match generic reference"
+    );
 
     println!(
         "nullable_bool_compare(Lt) n={n} NEW={:.2}ms REF(materialize+scalar_compare)={:.2}ms ({:.1}x)",

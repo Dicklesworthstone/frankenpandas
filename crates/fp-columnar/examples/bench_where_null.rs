@@ -26,7 +26,10 @@ fn ref_where_col(vals: &[Scalar], cond_vals: &[Scalar], other: &Scalar) -> Colum
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
     let other = Scalar::Int64(-99);
 

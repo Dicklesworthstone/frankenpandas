@@ -6,7 +6,10 @@ use fp_columnar::{Column, ComparisonOp};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     // Realistic epoch-ns near 1.6e18 (>> 2^53), with small deltas.
@@ -42,8 +45,14 @@ fn main() {
     let b = Column::from_datetime64_values(vec![base + 1, base + 1, base + 1]);
     let lt = a.binary_comparison(&b, ComparisonOp::Lt).unwrap();
     let eq = a.binary_comparison(&b, ComparisonOp::Eq).unwrap();
-    println!("near-1.6e18  a<b  = {:?}  (exact want [true,false,false])", lt.values());
-    println!("near-1.6e18  a==b = {:?}  (exact want [false,true,false])", eq.values());
+    println!(
+        "near-1.6e18  a<b  = {:?}  (exact want [true,false,false])",
+        lt.values()
+    );
+    println!(
+        "near-1.6e18  a==b = {:?}  (exact want [false,true,false])",
+        eq.values()
+    );
 
     // 3) Timing: current binary_comparison vs a hand-rolled typed i64-ns compare.
     let mut best_cur = u128::MAX;

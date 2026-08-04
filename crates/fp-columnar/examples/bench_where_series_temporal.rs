@@ -20,14 +20,27 @@ fn build(n: usize, base: i64, seed: u64) -> (Column, Vec<Scalar>, Vec<bool>) {
         }
     }
     let scalars: Vec<Scalar> = (0..n)
-        .map(|i| if vbits[i] { Scalar::Datetime64(data[i]) } else { Scalar::Null(NullKind::NaT) })
+        .map(|i| {
+            if vbits[i] {
+                Scalar::Datetime64(data[i])
+            } else {
+                Scalar::Null(NullKind::NaT)
+            }
+        })
         .collect();
-    (Column::from_datetime64_values_with_validity(data, validity), scalars, vbits)
+    (
+        Column::from_datetime64_values_with_validity(data, validity),
+        scalars,
+        vbits,
+    )
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
     let base: i64 = 1_600_000_000_000_000_000;
 
@@ -57,7 +70,13 @@ fn main() {
     for _ in 0..iters {
         let t = std::time::Instant::now();
         let out: Vec<Scalar> = (0..n)
-            .map(|i| if cbits[i] { s_sc[i].clone() } else { o_sc[i].clone() })
+            .map(|i| {
+                if cbits[i] {
+                    s_sc[i].clone()
+                } else {
+                    o_sc[i].clone()
+                }
+            })
             .collect();
         let o = Column::from_values(out).unwrap();
         best_ref = best_ref.min(t.elapsed().as_nanos());

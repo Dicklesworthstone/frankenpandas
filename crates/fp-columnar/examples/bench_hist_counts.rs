@@ -89,7 +89,11 @@ fn main() {
             best_c = best_c.min(t.elapsed().as_nanos());
             std::hint::black_box(&r);
         }
-        assert_eq!(col.hist_counts(bins), ref_hist(&vals, bins), "{label}: NEW != control");
+        assert_eq!(
+            col.hist_counts(bins),
+            ref_hist(&vals, bins),
+            "{label}: NEW != control"
+        );
         println!(
             "hist_counts {label:>13} n={n} bins={bins} NEW={:>7.2}ms CONTROL={:>7.2}ms speedup={:.3}x",
             best_t as f64 / 1e6,

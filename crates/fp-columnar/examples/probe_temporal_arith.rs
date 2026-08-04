@@ -7,7 +7,10 @@ use fp_types::{DType, Scalar};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let base: i64 = 1_600_000_000_000_000_000;
@@ -41,7 +44,10 @@ fn main() {
     let a = Column::from_datetime64_values(vec![base + 5, base + 1]);
     let b = Column::from_datetime64_values(vec![base, base + 3]);
     match a.sub(&b) {
-        Ok(out) => println!("(base+5,base+1) - (base,base+3) = {:?} (want [Td 5, Td -2])", out.values()),
+        Ok(out) => println!(
+            "(base+5,base+1) - (base,base+3) = {:?} (want [Td 5, Td -2])",
+            out.values()
+        ),
         Err(e) => println!("exact dt-dt ERRORED: {e:?}"),
     }
 
@@ -66,7 +72,11 @@ fn main() {
         fp_columnar::ValidityMask::all_valid(2),
     );
     match dtm.add(&tdm) {
-        Ok(o) => println!("dt + td -> dtype={:?} vals={:?} (want Datetime64 [base+10, base+120])", o.dtype(), o.values()),
+        Ok(o) => println!(
+            "dt + td -> dtype={:?} vals={:?} (want Datetime64 [base+10, base+120])",
+            o.dtype(),
+            o.values()
+        ),
         Err(e) => println!("dt + td ERRORED: {e:?}"),
     }
     match dtm.sub(&tdm) {
@@ -79,11 +89,18 @@ fn main() {
     }
 
     // These must STILL error (pandas raises).
-    println!("dt + dt is_err = {} (want true)", dt_end.add(&dt_start).is_err());
+    println!(
+        "dt + dt is_err = {} (want true)",
+        dt_end.add(&dt_start).is_err()
+    );
     println!("td - dt is_err = {} (want true)", tdm.sub(&dtm).is_err());
 
     // Timing.
-    if dt_end.sub(&dt_start).map(|c| c.dtype() == DType::Timedelta64).unwrap_or(false) {
+    if dt_end
+        .sub(&dt_start)
+        .map(|c| c.dtype() == DType::Timedelta64)
+        .unwrap_or(false)
+    {
         let mut best = u128::MAX;
         for _ in 0..iters {
             let t = std::time::Instant::now();
@@ -95,8 +112,15 @@ fn main() {
         let mut best_ideal = u128::MAX;
         for _ in 0..iters {
             let t = std::time::Instant::now();
-            let d: Vec<i64> = end.iter().zip(&start).map(|(&a, &b)| a.saturating_sub(b)).collect();
-            let out = Column::from_timedelta64_values_with_validity(d, fp_columnar::ValidityMask::all_valid(n));
+            let d: Vec<i64> = end
+                .iter()
+                .zip(&start)
+                .map(|(&a, &b)| a.saturating_sub(b))
+                .collect();
+            let out = Column::from_timedelta64_values_with_validity(
+                d,
+                fp_columnar::ValidityMask::all_valid(n),
+            );
             best_ideal = best_ideal.min(t.elapsed().as_nanos());
             std::hint::black_box(&out);
         }

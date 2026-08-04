@@ -65,7 +65,9 @@ fn clone_shares_the_block_rather_than_copying_it() {
     let cloned = df.clone();
 
     let a = df.to_numpy_block_view().expect("original is block-backed");
-    let b = cloned.to_numpy_block_view().expect("clone stays block-backed");
+    let b = cloned
+        .to_numpy_block_view()
+        .expect("clone stays block-backed");
 
     // The whole point of the primitive: the clone must SHARE the payload. Pointer
     // identity of the backing allocation is the actual claim -- equal contents would

@@ -11,7 +11,7 @@
 //! Run: cargo run -p fp-frame --release --example bench_qcut_i64 -- 5000000 6
 
 use fp_columnar::Column;
-use fp_frame::{qcut, Series};
+use fp_frame::{Series, qcut};
 use fp_index::IndexLabel;
 use fp_types::Scalar;
 

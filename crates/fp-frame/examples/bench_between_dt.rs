@@ -20,7 +20,10 @@ fn best<F: FnMut()>(iters: usize, mut f: F) -> f64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let base: i64 = 1_600_000_000_000_000_000;
@@ -63,7 +66,11 @@ fn main() {
     )
     .unwrap();
     let r = tiny
-        .between(&Scalar::Datetime64(base + 1), &Scalar::Datetime64(base + 1), "both")
+        .between(
+            &Scalar::Datetime64(base + 1),
+            &Scalar::Datetime64(base + 1),
+            "both",
+        )
         .unwrap();
     println!("exact 1-ns window = {:?} (want [F,T,F])", r.values());
 

@@ -32,9 +32,7 @@
 
 use std::{hint::black_box, time::Instant};
 
-use fp_index::{
-    Index, IndexLabel, RangeIndex, date_range, infer_freq, infer_freq_from_nanos,
-};
+use fp_index::{Index, IndexLabel, RangeIndex, date_range, infer_freq, infer_freq_from_nanos};
 use fp_types::Timedelta;
 use rustc_hash::FxHashMap;
 

@@ -93,10 +93,7 @@ fn main() {
     let i_a = Column::from_i64_values_with_validity(xi.clone(), val.clone());
     let i_b = Column::from_i64_values_with_validity(yi, val);
 
-    for (label, a, b) in [
-        ("f64_allvalid", &f_a, &f_b),
-        ("i64_nullable", &i_a, &i_b),
-    ] {
+    for (label, a, b) in [("f64_allvalid", &f_a, &f_b), ("i64_nullable", &i_a, &i_b)] {
         for op in ["cov", "corr"] {
             let is_cov = op == "cov";
             let mut best_t = u128::MAX;
@@ -109,7 +106,11 @@ fn main() {
             let mut best_c = u128::MAX;
             for _ in 0..iters {
                 let t = std::time::Instant::now();
-                let r = if is_cov { cov_scalar(a, b, 1) } else { corr_scalar(a, b) };
+                let r = if is_cov {
+                    cov_scalar(a, b, 1)
+                } else {
+                    corr_scalar(a, b)
+                };
                 best_c = best_c.min(t.elapsed().as_nanos());
                 std::hint::black_box(&r);
             }

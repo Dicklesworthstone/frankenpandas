@@ -36,7 +36,10 @@ fn dup_old(data: &[i64]) -> usize {
     const EMPTY: i64 = i64::MIN;
     let n = data.len();
     let mut flags = vec![false; n];
-    let cap = n.saturating_add(n / 2).checked_next_power_of_two().unwrap_or(0);
+    let cap = n
+        .saturating_add(n / 2)
+        .checked_next_power_of_two()
+        .unwrap_or(0);
     let mask = cap - 1;
     let mut keys = vec![EMPTY; cap];
     let mut ss = false;
@@ -107,7 +110,9 @@ fn main() {
         };
         println!(
             "duplicated card≈{card:>8} NEW={:>7.2}ms FxHashSet={:>7.2}ms new/fx={:.3}x{dup_old_str}",
-            t_dup, f_dup, f_dup / t_dup
+            t_dup,
+            f_dup,
+            f_dup / t_dup
         );
         std::io::stdout().flush().ok();
 
@@ -120,7 +125,9 @@ fn main() {
             let f_nu = best(iters, || ndistinct_fxset(&data));
             println!(
                 "nunique    card≈{card:>8} NEW={:>7.2}ms FxHashSet={:>7.2}ms new/fx={:.3}x",
-                t_nu, f_nu, f_nu / t_nu
+                t_nu,
+                f_nu,
+                f_nu / t_nu
             );
             std::io::stdout().flush().ok();
         }

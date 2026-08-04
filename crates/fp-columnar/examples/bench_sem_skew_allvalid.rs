@@ -104,12 +104,18 @@ fn main() {
                 }
                 b as f64 / 1e6
             };
-            assert_eq!(format!("{:?}", new(col)), format!("{:?}", old(col)), "{label} {op}");
+            assert_eq!(
+                format!("{:?}", new(col)),
+                format!("{:?}", old(col)),
+                "{label} {op}"
+            );
             let t_new = bench(&new);
             let t_old = bench(&old);
             println!(
                 "sem_skew {label:>13} {op:>4} n={n} NEW(2pass)={:>6.2}ms OLD(Vec)={:>6.2}ms speedup={:.3}x",
-                t_new, t_old, t_old / t_new
+                t_new,
+                t_old,
+                t_old / t_new
             );
         }
     }

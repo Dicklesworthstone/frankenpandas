@@ -35,15 +35,18 @@ fn na_last(a: &Scalar, b: &Scalar) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a, b) {
         (Scalar::Utf8(x), Scalar::Utf8(y)) => x.cmp(y),
-        (Scalar::Utf8(_), _) => Ordering::Less,    // present before missing
+        (Scalar::Utf8(_), _) => Ordering::Less, // present before missing
         (_, Scalar::Utf8(_)) => Ordering::Greater, // missing last
-        _ => Ordering::Equal,                      // both missing: stable ⇒ original order
+        _ => Ordering::Equal,                   // both missing: stable ⇒ original order
     }
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let mut bytes: Vec<u8> = Vec::with_capacity(n * 10);
@@ -90,7 +93,10 @@ fn main() {
     }
     let got = col.argsort_with(true);
     let want = argsort_scalar(&warm_vals);
-    assert_eq!(got, want, "argsort perm must match the stable na-last comparator");
+    assert_eq!(
+        got, want,
+        "argsort perm must match the stable na-last comparator"
+    );
     println!(
         "argsort_with utf8_nullable n={n} NEW={:>7.2}ms COLD={:>7.2}ms(={:.2}x) WARM={:>7.2}ms(={:.2}x)",
         best_t as f64 / 1e6,

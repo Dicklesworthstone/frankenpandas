@@ -22,7 +22,7 @@ fn na_last_cmp(a: &Option<String>, b: &Option<String>, ascending: bool) -> std::
                 y.cmp(x)
             }
         }
-        (Some(_), None) => Ordering::Less,    // present before missing
+        (Some(_), None) => Ordering::Less, // present before missing
         (None, Some(_)) => Ordering::Greater, // missing last
         (None, None) => Ordering::Equal,
     }
@@ -56,7 +56,10 @@ fn materialize(bytes: &[u8], offsets: &[usize], present: &[bool]) -> Vec<Option<
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     // ~1000 categories, every 5th row missing.

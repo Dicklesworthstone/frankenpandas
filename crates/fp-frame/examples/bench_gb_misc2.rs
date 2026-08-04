@@ -24,17 +24,11 @@ fn main() {
     let n: usize = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
     let g: i64 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
     let op = a.get(3).map(String::as_str).unwrap_or("idxmax");
-    let it: usize = a
-        .get(4)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(6)
-        .max(1);
+    let it: usize = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(6).max(1);
     let dtype = a.get(5).map(String::as_str).unwrap_or("f64");
     let n = n.max(2);
     let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
-    let mut key_data: Vec<i64> = (0..n)
-        .map(|i| (sm(i, 0) as u64 as i64) % g)
-        .collect();
+    let mut key_data: Vec<i64> = (0..n).map(|i| (sm(i, 0) as u64 as i64) % g).collect();
     let mut value_data: Vec<f64> = (0..n).map(|i| sm(i, 1)).collect();
     // The control key drops only the final row. Make that row an exact duplicate
     // of its predecessor so candidate/control OHLC outputs remain identical while

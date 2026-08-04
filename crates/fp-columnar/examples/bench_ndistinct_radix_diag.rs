@@ -39,9 +39,11 @@ fn main() {
             .collect();
         let col = Column::from_i64_values(data.clone());
         // Confirm wide (non-dense) path.
-        assert!(fp_columnar::Column::from_i64_values(data.clone())
-            .as_i64_slice()
-            .is_some());
+        assert!(
+            fp_columnar::Column::from_i64_values(data.clone())
+                .as_i64_slice()
+                .is_some()
+        );
 
         let t_new = best(iters, || match col.nunique() {
             Scalar::Int64(x) => x,
@@ -56,7 +58,9 @@ fn main() {
         });
         println!(
             "ndistinct {label:>16} n={n} card={card} nunique={:>7.2}ms FxHashSet={:>7.2}ms new/fx={:.3}x",
-            t_new, t_fx, t_fx / t_new
+            t_new,
+            t_fx,
+            t_fx / t_new
         );
         std::io::stdout().flush().ok();
     }

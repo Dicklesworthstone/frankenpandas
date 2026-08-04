@@ -84,6 +84,9 @@ fn main() {
     let t_full = bench(&|| ser.map_values(&mapping).unwrap().column().values().to_vec());
     println!(
         "map_values_utf8 n={n} keys=500 iters={iters} NEW_tally={:.2}ms OLD_tally(clone)={:.2}ms speedup={:.3}x  full_method={:.2}ms",
-        t_new, t_old, t_old / t_new, t_full
+        t_new,
+        t_old,
+        t_old / t_new,
+        t_full
     );
 }

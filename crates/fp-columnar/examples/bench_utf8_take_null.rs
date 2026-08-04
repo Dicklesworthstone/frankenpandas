@@ -33,7 +33,10 @@ fn gather_clone(vals: &[Scalar], perm: &[usize]) -> Column {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     let mut bytes: Vec<u8> = Vec::with_capacity(n * 10);

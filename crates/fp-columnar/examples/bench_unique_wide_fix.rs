@@ -40,7 +40,11 @@ fn f64_fxset(data: &[f64]) -> Vec<u64> {
 
 fn f64_old(data: &[f64]) -> usize {
     const EMPTY: i64 = i64::MIN;
-    let cap = data.len().saturating_add(data.len() / 2).checked_next_power_of_two().unwrap_or(0);
+    let cap = data
+        .len()
+        .saturating_add(data.len() / 2)
+        .checked_next_power_of_two()
+        .unwrap_or(0);
     let mask = cap - 1;
     let mut keys = vec![EMPTY; cap];
     let mut cnt = 0usize;
@@ -92,13 +96,20 @@ fn main() {
             best_f = best_f.min(t.elapsed().as_nanos());
             std::hint::black_box(&w);
         }
-        assert_eq!(f64_new(&col), f64_fxset(&data), "card={card}: NEW != FxHashSet");
+        assert_eq!(
+            f64_new(&col),
+            f64_fxset(&data),
+            "card={card}: NEW != FxHashSet"
+        );
         let old_str = if idx == 0 {
             let t = std::time::Instant::now();
             let c = f64_old(&data);
             let old_ms = t.elapsed().as_nanos() as f64 / 1e6;
             std::hint::black_box(c);
-            format!(" OLD={old_ms:.1}ms new/old={:.1}x", old_ms / (best_t as f64 / 1e6))
+            format!(
+                " OLD={old_ms:.1}ms new/old={:.1}x",
+                old_ms / (best_t as f64 / 1e6)
+            )
         } else {
             String::new()
         };

@@ -30,7 +30,9 @@ fn main() {
             Column::from_bool_values_with_validity(data, validity)
         }
         _ => {
-            let data: Vec<i64> = (0..n as i64).map(|i| 1_600_000_000_000 + i * 1_000).collect();
+            let data: Vec<i64> = (0..n as i64)
+                .map(|i| 1_600_000_000_000 + i * 1_000)
+                .collect();
             Column::from_datetime64_values_with_validity(data, validity)
         }
     };
