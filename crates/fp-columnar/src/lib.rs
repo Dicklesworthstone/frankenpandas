@@ -20335,15 +20335,22 @@ impl Column {
     /// - "same": output length = max(len(a), len(v))
     /// - "valid": output length = max(len(a), len(v)) - min(len(a), len(v)) + 1
     pub fn convolve(&self, kernel: &Self, mode: &str) -> Result<Self, ColumnError> {
+        // Missing / non-numeric propagates NaN (br-frankenpandas-1yeql), on
+        // BOTH the data and the kernel. `to_f64` errors for Null, Utf8, and
+        // Timedelta64, so the old `unwrap_or(0.0)` silently convolved a missing
+        // value as a zero sample and returned a plausible wrong signal.
+        // np.convolve propagates NaN into every output tap the value reaches,
+        // which falls out of the f64 arithmetic below for free. All-numeric
+        // input is unaffected bit-for-bit.
         let a: Vec<f64> = self
             .values
             .iter()
-            .map(|v| v.to_f64().unwrap_or(0.0))
+            .map(|v| v.to_f64().unwrap_or(f64::NAN))
             .collect();
         let v: Vec<f64> = kernel
             .values
             .iter()
-            .map(|v| v.to_f64().unwrap_or(0.0))
+            .map(|v| v.to_f64().unwrap_or(f64::NAN))
             .collect();
 
         if a.is_empty() || v.is_empty() {
@@ -23212,10 +23219,16 @@ impl Column {
             }
             return Ok(Scalar::Float64(sum));
         }
+        // Missing / non-numeric propagates NaN (br-frankenpandas-1yeql).
+        // `to_f64` errors for Null, Utf8, and Timedelta64, so the old
+        // `unwrap_or(0.0)` silently integrated a missing value — or an entire
+        // string column — as zeros and returned a plausible wrong integral.
+        // np.trapz propagates NaN, and the sibling `gradient` below already
+        // uses this form. All-numeric input is unaffected bit-for-bit.
         let vals: Vec<f64> = self
             .values
             .iter()
-            .map(|v| v.to_f64().unwrap_or(0.0))
+            .map(|v| v.to_f64().unwrap_or(f64::NAN))
             .collect();
         let mut sum = 0.0;
         for i in 1..n {
@@ -46473,6 +46486,90 @@ mod tests {
             assert!((result.values()[1].to_f64().unwrap() - 3.0).abs() < 1e-10);
             assert!((result.values()[2].to_f64().unwrap() - 5.0).abs() < 1e-10);
             assert!((result.values()[3].to_f64().unwrap() - 3.0).abs() < 1e-10);
+        }
+
+        /// br-frankenpandas-1yeql: `to_f64` errors for Null, Utf8 AND
+        /// Timedelta64, so the old `unwrap_or(0.0)` silently convolved/
+        /// integrated a MISSING value — or a whole string column — as zeros and
+        /// returned a plausible finite answer. numpy propagates NaN, and the
+        /// sibling `gradient` in this same file already did. Each case below is
+        /// a real negative case: the pre-fix code returns a finite number for
+        /// every one of them.
+        #[test]
+        fn convolve_trapz_propagate_missing_and_non_numeric_1yeql() {
+            let f = |x: f64| Scalar::Float64(x);
+
+            // --- convolve: null in the DATA taints every output tap it reaches
+            let a = Column::from_values(vec![f(1.0), Scalar::Null(NullKind::NaN), f(3.0)]).unwrap();
+            let v = Column::from_values(vec![f(1.0), f(1.0)]).unwrap();
+            let out = a.convolve(&v, "full").unwrap();
+            assert_eq!(out.len(), 4);
+            // taps 1 and 2 both consume the missing sample; 0 and 3 do not.
+            assert!(
+                out.values()[0].to_f64().unwrap().is_finite(),
+                "tap 0 does not touch the null and must stay finite"
+            );
+            assert!(
+                out.values()[1].to_f64().unwrap().is_nan(),
+                "tap 1 consumes the null and must be NaN, not a finite value"
+            );
+            assert!(
+                out.values()[2].to_f64().unwrap().is_nan(),
+                "tap 2 consumes the null and must be NaN"
+            );
+            assert!(
+                out.values()[3].to_f64().unwrap().is_finite(),
+                "tap 3 does not touch the null and must stay finite"
+            );
+
+            // --- convolve: null in the KERNEL taints as well
+            let a2 = Column::from_values(vec![f(1.0), f(2.0)]).unwrap();
+            let kn = Column::from_values(vec![f(1.0), Scalar::Null(NullKind::NaN)]).unwrap();
+            let out2 = a2.convolve(&kn, "full").unwrap();
+            assert!(
+                out2.values().iter().any(|s| s.to_f64().unwrap().is_nan()),
+                "a missing kernel tap must propagate NaN"
+            );
+
+            // --- convolve: a NON-NUMERIC column must not convolve as zeros
+            let utf8 = Column::from_values(vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ])
+            .unwrap();
+            let out3 = utf8.convolve(&v, "full").unwrap();
+            assert!(
+                out3.values().iter().all(|s| s.to_f64().unwrap().is_nan()),
+                "a Utf8 column must yield NaN, not silently integrate as zeros"
+            );
+
+            // --- trapz: a null makes the integral NaN, not a finite area
+            let t = Column::from_values(vec![f(1.0), Scalar::Null(NullKind::NaN), f(3.0)]).unwrap();
+            let area = t.trapz(1.0).unwrap().to_f64().unwrap();
+            assert!(
+                area.is_nan(),
+                "trapz over a column with a missing value must be NaN, got {area}"
+            );
+
+            // --- trapz: Timedelta64 is non-numeric to to_f64 and must not be 0
+            let td =
+                Column::from_values(vec![Scalar::Timedelta64(1_000), Scalar::Timedelta64(2_000)])
+                    .unwrap();
+            assert!(
+                td.trapz(1.0).unwrap().to_f64().unwrap().is_nan(),
+                "a Timedelta64 column must not integrate as zeros"
+            );
+
+            // --- normal path unchanged bit-for-bit: the guard was not bought
+            // with a regression on all-valid numeric input.
+            let clean = Column::from_values(vec![f(1.0), f(2.0), f(3.0)]).unwrap();
+            let cf = clean.convolve(&v, "full").unwrap();
+            for (i, want) in [1.0_f64, 3.0, 5.0, 3.0].iter().enumerate() {
+                assert!((cf.values()[i].to_f64().unwrap() - want).abs() < 1e-10);
+            }
+            // trapz over 1,2,3 with dx=1 = (1+2)/2 + (2+3)/2 = 4.0
+            assert!((clean.trapz(1.0).unwrap().to_f64().unwrap() - 4.0).abs() < 1e-10);
         }
 
         #[test]
