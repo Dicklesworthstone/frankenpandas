@@ -3559,20 +3559,21 @@ pub fn nanmax(values: &[Scalar]) -> Scalar {
 /// Per br-frankenpandas-j8ntk: harvest ns values from a uniformly-Timedelta64
 /// input as f64 (the f64 representation has 53 bits of mantissa, sufficient
 /// for ns spans up to ~104 days exactly; beyond that pandas itself loses
-/// precision the same way). Returns None if any non-missing value is not
-/// Timedelta64.
+/// precision the same way). A NaT-only input remains in the Timedelta family.
+/// Returns None if any non-missing value is not Timedelta64.
 fn collect_timedelta_ns_f64(values: &[Scalar]) -> Option<Vec<f64>> {
     let mut out = Vec::with_capacity(values.len());
     let mut saw_td = false;
     for v in values {
-        if v.is_missing() {
-            continue;
-        }
         match v {
             Scalar::Timedelta64(ns) => {
                 saw_td = true;
+                if v.is_missing() {
+                    continue;
+                }
                 out.push(*ns as f64);
             }
+            _ if v.is_missing() => continue,
             _ => return None,
         }
     }
@@ -7492,7 +7493,7 @@ mod tests {
         fn expected_timedelta(values: &[Scalar], ddof: usize) -> (Scalar, Scalar, Scalar) {
             let samples = timedelta_samples(values);
             if samples.is_empty() {
-                let missing = Scalar::Null(NullKind::NaN);
+                let missing = Scalar::Timedelta64(Timedelta::NAT);
                 return (missing.clone(), missing.clone(), missing);
             }
             let Some((var, std, sem)) = reductions_from_samples(&samples, ddof) else {
