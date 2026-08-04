@@ -3859,6 +3859,44 @@ fn is_timedelta_input(values: &[Scalar]) -> bool {
     saw_td
 }
 
+/// Returns true for uniformly-Int64 input with optional missing markers.
+fn is_int64_input(values: &[Scalar]) -> bool {
+    let mut saw_int = false;
+    for value in values {
+        if value.is_missing() {
+            continue;
+        }
+        match value {
+            Scalar::Int64(_) => saw_int = true,
+            _ => return false,
+        }
+    }
+    saw_int
+}
+
+/// First-position arg-extremum over a uniformly i64-backed scalar family.
+fn nanarg_i64(values: &[Scalar], find_max: bool) -> Option<usize> {
+    let mut best: Option<(usize, i64)> = None;
+    for (index, value) in values.iter().enumerate() {
+        if value.is_missing() {
+            continue;
+        }
+        let (Scalar::Int64(candidate) | Scalar::Timedelta64(candidate)) = value else {
+            continue;
+        };
+        match best {
+            None => best = Some((index, *candidate)),
+            Some((_, current))
+                if (find_max && *candidate > current) || (!find_max && *candidate < current) =>
+            {
+                best = Some((index, *candidate));
+            }
+            _ => {}
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
 /// Per br-frankenpandas-x0x91: cumulative running aggregation over a
 /// uniformly-Timedelta64 input. NaT/Null positions emit NaT and skip
 /// the accumulator. Saturating i128 keeps overflow contained at i64
@@ -4096,25 +4134,10 @@ pub fn nanquantile(values: &[Scalar], q: f64) -> Scalar {
 /// Matches `np.nanargmax`. Returns `None` if every value is missing.
 /// Ties resolve to the first position seen (matching numpy).
 pub fn nanargmax(values: &[Scalar]) -> Option<usize> {
-    // Per br-frankenpandas-ql1t5: Timedelta64.to_f64() errors, so the
-    // generic path would silently skip every Timedelta64 value and
-    // return None. Pandas td_series.argmax() returns the position of
-    // the largest Timedelta — compare i64 ns directly.
-    if is_timedelta_input(values) {
-        let mut best: Option<(usize, i64)> = None;
-        for (i, v) in values.iter().enumerate() {
-            if v.is_missing() {
-                continue;
-            }
-            if let Scalar::Timedelta64(ns) = v {
-                match best {
-                    None => best = Some((i, *ns)),
-                    Some((_, cur)) if *ns > cur => best = Some((i, *ns)),
-                    _ => {}
-                }
-            }
-        }
-        return best.map(|(i, _)| i);
+    // Compare typed 64-bit families directly: f64 coercion loses ordering for
+    // adjacent Int64 values beyond the 53-bit exactness boundary.
+    if is_timedelta_input(values) || is_int64_input(values) {
+        return nanarg_i64(values, true);
     }
     let mut best: Option<(usize, f64)> = None;
     for (i, v) in values.iter().enumerate() {
@@ -4139,22 +4162,9 @@ pub fn nanargmax(values: &[Scalar]) -> Option<usize> {
 ///
 /// Matches `np.nanargmin`. Returns `None` if every value is missing.
 pub fn nanargmin(values: &[Scalar]) -> Option<usize> {
-    // Per br-frankenpandas-ql1t5: Timedelta64 argmin via i64 ns compare.
-    if is_timedelta_input(values) {
-        let mut best: Option<(usize, i64)> = None;
-        for (i, v) in values.iter().enumerate() {
-            if v.is_missing() {
-                continue;
-            }
-            if let Scalar::Timedelta64(ns) = v {
-                match best {
-                    None => best = Some((i, *ns)),
-                    Some((_, cur)) if *ns < cur => best = Some((i, *ns)),
-                    _ => {}
-                }
-            }
-        }
-        return best.map(|(i, _)| i);
+    // See nanargmax: preserve exact ordering for typed 64-bit families.
+    if is_timedelta_input(values) || is_int64_input(values) {
+        return nanarg_i64(values, false);
     }
     let mut best: Option<(usize, f64)> = None;
     for (i, v) in values.iter().enumerate() {
@@ -8914,6 +8924,30 @@ mod tests {
             &td_all_missing,
             None,
             None,
+        );
+        let positive_int64_endpoint = [
+            Scalar::Int64(i64::MAX - 1),
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(i64::MAX),
+        ];
+        assert_args(
+            usize::MAX - 2,
+            "int64_positive_endpoint_exact_order",
+            &positive_int64_endpoint,
+            Some(0),
+            Some(2),
+        );
+        let negative_int64_endpoint = [
+            Scalar::Int64(i64::MIN + 2),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Int64(i64::MIN + 1),
+        ];
+        assert_args(
+            usize::MAX - 3,
+            "int64_negative_endpoint_exact_order",
+            &negative_int64_endpoint,
+            Some(2),
+            Some(0),
         );
 
         let mut seed = 0xa126_5eed_ed9e_u64;
