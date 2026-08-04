@@ -152,9 +152,9 @@ mod tests {
         let transport = InMemoryTransport::new();
         let storage = transport.storage.clone();
         let _ = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = storage
-                .lock()
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+            let Ok(_guard) = storage.lock() else {
+                return;
+            };
             std::panic::resume_unwind(Box::new("poison in-memory transport lock"));
         }));
 
