@@ -26043,6 +26043,14 @@ impl Column {
     pub fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, ColumnError> {
         let lower = lower.filter(|v| !v.is_nan());
         let upper = upper.filter(|v| !v.is_nan());
+        // pandas treats scalar bounds as the endpoints of an interval, not as
+        // sequential assignments: `clip(lower=5.0, upper=3.0)` is equivalent
+        // to `clip(lower=3.0, upper=5.0)`. Normalize once before every typed
+        // and Scalar route so their shared clamp closure stays identical.
+        let (lower, upper) = match (lower, upper) {
+            (Some(lower), Some(upper)) if lower > upper => (Some(upper), Some(lower)),
+            bounds => bounds,
+        };
         // Typed fast path: an all-valid numeric column clamps straight over its
         // contiguous buffer (output is always Float64), with no per-element
         // Scalar dispatch/clone or output Vec<Scalar>. Bit-identical — the scalar
@@ -34518,16 +34526,15 @@ mod tests {
             let mut seed = 0x0c11_f0b0_a7e5_d1dc_u64;
             for case in 0..220 {
                 let len = (next(&mut seed) % 61 + 1) as usize;
-                let mut lower = bound(&mut seed);
-                let mut upper = bound(&mut seed);
-                if let (Some(lo), Some(hi)) = (normalize(lower), normalize(upper))
-                    && lo > hi
-                {
-                    lower = Some(hi);
-                    upper = Some(lo);
-                }
-                let expected_lower = normalize(lower);
-                let expected_upper = normalize(upper);
+                let lower = bound(&mut seed);
+                let upper = bound(&mut seed);
+                let (expected_lower, expected_upper) =
+                    match (normalize(lower), normalize(upper)) {
+                        (Some(lower), Some(upper)) if lower > upper => {
+                            (Some(upper), Some(lower))
+                        }
+                        bounds => bounds,
+                    };
 
                 let mut values = Vec::with_capacity(len);
                 for _ in 0..len {
@@ -34567,6 +34574,28 @@ mod tests {
                     }
                 }
             }
+        }
+
+        #[test]
+        fn clip_reversed_scalar_bounds_normalize_interval_t3idc() {
+            // pandas treats lower/upper as unordered interval endpoints. This
+            // must hold for the typed Float64 route, rather than turning every
+            // value into the smaller upper bound through sequential clamping.
+            let input = Column::from_values(vec![
+                Scalar::Float64(-2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(8.0),
+            ])
+            .expect("column");
+
+            let reversed = input.clip(Some(5.0), Some(3.0)).expect("clip");
+            let ordered = input.clip(Some(3.0), Some(5.0)).expect("clip");
+
+            assert_eq!(
+                reversed.values(),
+                &[Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]
+            );
+            assert_eq!(reversed, ordered);
         }
 
         #[test]
