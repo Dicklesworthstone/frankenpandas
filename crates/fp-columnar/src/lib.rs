@@ -46561,6 +46561,26 @@ mod tests {
                 "a Timedelta64 column must not integrate as zeros"
             );
 
+            // --- correlate delegates to convolve, so the fix reaches it too.
+            // Pinned explicitly: if someone later stops delegating (e.g. to
+            // "optimize" it), this catches the silent regression.
+            let cr = a.correlate(&v, "full").unwrap();
+            assert!(
+                cr.values().iter().any(|s| s.to_f64().unwrap().is_nan()),
+                "correlate must propagate the null it inherits from convolve"
+            );
+            let cr_clean = Column::from_values(vec![f(1.0), f(2.0), f(3.0)])
+                .unwrap()
+                .correlate(&v, "full")
+                .unwrap();
+            assert!(
+                cr_clean
+                    .values()
+                    .iter()
+                    .all(|s| s.to_f64().unwrap().is_finite()),
+                "all-valid correlate must stay finite"
+            );
+
             // --- normal path unchanged bit-for-bit: the guard was not bought
             // with a regression on all-valid numeric input.
             let clean = Column::from_values(vec![f(1.0), f(2.0), f(3.0)]).unwrap();
