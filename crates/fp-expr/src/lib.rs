@@ -830,18 +830,14 @@ fn is_pure_boolean_literal_filter(expr: &Expr) -> bool {
     }
 }
 
-pub fn filter_dataframe_on_expr(
-    expr: &Expr,
-    frame: &fp_frame::DataFrame,
-    policy: &RuntimePolicy,
-    ledger: &mut EvidenceLedger,
-) -> Result<fp_frame::DataFrame, ExprError> {
-    if is_pure_boolean_literal_filter(expr) {
-        return Err(ExprError::Frame(FrameError::CompatibilityRejected(
-            "scalar boolean query expressions are not valid row filters".to_string(),
-        )));
+fn validate_filter_mask(mask: &Series) -> Result<(), ExprError> {
+    // `filter_rows` already consumes an all-valid typed Bool column through its
+    // bool slice. Avoid materializing that same column merely to prove its dtype
+    // here; nullable and scalar-backed masks retain the element-wise validation
+    // below so their existing missing-value semantics are unchanged.
+    if mask.column().as_bool_slice().is_some() {
+        return Ok(());
     }
-    let mask = evaluate_on_dataframe(expr, frame, policy, ledger)?;
     if let Some(offending) = mask
         .values()
         .iter()
@@ -854,6 +850,22 @@ pub fn filter_dataframe_on_expr(
             ),
         )));
     }
+    Ok(())
+}
+
+pub fn filter_dataframe_on_expr(
+    expr: &Expr,
+    frame: &fp_frame::DataFrame,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<fp_frame::DataFrame, ExprError> {
+    if is_pure_boolean_literal_filter(expr) {
+        return Err(ExprError::Frame(FrameError::CompatibilityRejected(
+            "scalar boolean query expressions are not valid row filters".to_string(),
+        )));
+    }
+    let mask = evaluate_on_dataframe(expr, frame, policy, ledger)?;
+    validate_filter_mask(&mask)?;
     frame.filter_rows(&mask).map_err(ExprError::from)
 }
 
@@ -870,18 +882,7 @@ pub fn filter_dataframe_on_expr_with_locals(
         )));
     }
     let mask = evaluate_on_dataframe_with_locals(expr, frame, locals, policy, ledger)?;
-    if let Some(offending) = mask
-        .values()
-        .iter()
-        .find(|value| !matches!(value, Scalar::Bool(_) | Scalar::Null(_)))
-    {
-        return Err(ExprError::Frame(FrameError::CompatibilityRejected(
-            format!(
-                "boolean mask required for query-style filter; found dtype {:?}",
-                offending.dtype()
-            ),
-        )));
-    }
+    validate_filter_mask(&mask)?;
     frame.filter_rows(&mask).map_err(ExprError::from)
 }
 
@@ -4661,6 +4662,37 @@ mod tests {
             err,
             ExprError::Frame(FrameError::CompatibilityRejected(msg))
                 if msg.contains("boolean mask required for query-style filter")
+        ));
+    }
+
+    #[test]
+    fn filter_mask_validation_keeps_typed_and_nullable_bool_semantics_qm012() {
+        let make_mask = |values| {
+            let frame = fp_frame::DataFrame::from_dict(&["mask"], vec![("mask", values)])
+                .expect("mask frame");
+            Series::new(
+                "mask",
+                frame.index().clone(),
+                frame.column("mask").expect("mask column").clone(),
+            )
+            .expect("mask series")
+        };
+
+        let typed = make_mask(vec![Scalar::Bool(true), Scalar::Bool(false)]);
+        assert!(super::validate_filter_mask(&typed).is_ok());
+
+        let nullable = make_mask(vec![
+            Scalar::Bool(true),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Bool(false),
+        ]);
+        assert!(super::validate_filter_mask(&nullable).is_ok());
+
+        let non_boolean = make_mask(vec![Scalar::Bool(true), Scalar::Int64(1)]);
+        assert!(matches!(
+            super::validate_filter_mask(&non_boolean),
+            Err(ExprError::Frame(FrameError::CompatibilityRejected(message)))
+                if message.contains("boolean mask required for query-style filter")
         ));
     }
 

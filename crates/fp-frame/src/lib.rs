@@ -105333,7 +105333,20 @@ mod tests {
         // and needles longer than most rows (mostly false) so neither trivial
         // answer can pass the assertions.
         let needles = [
-            "", "a", "é", "→", "日", "𝄞", "ß", "🎯", "aé", "é→", "日𝄞", "🎯ß", "aaaaaaa", "𝄞𝄞𝄞",
+            "",
+            "a",
+            "é",
+            "→",
+            "日",
+            "𝄞",
+            "ß",
+            "🎯",
+            "aé",
+            "é→",
+            "日𝄞",
+            "🎯ß",
+            "aaaaaaa",
+            "𝄞𝄞𝄞",
         ];
 
         let mut bytes: Vec<u8> = Vec::new();
@@ -136208,6 +136221,134 @@ mod tests {
             prod.column().values()[2],
             Scalar::Int64(i64::MAX.wrapping_mul(2))
         );
+    }
+
+    #[test]
+    fn df_min_max_axis1_all_int64_preserves_int64_uza04_158() {
+        // br-frankenpandas-uza04.158: pandas keeps int64 for min/max(axis=1) over
+        // pure-integer rows, and widens to float64 only when a Float64 column
+        // participates. The sibling guard df_sum_prod_axis1_all_int64_preserves_int64_o9lmv
+        // covers sum/prod; min/max route through the same reduce_rows_int64 reducer
+        // but had no guard, so a regression to the generic `reduce_rows` fallback
+        // (which emits Scalar::Float64) would have gone unnoticed.
+        //
+        // The i64::MAX / i64::MIN rows are the load-bearing negative case: neither
+        // value is representable in f64 (i64::MAX as f64 rounds to i64::MAX + 1), so
+        // a Float64 regression fails on the VALUE, not merely on the dtype. They also
+        // pin the fold seeds — min seeds at i64::MAX and max seeds at i64::MIN, so a
+        // row saturated at its own seed proves the seed is a genuine identity rather
+        // than a "no contribution" sentinel that leaks.
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(-2),
+                        Scalar::Int64(i64::MAX),
+                        Scalar::Int64(i64::MIN),
+                        Scalar::Int64(i64::MIN),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                        Scalar::Int64(i64::MAX),
+                        Scalar::Int64(i64::MIN),
+                        Scalar::Int64(i64::MAX),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![
+                        Scalar::Int64(2),
+                        Scalar::Int64(0),
+                        Scalar::Int64(i64::MAX),
+                        Scalar::Int64(i64::MIN),
+                        Scalar::Int64(0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let min = df.min_axis1().unwrap();
+        assert_eq!(min.column().dtype(), DType::Int64);
+        assert_eq!(min.column().values()[0], Scalar::Int64(1));
+        assert_eq!(min.column().values()[1], Scalar::Int64(-2));
+        assert_eq!(min.column().values()[2], Scalar::Int64(i64::MAX));
+        assert_eq!(min.column().values()[3], Scalar::Int64(i64::MIN));
+        assert_eq!(min.column().values()[4], Scalar::Int64(i64::MIN));
+
+        let max = df.max_axis1().unwrap();
+        assert_eq!(max.column().dtype(), DType::Int64);
+        assert_eq!(max.column().values()[0], Scalar::Int64(3));
+        assert_eq!(max.column().values()[1], Scalar::Int64(4));
+        assert_eq!(max.column().values()[2], Scalar::Int64(i64::MAX));
+        assert_eq!(max.column().values()[3], Scalar::Int64(i64::MIN));
+        assert_eq!(max.column().values()[4], Scalar::Int64(i64::MAX));
+
+        // A lone Int64 column still reduces to itself, in Int64.
+        let single = DataFrame::from_dict(
+            &["only"],
+            vec![(
+                "only",
+                vec![Scalar::Int64(7), Scalar::Int64(-7), Scalar::Int64(0)],
+            )],
+        )
+        .unwrap();
+        for reduced in [
+            single.min_axis1().unwrap(),
+            single.max_axis1().unwrap(),
+        ] {
+            assert_eq!(reduced.column().dtype(), DType::Int64);
+            assert_eq!(reduced.column().values()[0], Scalar::Int64(7));
+            assert_eq!(reduced.column().values()[1], Scalar::Int64(-7));
+            assert_eq!(reduced.column().values()[2], Scalar::Int64(0));
+        }
+
+        // NEGATIVE (over-widening guard): a Float64 participant must still widen the
+        // row to Float64. A naive "always emit Int64" fix would pass every assertion
+        // above and fail here.
+        let mixed = DataFrame::from_dict(
+            &["i", "f"],
+            vec![
+                ("i", vec![Scalar::Int64(1), Scalar::Int64(5)]),
+                ("f", vec![Scalar::Float64(2.5), Scalar::Float64(0.5)]),
+            ],
+        )
+        .unwrap();
+
+        let mixed_min = mixed.min_axis1().unwrap();
+        assert_eq!(mixed_min.column().dtype(), DType::Float64);
+        assert_eq!(mixed_min.column().values()[0], Scalar::Float64(1.0));
+        assert_eq!(mixed_min.column().values()[1], Scalar::Float64(0.5));
+
+        let mixed_max = mixed.max_axis1().unwrap();
+        assert_eq!(mixed_max.column().dtype(), DType::Float64);
+        assert_eq!(mixed_max.column().values()[0], Scalar::Float64(2.5));
+        assert_eq!(mixed_max.column().values()[1], Scalar::Float64(5.0));
+
+        // NEGATIVE (under-narrowing guard): a pure-Float64 frame stays Float64.
+        let floats = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                ("x", vec![Scalar::Float64(1.5), Scalar::Float64(-3.25)]),
+                ("y", vec![Scalar::Float64(4.0), Scalar::Float64(-1.0)]),
+            ],
+        )
+        .unwrap();
+        let float_min = floats.min_axis1().unwrap();
+        assert_eq!(float_min.column().dtype(), DType::Float64);
+        assert_eq!(float_min.column().values()[0], Scalar::Float64(1.5));
+        assert_eq!(float_min.column().values()[1], Scalar::Float64(-3.25));
+        let float_max = floats.max_axis1().unwrap();
+        assert_eq!(float_max.column().dtype(), DType::Float64);
+        assert_eq!(float_max.column().values()[0], Scalar::Float64(4.0));
+        assert_eq!(float_max.column().values()[1], Scalar::Float64(-1.0));
     }
 
     #[test]
