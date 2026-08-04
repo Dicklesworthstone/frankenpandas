@@ -78,7 +78,10 @@ fn main() {
     // Byte-for-byte parity.
     let sf = fp_io::write_csv_string(&frame_fast).unwrap();
     let sg = fp_io::write_csv_string(&frame_general).unwrap();
-    assert_eq!(sf, sg, "fast (nullable-Utf8) CSV must byte-match the general writer");
+    assert_eq!(
+        sf, sg,
+        "fast (nullable-Utf8) CSV must byte-match the general writer"
+    );
     println!(
         "to_csv nullable-utf8 n={n} NEW(fast)={:>7.2}ms CONTROL(general)={:>7.2}ms speedup={:.3}x",
         best_t as f64 / 1e6,

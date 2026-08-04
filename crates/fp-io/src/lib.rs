@@ -18287,12 +18287,12 @@ mod tests {
         let rows: Vec<Option<&str>> = vec![
             Some("Alice"),
             None,
-            Some("a,b"),        // comma ⇒ quoted
-            Some("he\"llo"),    // embedded quote ⇒ quoted + doubled
-            Some(""),           // present empty string
+            Some("a,b"),     // comma ⇒ quoted
+            Some("he\"llo"), // embedded quote ⇒ quoted + doubled
+            Some(""),        // present empty string
             None,
-            Some("line\nbrk"),  // LF ⇒ quoted
-            Some("tab\tok"),    // tab (not a QUOTE_MINIMAL trigger) ⇒ unquoted
+            Some("line\nbrk"), // LF ⇒ quoted
+            Some("tab\tok"),   // tab (not a QUOTE_MINIMAL trigger) ⇒ unquoted
             Some("plain"),
         ];
         let n = rows.len();
@@ -18331,9 +18331,7 @@ mod tests {
             .unwrap()
         };
         let frame_fast = mk(Column::from_utf8_values_with_validity(
-            bytes,
-            offsets,
-            validity,
+            bytes, offsets, validity,
         ));
         let frame_general = mk(Column::from_values(eager).unwrap());
 
@@ -18357,7 +18355,10 @@ mod tests {
         ] {
             let fast = write_csv_string_with_options(&frame_fast, &options).expect("fast");
             let general = write_csv_string_with_options(&frame_general, &options).expect("general");
-            assert_eq!(fast, general, "fast nullable-Utf8 CSV must byte-match the general writer");
+            assert_eq!(
+                fast, general,
+                "fast nullable-Utf8 CSV must byte-match the general writer"
+            );
         }
 
         // Single-column nullable Utf8 frame: exercises the empty-na `""` quoting on a
@@ -18375,17 +18376,26 @@ mod tests {
                 }
                 o.push(b.len());
             }
-            c.insert("name".to_string(), Column::from_utf8_values_with_validity(b, o, v));
+            c.insert(
+                "name".to_string(),
+                Column::from_utf8_values_with_validity(b, o, v),
+            );
             DataFrame::new(Index::new_known_unique_int64_unit_range(0, n), c).unwrap()
         };
         let single_general = {
             let mut c = std::collections::BTreeMap::new();
-            c.insert("name".to_string(), Column::from_values(eager_clone(&rows)).unwrap());
+            c.insert(
+                "name".to_string(),
+                Column::from_values(eager_clone(&rows)).unwrap(),
+            );
             DataFrame::new(Index::new_known_unique_int64_unit_range(0, n), c).unwrap()
         };
         let f = write_csv_string(&single_fast).expect("fast single");
         let g = write_csv_string(&single_general).expect("general single");
-        assert_eq!(f, g, "single-column nullable-Utf8 CSV must byte-match the general writer");
+        assert_eq!(
+            f, g,
+            "single-column nullable-Utf8 CSV must byte-match the general writer"
+        );
     }
 
     #[cfg(test)]
@@ -18408,9 +18418,9 @@ mod tests {
         let rows: Vec<Option<&str>> = vec![
             Some("Alice"),
             None,
-            Some("a\"b"),      // embedded quote ⇒ JSON-escaped
-            Some("back\\sl"),  // backslash ⇒ escaped
-            Some(""),          // present empty string
+            Some("a\"b"),     // embedded quote ⇒ JSON-escaped
+            Some("back\\sl"), // backslash ⇒ escaped
+            Some(""),         // present empty string
             None,
             Some("tab\tnl\n"), // control bytes ⇒ escaped
             Some("héllo"),     // multi-byte UTF-8 (passes through)
@@ -18444,7 +18454,9 @@ mod tests {
             )
             .unwrap()
         };
-        let frame_fast = mk(Column::from_utf8_values_with_validity(bytes, offsets, validity));
+        let frame_fast = mk(Column::from_utf8_values_with_validity(
+            bytes, offsets, validity,
+        ));
         let frame_general = mk(Column::from_values(eager_clone(&rows)).unwrap());
 
         let ctl = frame_general.column("name").unwrap();
@@ -18504,8 +18516,10 @@ mod tests {
             nb.extend_from_slice(s.as_bytes());
             no.push(nb.len());
         }
-        let eager_names: Vec<Scalar> =
-            names.iter().map(|s| Scalar::Utf8((*s).to_string())).collect();
+        let eager_names: Vec<Scalar> = names
+            .iter()
+            .map(|s| Scalar::Utf8((*s).to_string()))
+            .collect();
 
         let mk = |name_col: Column| -> DataFrame {
             let mut cols = std::collections::BTreeMap::new();
@@ -18580,17 +18594,17 @@ mod tests {
         bv.set(1, false); // validity-clear (data false → na_rep, not "False")
         bv.set(8, false); // validity-clear (data true → na_rep, not "True")
 
-        let names: Vec<&str> = vec![
-            "a", "b,c", "d", "e", "", "f\"g", "h", "plain", "z",
-        ];
+        let names: Vec<&str> = vec!["a", "b,c", "d", "e", "", "f\"g", "h", "plain", "z"];
         let mut nb: Vec<u8> = Vec::new();
         let mut no: Vec<usize> = vec![0];
         for s in &names {
             nb.extend_from_slice(s.as_bytes());
             no.push(nb.len());
         }
-        let eager_names: Vec<Scalar> =
-            names.iter().map(|s| Scalar::Utf8((*s).to_string())).collect();
+        let eager_names: Vec<Scalar> = names
+            .iter()
+            .map(|s| Scalar::Utf8((*s).to_string()))
+            .collect();
 
         let mk = |name_col: Column| -> DataFrame {
             let mut cols = std::collections::BTreeMap::new();

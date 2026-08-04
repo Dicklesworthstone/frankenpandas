@@ -820,9 +820,7 @@ fn main() {
     // non-identity scatter, not an identity short-circuit.
     {
         let make = |reverse: bool| {
-            let key_at = |i: usize| -> usize {
-                if reverse { n - 1 - i } else { i }
-            };
+            let key_at = |i: usize| -> usize { if reverse { n - 1 - i } else { i } };
             let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
             let mut cols = std::collections::BTreeMap::new();
             let mut order = Vec::new();
@@ -866,8 +864,8 @@ fn main() {
             Column::from_f64_values((0..n).map(|i| ((i % 9973) as f64) * 0.25).collect()),
         );
         order.push("val".to_string());
-        let pt = DataFrame::new_with_column_order(Index::new(labels), cols, order)
-            .expect("pivot frame");
+        let pt =
+            DataFrame::new_with_column_order(Index::new(labels), cols, order).expect("pivot frame");
         time_it("pivot_table(sum)", 1, 10, || {
             let _ = pt.pivot_table("val", "idx", "col", "sum").unwrap();
         });

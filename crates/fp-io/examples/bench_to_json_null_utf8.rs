@@ -74,7 +74,10 @@ fn main() {
     }
     let sf = fp_io::write_json_string(&frame_fast, JsonOrient::Records).unwrap();
     let sg = fp_io::write_json_string(&frame_general, JsonOrient::Records).unwrap();
-    assert_eq!(sf, sg, "fast (nullable-Utf8) JSON must byte-match the serde tree");
+    assert_eq!(
+        sf, sg,
+        "fast (nullable-Utf8) JSON must byte-match the serde tree"
+    );
     println!(
         "to_json(records) nullable-utf8 n={n} NEW(fast)={:>7.2}ms CONTROL(serde)={:>7.2}ms speedup={:.3}x",
         best_t as f64 / 1e6,

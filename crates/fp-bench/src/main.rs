@@ -979,14 +979,9 @@ fn run_pipeline(workload: &str, data_dir: Option<&Path>) -> Option<PairedSamples
             .expect("pipeline: sum");
 
         // 4. join -- agg.merge(stores, on="store_id", how="inner")
-        let merged = merge_dataframes_on_with(
-            &agg,
-            &stores,
-            &["store_id"],
-            &["store_id"],
-            JoinType::Inner,
-        )
-        .expect("pipeline: merge stores");
+        let merged =
+            merge_dataframes_on_with(&agg, &stores, &["store_id"], &["store_id"], JoinType::Inner)
+                .expect("pipeline: merge stores");
         let joined =
             DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
                 .expect("pipeline: materialize merge");
