@@ -41812,6 +41812,88 @@ impl StringAccessor<'_> {
         self.apply_str(|s| Scalar::Bool(func(s)), name)
     }
 
+    /// Apply a boolean predicate that only needs the RAW BYTES of each string.
+    ///
+    /// perf (br-frankenpandas-i7znp): [`Self::apply_str_bool`]'s contiguous
+    /// (rung-3) path calls `std::str::from_utf8` on every row before handing a
+    /// `&str` to the predicate. For a prefix/suffix test that is a full
+    /// validation pass over the ENTIRE byte buffer performed only to compare a
+    /// few leading/trailing bytes — on the 1M-row `item_%010d` benchmark that is
+    /// 16 MB validated to serve 4-byte compares, and it is the dominant term in
+    /// the `str.startswith` loss against pandas' Arrow backend (which compares
+    /// bytes over the same contiguous buffer and pays no validation).
+    ///
+    /// BIT-TRANSPARENT for byte-level predicates: `as_utf8_contiguous` already
+    /// gates on `validity.all()` (no nulls to reinterpret) and the buffer is
+    /// valid UTF-8 by construction — the `from_utf8` this skips is exactly the
+    /// check the existing code `expect`s can never fail. For a valid-UTF-8
+    /// haystack `s` and valid-UTF-8 needle `pat`, `s.starts_with(pat)` /
+    /// `s.ends_with(pat)` ARE byte compares: UTF-8 is prefix-free and
+    /// self-synchronizing, so a byte match cannot land mid-code-point. Callers
+    /// must therefore only pass predicates whose answer is a pure function of
+    /// the bytes (prefix/suffix tests) — NOT char-semantic ops like `upper` or
+    /// `len`, which keep the `&str` path.
+    ///
+    /// Non-contiguous backings delegate to [`Self::apply_str_bool`] so the
+    /// Scalar and null-bearing paths keep one implementation.
+    fn apply_str_bytes_bool<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&[u8]) -> bool + Sync,
+    {
+        let column = self.series.column();
+        let Some((in_bytes, in_offsets)) = column.as_utf8_contiguous() else {
+            return self.apply_str_bool(|s| func(s.as_bytes()), name);
+        };
+        // Chunking mirrors apply_str_bool exactly so the two paths stay
+        // comparable under A/B and share the same parallel-entry thresholds.
+        const PARALLEL_MIN_BYTES: usize = 8 * 1024 * 1024;
+        const MIN_ROWS_PER_WORKER: usize = 131_072;
+        let n = in_offsets.len() - 1;
+        let workers = if in_bytes.len() >= PARALLEL_MIN_BYTES {
+            std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(64)
+                .min(n.div_ceil(MIN_ROWS_PER_WORKER))
+        } else {
+            1
+        };
+        let map_rows = |start_row: usize, end_row: usize| {
+            let mut part = Vec::with_capacity(end_row - start_row);
+            for w in in_offsets[start_row..=end_row].windows(2) {
+                part.push(func(&in_bytes[w[0]..w[1]]));
+            }
+            part
+        };
+        let out = if workers < 2 {
+            map_rows(0, n)
+        } else {
+            let rows_per_worker = n.div_ceil(workers);
+            let parts = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(workers);
+                for start_row in (0..n).step_by(rows_per_worker) {
+                    let end_row = (start_row + rows_per_worker).min(n);
+                    let map_rows = &map_rows;
+                    handles.push(scope.spawn(move || map_rows(start_row, end_row)));
+                }
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .expect("string byte-predicate worker thread panicked")
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let mut merged = Vec::with_capacity(n);
+            for part in parts {
+                merged.extend(part);
+            }
+            merged
+        };
+        let index = self.series.index().clone();
+        Series::new(name, index, Column::from_bool_values(out))
+    }
+
     fn apply_str<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Scalar,
@@ -42334,7 +42416,11 @@ impl StringAccessor<'_> {
 
     /// Check whether each string starts with a prefix.
     pub fn startswith(&self, pat: &str) -> Result<Series, FrameError> {
-        self.apply_str_bool(|s| s.starts_with(pat), self.series.name())
+        // Byte-level predicate (br-frankenpandas-i7znp): a prefix test is a pure
+        // function of the bytes, so it skips the per-row `from_utf8` validation
+        // the `&str` path pays. Bit-identical — see `apply_str_bytes_bool`.
+        let pat = pat.as_bytes();
+        self.apply_str_bytes_bool(|b| b.starts_with(pat), self.series.name())
     }
 
     /// Check whether each string starts with any of the given prefixes.
@@ -42378,7 +42464,9 @@ impl StringAccessor<'_> {
 
     /// Check whether each string ends with a suffix.
     pub fn endswith(&self, pat: &str) -> Result<Series, FrameError> {
-        self.apply_str_bool(|s| s.ends_with(pat), self.series.name())
+        // Byte-level predicate (br-frankenpandas-i7znp): see `startswith`.
+        let pat = pat.as_bytes();
+        self.apply_str_bytes_bool(|b| b.ends_with(pat), self.series.name())
     }
 
     /// Check whether each string ends with any of the given suffixes.
@@ -72821,7 +72909,7 @@ impl DataFrame {
 
     /// Internal: extract a named column as a Series.
     fn column_as_series(&self, name: &str) -> Result<Series, FrameError> {
-        let col = self.columns.get(name).ok_or_else(|| {
+        let col = self.column(name).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("column not found: {name}"))
         })?;
         Series::new(name.to_string(), self.index.clone(), col.clone())
@@ -105207,6 +105295,201 @@ mod tests {
         let ends = s.str().endswith("suffix").unwrap();
         assert_eq!(ends.values()[0], Scalar::Bool(false));
         assert_eq!(ends.values()[1], Scalar::Bool(true));
+    }
+
+    /// Differential guard for the byte-level prefix/suffix path
+    /// (br-frankenpandas-i7znp). The contiguous fast path compares RAW BYTES
+    /// and never calls `from_utf8`, so the risk it must retire is a byte match
+    /// that is not a character match. This drives a multi-byte UTF-8 corpus
+    /// (2-, 3-, and 4-byte code points, plus needles deliberately chosen to
+    /// share leading/trailing bytes with non-matching rows) through BOTH the
+    /// contiguous backing and the Scalar backing, and asserts every row against
+    /// the `&str` oracle `s.starts_with(pat)` / `s.ends_with(pat)`.
+    ///
+    /// A byte implementation that split a code point, or a fallback that
+    /// diverged from the fast path, fails here.
+    #[test]
+    fn str_prefix_suffix_byte_path_matches_str_oracle_on_multibyte() {
+        // Seeded LCG (no rand, no mocks) over a mixed-width alphabet.
+        let alphabet = ["a", "é", "→", "日", "𝄞", "z", "ß", "🎯"];
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut rows: Vec<String> = Vec::with_capacity(512);
+        for _ in 0..512 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let len = (state >> 33) as usize % 6;
+            let mut s = String::new();
+            for k in 0..len {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let _ = k;
+                s.push_str(alphabet[(state >> 33) as usize % alphabet.len()]);
+            }
+            rows.push(s);
+        }
+        // Needles include multi-byte code points, an empty needle (always true),
+        // and needles longer than most rows (mostly false) so neither trivial
+        // answer can pass the assertions.
+        let needles = [
+            "", "a", "é", "→", "日", "𝄞", "ß", "🎯", "aé", "é→", "日𝄞", "🎯ß", "aaaaaaa", "𝄞𝄞𝄞",
+        ];
+
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut offsets: Vec<usize> = vec![0];
+        for row in &rows {
+            bytes.extend_from_slice(row.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let index = Index::new_known_unique_int64_unit_range(0, rows.len());
+        let contiguous = Series::new(
+            "s",
+            index.clone(),
+            Column::from_utf8_contiguous(bytes, offsets),
+        )
+        .unwrap();
+        // Same logical data with a Scalar backing: exercises the delegating
+        // (non-contiguous) arm of `apply_str_bytes_bool`.
+        let scalar = Series::new(
+            "s",
+            index,
+            Column::from_values(
+                rows.iter()
+                    .map(|r| Scalar::Utf8(r.clone()))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        for needle in needles {
+            let starts = contiguous.str().startswith(needle).unwrap();
+            let ends = contiguous.str().endswith(needle).unwrap();
+            let starts_scalar = scalar.str().startswith(needle).unwrap();
+            let ends_scalar = scalar.str().endswith(needle).unwrap();
+
+            let starts_flags = starts
+                .column()
+                .as_bool_slice()
+                .expect("startswith must retain typed Bool output");
+            let ends_flags = ends
+                .column()
+                .as_bool_slice()
+                .expect("endswith must retain typed Bool output");
+
+            for (row, text) in rows.iter().enumerate() {
+                assert_eq!(
+                    starts_flags[row],
+                    text.starts_with(needle),
+                    "startswith({needle:?}) row {row} = {text:?}"
+                );
+                assert_eq!(
+                    ends_flags[row],
+                    text.ends_with(needle),
+                    "endswith({needle:?}) row {row} = {text:?}"
+                );
+                assert_eq!(
+                    starts_scalar.values()[row],
+                    Scalar::Bool(text.starts_with(needle)),
+                    "scalar-backed startswith({needle:?}) row {row} = {text:?}"
+                );
+                assert_eq!(
+                    ends_scalar.values()[row],
+                    Scalar::Bool(text.ends_with(needle)),
+                    "scalar-backed endswith({needle:?}) row {row} = {text:?}"
+                );
+            }
+        }
+    }
+
+    /// The contiguous prefix/suffix path forks to a multi-threaded row split
+    /// once the buffer crosses `PARALLEL_MIN_BYTES` (8 MiB). Small tests never
+    /// reach it, so this drives a buffer past that threshold and checks the
+    /// merged output row-for-row against the oracle — a worker that mis-slices
+    /// its row range, or a merge that reorders parts, shows up as a wrong row.
+    #[test]
+    fn str_prefix_suffix_parallel_path_matches_oracle() {
+        // 600k rows x 16 bytes = 9.6 MiB > 8 MiB, and 600k rows spans several
+        // 131_072-row workers, so the threaded arm is the one under test.
+        const ROWS: usize = 600_000;
+        let mut bytes: Vec<u8> = Vec::with_capacity(ROWS * 16);
+        let mut offsets: Vec<usize> = Vec::with_capacity(ROWS + 1);
+        offsets.push(0);
+        for row in 0..ROWS {
+            // Three interleaved shapes so the answer varies WITHIN each worker's
+            // range and cannot be satisfied by an all-true or all-false vector.
+            match row % 3 {
+                0 => bytes.extend_from_slice(b"item_aaaaaaaaaa"),
+                1 => bytes.extend_from_slice(b"xtem_bbbbbbbbbz"),
+                _ => bytes.extend_from_slice(b"item_cccccccccz"),
+            }
+            offsets.push(bytes.len());
+        }
+        assert!(
+            bytes.len() >= 8 * 1024 * 1024,
+            "test must cross the parallel threshold, got {} bytes",
+            bytes.len()
+        );
+        let series = Series::new(
+            "s",
+            Index::new_known_unique_int64_unit_range(0, ROWS),
+            Column::from_utf8_contiguous(bytes, offsets),
+        )
+        .unwrap();
+
+        let starts = series.str().startswith("item_").unwrap();
+        let ends = series.str().endswith("z").unwrap();
+        let starts_flags = starts
+            .column()
+            .as_bool_slice()
+            .expect("startswith must retain typed Bool output");
+        let ends_flags = ends
+            .column()
+            .as_bool_slice()
+            .expect("endswith must retain typed Bool output");
+        assert_eq!(starts_flags.len(), ROWS);
+        assert_eq!(ends_flags.len(), ROWS);
+        for row in 0..ROWS {
+            let expect_start = row % 3 != 1;
+            let expect_end = row % 3 != 0;
+            assert_eq!(starts_flags[row], expect_start, "startswith row {row}");
+            assert_eq!(ends_flags[row], expect_end, "endswith row {row}");
+        }
+    }
+
+    /// A null-bearing column has no contiguous all-valid backing, so
+    /// `apply_str_bytes_bool` must delegate rather than treat a missing row as
+    /// an empty byte slice (which would answer `true` for an empty needle and
+    /// `false` otherwise instead of propagating NaN).
+    #[test]
+    fn str_prefix_suffix_propagates_nulls_through_byte_path() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("item_a".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("b_item".into()),
+            ],
+        )
+        .unwrap();
+
+        let starts = s.str().startswith("item").unwrap();
+        assert_eq!(starts.values()[0], Scalar::Bool(true));
+        assert!(starts.values()[1].is_missing(), "null must propagate");
+        assert_eq!(starts.values()[2], Scalar::Bool(false));
+
+        // Empty needle: every PRESENT row is true, the null still propagates.
+        let empty = s.str().startswith("").unwrap();
+        assert_eq!(empty.values()[0], Scalar::Bool(true));
+        assert!(empty.values()[1].is_missing(), "null must propagate");
+        assert_eq!(empty.values()[2], Scalar::Bool(true));
+
+        let ends = s.str().endswith("item").unwrap();
+        assert_eq!(ends.values()[0], Scalar::Bool(false));
+        assert!(ends.values()[1].is_missing(), "null must propagate");
+        assert_eq!(ends.values()[2], Scalar::Bool(true));
     }
 
     #[test]
