@@ -95,11 +95,14 @@ move on this workload may be *avoiding the spawn* — a reusable pool, or raisin
 
 ## Premise check
 
-The task framed `str.startswith` as a 0.42x LOSS. That did not reproduce: the
-candidate measured faster than pandas on this host. But the row is undecidable
-and no reference-arm row was obtained, so **neither the 0.42x loss nor any
-improvement is established**. The prior 0.42x figure should be treated as
-unverified until it is reproduced with a passing null.
+The task framed `str.startswith` as a 0.42x LOSS. That did not reproduce on
+either arm: the candidate measured 1.694 and the reference 1.040 against live
+pandas, i.e. both at or above parity, not 0.42x. Both rows are undecidable, so
+**neither the 0.42x loss nor any improvement is established** — but nothing
+observed here supports a 0.42x loss either, and the reference arm carries the
+UNMODIFIED code, so that figure cannot be blamed on this lever's absence. The
+prior 0.42x should be treated as unverified until reproduced with a passing
+null; it may have come from a different host, size, dtype, or pandas backend.
 
 ## Gate integrity
 
@@ -119,6 +122,40 @@ Eliminated in order, each with evidence:
    `require_quiet` samples never cleared: 14/14 exhausted unpinned, 14/14
    exhausted pinned (`taskset -c 0-3 --thread-count 4`). Splitting to two
    invocations (four gates each) cleared on attempt 6.
+
+## Reference arm (added after the entry above was first written)
+
+The reference arm also produced an ACCEPTED row, on attempt 8, and it is
+**also `NULL_UNDECIDABLE`**.
+
+| | ELF | FP p50 | FP CV | pandas p50 | raw ratio | FP A/A null |
+|---|---|---:|---:|---:|---:|---:|
+| candidate | `9a44e005…` | 2773.7 us | 61.3% | 4699.0 us | 1.694 | 0.970 FAIL |
+| reference | `8f50de2e…` | 5548.4 us | 43.1% | 5771.6 us | 1.040 | 0.946 FAIL |
+
+The FP A/A null failed on BOTH arms, so neither row is valid and the pair
+establishes nothing.
+
+**The tempting number, and why it is not reported as a result.** Candidate p50
+2773.7 us against reference p50 5548.4 us looks like a ~2x self-speedup from the
+lever. It is not claimable, for three independent reasons, any one of which is
+disqualifying:
+
+1. Both rows are `NULL_UNDECIDABLE` — the A/A control failed on each, so neither
+   measurement is valid on its own terms.
+2. The INCUMBENT moved between the two invocations: pandas' own p50 went
+   4699.0 -> 5771.6 us, a 23% drift on the identical workload and binary. The
+   two arms were therefore not measured under comparable host conditions. This
+   is exactly the weakness the split-invocation design trades away, and it is
+   why the three-arm same-invocation form is the preferred shape.
+3. Even a clean candidate-vs-reference delta is a **self-speedup**, which this
+   campaign classifies as MAINTENANCE, not a win. A win requires a decidable
+   vs-incumbent ratio.
+
+Read together the two rows are *consistent with* the lever helping, and equally
+consistent with host drift: the reference arm simply ran during a slower period,
+which its own inflated pandas baseline shows. Distinguishing those requires a
+host where the null lands within +/-2%. Until then, nothing is established.
 
 ## Retry predicate
 
