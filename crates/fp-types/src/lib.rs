@@ -2857,7 +2857,13 @@ impl Timestamp {
                 target: "Timestamp".to_string(),
             })?;
 
-        let total_nanos = Self::ymd_hms_to_nanos(year, month, day, hour, minute, second, nanos);
+        // br-frankenpandas-94o1u: an unrepresentable instant is a parse
+        // failure, not a wrapped value.
+        let total_nanos = Self::ymd_hms_to_nanos(year, month, day, hour, minute, second, nanos)
+            .ok_or_else(|| TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "Timestamp".to_string(),
+            })?;
 
         Ok(if let Some(tz_name) = tz {
             Self::from_nanos_tz(total_nanos, tz_name)
@@ -2957,6 +2963,27 @@ impl Timestamp {
         Some((hour, minute, second, nanos))
     }
 
+    /// Compose a civil date-time into i64 nanoseconds since the epoch, or
+    /// `None` when the instant is not representable.
+    ///
+    /// Checked composition (br-frankenpandas-94o1u). `parse_date` validates the
+    /// month and the day-of-month but parses the YEAR as an unbounded `i64`,
+    /// and i64 nanoseconds top out around year 2262 — the bound pandas
+    /// documents for ns-resolution Timestamps. Unchecked, the two multiplies
+    /// below wrapped in release, so `Timestamp::parse("300000-01-01")` returned
+    /// `Ok` holding a silently wrong, plausible-looking in-range instant.
+    /// pandas raises `OutOfBoundsDatetime`.
+    ///
+    /// This is the ingestion path — CSV/JSON date columns and user strings —
+    /// so failing OPEN with corrupt data is the failure mode the security
+    /// doctrine specifically forbids. `None` here becomes the same
+    /// `ValueNotParseable` the caller already returns for any other
+    /// unparseable input, so no new error variant and no API change.
+    ///
+    /// The day-count arithmetic above the multiplies cannot overflow for any
+    /// `year` that survives `str::parse::<i64>` minus the era arithmetic's own
+    /// bounds, but it is routed through checked ops anyway so an extreme year
+    /// is rejected rather than wrapped before it ever reaches the seconds step.
     fn ymd_hms_to_nanos(
         year: i64,
         month: u32,
@@ -2965,22 +2992,31 @@ impl Timestamp {
         minute: u32,
         second: u32,
         sub_nanos: u64,
-    ) -> i64 {
+    ) -> Option<i64> {
         let m = month as i64;
         let d = day as i64;
 
-        let y = if m <= 2 { year - 1 } else { year };
-        let era = if y >= 0 { y } else { y - 399 } / 400;
-        let yoe = y - era * 400;
+        let y = if m <= 2 { year.checked_sub(1)? } else { year };
+        let era = if y >= 0 { y } else { y.checked_sub(399)? } / 400;
+        let yoe = y.checked_sub(era.checked_mul(400)?)?;
         let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-        let days_since_epoch = era * 146_097 + doe - 719_468;
+        let doe = yoe
+            .checked_mul(365)?
+            .checked_add(yoe / 4 - yoe / 100)?
+            .checked_add(doy)?;
+        let days_since_epoch = era
+            .checked_mul(146_097)?
+            .checked_add(doe)?
+            .checked_sub(719_468)?;
 
-        let total_seconds = days_since_epoch * 86400
-            + (hour as i64) * 3600
-            + (minute as i64) * 60
-            + (second as i64);
-        total_seconds * Timedelta::NANOS_PER_SEC + sub_nanos as i64
+        let total_seconds = days_since_epoch
+            .checked_mul(86400)?
+            .checked_add(i64::from(hour) * 3600)?
+            .checked_add(i64::from(minute) * 60)?
+            .checked_add(i64::from(second))?;
+        total_seconds
+            .checked_mul(Timedelta::NANOS_PER_SEC)?
+            .checked_add(sub_nanos as i64)
     }
 
     /// Format timestamp using strftime directives.
@@ -11918,6 +11954,65 @@ mod tests {
             };
             assert_ordinal_case(case, day_offset, subday_nanos);
         }
+    }
+
+    /// br-frankenpandas-94o1u: `parse_date` bounds the month and the day but
+    /// parses the YEAR as an unbounded i64, and i64 nanoseconds top out around
+    /// 2262. The old unchecked composition wrapped in release, so these inputs
+    /// returned `Ok` holding a plausible in-range instant instead of failing —
+    /// on the INGESTION path, where the input is untrusted. Each case below is
+    /// a real negative case: a naive implementation still returns Ok here.
+    #[test]
+    fn timestamp_parse_rejects_unrepresentable_years_94o1u() {
+        for s in [
+            "300000-01-01",
+            "10000000-06-15T12:30:45",
+            "999999999-01-01",
+            "-300000-01-01",
+            "-99999999-12-31T23:59:59",
+        ] {
+            let got = Timestamp::parse(s);
+            assert!(
+                got.is_err(),
+                "parse({s:?}) is unrepresentable in i64 ns and must be Err, got {:?} \
+                 — this is the silent wrap",
+                got.map(|ts| (ts.nanos, ts.year()))
+            );
+        }
+
+        // Boundary: the i64 ns axis reaches into 2262 but not 2263. Pins the
+        // guard to the real limit — a cutoff at some rounder year fails a side.
+        let ok = Timestamp::parse("2262-01-01").expect("2262-01-01 is representable");
+        assert_eq!(ok.year(), Some(2262));
+        assert!(
+            Timestamp::parse("2263-12-31T23:59:59").is_err(),
+            "end of 2263 exceeds the i64 ns axis and must be Err"
+        );
+
+        // A rejected year must not poison the normal path: ordinary parses,
+        // including every accepted shape (date-only, T- and space-separated,
+        // fractional seconds, tz suffix), still succeed and are unchanged.
+        assert_eq!(Timestamp::parse("2024-01-15").unwrap().year(), Some(2024));
+        assert_eq!(
+            Timestamp::parse("2024-01-15T10:30:45").unwrap().hour(),
+            Some(10)
+        );
+        assert_eq!(
+            Timestamp::parse("2024-01-15 10:30:45").unwrap().minute(),
+            Some(30)
+        );
+        assert_eq!(
+            Timestamp::parse("2024-01-15T10:30:45.123456789")
+                .unwrap()
+                .nanosecond(),
+            Some(789)
+        );
+        assert_eq!(
+            Timestamp::parse("2024-01-15T00:00:00Z").unwrap().year(),
+            Some(2024)
+        );
+        // Pre-epoch (negative nanos) is representable and must keep working.
+        assert_eq!(Timestamp::parse("1900-01-01").unwrap().year(), Some(1900));
     }
 
     #[test]
