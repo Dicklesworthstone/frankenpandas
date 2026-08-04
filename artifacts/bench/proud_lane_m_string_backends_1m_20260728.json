@@ -1,0 +1,564 @@
+{
+  "schema_version": "v4",
+  "timestamp": "2026-07-28T06:33:09.699771+00:00",
+  "invocation_id": "vs-pandas-20260728T063309.699807Z-pid1758322",
+  "engine_identity": {
+    "frankenpandas": {
+      "version": "0.1.2",
+      "profile": "release-perf",
+      "role": "Subject"
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "role": "Oracle",
+      "executable": {
+        "sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+        "bytes": 6894448,
+        "path": "/usr/bin/python3.13"
+      },
+      "artifact": {
+        "sha256": "051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb",
+        "bytes": 70709779,
+        "files": 2922,
+        "path": "/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/lane-m-python-site/pandas/__init__.py",
+        "scheme": "importlib-metadata-content-tree-v1"
+      },
+      "optional_backends": {
+        "pyarrow": {
+          "version": "24.0.0",
+          "artifact": {
+            "sha256": "2e701e78b2e69a481b6e901b584db29c4151221f59568dcb7cde7f036bca5f17",
+            "bytes": 157865460,
+            "files": 861,
+            "path": "/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/lane-m-python-site/pyarrow/__init__.py",
+            "scheme": "importlib-metadata-content-tree-v1"
+          }
+        }
+      }
+    }
+  },
+  "harness_source": {
+    "sha256": "55c7f737d6d18b460b566338e6f8859dcc9dcc51ff5b0c91b1aa3373c4b8de47",
+    "bytes": 62017,
+    "path": "/data/projects/frankenpandas/benches/vs_pandas_harness.py"
+  },
+  "parameters": {
+    "sizes": [
+      "1M"
+    ],
+    "dtypes": [
+      "float64"
+    ],
+    "categories": [
+      "strings"
+    ],
+    "paired_rounds": 25,
+    "warmup_iterations": 3,
+    "bootstrap_resamples": 10000,
+    "null_ci_confidence": 0.95,
+    "decidability_margin": 2.0,
+    "gate": "median_bootstrap_ci",
+    "cv_role": "provenance_only",
+    "pandas_string_backend_policy": {
+      "unsuffixed_workloads": "object",
+      "explicit_workload_suffixes": {
+        "_object": "object",
+        "_arrow": "string[pyarrow]"
+      }
+    },
+    "shared_invocation_id": "vs-pandas-20260728T063309.699807Z-pid1758322"
+  },
+  "results": [
+    {
+      "workload": "str_sort_object",
+      "category": "strings",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 86491.53,
+        "p95_us": 245918.22,
+        "p99_us": 433406.05,
+        "mean_us": 110526.51,
+        "stddev_us": 77037.78,
+        "cv_pct": 69.7,
+        "throughput_rows_sec": 11561826,
+        "checksum": "4957dea0fe3e2ed1",
+        "executable": {
+          "sha256": "4ac48e4c83e07a1750c64e8d3d48aa0f9ce43ebe2e4fda298b4dd77df9f2dd2d",
+          "bytes": 70294216,
+          "path": "/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench"
+        },
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 1.028622,
+          "median_ci_95": [
+            0.89776,
+            1.144962
+          ],
+          "log_half_width": 0.13537151,
+          "two_x_decidable_interval": [
+            0.762813,
+            1.310938
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 660870.81,
+        "p95_us": 739006.1,
+        "p99_us": 778120.12,
+        "mean_us": 665673.18,
+        "stddev_us": 36285.68,
+        "cv_pct": 5.45,
+        "throughput_rows_sec": 1513155,
+        "checksum": "87d6bed1dccb6952",
+        "executable": {
+          "sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+          "bytes": 6894448,
+          "path": "/usr/bin/python3.13"
+        },
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 0.988101,
+          "median_ci_95": [
+            0.975916,
+            1.019528
+          ],
+          "log_half_width": 0.02437904,
+          "two_x_decidable_interval": [
+            0.952412,
+            1.049966
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "ratio": 7.641,
+      "median_ci_gate": {
+        "decidable": true,
+        "margin_multiplier": 2.0,
+        "claim_log_effect": 2.03351189,
+        "required_log_effect": 0.27074301,
+        "combined_two_x_null_interval": [
+          0.762813,
+          1.310938
+        ],
+        "cv_is_provenance_only": true
+      },
+      "verdict": "FASTER",
+      "invocation_id": "vs-pandas-20260728T063309.699807Z-pid1758322"
+    },
+    {
+      "workload": "str_sort_arrow",
+      "category": "strings",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 87174.1,
+        "p95_us": 238535.93,
+        "p99_us": 308664.08,
+        "mean_us": 112391.23,
+        "stddev_us": 58385.32,
+        "cv_pct": 51.95,
+        "throughput_rows_sec": 11471297,
+        "checksum": "4957dea0fe3e2ed1",
+        "executable": {
+          "sha256": "4ac48e4c83e07a1750c64e8d3d48aa0f9ce43ebe2e4fda298b4dd77df9f2dd2d",
+          "bytes": 70294216,
+          "path": "/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench"
+        },
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 0.921696,
+          "median_ci_95": [
+            0.781551,
+            1.190955
+          ],
+          "log_half_width": 0.24647452,
+          "two_x_decidable_interval": [
+            0.610822,
+            1.637137
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 154807.46,
+        "p95_us": 195865.36,
+        "p99_us": 202688.28,
+        "mean_us": 158957.39,
+        "stddev_us": 17150.1,
+        "cv_pct": 10.79,
+        "throughput_rows_sec": 6459637,
+        "checksum": "21a58e4f3a716bc9",
+        "executable": {
+          "sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+          "bytes": 6894448,
+          "path": "/usr/bin/python3.13"
+        },
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 1.032879,
+          "median_ci_95": [
+            0.954701,
+            1.086849
+          ],
+          "log_half_width": 0.08328252,
+          "two_x_decidable_interval": [
+            0.846568,
+            1.18124
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "ratio": 1.776,
+      "median_ci_gate": {
+        "decidable": true,
+        "margin_multiplier": 2.0,
+        "claim_log_effect": 0.57427493,
+        "required_log_effect": 0.49294904,
+        "combined_two_x_null_interval": [
+          0.610822,
+          1.637137
+        ],
+        "cv_is_provenance_only": true
+      },
+      "verdict": "FASTER",
+      "invocation_id": "vs-pandas-20260728T063309.699807Z-pid1758322"
+    },
+    {
+      "workload": "str_value_counts_object",
+      "category": "strings",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 22300.99,
+        "p95_us": 25795.22,
+        "p99_us": 32744.67,
+        "mean_us": 22858.8,
+        "stddev_us": 2602.12,
+        "cv_pct": 11.38,
+        "throughput_rows_sec": 44841060,
+        "checksum": "4957dea0fe3e2ed1",
+        "executable": {
+          "sha256": "4ac48e4c83e07a1750c64e8d3d48aa0f9ce43ebe2e4fda298b4dd77df9f2dd2d",
+          "bytes": 70294216,
+          "path": "/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench"
+        },
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 0.997609,
+          "median_ci_95": [
+            0.953335,
+            1.03417
+          ],
+          "log_half_width": 0.04778907,
+          "two_x_decidable_interval": [
+            0.908847,
+            1.100295
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 98563.19,
+        "p95_us": 116274.27,
+        "p99_us": 147193.87,
+        "mean_us": 100738.94,
+        "stddev_us": 12382.39,
+        "cv_pct": 12.29,
+        "throughput_rows_sec": 10145776,
+        "checksum": "31b75cfd0c100db2",
+        "executable": {
+          "sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+          "bytes": 6894448,
+          "path": "/usr/bin/python3.13"
+        },
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 0.995777,
+          "median_ci_95": [
+            0.93398,
+            1.044445
+          ],
+          "log_half_width": 0.06830061,
+          "two_x_decidable_interval": [
+            0.872318,
+            1.146371
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "ratio": 4.42,
+      "median_ci_gate": {
+        "decidable": true,
+        "margin_multiplier": 2.0,
+        "claim_log_effect": 1.48606678,
+        "required_log_effect": 0.13660123,
+        "combined_two_x_null_interval": [
+          0.872318,
+          1.146371
+        ],
+        "cv_is_provenance_only": true
+      },
+      "verdict": "FASTER",
+      "invocation_id": "vs-pandas-20260728T063309.699807Z-pid1758322"
+    },
+    {
+      "workload": "str_value_counts_arrow",
+      "category": "strings",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 22358.75,
+        "p95_us": 34898.63,
+        "p99_us": 54125.33,
+        "mean_us": 24676.67,
+        "stddev_us": 7258.88,
+        "cv_pct": 29.42,
+        "throughput_rows_sec": 44725214,
+        "checksum": "4957dea0fe3e2ed1",
+        "executable": {
+          "sha256": "4ac48e4c83e07a1750c64e8d3d48aa0f9ce43ebe2e4fda298b4dd77df9f2dd2d",
+          "bytes": 70294216,
+          "path": "/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench"
+        },
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 1.027666,
+          "median_ci_95": [
+            0.96278,
+            1.06856
+          ],
+          "log_half_width": 0.06631151,
+          "two_x_decidable_interval": [
+            0.875795,
+            1.141819
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 33124.33,
+        "p95_us": 44166.83,
+        "p99_us": 67097.1,
+        "mean_us": 34999.54,
+        "stddev_us": 8410.7,
+        "cv_pct": 24.03,
+        "throughput_rows_sec": 30189293,
+        "checksum": "eb0e451cb2810dff",
+        "executable": {
+          "sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+          "bytes": 6894448,
+          "path": "/usr/bin/python3.13"
+        },
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 1.01925,
+          "median_ci_95": [
+            0.976184,
+            1.051414
+          ],
+          "log_half_width": 0.05013605,
+          "two_x_decidable_interval": [
+            0.904591,
+            1.105472
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "ratio": 1.481,
+      "median_ci_gate": {
+        "decidable": true,
+        "margin_multiplier": 2.0,
+        "claim_log_effect": 0.3930501,
+        "required_log_effect": 0.13262302,
+        "combined_two_x_null_interval": [
+          0.875795,
+          1.141819
+        ],
+        "cv_is_provenance_only": true
+      },
+      "verdict": "FASTER",
+      "invocation_id": "vs-pandas-20260728T063309.699807Z-pid1758322"
+    },
+    {
+      "workload": "str_groupby_sum_object",
+      "category": "strings",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 14917.78,
+        "p95_us": 21257.17,
+        "p99_us": 48572.56,
+        "mean_us": 16470.54,
+        "stddev_us": 8167.65,
+        "cv_pct": 49.59,
+        "throughput_rows_sec": 67034098,
+        "checksum": "4957dea0fe3e2ed1",
+        "executable": {
+          "sha256": "4ac48e4c83e07a1750c64e8d3d48aa0f9ce43ebe2e4fda298b4dd77df9f2dd2d",
+          "bytes": 70294216,
+          "path": "/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench"
+        },
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 0.988744,
+          "median_ci_95": [
+            0.958645,
+            1.036576
+          ],
+          "log_half_width": 0.04223476,
+          "two_x_decidable_interval": [
+            0.919,
+            1.08814
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 61870.5,
+        "p95_us": 81304.12,
+        "p99_us": 88859.85,
+        "mean_us": 64555.43,
+        "stddev_us": 8367.05,
+        "cv_pct": 12.96,
+        "throughput_rows_sec": 16162792,
+        "checksum": "55ec589132801492",
+        "executable": {
+          "sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+          "bytes": 6894448,
+          "path": "/usr/bin/python3.13"
+        },
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 1.000482,
+          "median_ci_95": [
+            0.974951,
+            1.041829
+          ],
+          "log_half_width": 0.04097814,
+          "two_x_decidable_interval": [
+            0.921312,
+            1.085408
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "ratio": 4.147,
+      "median_ci_gate": {
+        "decidable": true,
+        "margin_multiplier": 2.0,
+        "claim_log_effect": 1.42248959,
+        "required_log_effect": 0.08446952,
+        "combined_two_x_null_interval": [
+          0.919,
+          1.08814
+        ],
+        "cv_is_provenance_only": true
+      },
+      "verdict": "FASTER",
+      "invocation_id": "vs-pandas-20260728T063309.699807Z-pid1758322"
+    },
+    {
+      "workload": "str_groupby_sum_arrow",
+      "category": "strings",
+      "size": "1M",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 14191.1,
+        "p95_us": 17801.23,
+        "p99_us": 20587.09,
+        "mean_us": 15016.9,
+        "stddev_us": 1704.44,
+        "cv_pct": 11.35,
+        "throughput_rows_sec": 70466684,
+        "checksum": "4957dea0fe3e2ed1",
+        "executable": {
+          "sha256": "4ac48e4c83e07a1750c64e8d3d48aa0f9ce43ebe2e4fda298b4dd77df9f2dd2d",
+          "bytes": 70294216,
+          "path": "/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench"
+        },
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 1.033513,
+          "median_ci_95": [
+            0.985028,
+            1.117088
+          ],
+          "log_half_width": 0.11072516,
+          "two_x_decidable_interval": [
+            0.801356,
+            1.247885
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 45405.14,
+        "p95_us": 80149.41,
+        "p99_us": 96406.76,
+        "mean_us": 49120.89,
+        "stddev_us": 12522.11,
+        "cv_pct": 25.49,
+        "throughput_rows_sec": 22023939,
+        "checksum": "55ec589132801492",
+        "executable": {
+          "sha256": "efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e",
+          "bytes": 6894448,
+          "path": "/usr/bin/python3.13"
+        },
+        "null_control": {
+          "rounds": 25,
+          "median_ratio": 1.011623,
+          "median_ci_95": [
+            0.978088,
+            1.063541
+          ],
+          "log_half_width": 0.06160403,
+          "two_x_decidable_interval": [
+            0.88408,
+            1.13112
+          ]
+        },
+        "iterations": 50,
+        "valid": true
+      },
+      "ratio": 3.2,
+      "median_ci_gate": {
+        "decidable": true,
+        "margin_multiplier": 2.0,
+        "claim_log_effect": 1.16301003,
+        "required_log_effect": 0.22145032,
+        "combined_two_x_null_interval": [
+          0.801356,
+          1.247885
+        ],
+        "cv_is_provenance_only": true
+      },
+      "verdict": "FASTER",
+      "invocation_id": "vs-pandas-20260728T063309.699807Z-pid1758322"
+    }
+  ],
+  "summary": {
+    "total_workloads": 6,
+    "contract_valid_workloads": 6,
+    "decidable_workloads": 6,
+    "null_undecidable_workloads": 0,
+    "category_scores": {
+      "strings": 3.25
+    },
+    "weighted_score": 1.525,
+    "claim_validated": false
+  }
+}

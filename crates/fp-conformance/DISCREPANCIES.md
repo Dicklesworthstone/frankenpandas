@@ -131,6 +131,24 @@
 - **Tests affected:** `conformance_series::conformance_series_add_duplicate_labels` (passing).
 - **Review date:** 2026-06-01
 
+### DISC-016: RangeIndex set-operation result ordering (all four ops RESOLVED)
+- **Reference:** pandas 2.2.3 `RangeIndex` set operations use different default `sort` semantics:
+  - `union` / `difference` / `symmetric_difference`: `sort=None` — result is ascending-sorted EXCEPT when an operand is empty or the two operands are value-equal, where the surviving operand passes through unchanged (order preserved).
+  - `intersection`: `sort=False` — result is ascending EXCEPT when BOTH operands are descending (`step < 0`), where it is descending. (Verified vs pandas 2.2.3 over 150k random pairs.)
+- **Our impl:** RESOLVED for all four. Previously fp returned every set op in self/discovery order (matching pandas only where the affine fast paths happened to already be in pandas' order), diverging for both-non-empty operands with descending or non-aligned (interleaving) lattices — union/difference/symmetric_difference for ~any descending/interleaved input, and intersection for self-descending ∩ other-ascending (≈23.5% of multi-element intersections). fp now normalizes operands to their ascending equivalent so the fast paths and fallbacks produce pandas' order, sorts the interleaving union/symmetric_difference fallbacks, and routes both-descending intersection through the operands as-is (self-order yields descending). Empty-operand and value-equal passthrough preserved; lazy affine / two-affine-run backing retained for the aligned common case (only reordered cases materialize).
+- **Impact:** all four ops now bit-match pandas across a 263-case randomized differential (descending, non-aligned, empty, value-equal, disjoint, subset), plus 150k-pair Python sweeps confirming the ordering rules.
+- **Resolution:** FIXED (DustySummit, br-frankenpandas). union/difference/symmetric_difference in commit 88e2a8487; intersection ordering in the follow-up commit.
+- **Tests affected:** `range_index_set_ops_match_pandas_2_2_3_differential_dustysummit` (data-driven from `testdata_rangeset_pandas_cases.rs`, all four ops); `range_index_set_ops_use_direct_values_b7nxg`, `range_index_set_ops_closed_form_membership_preserves_order_iatnc`, `range_index_set_ops_return_affine_spans_iatnc` (refreshed to pandas-correct ordering).
+- **Review date:** 2026-07-23
+
+### DISC-017: RangeIndex.slice_locs / searchsorted reject monotonic-decreasing (step < 0) ranges
+- **Reference:** pandas 2.2.3 permits `RangeIndex(10,0,-1).slice_locs(8,3)` → `(2, 8)` and `RangeIndex(10,0,-1).searchsorted(5)` → `0` on descending ranges.
+- **Our impl:** ACCEPTED divergence — fp returns an explicit `InvalidArgument` error for `slice_locs` and `searchsorted` when `step < 0` ("requires a monotonic[ally-]increasing RangeIndex"), rather than replicating pandas' behavior. get_loc / get_indexer / get_indexer_non_unique / reindex (direction-agnostic value→position lookups) DO work correctly on descending ranges; only the two ordering-boundary ops refuse.
+- **Impact:** Rationale for refusing rather than matching: pandas' `searchsorted` on a descending index is a numpy artifact — numpy `searchsorted` assumes an ascending array, so `desc.searchsorted(5) = 0` is a meaningless insertion point, not a correct one. pandas' descending `slice_locs` inherits the same ascending-assuming `get_slice_bound`, producing quirky edge results (e.g. `[7].slice_locs(8,-9) = (1,0)` — an EMPTY slice for a value that is in `[-9, 8]`). A randomized 40k-pair differential found no simple closed form matching pandas' descending slice_locs (≈7.6% of a naive `value<=start` / `value<end` closed form diverged, all in boundary/single-element cases). fp's explicit error avoids silently reproducing these numpy quirks; callers needing a descending slice can reverse the index first.
+- **Resolution:** ACCEPTED (DustySummit, 2026-07-23). Revisit only if a use case needs pandas-bug-compatible descending `slice_locs`; it would require replicating pandas' `get_slice_bound` direction handling, not a closed form.
+- **Tests affected:** none (fp's error path is covered by existing RangeIndex tests; no descending slice_locs/searchsorted parity test is asserted).
+- **Review date:** 2026-07-23
+
 ## Rules
 
 1. Every divergence gets a sequential ID (DISC-NNN)

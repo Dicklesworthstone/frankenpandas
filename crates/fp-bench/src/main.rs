@@ -14,14 +14,23 @@
 
 #[cfg(feature = "lazy-transpose-prototype")]
 use std::sync::Arc;
-use std::{collections::BTreeMap, hint::black_box, time::Instant};
+use std::{
+    cell::Cell,
+    collections::BTreeMap,
+    fmt::Write as _,
+    hint::black_box,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
 
 use fp_columnar::{Column, ValidityMask};
-use fp_types::{DType, NullKind, Scalar};
 use fp_frame::{DataFrame, Series, to_datetime};
 use fp_index::{DuplicateKeep, Index, IndexLabel, RangeIndex};
 use fp_join::{JoinType, merge_dataframes_on_with};
+use fp_types::{DType, NullKind, Scalar};
 use mimalloc::MiMalloc;
+use sha2::{Digest, Sha256};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -29,6 +38,254 @@ static GLOBAL: MiMalloc = MiMalloc;
 const WARMUP: usize = 3;
 const ITERS: usize = 25;
 const TAKE_BATCH: usize = 256;
+const TELEMETRY_STRING_BATCH_ROWS: usize = 250_000;
+
+#[derive(Debug)]
+struct PairedSamples {
+    times_us: Vec<f64>,
+    null_arm_a_us: Vec<f64>,
+    null_arm_b_us: Vec<f64>,
+    null_ratios: Vec<f64>,
+    checksum: u64,
+    thread_probe: ThreadProbe,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ThreadProbe {
+    runtime_available_parallelism: usize,
+    process_threads_before_probe: usize,
+    peak_process_threads: usize,
+    operation_threads_used: usize,
+}
+
+/// SHA-256 of this executable, computed by the process that is actually
+/// running. This is deliberately emitted before any benchmark output.
+fn self_identity() -> String {
+    let Ok(path) = std::env::current_exe() else {
+        return "unavailable".to_string();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return "unavailable".to_string();
+    };
+    let digest = Sha256::digest(&bytes);
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{hex} ({} bytes) {}", bytes.len(), path.display())
+}
+
+fn runtime_isa_features() -> Vec<&'static str> {
+    let mut features = vec!["scalar"];
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if std::is_x86_feature_detected!("sse2") {
+            features.push("sse2");
+        }
+        if std::is_x86_feature_detected!("avx2") {
+            features.push("avx2");
+        }
+        if std::is_x86_feature_detected!("fma") {
+            features.push("fma");
+        }
+        if std::is_x86_feature_detected!("bmi2") {
+            features.push("bmi2");
+        }
+        if std::is_x86_feature_detected!("vaes") {
+            features.push("vaes");
+        }
+        if std::is_x86_feature_detected!("avx512f") {
+            features.push("avx512f");
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            features.push("neon");
+        }
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            features.push("dotprod");
+        }
+        if std::arch::is_aarch64_feature_detected!("i8mm") {
+            features.push("i8mm");
+        }
+    }
+    features
+}
+
+#[cfg(target_os = "linux")]
+fn process_thread_count() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("Threads:")
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+        })
+        .unwrap_or(1)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_thread_count() -> usize {
+    1
+}
+
+/// Observe one untimed operation so every benchmark can report how much
+/// parallelism it actually exercised, not merely how many CPUs were available.
+///
+/// FrankenPandas' current parallel paths use scoped worker threads. A monitor
+/// thread samples `/proc/self/status`; subtracting the pre-existing process
+/// threads and the monitor itself yields the peak operation worker count. A
+/// serial operation therefore reports one, while a scoped four-worker path
+/// reports four. The probe runs before warmup and never enters a timed region.
+fn probe_operation_threads<F, T>(op: &mut F) -> ThreadProbe
+where
+    F: FnMut() -> T,
+{
+    use std::sync::{
+        Barrier,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    let runtime_available_parallelism =
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let process_threads_before_probe = process_thread_count();
+    let peak_process_threads = AtomicUsize::new(process_threads_before_probe);
+    let keep_sampling = AtomicBool::new(true);
+    let ready = Barrier::new(2);
+
+    std::thread::scope(|scope| {
+        let monitor = scope.spawn(|| {
+            ready.wait();
+            while keep_sampling.load(Ordering::Acquire) {
+                peak_process_threads.fetch_max(process_thread_count(), Ordering::Relaxed);
+                std::thread::sleep(Duration::from_micros(20));
+            }
+            peak_process_threads.fetch_max(process_thread_count(), Ordering::Relaxed);
+        });
+        ready.wait();
+        black_box(op());
+        keep_sampling.store(false, Ordering::Release);
+        monitor.join().expect("thread-count monitor must not panic");
+    });
+
+    let peak_process_threads = peak_process_threads.load(Ordering::Relaxed);
+    let operation_threads_used = peak_process_threads
+        .saturating_sub(process_threads_before_probe.saturating_add(1))
+        .max(1);
+    ThreadProbe {
+        runtime_available_parallelism,
+        process_threads_before_probe,
+        peak_process_threads,
+        operation_threads_used,
+    }
+}
+
+fn same_worker_python(target_dir: &Path, harness_script: &Path) -> (PathBuf, PathBuf) {
+    let python = PathBuf::from("python3");
+    let site_packages = target_dir.join("lane-m-python-site");
+    let pinned_packages = [
+        ["numpy", "2.4.3"].join("=="),
+        ["pandas", "2.2.3"].join("=="),
+        ["pyarrow", "24.0.0"].join("=="),
+    ];
+    let import_is_ready = Command::new(&python)
+        .arg(harness_script)
+        .arg("--dependency-probe")
+        .env("PYTHONNOUSERSITE", "1")
+        .env("PYTHONPATH", &site_packages)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if import_is_ready {
+        return (python, site_packages);
+    }
+
+    let pip_status = Command::new(&python)
+        .args([
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--target",
+        ])
+        .arg(&site_packages)
+        .args(&pinned_packages)
+        .status()
+        .is_ok_and(|status| status.success());
+    let install_status = pip_status
+        || ["uv", "/root/.local/bin/uv", "/root/.cargo/bin/uv"]
+            .iter()
+            .any(|uv| {
+                Command::new(uv)
+                    .args(["pip", "install", "--python", "python3", "--target"])
+                    .arg(&site_packages)
+                    .args(&pinned_packages)
+                    .status()
+                    .is_ok_and(|status| status.success())
+            });
+    assert!(
+        install_status,
+        "failed to install pinned same-worker benchmark dependencies"
+    );
+    let import_status = Command::new(&python)
+        .arg(harness_script)
+        .arg("--dependency-probe")
+        .env("PYTHONNOUSERSITE", "1")
+        .env("PYTHONPATH", &site_packages)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("verify same-worker benchmark dependencies");
+    assert!(
+        import_status.success(),
+        "pinned same-worker benchmark dependencies are not importable"
+    );
+    (python, site_packages)
+}
+
+/// Run the Python half of the harness on the same host as this ELF.
+///
+/// RCH accepts `cargo run` as a remote compilation command but deliberately
+/// refuses arbitrary remote Python commands. This bridge lets a strict-remote
+/// invocation keep pandas, the Rust child process, and both A/A controls on
+/// one worker without copying a target directory back to the coordinator.
+fn run_remote_python_harness(args: &[String]) -> Option<i32> {
+    let marker = args
+        .iter()
+        .position(|argument| argument == "--remote-python-harness")?;
+    let executable = std::env::current_exe().expect("resolve running fp-bench executable");
+    let profile_dir = executable
+        .parent()
+        .expect("fp-bench executable has a profile directory");
+    let target_dir = profile_dir
+        .parent()
+        .expect("fp-bench profile has a target directory");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../benches/vs_pandas_harness.py")
+        .canonicalize()
+        .expect("resolve vs_pandas_harness.py");
+    let (python, site_packages) = same_worker_python(target_dir, &script);
+    for harness_args in args[marker + 1..]
+        .split(|argument| argument == "--next-python-harness")
+        .filter(|segment| !segment.is_empty())
+    {
+        let status = Command::new(&python)
+            .arg(&script)
+            .args(harness_args)
+            .env("CARGO_TARGET_DIR", target_dir)
+            .env("PYTHONNOUSERSITE", "1")
+            .env("PYTHONPATH", &site_packages)
+            .status()
+            .expect("run same-worker Python benchmark harness");
+        if !status.success() {
+            return Some(status.code().unwrap_or(1));
+        }
+    }
+    Some(0)
+}
 
 /// splitmix64 — deterministic, seed-stable uniform stream. We only need a
 /// fair-distribution data set for TIMING (not bit-identity with numpy's PCG64),
@@ -60,6 +317,11 @@ fn size_rows_cols(size: &str) -> (usize, usize) {
         "10k" => (10_000, 10),
         "100k" => (100_000, 10),
         "1M" => (1_000_000, 10),
+        "2M" => (2_000_000, 10),
+        "4M" => (4_000_000, 10),
+        "6M" => (6_000_000, 10),
+        "8M" => (8_000_000, 10),
+        "10M" => (10_000_000, 10),
         _ => (100_000, 10),
     }
 }
@@ -68,6 +330,27 @@ fn arithmetic_take_positions(rows: usize) -> Vec<usize> {
     let start = rows / 8;
     let stop = rows - start;
     (start..stop).step_by(2).collect()
+}
+
+fn telemetry_string_batch_ranges(rows: usize) -> Vec<(usize, usize)> {
+    (0..rows)
+        .step_by(TELEMETRY_STRING_BATCH_ROWS)
+        .map(|start| (start, (start + TELEMETRY_STRING_BATCH_ROWS).min(rows)))
+        .collect()
+}
+
+fn build_telemetry_string_batches(rows: usize) -> Vec<Series> {
+    telemetry_string_batch_ranges(rows)
+        .into_iter()
+        .map(|(start, stop)| {
+            let len = stop - start;
+            let index = Index::new_known_unique_int64_affine_range(start as i64, 1, len)
+                .expect("telemetry batch index");
+            let values = (start..stop).map(|row| row as f64 * 1.5).collect();
+            Series::new("s", index, Column::from_f64_values_owned(values))
+                .expect("telemetry batch series")
+        })
+        .collect()
 }
 
 /// Build one Float64 column of `rows` values per the requested dtype, advancing
@@ -98,6 +381,46 @@ fn gen_i64_column(rng: &mut SplitMix64, rows: usize) -> Vec<i64> {
 
 fn gen_bool_column(rng: &mut SplitMix64, rows: usize) -> Vec<bool> {
     (0..rows).map(|_| (rng.next_u64() & 1) != 0).collect()
+}
+
+/// Ordered, stateful callback used by the large-N `Series.apply` incumbent
+/// gate. The recurrence makes one callback invocation per element observable:
+/// replacing it with a vectorized reduction changes every subsequent output.
+fn stateful_apply_step(state: &Cell<i64>, value: &Scalar) -> Scalar {
+    let Scalar::Int64(input) = value else {
+        panic!("stateful apply fixture must contain Int64 values");
+    };
+    let next = state.get().wrapping_mul(31).wrapping_add(*input) & 0x7fff_ffff;
+    state.set(next);
+    Scalar::Int64(next)
+}
+
+/// Ordered callback for the large-N `Rolling.apply` incumbent gate.
+///
+/// The running state makes every callback invocation observable, while the
+/// window sum forces the workload to preserve rolling-window semantics.
+fn stateful_rolling_step(state: &Cell<i64>, values: &[f64]) -> f64 {
+    let window_sum = values.iter().sum::<f64>() as i64;
+    let next = state.get().wrapping_mul(31).wrapping_add(window_sum) & 0x7fff_ffff;
+    state.set(next);
+    next as f64
+}
+
+/// Ordered callback for the large-N `Expanding.apply` incumbent gate.
+///
+/// Reading both the newest value and the growing prefix length makes the
+/// expanding-window contract observable; the running state makes callback
+/// order and cardinality observable.
+fn stateful_expanding_step(state: &Cell<i64>, values: &[f64]) -> f64 {
+    let newest = values.last().copied().unwrap_or_default() as i64;
+    let next = state
+        .get()
+        .wrapping_mul(31)
+        .wrapping_add(newest)
+        .wrapping_add(values.len() as i64)
+        & 0x7fff_ffff;
+    state.set(next);
+    next as f64
 }
 
 fn gen_datetime64_column(rows: usize, column: usize) -> Vec<i64> {
@@ -158,6 +481,20 @@ fn build_frame(rows: usize, cols: usize, dtype: &str) -> (DataFrame, Vec<Vec<f64
                 let mut data = gen_f64_column(&mut rng, rows, "float64");
                 for (i, value) in data.iter_mut().enumerate() {
                     if i % 7 == 0 {
+                        *value = f64::NAN;
+                    }
+                }
+                raw.push(data.clone());
+                columns.insert(name.clone(), Column::from_f64_values(data));
+            }
+            // Historical Cod-a GroupBy gauntlet shape: deterministic missing
+            // value every 37th row. Kept as an explicit dtype so resurrection
+            // runs can reproduce that nullable workload under the v4
+            // A/A + median-CI contract.
+            "float64_nan37" => {
+                let mut data = gen_f64_column(&mut rng, rows, "float64");
+                for (i, value) in data.iter_mut().enumerate() {
+                    if i % 37 == 0 {
                         *value = f64::NAN;
                     }
                 }
@@ -385,59 +722,357 @@ fn build_square_f64_frame(dim: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, column_order).expect("fp-bench square frame")
 }
 
-/// Time a closure `ITERS` times after `WARMUP` warmups; return per-iter µs.
-fn time_us<F: FnMut()>(mut op: F) -> Vec<f64> {
+fn timed_batch_us<F, T>(
+    op: &mut F,
+    repeat: usize,
+    divide_by_repeat: bool,
+    checksum: &mut u64,
+) -> f64
+where
+    F: FnMut() -> T,
+{
+    debug_assert!(repeat > 0);
+    let started = Instant::now();
+    let mut last_result = None;
+    for _ in 0..repeat {
+        last_result = Some(black_box(op()));
+    }
+    let mut elapsed_us = started.elapsed().as_secs_f64() * 1e6;
+    if divide_by_repeat {
+        elapsed_us /= repeat as f64;
+    }
+
+    let result = last_result.expect("repeat is non-zero");
+    *checksum =
+        checksum.rotate_left(9) ^ (std::mem::size_of_val(&result) as u64) ^ 0x9e37_79b9_7f4a_7c15;
+    black_box(result);
+    elapsed_us
+}
+
+/// Measure an identical arm twice inside every round. Order alternates so
+/// first-mover cache and scheduler bias cancel. The median of `null_ratios` is
+/// the A/A point estimate; the caller gates on its bootstrap median CI.
+fn paired_time_us<F, T>(mut op: F, repeat: usize, divide_by_repeat: bool) -> PairedSamples
+where
+    F: FnMut() -> T,
+{
+    let thread_probe = probe_operation_threads(&mut op);
     for _ in 0..WARMUP {
-        op();
+        for _ in 0..repeat {
+            black_box(op());
+        }
     }
-    let mut out = Vec::with_capacity(ITERS);
-    for _ in 0..ITERS {
-        let t = Instant::now();
-        op();
-        out.push(t.elapsed().as_secs_f64() * 1e6);
+
+    let mut times_us = Vec::with_capacity(ITERS * 2);
+    let mut null_arm_a_us = Vec::with_capacity(ITERS);
+    let mut null_arm_b_us = Vec::with_capacity(ITERS);
+    let mut null_ratios = Vec::with_capacity(ITERS);
+    let mut checksum = 0_u64;
+    for round in 0..ITERS {
+        let (arm_a_us, arm_b_us) = if round % 2 == 0 {
+            let arm_a_us = timed_batch_us(&mut op, repeat, divide_by_repeat, &mut checksum);
+            let arm_b_us = timed_batch_us(&mut op, repeat, divide_by_repeat, &mut checksum);
+            (arm_a_us, arm_b_us)
+        } else {
+            let arm_b_us = timed_batch_us(&mut op, repeat, divide_by_repeat, &mut checksum);
+            let arm_a_us = timed_batch_us(&mut op, repeat, divide_by_repeat, &mut checksum);
+            (arm_a_us, arm_b_us)
+        };
+        times_us.extend([arm_a_us, arm_b_us]);
+        null_arm_a_us.push(arm_a_us);
+        null_arm_b_us.push(arm_b_us);
+        null_ratios.push(arm_a_us / arm_b_us);
     }
-    out
+    PairedSamples {
+        times_us,
+        null_arm_a_us,
+        null_arm_b_us,
+        null_ratios,
+        checksum,
+        thread_probe,
+    }
+}
+
+/// Variant for cache-populating APIs: build a fresh subject before each arm,
+/// outside the timed region, so arm B cannot inherit arm A's materialization.
+fn paired_time_us_with_setup<Setup, Subject, Op, Output>(
+    mut setup: Setup,
+    mut op: Op,
+) -> PairedSamples
+where
+    Setup: FnMut() -> Subject,
+    Op: FnMut(&Subject) -> Output,
+{
+    let mut checksum = 0_u64;
+    let probe_subject = black_box(setup());
+    let thread_probe = probe_operation_threads(&mut || op(black_box(&probe_subject)));
+    black_box(probe_subject);
+    let (times_us, null_arm_a_us, null_arm_b_us, null_ratios) = {
+        let mut time_arm = || {
+            let subject = black_box(setup());
+            let started = Instant::now();
+            let result = black_box(op(black_box(&subject)));
+            let elapsed_us = started.elapsed().as_secs_f64() * 1e6;
+            checksum = checksum.rotate_left(9)
+                ^ (std::mem::size_of_val(&result) as u64)
+                ^ 0x9e37_79b9_7f4a_7c15;
+            black_box(result);
+            elapsed_us
+        };
+
+        for _ in 0..WARMUP {
+            black_box(time_arm());
+        }
+
+        let mut times_us = Vec::with_capacity(ITERS * 2);
+        let mut null_arm_a_us = Vec::with_capacity(ITERS);
+        let mut null_arm_b_us = Vec::with_capacity(ITERS);
+        let mut null_ratios = Vec::with_capacity(ITERS);
+        for round in 0..ITERS {
+            let (arm_a_us, arm_b_us) = if round % 2 == 0 {
+                (time_arm(), time_arm())
+            } else {
+                let arm_b_us = time_arm();
+                let arm_a_us = time_arm();
+                (arm_a_us, arm_b_us)
+            };
+            times_us.extend([arm_a_us, arm_b_us]);
+            null_arm_a_us.push(arm_a_us);
+            null_arm_b_us.push(arm_b_us);
+            null_ratios.push(arm_a_us / arm_b_us);
+        }
+        (times_us, null_arm_a_us, null_arm_b_us, null_ratios)
+    };
+
+    PairedSamples {
+        times_us,
+        null_arm_a_us,
+        null_arm_b_us,
+        null_ratios,
+        checksum,
+        thread_probe,
+    }
+}
+
+/// Time a closure after warmup and emit a same-invocation A/A control.
+fn time_us<F, T>(op: F) -> PairedSamples
+where
+    F: FnMut() -> T,
+{
+    paired_time_us(op, 1, false)
 }
 
 #[cfg(feature = "lazy-transpose-prototype")]
-fn time_us_repeated<F: FnMut()>(repeat: usize, mut op: F) -> Vec<f64> {
-    for _ in 0..WARMUP {
-        for _ in 0..repeat {
-            op();
-        }
-    }
-    let mut out = Vec::with_capacity(ITERS);
-    for _ in 0..ITERS {
-        let t = Instant::now();
-        for _ in 0..repeat {
-            op();
-        }
-        out.push(t.elapsed().as_secs_f64() * 1e6 / repeat as f64);
-    }
-    out
+fn time_us_repeated<F, T>(repeat: usize, op: F) -> PairedSamples
+where
+    F: FnMut() -> T,
+{
+    paired_time_us(op, repeat, true)
 }
 
 #[cfg(feature = "lazy-transpose-view")]
-fn time_us_repeated_total<F: FnMut()>(repeat: usize, mut op: F) -> Vec<f64> {
-    for _ in 0..WARMUP {
-        for _ in 0..repeat {
-            op();
-        }
-    }
-    let mut out = Vec::with_capacity(ITERS);
-    for _ in 0..ITERS {
-        let t = Instant::now();
-        for _ in 0..repeat {
-            op();
-        }
-        out.push(t.elapsed().as_secs_f64() * 1e6);
-    }
-    out
+fn time_us_repeated_total<F, T>(repeat: usize, op: F) -> PairedSamples
+where
+    F: FnMut() -> T,
+{
+    paired_time_us(op, repeat, false)
 }
 
-fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f64>> {
+/// Whole-job ETL pipeline — deliberately NOT a kernel benchmark.
+///
+/// One timed closure runs a complete job of the shape a pandas user actually
+/// writes, end to end. The Python driver runs this exact job on live pandas
+/// in the same invocation:
+///
+/// ```python
+/// sales  = pd.read_csv(sales_path)
+/// stores = pd.read_csv(stores_path)
+/// kept   = sales[sales["amount"] > 0.0]
+/// agg    = kept.groupby("store_id", as_index=False).sum()
+/// joined = agg.merge(stores, on="store_id", how="inner")
+/// ranked = joined.sort_values(["amount", "store_id"], ascending=[False, True])
+/// ranked.to_csv(out_path, index=False)
+/// ```
+///
+/// Both engines read the SAME two input CSVs, materialized once by the driver
+/// outside every timed window, and each writes its own output CSV that the
+/// driver then diffs byte-for-byte. A whole-job ratio only means something if
+/// both arms did the same job; that diff is what proves it, because the
+/// per-engine `checksum` is a liveness token (`size_of_val`) and cannot
+/// compare content across engines.
+///
+/// The sort carries an explicit `store_id` tiebreak so the row order is total
+/// and the byte diff cannot fail on tied `amount` sums alone — pandas'
+/// default `quicksort` is not stable, so ties would otherwise be free to
+/// disagree without either engine being wrong.
+fn run_pipeline(workload: &str, data_dir: Option<&Path>) -> Option<PairedSamples> {
+    if !matches!(workload, "etl_job" | "etl_job_parquet") {
+        return None;
+    }
+    // `etl_job` at 1M is 82.3% read_csv on the pandas side (measured; see
+    // artifacts/bench/cc_thinkstation1_pipeline_whole_job_20260730.md), so a
+    // whole-job ratio from it is mostly a CSV-parse ratio. That is realistic --
+    // real ETL is parse-dominated -- but it means the shape cannot answer
+    // whether a whole-job win survives when parsing is NOT the bulk of the job.
+    // `etl_job_parquet` runs the identical six stages off Parquet, where load
+    // is cheap, so the compute stages carry real weight. Same job, same
+    // outputs, different input format: the pair brackets the answer.
+    let parquet = workload == "etl_job_parquet";
+    let dir = data_dir.expect(
+        "pipeline/etl_job requires --data-dir; the Python driver materializes \
+         sales.csv and stores.csv there before either arm is timed",
+    );
+    let (sales_path, stores_path, out_path) = if parquet {
+        (
+            dir.join("sales.parquet"),
+            dir.join("stores.parquet"),
+            dir.join("out_frankenpandas_parquet.csv"),
+        )
+    } else {
+        (
+            dir.join("sales.csv"),
+            dir.join("stores.csv"),
+            dir.join("out_frankenpandas.csv"),
+        )
+    };
+    assert!(
+        sales_path.is_file(),
+        "pipeline: missing input {}",
+        sales_path.display()
+    );
+    assert!(
+        stores_path.is_file(),
+        "pipeline: missing input {}",
+        stores_path.display()
+    );
+
+    Some(time_us(|| {
+        // 1. load
+        let (sales, stores) = if parquet {
+            (
+                fp_io::read_parquet(&sales_path).expect("pipeline: read sales.parquet"),
+                fp_io::read_parquet(&stores_path).expect("pipeline: read stores.parquet"),
+            )
+        } else {
+            (
+                fp_io::read_csv(&sales_path).expect("pipeline: read sales.csv"),
+                fp_io::read_csv(&stores_path).expect("pipeline: read stores.csv"),
+            )
+        };
+
+        // 2. filter -- sales[sales["amount"] > 0.0]
+        let keep = sales
+            .get_column("amount")
+            .gt_scalar(&Scalar::Float64(0.0))
+            .expect("pipeline: amount > 0");
+        let mask = keep
+            .column()
+            .as_bool_slice()
+            .expect("pipeline: filter mask is an all-valid Bool column");
+        let kept = sales.loc_bool(mask).expect("pipeline: filter");
+
+        // 3. groupby -- kept.groupby("store_id", as_index=False).sum()
+        let agg = kept
+            .groupby_with_as_index(&["store_id"], false)
+            .expect("pipeline: groupby store_id")
+            .sum()
+            .expect("pipeline: sum");
+
+        // 4. join -- agg.merge(stores, on="store_id", how="inner")
+        let merged = merge_dataframes_on_with(
+            &agg,
+            &stores,
+            &["store_id"],
+            &["store_id"],
+            JoinType::Inner,
+        )
+        .expect("pipeline: merge stores");
+        let joined =
+            DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+                .expect("pipeline: materialize merge");
+
+        // 5. sort -- descending revenue, store_id tiebreak
+        let ranked = joined
+            .sort_values_multi(&["amount", "store_id"], &[false, true], "last")
+            .expect("pipeline: rank");
+
+        // 6. write
+        fp_io::write_csv(&ranked, &out_path).expect("pipeline: write output");
+        ranked
+    }))
+}
+
+/// The math-unary family the ledger recorded as blocked on the build target.
+///
+/// `docs/NEGATIVE_EVIDENCE.md` (2026-06-26) records floor 0.089x, ceil 0.11x,
+/// trunc 0.13x, round(decimals) 0.090x, sqrt ~0.085x, log 0.20x vs pandas, with
+/// the explicit finding that they are "NOT source-fixable": they need `vroundpd`
+/// / wide `vsqrtpd`, and FrankenPandas builds for generic x86-64, so
+/// `f64::floor/ceil/trunc/round_ties_even` lower to libm libcalls and sqrt to
+/// scalar `sqrtsd`, while numpy runtime-dispatches AVX regardless of compile
+/// target. That row ends: "This is the ceiling for the math-unary family until
+/// that build-target call is revisited."
+///
+/// The fleet's ISA floor moved to x86-64-v3 on 2026-07-25 (workers.toml: ovh-b,
+/// the only non-AVX2 worker, dropped the `rust` tag), which satisfies that
+/// retry condition. This lane exists so the re-test is a whole-binary timed A/B
+/// rather than an instruction count -- fewer instructions is the mechanism, not
+/// a proxy for the result.
+///
+/// Input is deliberately NON-INTEGRAL: an integral-valued Float64 column hits
+/// the `floor`/`ceil`/`trunc` semantic-identity bit witness (landed 2026-06-26)
+/// and short-circuits the kernel entirely, so an integral fixture would measure
+/// the guard instead of the arithmetic. It is also strictly positive so `sqrt`
+/// and `log` stay finite and neither engine drifts onto a NaN path.
+fn run_math_unary(workload: &str, rows: usize) -> Option<PairedSamples> {
+    let mut rng = SplitMix64(0x1234_5678_9ABC_DEF0);
+    let data: Vec<f64> = (0..rows).map(|_| 1.0 + rng.unit() * 99_999.0).collect();
+    let index = Index::new_known_unique_int64_unit_range(0, rows);
+    let series = Series::new("s", index, Column::from_f64_values(data)).expect("math series");
+
+    let samples = match workload {
+        "floor" => time_us(|| series.floor().expect("floor")),
+        "ceil" => time_us(|| series.ceil().expect("ceil")),
+        "trunc" => time_us(|| series.trunc().expect("trunc")),
+        "round2" => time_us(|| series.round(2).expect("round")),
+        "sqrt" => time_us(|| series.sqrt().expect("sqrt")),
+        "log" => time_us(|| series.log().expect("log")),
+        _ => return None,
+    };
+    Some(samples)
+}
+
+fn run(
+    category: &str,
+    workload: &str,
+    size: &str,
+    dtype: &str,
+    data_dir: Option<&Path>,
+) -> Option<PairedSamples> {
     let (rows, cols) = size_rows_cols(size);
-    let (df, raw) = build_frame(rows, cols, dtype);
+    // The pipeline category reads its inputs from disk and never touches the
+    // synthetic ten-column frame. Dispatch before `build_frame` so a 10M-row
+    // run does not allocate ~800 MB of unrelated columns and hold them live
+    // for the whole measurement.
+    if category == "pipeline" {
+        return run_pipeline(workload, data_dir);
+    }
+    // Same reason: math_unary builds its exact one-column input below.
+    if category == "math_unary" {
+        return run_math_unary(workload, rows);
+    }
+    // The astype workloads construct their exact one-column input below.
+    // Avoid retaining an unrelated ten-column frame during measurement.
+    let base_cols = if category == "dataframe_ops"
+        && matches!(
+            workload,
+            "astype_str_f64" | "astype_str_f64_telemetry_batches"
+        ) {
+        0
+    } else {
+        cols
+    };
+    let (df, raw) = build_frame(rows, base_cols, dtype);
     #[cfg(feature = "lazy-transpose-prototype")]
     let transpose_block = PrototypeF64Block::from_column_vectors(&raw);
 
@@ -811,11 +1446,35 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = series.astype(fp_types::DType::Utf8).expect("astype str");
             })
         }
+        ("dataframe_ops", "astype_str_f64_telemetry_batches") => {
+            // Realistic bounded-memory sink: format every finite telemetry
+            // value into an ordered Utf8 Series, consume each 250k-row batch,
+            // then release it before advancing. Input population is untimed.
+            let batches = build_telemetry_string_batches(rows);
+            time_us(|| {
+                let mut observed_rows = 0_usize;
+                for batch in &batches {
+                    let rendered = batch
+                        .astype(fp_types::DType::Utf8)
+                        .expect("telemetry batch astype str");
+                    black_box((
+                        rendered.values().first().expect("nonempty batch"),
+                        rendered.values().last().expect("nonempty batch"),
+                    ));
+                    observed_rows += rendered.len();
+                    black_box(rendered);
+                }
+                black_box(observed_rows)
+            })
+        }
         ("dataframe_ops", "df_melt") => time_us(|| {
             // pandas: df.melt()
             let _ = df.melt(&[], &[], None, None).expect("melt");
         }),
-        ("dataframe_ops", "df_explode") => {
+        (
+            "dataframe_ops",
+            "df_explode" | "df_explode_string_python" | "df_explode_string_arrow",
+        ) => {
             // Series of comma-separated strings "aN,bN,cN" (3 parts each).
             // pandas: s.str.split(",").explode().
             let mut bytes: Vec<u8> = Vec::new();
@@ -853,9 +1512,32 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
             // pandas: df.count()
             let _ = df.count().expect("count");
         }),
-        ("dataframe_ops", "df_to_numpy") => time_us(|| {
-            // pandas: df.to_numpy()
-            let _ = df.to_numpy();
+        ("dataframe_ops", "df_to_numpy") => paired_time_us_with_setup(
+            || build_frame(rows, cols, dtype).0,
+            |fresh| {
+                // pandas: df.to_numpy(). Fresh construction is outside the
+                // timer, preventing a cached consolidation from posing as a
+                // first-call materialization win.
+                fresh.to_numpy()
+            },
+        ),
+        ("dataframe_ops", "df_values") => paired_time_us_with_setup(
+            || build_frame(rows, cols, dtype).0,
+            |fresh| {
+                // pandas: df.values (Vec<Vec<Scalar>> row-major materialization).
+                // Each arm gets a fresh frame outside the timed boundary.
+                fresh.values()
+            },
+        ),
+        ("dataframe_ops", "df_iterrows") => time_us(|| {
+            // pandas: list(df.iterrows())
+            let _ = df.iterrows();
+        }),
+        ("dataframe_ops", "df_itertuples" | "df_row_tuples_fastest") => time_us(|| {
+            // pandas exact arm: list(df.itertuples()). The
+            // df_row_tuples_fastest fairness arm uses the fastest independently
+            // screened pandas route to a fully materialized tuple per row.
+            let _ = df.itertuples();
         }),
         ("dataframe_ops", "df_mode") => time_us(|| {
             // pandas: df.mode()
@@ -1823,10 +2505,48 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = series.rolling(50, Some(50)).std().expect("rolling std");
             })
         }
+        ("rolling", "rolling_apply_stateful") => {
+            // pandas task-equivalent winner after an eight-route 1M screen:
+            // rolling(10).sum() followed by an ordered stateful callback. The
+            // callback output depends on every earlier valid window.
+            let series = Series::new(
+                "s",
+                Index::new_known_unique_int64_unit_range(0, rows),
+                Column::from_f64_values_owned((0..rows).map(|row| (row % 997) as f64).collect()),
+            )
+            .expect("stateful rolling series");
+            time_us(|| {
+                let state = Cell::new(0_i64);
+                let result = series
+                    .rolling(10, Some(10))
+                    .apply(|values| stateful_rolling_step(&state, values))
+                    .expect("stateful rolling apply");
+                (result, state.get())
+            })
+        }
         ("rolling", "expanding_sum") => {
             let series = df.get_column("col_0");
             time_us(|| {
                 let _ = series.expanding(Some(1)).sum().expect("expanding sum");
+            })
+        }
+        ("rolling", "expanding_apply_stateful") => {
+            // pandas task-equivalent winner after an eight-route 1M screen:
+            // np.fromiter over the same ordered recurrence. Prefix length,
+            // newest value, and all prior callback states remain observable.
+            let series = Series::new(
+                "s",
+                Index::new_known_unique_int64_unit_range(0, rows),
+                Column::from_f64_values_owned((0..rows).map(|row| (row % 997) as f64).collect()),
+            )
+            .expect("stateful expanding series");
+            time_us(|| {
+                let state = Cell::new(0_i64);
+                let result = series
+                    .expanding(Some(1))
+                    .apply(|values| stateful_expanding_step(&state, values))
+                    .expect("stateful expanding apply");
+                (result, state.get())
             })
         }
         ("rolling", "ewm_mean") => {
@@ -2027,10 +2747,19 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         // String-column ops (the rest of the matrix is numeric-only). pandas:
         // f.sort_values("name") / f["key"].value_counts() / f.groupby("key")
         // ["val"].sum(). The numeric `df` built above is unused here.
-        ("strings", "str_len" | "str_upper" | "str_contains" | "str_startswith") => {
+        (
+            "strings",
+            "str_len"
+            | "str_upper"
+            | "str_contains"
+            | "str_contains_arrow"
+            | "str_startswith"
+            | "str_startswith_arrow",
+        ) => {
             let frame = build_str_frame(rows);
             let series = frame.get_column("name");
-            match workload {
+            let base_workload = workload.strip_suffix("_arrow").unwrap_or(workload);
+            match base_workload {
                 "str_len" => time_us(|| {
                     let _ = series.str().len().expect("str len");
                 }),
@@ -2061,9 +2790,24 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 }),
             }
         }
-        ("strings", "str_sort" | "str_value_counts" | "str_groupby_sum") => {
+        (
+            "strings",
+            "str_sort"
+            | "str_sort_object"
+            | "str_sort_arrow"
+            | "str_value_counts"
+            | "str_value_counts_object"
+            | "str_value_counts_arrow"
+            | "str_groupby_sum"
+            | "str_groupby_sum_object"
+            | "str_groupby_sum_arrow",
+        ) => {
             let frame = build_str_frame(rows);
-            match workload {
+            let base_workload = workload
+                .strip_suffix("_object")
+                .or_else(|| workload.strip_suffix("_arrow"))
+                .unwrap_or(workload);
+            match base_workload {
                 "str_sort" => time_us(|| {
                     let _ = frame.sort_values("name", true).expect("str sort");
                 }),
@@ -2287,6 +3031,34 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 let _ = fp_io::read_json_str(&json, fp_io::JsonOrient::Records).expect("read_json");
             })
         }
+        ("io", "json_read_columns") => {
+            // pandas: pd.read_json(json, orient="columns"); parse a column-map JSON.
+            let json = df.to_json("columns").expect("to_json setup");
+            time_us(|| {
+                let _ = fp_io::read_json_str(&json, fp_io::JsonOrient::Columns).expect("read_json");
+            })
+        }
+        ("io", "json_read_index") => {
+            // pandas: pd.read_json(json, orient="index"); parse an index-map JSON.
+            let json = df.to_json("index").expect("to_json setup");
+            time_us(|| {
+                let _ = fp_io::read_json_str(&json, fp_io::JsonOrient::Index).expect("read_json");
+            })
+        }
+        ("io", "json_read_split") => {
+            // pandas: pd.read_json(json, orient="split"); parse split JSON.
+            let json = df.to_json("split").expect("to_json setup");
+            time_us(|| {
+                let _ = fp_io::read_json_str(&json, fp_io::JsonOrient::Split).expect("read_json");
+            })
+        }
+        ("io", "json_read_values") => {
+            // pandas: pd.read_json(json, orient="values"); parse row-array JSON.
+            let json = df.to_json("values").expect("to_json setup");
+            time_us(|| {
+                let _ = fp_io::read_json_str(&json, fp_io::JsonOrient::Values).expect("read_json");
+            })
+        }
         ("io", "json_write_records") => {
             // pandas: df.to_json(orient="records"); 10-col f64 frame.
             time_us(|| {
@@ -2344,6 +3116,24 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
                 )
                 .expect("apply");
         }),
+        ("dataframe_ops", "series_apply_stateful") => {
+            // pandas: Series(range(n)).apply(stateful_step). The callback is an
+            // ordered recurrence, so each call affects all later outputs.
+            // Population stays outside the timed closure on both engines.
+            let series = Series::new(
+                "s",
+                Index::new_known_unique_int64_unit_range(0, rows),
+                Column::from_i64_values((0..rows as i64).collect()),
+            )
+            .expect("stateful apply series");
+            time_us(|| {
+                let state = Cell::new(0_i64);
+                let result = series
+                    .apply(|value| stateful_apply_step(&state, value))
+                    .expect("stateful series apply");
+                (result, state.get())
+            })
+        }
         ("dataframe_ops", "cut_explicit") => {
             // pandas: pd.cut(s, bins=[-1,1e5,...,1.1e6]) — explicit edges spanning
             // the [0,1e6] data (all in-range -> all-valid). Exercises cut_bins.
@@ -2437,9 +3227,11 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
         }
         ("datetime", "dt_strftime" | "dt_date" | "dt_time" | "dt_day_name" | "dt_month_name") => {
             let base: i64 = 946_684_800_000_000_000;
-            // 1 day + 37 s per row so BOTH the date and the time-of-day vary.
+            // Ten minutes per row makes both the date and time-of-day vary,
+            // remains inside datetime64[ns] through 10M rows, and exactly
+            // matches the live pandas incumbent arms.
             let nanos: Vec<i64> = (0..rows as i64)
-                .map(|i| base + i * 86_437_000_000_000)
+                .map(|i| base + i * 600_000_000_000)
                 .collect();
             let index = Index::new_known_unique_int64_unit_range(0, rows);
             let series = Series::new(
@@ -2520,16 +3312,68 @@ fn run(category: &str, workload: &str, size: &str, dtype: &str) -> Option<Vec<f6
 }
 
 fn main() {
+    println!("bench_elf_sha256={}", self_identity());
+
     let args: Vec<String> = std::env::args().collect();
+    if let Some(status) = run_remote_python_harness(&args) {
+        std::process::exit(status);
+    }
     let category = arg(&args, "--category").unwrap_or("dataframe_ops");
     let workload = arg(&args, "--workload").unwrap_or("sort_single");
     let size = arg(&args, "--size").unwrap_or("100k");
     let dtype = arg(&args, "--dtype").unwrap_or("float64");
+    // Only the pipeline category consumes this: the driver materializes the
+    // job's input CSVs there so both engines read byte-identical inputs.
+    let data_dir = arg(&args, "--data-dir").map(Path::new);
 
-    match run(category, workload, size, dtype) {
-        Some(times) => {
-            let body: Vec<String> = times.iter().map(|t| format!("{t}")).collect();
-            println!("{{\"times_us\": [{}]}}", body.join(", "));
+    match run(category, workload, size, dtype, data_dir) {
+        Some(samples) => {
+            let times: Vec<String> = samples.times_us.iter().map(|t| format!("{t}")).collect();
+            let null_arm_a: Vec<String> = samples
+                .null_arm_a_us
+                .iter()
+                .map(|t| format!("{t}"))
+                .collect();
+            let null_arm_b: Vec<String> = samples
+                .null_arm_b_us
+                .iter()
+                .map(|t| format!("{t}"))
+                .collect();
+            let null_ratios: Vec<String> = samples
+                .null_ratios
+                .iter()
+                .map(|ratio| format!("{ratio}"))
+                .collect();
+            let runtime_isa_features = runtime_isa_features()
+                .into_iter()
+                .map(|feature| format!("\"{feature}\""))
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                concat!(
+                    "{{\"times_us\":[{}],",
+                    "\"null_control\":{{\"arm_a_times_us\":[{}],",
+                    "\"arm_b_times_us\":[{}],\"ratios\":[{}]}},",
+                    "\"checksum\":\"{:016x}\",",
+                    "\"thread_provenance\":{{",
+                    "\"runtime_available_parallelism\":{},",
+                    "\"process_threads_before_probe\":{},",
+                    "\"peak_process_threads\":{},",
+                    "\"operation_threads_used\":{},",
+                    "\"runtime_detected_isa_features\":[{}]",
+                    "}}}}"
+                ),
+                times.join(","),
+                null_arm_a.join(","),
+                null_arm_b.join(","),
+                null_ratios.join(","),
+                samples.checksum,
+                samples.thread_probe.runtime_available_parallelism,
+                samples.thread_probe.process_threads_before_probe,
+                samples.thread_probe.peak_process_threads,
+                samples.thread_probe.operation_threads_used,
+                runtime_isa_features,
+            );
         }
         None => {
             eprintln!(
@@ -2537,6 +3381,142 @@ fn main() {
             );
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod harness_contract_tests {
+    use std::cell::Cell;
+
+    use fp_types::Scalar;
+
+    use super::{
+        ITERS, TELEMETRY_STRING_BATCH_ROWS, paired_time_us, runtime_isa_features, self_identity,
+        size_rows_cols, stateful_apply_step, stateful_expanding_step, stateful_rolling_step,
+        telemetry_string_batch_ranges,
+    };
+
+    #[test]
+    fn executable_identity_is_a_lowercase_sha256() {
+        let identity = self_identity();
+        let digest = identity.split_whitespace().next().expect("identity digest");
+        assert_eq!(digest.len(), 64);
+        assert!(
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        assert!(identity.contains(" bytes) "));
+    }
+
+    #[test]
+    fn paired_timing_emits_one_interleaved_null_ratio_per_round() {
+        let mut value = 0_u64;
+        let samples = paired_time_us(
+            || {
+                value = value.wrapping_add(1);
+                value
+            },
+            1,
+            false,
+        );
+        assert_eq!(samples.times_us.len(), ITERS * 2);
+        assert_eq!(samples.null_arm_a_us.len(), ITERS);
+        assert_eq!(samples.null_arm_b_us.len(), ITERS);
+        assert_eq!(samples.null_ratios.len(), ITERS);
+        assert!(
+            samples
+                .null_ratios
+                .iter()
+                .all(|ratio| ratio.is_finite() && *ratio > 0.0)
+        );
+        assert_ne!(samples.checksum, 0);
+        assert!(samples.thread_probe.runtime_available_parallelism >= 1);
+        assert!(samples.thread_probe.operation_threads_used >= 1);
+        assert!(
+            samples.thread_probe.peak_process_threads
+                >= samples.thread_probe.process_threads_before_probe
+        );
+    }
+
+    #[test]
+    fn runtime_isa_provenance_always_includes_scalar_fallback() {
+        assert!(runtime_isa_features().contains(&"scalar"));
+    }
+
+    #[test]
+    fn large_thread_scaling_sizes_route_to_the_requested_rust_rows() {
+        assert_eq!(size_rows_cols("2M"), (2_000_000, 10));
+        assert_eq!(size_rows_cols("4M"), (4_000_000, 10));
+        assert_eq!(size_rows_cols("6M"), (6_000_000, 10));
+        assert_eq!(size_rows_cols("8M"), (8_000_000, 10));
+        assert_eq!(size_rows_cols("10M"), (10_000_000, 10));
+    }
+
+    #[test]
+    fn telemetry_string_batches_cover_each_row_once() {
+        assert!(telemetry_string_batch_ranges(0).is_empty());
+        assert_eq!(
+            telemetry_string_batch_ranges(TELEMETRY_STRING_BATCH_ROWS),
+            vec![(0, TELEMETRY_STRING_BATCH_ROWS)]
+        );
+        assert_eq!(
+            telemetry_string_batch_ranges(TELEMETRY_STRING_BATCH_ROWS * 2 + 1),
+            vec![
+                (0, TELEMETRY_STRING_BATCH_ROWS),
+                (TELEMETRY_STRING_BATCH_ROWS, TELEMETRY_STRING_BATCH_ROWS * 2,),
+                (
+                    TELEMETRY_STRING_BATCH_ROWS * 2,
+                    TELEMETRY_STRING_BATCH_ROWS * 2 + 1,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn stateful_apply_fixture_is_order_dependent_and_deterministic() {
+        let state = Cell::new(0_i64);
+        let actual: Vec<Scalar> = (0..8)
+            .map(|value| stateful_apply_step(&state, &Scalar::Int64(value)))
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(33),
+                Scalar::Int64(1_026),
+                Scalar::Int64(31_810),
+                Scalar::Int64(986_115),
+                Scalar::Int64(30_569_571),
+                Scalar::Int64(947_656_708),
+            ]
+        );
+        assert_eq!(state.get(), 947_656_708);
+    }
+
+    #[test]
+    fn stateful_rolling_fixture_preserves_window_and_callback_order() {
+        let state = Cell::new(0_i64);
+        let actual = [
+            stateful_rolling_step(&state, &[0.0, 1.0, 2.0]),
+            stateful_rolling_step(&state, &[1.0, 2.0, 3.0]),
+            stateful_rolling_step(&state, &[2.0, 3.0, 4.0]),
+        ];
+        assert_eq!(actual, [3.0, 99.0, 3_078.0]);
+        assert_eq!(state.get(), 3_078);
+    }
+
+    #[test]
+    fn stateful_expanding_fixture_preserves_prefix_and_callback_order() {
+        let state = Cell::new(0_i64);
+        let actual = [
+            stateful_expanding_step(&state, &[0.0]),
+            stateful_expanding_step(&state, &[0.0, 1.0]),
+            stateful_expanding_step(&state, &[0.0, 1.0, 2.0]),
+        ];
+        assert_eq!(actual, [1.0, 34.0, 1_059.0]);
+        assert_eq!(state.get(), 1_059);
     }
 }
 

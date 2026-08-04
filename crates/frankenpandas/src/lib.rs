@@ -24,6 +24,8 @@ pub use fp_expr::{
 };
 #[cfg(feature = "lazy-transpose-view")]
 pub use fp_frame::DataFrameTransposeView;
+#[cfg(feature = "block-storage")]
+pub use fp_frame::Float64BlockView;
 pub use fp_frame::{
     CategoricalAccessor,
     CategoricalMetadata,

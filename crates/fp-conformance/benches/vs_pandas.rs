@@ -21,16 +21,37 @@
 
 use std::{collections::BTreeMap, hint::black_box};
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group};
 use fp_columnar::Column;
 use fp_frame::{DataFrame, Series, concat_dataframes, concat_dataframes_with_axis};
 use fp_index::{DuplicateKeep, Index, IndexLabel, RangeIndex};
 use fp_io::read_csv_str;
 use fp_join::{JoinType, merge_dataframes_on_with};
 use fp_types::Scalar;
+use sha2::{Digest, Sha256};
 
 const SIZES: &[usize] = &[10_000, 100_000];
 const TAKE_BATCH: usize = 256;
+
+/// SHA-256 of the executable that is about to run the benchmark.
+fn self_identity() -> String {
+    use std::fmt::Write as _;
+
+    let Ok(path) = std::env::current_exe() else {
+        return "unavailable".to_string();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return "unavailable".to_string();
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    let mut sha256 = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(sha256, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{} ({} bytes) {}", sha256, bytes.len(), path.display())
+}
 
 // ============================================================================
 // DATA GENERATION HELPERS
@@ -600,11 +621,13 @@ criterion_group!(
     bench_affine_index_take_arithmetic
 );
 
-criterion_main!(
-    io_benches,
-    dataframe_ops_benches,
-    groupby_benches,
-    joins_benches,
-    rolling_benches,
-    indexing_benches
-);
+fn main() {
+    println!("bench_elf_sha256={}", self_identity());
+    io_benches();
+    dataframe_ops_benches();
+    groupby_benches();
+    joins_benches();
+    rolling_benches();
+    indexing_benches();
+    Criterion::default().configure_from_args().final_summary();
+}

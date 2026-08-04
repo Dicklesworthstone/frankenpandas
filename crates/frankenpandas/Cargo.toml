@@ -12,15 +12,15 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-fp-columnar = { path = "../fp-columnar", version = "0.1.2" }
-fp-expr = { path = "../fp-expr", version = "0.1.2" }
-fp-frame = { path = "../fp-frame", version = "0.1.2" }
-fp-groupby = { path = "../fp-groupby", version = "0.1.2" }
-fp-index = { path = "../fp-index", version = "0.1.2" }
-fp-io = { path = "../fp-io", version = "0.1.2", default-features = false }
-fp-join = { path = "../fp-join", version = "0.1.2" }
-fp-runtime = { path = "../fp-runtime", version = "0.1.2" }
-fp-types = { path = "../fp-types", version = "0.1.2" }
+fp-columnar = { path = "../fp-columnar", version = "0.2.0" }
+fp-expr = { path = "../fp-expr", version = "0.2.0" }
+fp-frame = { path = "../fp-frame", version = "0.2.0" }
+fp-groupby = { path = "../fp-groupby", version = "0.2.0" }
+fp-index = { path = "../fp-index", version = "0.2.0" }
+fp-io = { path = "../fp-io", version = "0.2.0", default-features = false }
+fp-join = { path = "../fp-join", version = "0.2.0" }
+fp-runtime = { path = "../fp-runtime", version = "0.2.0" }
+fp-types = { path = "../fp-types", version = "0.2.0" }
 
 # Re-exported under the sql-sqlite feature so README Quick Start can call
 # rusqlite::Connection::open_in_memory()? without users adding rusqlite as
@@ -44,6 +44,8 @@ rusqlite = { workspace = true, optional = true }
 #   without a tracing subscriber pay no dependency cost.
 # - asupersync: forward fp-runtime's optional asupersync runtime
 #   integration. Off by default.
+# - block-storage: forward fp-frame's opt-in homogeneous Float64 block
+#   representation. It remains off by default until block-born IO is ready.
 [features]
 default = ["sql-sqlite", "lazy-transpose-view"]
 hdf5 = ["fp-io/hdf5"]
@@ -53,6 +55,7 @@ sql-mysql = ["fp-io/sql-mysql"]
 tracing = ["fp-frame/tracing"]
 asupersync = ["fp-runtime/asupersync"]
 lazy-transpose-view = ["fp-frame/lazy-transpose-view"]
+block-storage = ["fp-frame/block-storage"]
 
 [dev-dependencies]
 # fd90.196: serde_json round-trip integration test for the README's

@@ -127,6 +127,9 @@ gemini.mcp.json
 .beads/*.rebuild_*
 .beads/recovery*/
 .beads_recovery/
+# Persistent machine-local FrankenSQLite namespace sidecars beside the Beads DB.
+.beads/*-fsqlite-ns-gate
+.beads/*-fsqlite-ns-use
 
 # Agent session ephemeral files
 SESSION_TODO.md
@@ -150,6 +153,8 @@ crates/*/target/
 .rch-target/
 .rch-target-*/
 .rch-targets-*/
+# The shared pool has no suffix at all, so the three patterns above miss it.
+.rch-targets/
 .rch-deploy-root/
 
 # cargo-fuzz output

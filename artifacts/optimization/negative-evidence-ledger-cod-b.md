@@ -785,3 +785,87 @@ epic vs OpenBLAS). Full detail + all bench artifacts in docs/NEGATIVE_EVIDENCE.m
 commits: column_name_at transpose fix (554x), parquet bench coverage, df_dot AXPY(16x)+A-panel(1.31x); 3
 floor/no-op REJECTs with retry predicates. RangeIndex bead lane (uza04.172-.179 + fvvrl/ckbyh/nkivs/tzvt3/
 b7nxg/un6on/k1xts) fully closed on fp-index 540/0.
+
+## 2026-07-23 - fresh-auth restart closure (DustyMarsh)
+
+- `uza04.172-.176` remain closed; current strict-remote fp-index validation
+  exercised all five named RangeIndex guards (577 passed, 0 failed, 10 ignored).
+  No code delta was warranted.
+- The full groupby matrix was unusably noisy, but a pinned retry made the
+  already-profiled string-factorization floor admissible at 100k: eight
+  aggregations measured 0.190x-0.542x with both-side CV below 5%.
+  **SURFACE/REJECT:** five prior factorization alternatives already lost; do
+  not attempt a sixth. Retry only after the upstream hasher/dependency floor
+  changes, followed by profile-first same-worker A/B/null and conformance.
+- `br-frankenpandas-uza04.212` adds JSON-records read to the public harness.
+  Admitted read ratios: CSV 155.292x/133.628x, JSON 1.766x at 10k, Parquet
+  6.183x/1.603x. JSON 100k stayed directionally faster but exceeded 5% CV
+  twice. **READ SURFACE/REJECT:** retry only on an isolated worker with both
+  CVs below 5%; only an admitted loss authorizes a subsequent profile.
+- See the dated `cod_restart_*_2026-07-23` benchmark artifacts and generated
+  scorecards, with the full evidence table in `docs/NEGATIVE_EVIDENCE.md`.
+
+## 2026-07-23 - JSON columns read frontier coverage (DustyMarsh)
+
+- RangeIndex `uza04.172-.176` remains closed and groupby remains behind the
+  five-reject string-factorization blocker; no sixth hash-table variant is
+  permitted.
+- Exact-current strict-remote `hz1` binary
+  `609f6ce2b4e757d242cc048bcc3e83762c5263159f393f40d6bc5f96091d20d5`
+  admitted CSV read 100k at 116.79x, JSON records 10k at 2.06x, and Parquet
+  read 100k at 1.57x. All other rows were directionally faster but high-CV.
+- `uza04.213` adds `json_read_columns`: 10k is a CV-valid 1.911x win
+  (16353.98/31255.99 us, CV 2.93%/1.43%); 100k is directionally 1.944x faster
+  but invalid at FP CV 6.93%.
+- **KEEP coverage; SURFACE/REJECT source work.** Retry 100k only with both CVs
+  below 5%; profile a source lever only if the admitted row becomes a loss.
+
+## 2026-07-23 - remaining JSON read orientations (DustyMarsh)
+
+- `uza04.214` adds `json_read_index`, `json_read_split`, and
+  `json_read_values` to fp-bench and the public harness.
+- Strict-remote `hz1` binary SHA-256:
+  `942da8f2467151a129da33ba126510447ab8862357e574234a6fac145e0b1d85`.
+- CV-valid 10k wins: split 1.711x (CV 2.22%/2.48%) and values 1.460x
+  (2.12%/0.97%). Index and every 100k row were high-CV, but all medians favored
+  FP in both pinned runs.
+- **KEEP coverage; SURFACE/REJECT source work.** The read matrix is dominated;
+  the five-reject string-factorization groupby blocker is the terminal lane
+  condition. Retry only after a new CV-valid loss or the upstream hash floor
+  changes.
+
+## 2026-07-23 - cached-pandas groupby phantom corrected; `uza04.215` KEEP
+
+- The shared pandas string-groupby helper cached its grouper outside the timed
+  loop; fp-bench rebuilt `SeriesGroupBy` inside the timed loop. This invalidates
+  the prior 0.190x-0.542x public loss rows and their terminal blocker.
+- Inline full-call A/B on pinned CPU 56 used one exact-HEAD remote-built binary.
+  The unchanged FP arm moved only 1.014x (2938.07 to 2979.29 us), while pandas
+  `groupby_all_str` moved from 173.48 us cached to 3623.61 us inline. All four
+  CVs were below 5%; corrected `all` is 1.772x/1.216x at 10k/100k.
+- All eleven corrected 100k string-groupby rows are wins or parity
+  (1.003x-3.271x), every one CV-valid. KEEP the comparator correction and new
+  `groupby_all_str` coverage. Strict-remote fp-frame groupby tests passed
+  207/0 (4 ignored).
+- Five rejected hash-table variants remain internal negative evidence, not a
+  public performance blocker. Retry cached-grouper timing only if the Rust arm
+  also reuses its grouper; require a new admitted loss plus profile-first
+  same-worker A/B/null and conformance before source work.
+
+## 2026-07-23 - `groupby_rank_str` harness coverage (`uza04.216`)
+
+- Added an inline full-call pandas rank comparator matching the existing Rust
+  average/ascending/keep workload.
+- Admitted wins: 3.053x at 10k (CV 1.34%/0.56%) and 3.177x at 100k
+  (0.50%/0.64%). The unchanged mean 100k null control remained a 3.279x win.
+- KEEP coverage; no source lever. Retry only after a new CV-valid loss, then
+  profile and require same-worker A/B/null plus rank conformance.
+
+## 2026-07-23 - remaining scalar groupby coverage (`uza04.217`)
+
+- Added inline pandas coverage for kurt, quantile, and Float64/Int64 unique.
+- All 10k/100k rows are CV-valid wins: kurt 210.898x/28.849x, quantile
+  4.026x/1.618x, Float64 unique 37.388x/5.340x, and Int64 unique
+  36.791x/5.136x. Mean null control remained 5.413x/3.269x.
+- KEEP coverage; source work stays closed unless a new inline full-call loss
+  clears the 5% CV gate and profile-first A/B/null plus conformance.

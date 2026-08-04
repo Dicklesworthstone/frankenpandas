@@ -12837,11 +12837,56 @@ impl RangeIndex {
         Ok(out)
     }
 
+    /// Returns an ascending-ordered `RangeIndex` covering the same value set
+    /// (name preserved). pandas set operations
+    /// (union/intersection/difference/symmetric_difference) return results
+    /// sorted ascending under the default `sort=None`, so descending ranges
+    /// (`step < 0`) are normalized to their ascending equivalent before the
+    /// set-op logic runs. Ascending or empty ranges are returned unchanged.
+    /// Falls back to an unchanged clone in the (unrepresentable) case where the
+    /// ascending `stop` would overflow `i64`.
+    fn ascending_normalized(&self) -> RangeIndex {
+        let len = self.len();
+        if self.step >= 0 || len == 0 {
+            return self.clone();
+        }
+        // Descending: the smallest value is the last element and the step
+        // magnitude is the ascending step. The ascending range runs
+        // [last, self.start] inclusive, i.e. stop = self.start + 1.
+        let last = self.value_at(len - 1);
+        let asc_step = self.step.wrapping_neg();
+        match self.start.checked_add(1) {
+            Some(stop) if asc_step > 0 => RangeIndex {
+                start: last,
+                stop,
+                step: asc_step,
+                name: self.name.clone(),
+            },
+            _ => self.clone(),
+        }
+    }
+
     /// Values present in both ranges, matching
-    /// `pd.RangeIndex.intersection(other)`. Returns flat Index because
-    /// the result may not be a contiguous range.
+    /// `pd.RangeIndex.intersection(other)`. Returns flat Index because the
+    /// result may not be a contiguous range. NB: pandas uses `sort=False` for
+    /// intersection (unlike union/difference/symmetric_difference, which default
+    /// to `sort=None`). Its result is ascending EXCEPT when BOTH operands are
+    /// descending (`step < 0`), where it is descending. (Verified against pandas
+    /// 2.2.3 over 150k random pairs.) The self-order scan below already yields
+    /// descending order over a descending range, so both-descending goes through
+    /// the operands as-is; every other case is routed through ascending-
+    /// normalized operands so the fast paths and fallback produce ascending.
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Index {
+        if self.step < 0 && other.step < 0 {
+            self.intersection_selforder(other)
+        } else {
+            self.ascending_normalized()
+                .intersection_selforder(&other.ascending_normalized())
+        }
+    }
+
+    fn intersection_selforder(&self, other: &Self) -> Index {
         let shared_name = self.name().filter(|_| self.name() == other.name());
         if let Some(overlap) = self.same_lattice_overlap_positions(other) {
             let (first, len) = match overlap {
@@ -12866,10 +12911,33 @@ impl RangeIndex {
         idx
     }
 
-    /// Self values then other values not seen, matching
-    /// `pd.RangeIndex.union(other)`.
+    /// True when the two ranges enumerate the same value sequence (order
+    /// included), i.e. `pd.Index.equals`. Used to detect the union passthrough
+    /// case where pandas returns `self` unchanged rather than sorting.
+    fn range_values_equal(&self, other: &Self) -> bool {
+        let len = self.len();
+        len == other.len()
+            && (len == 0
+                || (self.value_at(0) == other.value_at(0)
+                    && (len == 1 || self.step == other.step)))
+    }
+
+    /// Union of the two ranges, matching `pd.RangeIndex.union(other)`. pandas
+    /// (`sort=None`) returns the result sorted ascending EXCEPT when an operand
+    /// is empty or the two are value-equal, where it passes the surviving
+    /// operand through unchanged (order preserved). fp's existing fast paths
+    /// already reproduce those passthrough cases, so only the both-non-empty,
+    /// non-equal case is normalized to ascending.
     #[must_use]
     pub fn union(&self, other: &Self) -> Index {
+        if self.is_empty() || other.is_empty() || self.range_values_equal(other) {
+            return self.union_ascending(other);
+        }
+        self.ascending_normalized()
+            .union_ascending(&other.ascending_normalized())
+    }
+
+    fn union_ascending(&self, other: &Self) -> Index {
         let shared_name = self.name().filter(|_| self.name() == other.name());
         let self_len = self.len();
         let other_len = other.len();
@@ -12903,6 +12971,10 @@ impl RangeIndex {
                 labels.push(value);
             }
         }
+        // pandas sorts the union result ascending; both operands are already
+        // ascending here (normalized), so a sort produces the pandas order for
+        // the non-aligned case where the two lattices interleave.
+        labels.sort_unstable();
         let mut idx = Index::from_i64_values(labels);
         if let Some(name) = shared_name {
             idx = idx.set_name(name);
@@ -12910,10 +12982,21 @@ impl RangeIndex {
         idx
     }
 
-    /// Self values not in other, matching
-    /// `pd.RangeIndex.difference(other)`.
+    /// Self values not in other, matching `pd.RangeIndex.difference(other)`.
+    /// pandas (`sort=None`) sorts the result ascending EXCEPT when `other` is
+    /// empty, where it returns `self` unchanged; both-empty / equal operands
+    /// yield an empty result. Only the both-non-empty, non-equal case is
+    /// normalized to ascending.
     #[must_use]
     pub fn difference(&self, other: &Self) -> Index {
+        if self.is_empty() || other.is_empty() || self.range_values_equal(other) {
+            return self.difference_ascending(other);
+        }
+        self.ascending_normalized()
+            .difference_ascending(&other.ascending_normalized())
+    }
+
+    fn difference_ascending(&self, other: &Self) -> Index {
         // Per br-frankenpandas-6r1lq: difference preserves self.name (not
         // shared_name like union/intersection).
         if let Some(span) = self.single_difference_span_positions(other) {
@@ -12937,9 +13020,20 @@ impl RangeIndex {
     }
 
     /// Values in either but not both, matching
-    /// `pd.RangeIndex.symmetric_difference(other)`.
+    /// `pd.RangeIndex.symmetric_difference(other)`. pandas (`sort=None`) sorts
+    /// the result ascending EXCEPT when an operand is empty, where it returns
+    /// the surviving operand unchanged; equal operands yield an empty result.
+    /// Only the both-non-empty, non-equal case is normalized to ascending.
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Index {
+        if self.is_empty() || other.is_empty() || self.range_values_equal(other) {
+            return self.symmetric_difference_ascending(other);
+        }
+        self.ascending_normalized()
+            .symmetric_difference_ascending(&other.ascending_normalized())
+    }
+
+    fn symmetric_difference_ascending(&self, other: &Self) -> Index {
         let shared_name = self.name().filter(|_| self.name() == other.name());
         if let (Some(left_span), Some(right_span)) = (
             self.single_difference_span_positions(other),
@@ -12986,15 +13080,25 @@ impl RangeIndex {
                         {
                             return index;
                         }
-                        if let (Some(left_run), Some(right_run)) = (
-                            Int64AffineLabels::new(self.value_at(left_first), self.step, left_len),
-                            Int64AffineLabels::new(
-                                other.value_at(right_first),
-                                other.step,
-                                right_len,
-                            ),
-                        ) && let Some(mut index) =
-                            Index::new_known_unique_int64_two_affine_runs(left_run, right_run)
+                        // Only emit [left ++ right] directly when the left run
+                        // is entirely below the right run, so the concatenation
+                        // is ascending (pandas sorts the result). Otherwise fall
+                        // through to the sorted fallback below.
+                        if left_last < right_start
+                            && let (Some(left_run), Some(right_run)) = (
+                                Int64AffineLabels::new(
+                                    self.value_at(left_first),
+                                    self.step,
+                                    left_len,
+                                ),
+                                Int64AffineLabels::new(
+                                    other.value_at(right_first),
+                                    other.step,
+                                    right_len,
+                                ),
+                            )
+                            && let Some(mut index) =
+                                Index::new_known_unique_int64_two_affine_runs(left_run, right_run)
                         {
                             if let Some(name) = shared_name {
                                 index = index.set_name(name);
@@ -13018,6 +13122,10 @@ impl RangeIndex {
                 labels.push(value);
             }
         }
+        // pandas sorts the symmetric-difference result ascending; the two
+        // single-value runs above are each ascending (operands normalized) but
+        // interleave when neither range sits wholly below the other, so sort.
+        labels.sort_unstable();
         let mut idx = Index::from_i64_values(labels);
         if let Some(name) = shared_name {
             idx = idx.set_name(name);
@@ -28813,6 +28921,105 @@ mod tests {
     }
 
     #[test]
+    fn range_index_descending_ops_match_pandas_dustysummit() {
+        use super::RangeIndex;
+        // Regression coverage for descending-range handling — the exact smell
+        // that was buggy in the set operations. All expected values verified
+        // against pandas 2.2.3 (R(10,0,-2) = [10,8,6,4,2]).
+        let vals = |idx: &super::Index| -> Vec<i64> {
+            idx.labels()
+                .iter()
+                .map(|l| match l {
+                    super::IndexLabel::Int64(v) => *v,
+                    other => panic!("expected Int64 label, got {other:?}"),
+                })
+                .collect()
+        };
+        let desc = RangeIndex::new(10, 0, -2).unwrap();
+        let asc = RangeIndex::new(0, 10, 2).unwrap();
+
+        // argsort: the permutation that sorts values ascending.
+        assert_eq!(desc.argsort(), vec![4, 3, 2, 1, 0]);
+        assert_eq!(asc.argsort(), vec![0, 1, 2, 3, 4]);
+
+        // sort_values: ascending (descending rebuilds an ascending range).
+        assert_eq!(vals(&desc.sort_values().to_flat_index()), vec![2, 4, 6, 8, 10]);
+        assert_eq!(vals(&asc.sort_values().to_flat_index()), vec![0, 2, 4, 6, 8]);
+
+        // factorize: identity codes; uniques preserve the (descending) order.
+        let (codes, uniques) = desc.factorize();
+        assert_eq!(codes, vec![0, 1, 2, 3, 4]);
+        assert_eq!(vals(&uniques.to_flat_index()), vec![10, 8, 6, 4, 2]);
+
+        // take / repeat: order-preserving over the descending values.
+        assert_eq!(vals(&desc.take(&[0, 2, 4]).unwrap()), vec![10, 6, 2]);
+        assert_eq!(
+            vals(&desc.repeat(2)),
+            vec![10, 10, 8, 8, 6, 6, 4, 4, 2, 2]
+        );
+
+        // where keeps the value where cond is TRUE (replaces where false);
+        // putmask replaces where the mask is TRUE — opposite conventions.
+        let m = [true, false, true, false, true];
+        assert_eq!(vals(&desc.r#where(&m, 99).unwrap()), vec![10, 99, 6, 99, 2]);
+        assert_eq!(vals(&desc.putmask(&m, 99).unwrap()), vec![99, 8, 99, 4, 99]);
+    }
+
+    #[test]
+    #[allow(clippy::type_complexity)]
+    fn range_index_set_ops_match_pandas_2_2_3_differential_dustysummit() {
+        use super::RangeIndex;
+        // Data-driven differential vs pandas 2.2.3 for all four set operations.
+        // intersection uses sort=False (result ascending EXCEPT both operands
+        // descending -> descending); union/difference/symmetric_difference use
+        // sort=None (ascending EXCEPT empty-operand or value-equal passthrough).
+        // Cases cover descending operands, non-aligned step lattices, empty
+        // operands, value-equal operands, disjoint / overlapping / subset
+        // overlaps. Expected values were computed by real pandas; see
+        // testdata_rangeset_pandas_cases.rs.
+        let cases: &[((i64, i64, i64), (i64, i64, i64), &[i64], &[i64], &[i64], &[i64])] =
+            &include!("testdata_rangeset_pandas_cases.rs");
+
+        let vals = |idx: &super::Index| -> Vec<i64> {
+            idx.labels()
+                .iter()
+                .map(|l| match l {
+                    super::IndexLabel::Int64(v) => *v,
+                    other => panic!("expected Int64 label, got {other:?}"),
+                })
+                .collect()
+        };
+        let r = |(s, e, st): (i64, i64, i64)| RangeIndex::new(s, e, st).unwrap();
+
+        let mut fails: Vec<String> = Vec::new();
+        for (i, (a, b, want_i, want_u, want_d, want_s)) in cases.iter().enumerate() {
+            let (ra, rb) = (r(*a), r(*b));
+            let got_i = vals(&ra.intersection(&rb));
+            let got_u = vals(&ra.union(&rb));
+            let got_d = vals(&ra.difference(&rb));
+            let got_s = vals(&ra.symmetric_difference(&rb));
+            if got_i != *want_i {
+                fails.push(format!("#{i} inter {a:?}∩{b:?}: got {got_i:?} want {want_i:?}"));
+            }
+            if got_u != *want_u {
+                fails.push(format!("#{i} union {a:?}∪{b:?}: got {got_u:?} want {want_u:?}"));
+            }
+            if got_d != *want_d {
+                fails.push(format!("#{i} diff {a:?}∖{b:?}: got {got_d:?} want {want_d:?}"));
+            }
+            if got_s != *want_s {
+                fails.push(format!("#{i} symm {a:?}∆{b:?}: got {got_s:?} want {want_s:?}"));
+            }
+        }
+        assert!(
+            fails.is_empty(),
+            "{} RangeIndex set-op divergences from pandas 2.2.3:\n{}",
+            fails.len(),
+            fails.join("\n")
+        );
+    }
+
+    #[test]
     fn range_index_reduction_edge_cases_match_pandas_dustysummit() {
         use super::RangeIndex;
         // Empty range: min/max/median None; argmin/argmax error; both
@@ -30949,16 +31156,19 @@ mod tests {
         assert_eq!(union.name(), Some("k"));
         assert_eq!(difference.name(), Some("k"));
         assert_eq!(symmetric.name(), Some("k"));
+        // pandas 2.2.3: intersection uses sort=False (self-order, descending
+        // preserved); union/difference/symmetric_difference use sort=None and
+        // return ascending-sorted results for these both-non-empty operands.
         assert_eq!(
             intersection.labels.int64_view().unwrap().as_slice(),
             &[6, 3, 0]
         );
         assert_eq!(
             union.labels.int64_view().unwrap().as_slice(),
-            &[9, 6, 3, 0, -3]
+            &[-3, 0, 3, 6, 9]
         );
         assert_eq!(difference.labels.int64_view().unwrap().as_slice(), &[9]);
-        assert_eq!(symmetric.labels.int64_view().unwrap().as_slice(), &[9, -3]);
+        assert_eq!(symmetric.labels.int64_view().unwrap().as_slice(), &[-3, 9]);
 
         let mismatched = right.set_name("other");
         assert_eq!(left.intersection(&mismatched).name(), None);
@@ -30966,10 +31176,14 @@ mod tests {
         assert_eq!(left.symmetric_difference(&mismatched).name(), None);
         assert_eq!(left.difference(&mismatched).name(), Some("k"));
 
-        for output in [&intersection, &union, &difference, &symmetric] {
+        // intersection (self-order) and this single-span difference keep lazy
+        // affine backing; union/symmetric materialize because reconciling the
+        // interleaved descending lattices to pandas' ascending order requires a
+        // sort (the affine fast paths still apply to aligned ascending inputs).
+        for output in [&intersection, &difference] {
             assert!(
                 output.labels.materialized.get().is_none(),
-                "RangeIndex set ops should stream direct i64 labels into typed backing"
+                "self-order intersection and single-span difference keep typed lazy backing"
             );
         }
     }
@@ -30988,18 +31202,20 @@ mod tests {
         assert_eq!(union.name(), Some("k"));
         assert_eq!(difference.name(), Some("k"));
         assert_eq!(symmetric.name(), Some("k"));
+        // pandas 2.2.3: intersection sort=False (self-order); union/difference/
+        // symmetric_difference sort=None -> ascending for both-non-empty inputs.
         assert_eq!(
             intersection.labels.int64_view().unwrap().as_slice(),
             &[6, 0]
         );
         assert_eq!(
             union.labels.int64_view().unwrap().as_slice(),
-            &[9, 6, 3, 0, -6]
+            &[-6, 0, 3, 6, 9]
         );
-        assert_eq!(difference.labels.int64_view().unwrap().as_slice(), &[9, 3]);
+        assert_eq!(difference.labels.int64_view().unwrap().as_slice(), &[3, 9]);
         assert_eq!(
             symmetric.labels.int64_view().unwrap().as_slice(),
-            &[9, 3, -6]
+            &[-6, 3, 9]
         );
 
         let disjoint = super::RangeIndex::new(20, 26, 2).unwrap().set_name("k");
@@ -31010,15 +31226,16 @@ mod tests {
                 .int64_view()
                 .unwrap()
                 .as_slice(),
-            &[9, 6, 3, 0, 20, 22, 24]
+            &[0, 3, 6, 9, 20, 22, 24]
         );
 
-        for output in [&intersection, &union, &difference, &symmetric] {
-            assert!(
-                output.labels.materialized.get().is_none(),
-                "RangeIndex closed-form set ops should keep typed Int64 output backing"
-            );
-        }
+        // intersection keeps self-order lazy backing; union/difference/
+        // symmetric materialize when the ascending sort reorders the
+        // interleaved descending lattices (pandas sort=None).
+        assert!(
+            intersection.labels.materialized.get().is_none(),
+            "self-order intersection keeps typed lazy backing"
+        );
     }
 
     #[test]
@@ -31103,16 +31320,18 @@ mod tests {
                 len: 3,
             })
         );
+        // pandas 2.2.3 union (sort=None) returns ascending [-3, 0, 3, 6, 9] for
+        // these interleaved descending lattices; reconciling to ascending order
+        // materializes the labels rather than returning a descending affine span.
+        // (The aligned-ascending union above still returns a lazy affine span.)
         assert_eq!(
             descending_left
                 .union(&descending_right)
                 .labels
-                .int64_affine_range(),
-            Some(Int64AffineLabels {
-                start: 9,
-                step: -3,
-                len: 5,
-            })
+                .int64_view()
+                .unwrap()
+                .as_slice(),
+            &[-3, 0, 3, 6, 9]
         );
 
         let adjacent_left = super::RangeIndex::new(0, 3, 1).unwrap().set_name("k");
@@ -34060,9 +34279,15 @@ mod tests {
 ///        -- --ignored --nocapture ab_to_flat_index`
 #[cfg(test)]
 mod ab_to_flat_index_ccfp {
-    use std::time::Instant;
+    use std::{fmt::Write as _, time::Instant};
+
+    use sha2::{Digest, Sha256};
 
     use super::{IndexLabel, MultiIndex};
+
+    const BLOCKS: usize = 25;
+    const BOOTSTRAP_RESAMPLES: usize = 10_000;
+    const DECIDABILITY_MARGIN: f64 = 2.0;
 
     fn build_mi(n: usize) -> MultiIndex {
         // Two levels of the shape wide_to_long / set_index_multi actually produce:
@@ -34076,14 +34301,70 @@ mod ab_to_flat_index_ccfp {
         MultiIndex::from_arrays(vec![lvl0, lvl1]).expect("multiindex")
     }
 
-    fn stats(xs: &[f64]) -> (f64, f64, f64) {
-        let min = xs.iter().copied().fold(f64::INFINITY, f64::min);
-        let mean = xs.iter().sum::<f64>() / xs.len() as f64;
-        let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / xs.len() as f64;
-        (min, mean, 100.0 * var.sqrt() / mean)
+    fn median(xs: &[f64]) -> f64 {
+        let mut sorted = xs.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        sorted[sorted.len() / 2]
     }
 
-    fn ab_regime(label: &str, n: usize, blocks: usize, reps: usize) -> (f64, f64, f64, f64) {
+    fn stats(xs: &[f64]) -> (f64, f64) {
+        let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+        let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / xs.len() as f64;
+        (mean, 100.0 * var.sqrt() / mean)
+    }
+
+    fn bootstrap_median_ci(values: &[f64]) -> (f64, f64) {
+        let mut state = 0xf2a2_0260_725d_1ce5_u64;
+        let mut medians = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+        let mut sample = vec![0.0; values.len()];
+        for _ in 0..BOOTSTRAP_RESAMPLES {
+            for slot in &mut sample {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                *slot = values[(state as usize) % values.len()];
+            }
+            medians.push(median(&sample));
+        }
+        medians.sort_by(f64::total_cmp);
+        (
+            medians[BOOTSTRAP_RESAMPLES / 40],
+            medians[(BOOTSTRAP_RESAMPLES * 39 / 40).min(BOOTSTRAP_RESAMPLES - 1)],
+        )
+    }
+
+    fn binary_sha256() -> String {
+        let path = std::env::current_exe().expect("current test binary");
+        let bytes = std::fs::read(path).expect("read current test binary");
+        let digest = Sha256::digest(&bytes);
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        hex
+    }
+
+    fn time_orig(mi: &MultiIndex, reps: usize) -> f64 {
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let started = Instant::now();
+            std::hint::black_box(mi.to_flat_index_ref_write_fmt("_"));
+            best = best.min(started.elapsed().as_secs_f64() * 1e3);
+        }
+        best
+    }
+
+    fn time_candidate(mi: &MultiIndex, reps: usize) -> f64 {
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let started = Instant::now();
+            std::hint::black_box(mi.to_flat_index("_"));
+            best = best.min(started.elapsed().as_secs_f64() * 1e3);
+        }
+        best
+    }
+
+    fn ab_regime(label: &str, n: usize, reps: usize) {
         let mi = build_mi(n);
         // Parity in this same binary: the arms must be bit-identical.
         assert_eq!(
@@ -34093,44 +34374,72 @@ mod ab_to_flat_index_ccfp {
         );
         for _ in 0..2 {
             std::hint::black_box(mi.to_flat_index_ref_write_fmt("_"));
+            std::hint::black_box(mi.to_flat_index_ref_write_fmt("_"));
             std::hint::black_box(mi.to_flat_index("_"));
         }
-        let mut orig_ms: Vec<f64> = Vec::with_capacity(blocks);
-        let mut cand_ms: Vec<f64> = Vec::with_capacity(blocks);
-        for _ in 0..blocks {
-            let mut o = f64::INFINITY;
-            let mut c = f64::INFINITY;
-            for _ in 0..reps {
-                // Alternate ORIG/CAND so drift cancels pairwise.
-                let t = Instant::now();
-                std::hint::black_box(mi.to_flat_index_ref_write_fmt("_"));
-                o = o.min(t.elapsed().as_secs_f64() * 1e3);
-
-                let t = Instant::now();
-                std::hint::black_box(mi.to_flat_index("_"));
-                c = c.min(t.elapsed().as_secs_f64() * 1e3);
+        let mut orig_ms = Vec::with_capacity(BLOCKS);
+        let mut null_ms = Vec::with_capacity(BLOCKS);
+        let mut candidate_ms = Vec::with_capacity(BLOCKS);
+        for block in 0..BLOCKS {
+            if block % 2 == 0 {
+                orig_ms.push(time_orig(&mi, reps));
+                null_ms.push(time_orig(&mi, reps));
+                candidate_ms.push(time_candidate(&mi, reps));
+            } else {
+                candidate_ms.push(time_candidate(&mi, reps));
+                null_ms.push(time_orig(&mi, reps));
+                orig_ms.push(time_orig(&mi, reps));
             }
-            orig_ms.push(o);
-            cand_ms.push(c);
         }
-        let (o_min, _, o_cv) = stats(&orig_ms);
-        let (c_min, _, c_cv) = stats(&cand_ms);
-        println!("[{label}] n={n} blocks={blocks} reps={reps}");
-        println!("  ORIG write!      min={o_min:9.4} ms  cv={o_cv:5.2}%");
-        println!("  CAND variant-fmt min={c_min:9.4} ms  cv={c_cv:5.2}%");
-        println!("  fp-side ratio (min-of-blocks) = {:.3}x", o_min / c_min);
-        println!("  cv<5% both arms: orig={} cand={}", o_cv < 5.0, c_cv < 5.0);
-        (o_min, c_min, o_cv, c_cv)
+        let null_ratios: Vec<f64> = orig_ms
+            .iter()
+            .zip(&null_ms)
+            .map(|(arm_a, arm_b)| arm_a / arm_b)
+            .collect();
+        let candidate_ratios: Vec<f64> = orig_ms
+            .iter()
+            .zip(&candidate_ms)
+            .map(|(arm_a, arm_b)| arm_a / arm_b)
+            .collect();
+        let (orig_mean, orig_cv) = stats(&orig_ms);
+        let (candidate_mean, candidate_cv) = stats(&candidate_ms);
+        let null_median = median(&null_ratios);
+        let (ci_low, ci_high) = bootstrap_median_ci(&null_ratios);
+        let ratio = median(&candidate_ratios);
+        let required_log_effect = DECIDABILITY_MARGIN * ci_low.ln().abs().max(ci_high.ln().abs());
+        let decidable = ratio.ln().abs() >= required_log_effect;
+        let verdict = if !decidable {
+            "NULL_UNDECIDABLE"
+        } else if ratio > 1.0 {
+            "KEEP"
+        } else {
+            "REJECT"
+        };
+
+        println!("[{label}] n={n} blocks={BLOCKS} reps={reps}");
+        println!("  ORIG_MS {orig_ms:?}");
+        println!("  NULL_MS {null_ms:?}");
+        println!("  CANDIDATE_MS {candidate_ms:?}");
+        println!("  NULL_RATIOS {null_ratios:?}");
+        println!("  CANDIDATE_RATIOS {candidate_ratios:?}");
+        println!("  ORIG mean={orig_mean:9.4} ms cv={orig_cv:5.2}%");
+        println!("  CAND variant-fmt mean={candidate_mean:9.4} ms cv={candidate_cv:5.2}%");
+        println!("  NULL_MEDIAN_CI median={null_median:.6} low={ci_low:.6} high={ci_high:.6}");
+        println!(
+            "  MEDIAN_CI_GATE ratio={ratio:.6} required_log_effect={required_log_effect:.8} \
+             cv_is_provenance_only=true verdict={verdict}"
+        );
     }
 
     #[test]
     #[ignore = "perf A/B; run with --ignored --nocapture"]
     fn ab_to_flat_index_core_fmt() {
         println!("AB to_flat_index (ONE binary, ONE rch invocation; arms alternate in-block)");
+        println!("BINARY_SHA256 {}", binary_sha256());
         // SERIAL regime: n below FLATIDX_PAR_MIN_ROWS (50_000) so neither arm spawns
         // threads. Isolates the per-row formatting cost with no scheduler noise.
-        ab_regime("serial", 49_000, 9, 60);
+        ab_regime("serial", 49_000, 60);
         // PARALLEL regime: the shipped path at reshape scale.
-        ab_regime("parallel", 1_000_000, 9, 5);
+        ab_regime("parallel", 1_000_000, 5);
     }
 }

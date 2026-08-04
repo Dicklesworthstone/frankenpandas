@@ -19,7 +19,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.1.2"
+version = "0.2.0"
 # The LICENSE file is MIT plus a non-MIT rider on AI-assistant usage, which is
 # not expressible as a standard SPDX expression. The file itself is therefore the
 # license of record; no `license = "MIT"` SPDX field is set (it would understate

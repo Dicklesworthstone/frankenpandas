@@ -12,6 +12,32 @@ Method: `examples/bench_*.rs` self-time `best=<ns>` over N iters; pandas scripts
 Rule: record EVERY result (win/loss/neutral). Revert any lever that regressed or showed
 ~0 gain. Never retry a recorded dead end.
 
+Positive-row convention effective 2026-07-27:
+
+- **`maintenance-self-speedup`** means FrankenPandas before versus
+  FrankenPandas after. It may land, but it is not campaign output and must not
+  be presented as a competitive claim.
+- **`incumbent-win`** requires the actual pandas incumbent arm to run
+  side-by-side with FrankenPandas in the same invocation. The row must pin the
+  pandas name, version, and artifact SHA-256; record the shared invocation ID
+  and measured ratio; and include the executing-ELF identity, A/A null, and
+  median-CI decision. CV has no vote.
+- Every new or modified kept row must declare exactly one of those result
+  classes. A
+  `maintenance-self-speedup` label cannot rescue a pandas-facing or
+  `incumbent-win` claim that lacks the live incumbent arm.
+- Machine-readable evidence markers are
+  `**Campaign result class:**`, `**Executing ELF SHA-256 (self-reported by
+  process):**`, `**A/A null control (same invocation):**`,
+  `**Median-CI decision:**`, and `**CV role:**`. An `incumbent-win` additionally
+  requires `**Legacy incumbent arm (same invocation):** name=pandas
+  version=<pin> artifact_sha256=<64 lowercase hex>
+  invocation_id=<shared id> measured_ratio=<number>x`.
+- Every new or modified REJECT row must carry either
+  `**A/A null control (same invocation):**` with a measured numeric result or
+  `**Counted mechanism:**` with a measured instruction, cycle, syscall,
+  allocation, or fault result.
+
 ## 🗺️ PERF FRONTIER AFTER THE DT/TIMEDELTA SWEEP (BlackThrush, 2026-06-21)
 
 The datetime AND timedelta accessor surfaces are now FULLY TYPED (every component off the raw &[i64]
@@ -18635,3 +18661,3338 @@ hash, no bounds checks) NOT reachable by any safe-Rust hash-table variant. **The
 is a HARD LEDGERED BLOCKER: closing it needs an upstream faster short-string hasher in hashbrown/rustc-hash or a
 khash-class C dependency — not an agent-level fp-frame lever. Do NOT attempt a 6th factorization variant.** The
 harness coverage (d9a0901ec, fdaf551c6) quantifying the whole groupby lane stands as the deliverable.
+
+### 2026-07-23 DustySummit — to_numpy/values 2D-materialization block-storage wall — LEDGERED BLOCKER (non-incremental architectural gap; eager path already competitive)
+
+Profiled the transpose/block-storage lane's remaining piece — the row-major 2D materializers
+`DataFrame::to_numpy() -> Vec<Vec<f64>>` and `values() -> Vec<Vec<Scalar>>` (`.T` itself is already solved by
+the lazy-transpose-view: `df_transpose_materialize` = 1.7 µs/4.1 µs at 100k/1M via per-output-column
+`OnceLock` slots). Fresh `release-perf/fp-bench` on 100k/1M × 10 f64 (dataframe_ops):
+
+- `df_to_numpy`: **2588 µs (100k) / 31606 µs (1M)** — builds n owned `Vec<f64>` rows (n heap allocations).
+- `df_to_records`: 8245 µs / 61435 µs (worse; `Vec<Vec<Scalar>>`, wider cells).
+
+pandas 2.2.3 same shape:
+- `df.to_numpy()` (default) = **1.2 µs / 0.8 µs — O(1), n-independent**: a homogeneous frame is ONE 2D block,
+  so `to_numpy` returns a zero-copy (non-contiguous) VIEW. This is the block-storage advantage fp lacks.
+- `df.to_numpy(copy=True)` = **227 µs / 54032 µs**; `np.ascontiguousarray(...)` = 505 µs / 56987 µs.
+
+KEY NUANCE (why this is a blocker, not a bounded lever): the 1400–17000× headline is fp's EAGER owned
+materialization vs pandas' LAZY view — a CONTRACT difference, not an fp deficiency. Against the fair comparison
+(pandas EAGER copy), fp's 31 ms at 1M is FASTER than pandas' 54 ms `copy=True`, and ~11× slower only at 100k
+(2.6 ms vs 227 µs). fp's eager `to_numpy` is already in pandas' eager-copy ballpark. The `Vec<Vec<f64>>`
+n-allocation shape is the only within-contract weakness, and it cannot be fixed without changing the owned
+return type (a contiguous flat `Vec<f64>` + shape would be one alloc, but that is a new API, not the benched
+method).
+
+Matching pandas' O(1) `to_numpy` requires (a) block-backed homogeneous storage as a primary/optional DataFrame
+representation AND (b) a view-returning API — a large, non-incremental change beyond the bounded-lever mandate,
+whose only beneficiary is zero-copy numpy/BLAS interop (high value in the Python/ML ecosystem, LOW value for a
+Rust library where callers hold typed columns directly). The existing `PrototypeF64Block` (fp-bench,
+`lazy-transpose-prototype`) already validates that a contiguous block gives O(1) transpose/2D views.
+
+**VERDICT: LEDGERED BLOCKER.** The transpose/block-storage wall's addressable, incremental win was captured by
+the lazy-transpose-view (`.T` = 554×, per-column lazy slots, typed materialization, default-flipped). The
+remaining to_numpy/values O(1)-view piece is a non-incremental block-storage representation change with
+marginal value for fp's use case; fp's eager 2D materialization is already competitive with pandas' eager copy.
+No bounded fp-frame lever exists here. **Retry predicate:** revisit ONLY if (1) a concrete zero-copy
+numpy/Arrow-interop requirement lands that needs O(1) `to_numpy`, or (2) an operator greenlights the
+block-backed-storage representation as a multi-commit architectural project (then start from the validated
+`PrototypeF64Block`). Do NOT attempt to "optimize" `to_numpy`'s `Vec<Vec<f64>>` — it is within-contract
+competitive and allocation-bound; parallelizing n small allocs is allocator-contention-bound and would not
+change the strategic picture.
+
+### 2026-07-23 DustyMarsh — cod restart: RangeIndex `.172-.176` reconfirmed; groupby/read measured frontier → SURFACE/REJECT
+
+Ledger and log preflight came first. `br-frankenpandas-uza04.172` through `.176`
+are already closed on `main`, covering wide `get_loc` arithmetic, wide reduction
+length arithmetic, closed-form `searchsorted`, saturating memory accounting, and
+wide positional/take arithmetic. A current-tree strict-remote
+`cargo test -p fp-index` was dispatched through RCH to worker `vmi1264463`;
+the RangeIndex-specific guards for all five beads ran in the full fp-index suite
+(577 passed, 0 failed, 10 ignored).
+No RangeIndex source change was justified, and the subsequent set-operation
+commits on `main` remain outside this completed slice.
+
+The release-perf `fp-bench` binary used for these measurements was built through
+strict-remote RCH and, at measurement time, had SHA-256
+`e54b007306334e53a240bc7128ee0bea40add3d34bab06d7b872d691eee5e592`.
+The first full groupby 10k/100k sweep was entirely `DROPPED_HIGH_CV` (42/42),
+so none of its directional medians are evidence. A pinned CPU 56 retry then
+reproduced the already-profiled string-key loss vein with admissible CV below
+5% on both sides at 100k:
+
+| Workload | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---|---:|---:|---:|---:|
+| `groupby_median_str` | 2546.08 | 1379.35 | 0.542x | 0.77 / 0.53 |
+| `groupby_std_str` | 1229.81 | 362.19 | 0.295x | 0.49 / 1.53 |
+| `groupby_var_str` | 1238.00 | 373.69 | 0.302x | 0.92 / 1.58 |
+| `groupby_min_str` | 1138.53 | 242.64 | 0.213x | 0.81 / 2.55 |
+| `groupby_max_str` | 1143.09 | 253.77 | 0.222x | 0.46 / 2.61 |
+| `groupby_prod_str` | 1128.15 | 214.09 | 0.190x | 1.14 / 1.87 |
+| `groupby_sem_str` | 1426.61 | 373.75 | 0.262x | 0.73 / 1.43 |
+| `groupby_skew_str` | 1454.79 | 490.69 | 0.337x | 2.56 / 1.09 |
+
+This is confirming evidence for the preceding instrumented profile:
+`dense_group_ids` / `FxHashMap<&[u8]>` factorization consumes about 90% of the
+path, and five bounded alternatives already lost. **GROUPBY VERDICT:
+SURFACE/REJECT, no source candidate attempted.** A sixth factorization variant
+would violate the existing negative-evidence boundary and trespass into the
+architectural lane. **Retry predicate:** reopen only after an upstream
+`hashbrown`/`rustc-hash` short-string primitive or an approved khash-class
+dependency changes the implementation floor, then profile again before a
+same-worker A/B/null-control run with every CV below 5% and groupby conformance.
+
+The read frontier gained one missing public comparison:
+`json_read_records` now times pandas `read_json(..., orient="records")` against
+the existing fp-bench workload, with payload construction outside the timed
+region. Pinned CPU 57 results were:
+
+| Workload | Size | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---|---:|---:|---:|---:|---:|
+| `csv_read` | 10k | 49.90 | 7749.84 | 155.292x | 4.71 / 0.30 |
+| `csv_read` | 100k | 713.38 | 95327.44 | 133.628x | 2.91 / 0.97 |
+| `json_read_records` | 10k | 11201.94 | 19778.39 | 1.766x | 1.19 / 3.04 |
+
+The broader CPU 56 run also admitted `parquet_read` at 6.183x (10k,
+CV 3.96%/4.29%) and 1.603x (100k, CV 3.42%/0.88%). JSON records read at
+100k was directionally faster twice (FP/pandas p50 110830/297830 us and
+108120/290991 us) but invalid both times: FP CV 6.27% then 6.65%, with the
+second pandas control also at 14.37%. **READ VERDICT: SURFACE/REJECT for a
+fresh perf lever; land only the harness coverage.** The admitted rows are
+already faster and do not identify a hotspot; Parquet's remaining zero-copy
+decode opportunity is architectural and cc-owned. **Retry predicate:** rerun
+JSON 100k only on an isolated worker where both processes clear 5% CV; attempt
+source work only if that admitted row becomes slower than pandas, and then
+profile before any one-lever A/B/null-control/conformance cycle.
+
+Artifacts:
+
+- `artifacts/bench/cod_restart_groupby_frontier_10k_100k_2026-07-23.json`
+- `artifacts/bench/cod_restart_groupby_str_frontier_retry_cpu56_10k_100k_2026-07-23.json`
+- `artifacts/bench/cod_restart_read_frontier_10k_100k_2026-07-23.json`
+- `artifacts/bench/cod_restart_read_frontier_retry_cpu57_10k_100k_2026-07-23.json`
+- `artifacts/bench/cod_restart_json_read_100k_retry_cpu60_2026-07-23.json`
+- `artifacts/perf/cod_restart_groupby_frontier_scorecard_2026-07-23.md`
+- `artifacts/perf/cod_restart_read_frontier_scorecard_2026-07-23.md`
+
+### 2026-07-23 DustySummit — row-major materialization row-PARALLEL on top of resolve-once — REJECT (allocation-bound, mimalloc-dependent)
+
+After shipping the serial resolve-once wins for df.values/to_dict/iterrows/itertuples (2.3-2.6x,
+433c9f695+1f6e929f9), tried row-parallelizing `row_major_values` on top (the `to_records` pattern:
+`std::thread::scope` over contiguous row ranges, gated n>=50k, workers = min(16, n/16384)). A/B
+(FP_VALUES_PAR, taskset -c 0-15 so both variants share a 16-core budget, 8 blocks, df_values float64 x10):
+**100k SERIAL 13781us -> PARALLEL 9802us = 1.41x (CV 8.2%/2.7%); 1M 109347 -> 58301 = 1.88x (CV 5.3%/5.6%)**.
+
+REJECT. Up to 16 workers for <2x = poor parallel efficiency → the row build (n `Vec<Scalar>` allocations +
+n*m Scalar clones) is ALLOCATION / MEMORY-BANDWIDTH bound, not compute bound; the parallel gain is amortized
+away by the shared memory bus + allocator (the [[merge-join-bound-not-gather-bound]] pattern). Worse, the win
+is mimalloc-DEPENDENT: only the fp-bench binary sets `#[global_allocator] MiMalloc` — the fp-frame LIBRARY uses
+the system allocator, where the parallel per-row alloc scales worse (or contends), so the bench win does NOT
+generalize to real library callers. CVs also mostly exceed the 5% bar (16-core cpuset noise). The clean,
+allocator-independent win was already captured by serial resolve-once. Reverted (working tree back to HEAD).
+
+Generalizes to the WHOLE row-major family: iterrows/itertuples build the same allocation-bound `Vec<Scalar>`
+rows, so parallel-on-top is rejected for them too without separate measurement. NB: `to_records` DOES
+parallelize (same pattern) — it took the same mimalloc bet; its per-row work may be heavier, but the same
+non-generalizability caveat applies to it. **Retry predicate:** revisit ONLY if fp-frame adopts mimalloc (or
+another per-thread-arena allocator) as a library-default global allocator, which would make the parallel row
+build generalize; a bench-only win here is not shippable value.
+
+### 2026-07-23 DustyMarsh — JSON columns read harness coverage — KEEP coverage, no perf lever
+
+Ledger and Git-log preflight reconfirmed that RangeIndex beads
+`br-frankenpandas-uza04.172` through `.176` are closed with their current-main
+strict-remote correctness evidence. The only admitted groupby loss remains the
+string-key factorization path; five alternatives already lost and the ledger
+forbids a sixth hash-table variant without a new upstream short-string
+primitive or an approved khash-class dependency.
+
+The read frontier was rebuilt from current `main` (`774c7146f`) on RCH worker
+`hz1`. RCH compiled successfully but synchronized only dependency metadata, so
+the executable was retrieved from the worker-scoped target per the RCH
+runbook. Remote and local SHA-256 matched:
+`609f6ce2b4e757d242cc048bcc3e83762c5263159f393f40d6bc5f96091d20d5`.
+Pinned CPU 56 baseline results admitted only wins:
+
+| Workload | Size | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---|---:|---:|---:|---:|---:|
+| `csv_read` | 100k | 850.66 | 99350.27 | 116.79x | 4.85 / 0.50 |
+| `json_read_records` | 10k | 10500.61 | 21616.33 | 2.06x | 1.33 / 3.06 |
+| `parquet_read` | 100k | 3161.81 | 4969.99 | 1.57x | 2.90 / 4.86 |
+
+The 10k CSV and Parquet rows and 100k JSON-records row were invalid for high
+CV, but every directional median still favored FrankenPandas. No implementation
+hotspot was therefore eligible for a source lever.
+
+`br-frankenpandas-uza04.213` adds the previously uncovered
+`json_read_columns` comparison, keeping payload construction outside the timed
+region for both implementations. Its strict-remote binary had matching
+remote/local SHA-256
+`f72e319e099dec46aa06481e39d653124334c2b29d202901adf2d2a57e9218bb`.
+At 10k, FrankenPandas measured 16353.98 us versus pandas 31255.99 us:
+**1.911x faster**, with CV 2.93% / 1.43%. At 100k the medians remained
+directionally 1.944x faster (191187.58 / 371553.31 us), but FP CV 6.93%
+invalidated the row.
+
+**Verdict: KEEP the benchmark coverage; SURFACE/REJECT a performance-source
+lever.** There is no admitted loss to profile, and groupby is already behind a
+ledgered architectural blocker. Retry the 100k JSON-columns row only on an
+isolated/pinned worker where both CVs are below 5%; source work is authorized
+only if that admitted row becomes slower than pandas, followed by profile-first
+same-worker A/B/null control and JSON conformance.
+
+Artifacts:
+
+- `artifacts/bench/cod_frontier_read_hz1_10k_100k_2026-07-23.json`
+- `artifacts/bench/cod_frontier_json_read_columns_hz1_10k_100k_2026-07-23.json`
+- `artifacts/perf/cod_frontier_read_hz1_scorecard_2026-07-23.md`
+
+### 2026-07-23 DustyMarsh — remaining JSON read orientations — KEEP coverage; read surface dominated
+
+`br-frankenpandas-uza04.214` completed the public read matrix with
+`json_read_index`, `json_read_split`, and `json_read_values`. For each
+implementation, payload generation uses its matching `to_json(orient=...)`
+outside the timed region. The fp-bench binary was built strictly remotely on
+`hz1`; direct retrieval was again required because RCH synchronized only target
+metadata. Remote and local SHA-256 matched:
+`942da8f2467151a129da33ba126510447ab8862357e574234a6fac145e0b1d85`.
+
+Pinned CPU 56 admitted two new 10k wins:
+
+| Workload | Size | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---|---:|---:|---:|---:|---:|
+| `json_read_split` | 10k | 6850.67 | 11719.07 | 1.711x | 2.22 / 2.48 |
+| `json_read_values` | 10k | 6525.33 | 9524.34 | 1.460x | 2.12 / 0.97 |
+
+`json_read_index` at 10k was directionally 2.221x faster but invalid at FP CV
+9.01%. All three 100k rows were directionally faster in the first run but
+invalid at FP CV 10.51%-19.02%. A second pinned CPU 60 run reproduced the same
+direction with FP/pandas medians of 192746.54/519845.18 us for index,
+88394.61/172065.06 us for split, and 85624.73/146970.21 us for values, while
+FP CV remained 11.56%-13.85%.
+
+**Verdict: KEEP the remaining benchmark coverage; SURFACE/REJECT any
+performance-source lever.** Records, columns, index, split, and values now all
+favor FrankenPandas wherever admissible, and every invalid row is directionally
+faster in repeated pinned runs. There is no read-side loss to profile. The only
+remaining requested groupby loss is the already-profiled string-key
+factorization floor with five rejected alternatives, so the existing ledgered
+blocker is the terminal condition for this lane.
+
+**Retry predicate:** rerun the invalid JSON rows only after an isolated worker
+can keep both sides below 5% CV. Reopen source work only if an admitted row is
+slower than pandas. Reopen groupby only after an upstream short-string hashing
+primitive or approved khash-class dependency changes its implementation floor,
+then require profile-first same-worker A/B/null control plus conformance.
+
+Artifacts:
+
+- `artifacts/bench/cod_frontier_json_remaining_hz1_10k_100k_2026-07-23.json`
+- `artifacts/bench/cod_frontier_json_remaining_hz1_100k_retry_cpu60_2026-07-23.json`
+- `artifacts/perf/cod_frontier_json_remaining_hz1_scorecard_2026-07-23.md`
+
+### 2026-07-23 DustyMarsh — cached-pandas groupby phantom corrected; `.215` adds `all`; prior loss blocker withdrawn
+
+Ledger and Git-log preflight found that the July 23 string-groupby rows
+introduced by `d9a0901ec` violated the repository's already-documented
+full-call comparison rule. The shared pandas helper constructed
+`g = df.groupby("key")["col_1"]` once outside `time_operation`; warmup then
+populated pandas' grouper cache, so each measured pandas iteration was
+reduction-only. Every `fp-bench` iteration constructs `SeriesGroupBy` inside
+its timed closure and therefore measured factorize-plus-reduce. The resulting
+0.190x-0.542x rows and the "hashbrown-vs-khash" source-loss conclusion were a
+cached-grouper measurement phantom.
+
+`br-frankenpandas-uza04.215` changes the pandas helper to construct the
+`GroupBy` inside every timed iteration and adds the previously uncovered
+`groupby_all_str` public comparator. No Rust source changed. Same-worker
+before/after on pinned CPU 56 used the exact same strict-remote `hz1`
+release-perf binary (SHA-256
+`942da8f2467151a129da33ba126510447ab8862357e574234a6fac145e0b1d85`):
+
+| `groupby_all_str` arm | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---|---:|---:|---:|---:|
+| cached pandas, 100k | 2938.07 | 173.48 | 0.059x | 0.83 / 3.72 |
+| inline full-call, 100k | 2979.29 | 3623.61 | 1.216x | 0.38 / 0.80 |
+| inline full-call, 10k | 407.51 | 722.12 | 1.772x | 4.78 / 3.38 |
+
+The unchanged FP arm is the null control: 2938.07 us to 2979.29 us, a
+1.014x movement, while pandas moved 20.89x when its omitted factorization was
+restored. Every A/B and null-control CV above is below 5%.
+
+A full corrected 10k/100k sweep then admitted all affected 100k string
+aggregations as faster than pandas, except `all` at parity:
+mean 3.271x, median 1.671x, std 2.586x, var 2.586x, min 2.731x,
+max 2.704x, prod 2.692x, sem 2.277x, skew 2.301x, nunique 2.073x,
+and all 1.003x. The unchanged `groupby_mean_str` row was the public null
+workload and remained a 3.271x win. All listed 100k rows cleared 5% CV.
+At 10k every row except `min` also cleared the gate and measured
+1.694x-5.626x; the invalid `min` row is not used for any verdict.
+
+**Verdict: KEEP the harness-integrity correction and `groupby_all_str`
+coverage. WITHDRAW the prior string-groupby "hard blocker" as a pandas
+comparison verdict.** The five rejected FP hash-table variants remain valid
+negative evidence about alternatives to `FxHashMap<&[u8]>`, but they no
+longer describe a public performance gap and must not gate this frontier.
+The read surface remains dominated from `.212-.214`; RangeIndex
+`.172-.176` remains closed and unchanged.
+
+Conformance: strict-remote RCH on `vmi1149989` ran
+`cargo test -p fp-frame groupby --lib`: 207 passed, 0 failed, 4 ignored.
+The first requested worker (`hz1`) refused the test under critical disk
+pressure and strict mode correctly prevented local fallback. Agent Mail's
+corruption breaker also refused the advisory file lease before any write;
+Git/Beads truth was used without touching peer-owned dirt.
+
+Retry predicate: pandas may reuse a cached grouper only if the Rust workload
+is changed to construct and reuse the same `SeriesGroupBy` outside its timed
+closure; otherwise both sides must continue measuring the inline full call.
+Any future string-groupby source lever still requires a newly admitted loss,
+profile attribution, same-worker A/B/null with every CV below 5%, and
+conformance.
+
+Artifacts:
+
+- `artifacts/bench/cod_fp_uza04_215_groupby_all_str_10k_100k.json`
+- `artifacts/bench/cod_fp_uza04_215_groupby_all_str_inline_10k_100k.json`
+- `artifacts/bench/cod_fp_uza04_215_groupby_inline_full_10k_100k.json`
+- `artifacts/perf/cod_fp_uza04_215_groupby_inline_scorecard_2026-07-23.md`
+
+### 2026-07-23 DustyMarsh — `groupby_rank_str` public coverage — KEEP; no source lever
+
+After the cached-grouper correction, the next fp-bench-only groupby row was
+`groupby_rank_str`. Ledger and Git-log preflight found the existing typed/radix
+rank family already landed and a historical 1M win, so
+`br-frankenpandas-uza04.216` adds only the missing apples-to-apples pandas
+counterpart: inline full-call
+`groupby(...).rank(method="average", ascending=True, na_option="keep")`.
+
+Pinned CPU 56, exact-current remote-built binary:
+
+| Size | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---:|---:|---:|---:|---:|
+| 10k | 597.29 | 1823.57 | 3.053x | 1.34 / 0.56 |
+| 100k | 5300.91 | 16841.32 | 3.177x | 0.50 / 0.64 |
+
+An independent first pass also admitted 3.042x/3.569x wins at 10k/100k.
+The unchanged `groupby_mean_str` 100k null control measured 3.279x
+(1166.74/3826.14 us, CV 0.70%/0.82%), matching the preceding cycle's 3.271x
+band. Its 10k control row was high-CV and is not used.
+
+**Verdict: KEEP benchmark coverage; no source lever.** Rank is already
+3.05x-3.18x faster on the required sizes, and the strict-remote groupby
+conformance run from `.215` covered rank tests in its 207 passed / 0 failed
+result on the identical Rust tree.
+
+Retry predicate: revisit rank source only if an inline full-call row becomes a
+CV-valid loss on both sides; then profile first and require a same-worker
+A/B/null-control run with every deciding CV below 5% plus rank conformance.
+
+Artifacts:
+
+- `artifacts/bench/cod_fp_uza04_216_groupby_rank_str_10k_100k.json`
+- `artifacts/bench/cod_fp_uza04_216_groupby_rank_str_control_10k_100k.json`
+- `artifacts/perf/cod_fp_uza04_216_groupby_rank_scorecard_2026-07-23.md`
+
+### 2026-07-23 DustyMarsh — remaining scalar string-groupby coverage — KEEP; all rows dominated
+
+`br-frankenpandas-uza04.217` completed the fp-bench-only scalar
+SeriesGroupBy rows after exact ledger/log preflight: kurtosis, median
+quantile, Float64 unique, and Int64 unique. Each pandas operation constructs
+its grouper inside the timed closure. Pandas 2.2.3 has no direct
+`SeriesGroupBy.kurt`, so that row explicitly uses the public behavioral
+counterpart `groupby(...).apply(pd.Series.kurt)`; its large ratio reflects the
+public apply path and is not used to propose a source lever.
+
+Pinned CPU 56, exact-current remote-built binary, control pass:
+
+| Workload | Size | FP p50 us | pandas p50 us | Ratio | FP/pandas CV% |
+|---|---:|---:|---:|---:|---:|
+| `groupby_kurt_str` | 10k | 183.70 | 38741.56 | 210.898x | 2.55 / 0.89 |
+| `groupby_kurt_str` | 100k | 1461.38 | 42159.50 | 28.849x | 1.02 / 0.53 |
+| `groupby_quantile_str` | 10k | 485.80 | 1955.65 | 4.026x | 3.37 / 0.65 |
+| `groupby_quantile_str` | 100k | 3348.72 | 5418.62 | 1.618x | 0.77 / 0.71 |
+| `groupby_unique_str` | 10k | 601.80 | 22500.00 | 37.388x | 3.01 / 0.75 |
+| `groupby_unique_str` | 100k | 5003.82 | 26720.57 | 5.340x | 0.41 / 0.41 |
+| `groupby_unique_i64` | 10k | 583.66 | 21473.19 | 36.791x | 2.64 / 0.76 |
+| `groupby_unique_i64` | 100k | 4898.67 | 25157.90 | 5.136x | 0.63 / 1.34 |
+
+The unchanged `groupby_mean_str` null control remained 5.413x/3.269x at
+10k/100k with every CV below 5%. An independent pass also admitted every new
+row as a win.
+
+**Verdict: KEEP coverage; no source lever.** All rows are CV-valid wins, and
+the strict-remote groupby conformance run on the identical Rust tree included
+kurt/quantile/unique tests in its 207 passed / 0 failed result.
+
+Retry predicate: revisit any scalar family only after an inline full-call
+CV-valid loss appears; then profile before editing and require same-worker
+A/B/null with every deciding CV below 5% plus focused conformance.
+
+Artifacts:
+
+- `artifacts/bench/cod_fp_uza04_217_groupby_scalar_remaining_10k_100k.json`
+- `artifacts/bench/cod_fp_uza04_217_groupby_scalar_remaining_control_10k_100k.json`
+- `artifacts/perf/cod_fp_uza04_217_groupby_scalar_scorecard_2026-07-23.md`
+
+### 2026-07-25 QuietHarbor — uza04.218 groupby harness matrix CLOSED: 5/5 rows covered; df_groupby_2strkey_sum @10k 0.86x is VOID-NONULL routing evidence
+
+**MODEL-INTEGRITY CORRECTION (2026-07-27, `br-frankenpandas-psuwe`):** retain
+the raw samples below, but withdraw the claimed loss and its attribution. This
+invocation recorded neither an A/A null control nor a counted mechanism, and
+the executing ELF did not self-report its SHA-256. Under the fleet six-class
+taxonomy the `0.8563x` sample is `VOID-NONULL`, not a decided performance
+verdict. The linked scorecard's former `1.24x` weighted result is also withdrawn:
+five unmeasured categories were represented by `1.00x` placeholders.
+
+Completed `br-frankenpandas-uza04.218`. The five remaining fp-bench groupby rows (`groupby_multi_str`,
+`groupby_agg3_str`, `df_groupby_str_sum`, `df_groupby_2key_sum`, `df_groupby_2strkey_sum`) got their pandas
+counterparts in `974cc3680`; each preserves the full-call shape (population/grouper construction OUTSIDE the
+timed closure on both engines, verified by reading both sides).
+
+Substrate: release-perf `fp-bench` rebuilt at HEAD (2026-07-25 20:34:05Z) after confirming `crates/fp-frame/
+src/lib.rs` was newer than the previous binary; freshness re-verified with an `-nt` sweep over `crates/**/*.rs`
+(no source newer than the binary at run time). `taskset -c 48-63`, shared 64-thread host. **No ELF sha256 —
+harness-contract §2.1 is not adopted in this repo; that is a provenance gap on every row below.**
+
+Primary run (`artifacts/bench/cod_fp_uza04_218_groupby_matrix_remaining_10k_100k.json`), 9/10 rows admitted:
+
+| Workload | Size | FP p50 us | pandas p50 us | Ratio | Verdict |
+|---|---:|---:|---:|---:|---|
+| `groupby_multi_str` | 10k | 211.84 | 876.08 | 4.136x | FASTER |
+| `groupby_multi_str` | 100k | 1627.80 | 4603.07 | 2.828x | FASTER |
+| `groupby_agg3_str` | 10k | 186.26 | 1027.59 | 5.517x | FASTER |
+| `groupby_agg3_str` | 100k | 1654.23 | 3931.55 | — | DROPPED_HIGH_CV (fp cv 5.30) |
+| `df_groupby_str_sum` | 10k | 328.89 | 830.29 | 2.524x | FASTER |
+| `df_groupby_str_sum` | 100k | 1004.39 | 3192.28 | 3.178x | FASTER |
+| `df_groupby_2key_sum` | 10k | 745.00 | 900.50 | 1.209x | FASTER |
+| `df_groupby_2key_sum` | 100k | 1803.40 | 2713.90 | 1.505x | FASTER |
+| `df_groupby_2strkey_sum` | 10k | 1553.90 | 1289.50 | **0.830x** | **SLOWER** |
+| `df_groupby_2strkey_sum` | 100k | 4375.50 | 6134.30 | 1.402x | FASTER |
+
+**The cv gate is discarding decidable rows (campaign §2.3, measured here).** Both unsettled rows were re-run
+four times each (`artifacts/bench/cod_fp_uza04_218_groupby_matrix_retry_10k_100k.json`, which records EVERY
+attempt, admitted or not):
+
+| Workload | Size | p50 ratio per run | median | range | cv-admitted |
+|---|---|---|---:|---|---:|
+| `groupby_agg3_str` | 100k | 3.01 / 3.03 / 2.99 / 2.81 | **2.998x** | 2.81–3.03 | 1 of 4 |
+| `df_groupby_2strkey_sum` | 10k | 0.872 / 0.850 / 0.837 / 0.862 | **0.856x** | 0.837–0.872 | 1 of 4 |
+
+Four runs agree to within 3% on each row, and the cv gate admitted exactly one
+of each. That makes the vectors useful for routing, but repeatability across
+A/B samples does not establish the harness floor. Without a same-invocation
+A/A null, the `0.856x` and `2.998x` directions are not admitted performance
+verdicts. The cv-only filter was still the wrong screen; a future rerun must
+decide the rows on a median CI relative to its measured null floor.
+
+**Historical attribution hypothesis (arithmetic on the measured rows, not a
+symbolized profile; not evidence for a lever).** The int-key
+sibling `df_groupby_2key_sum` has the SAME 100x50=5000 group combos and wins (1.209x @10k, 1.505x @100k), so
+the deficit is specific to the string keys. fp str-minus-int delta: 809 us @10k, 2572 us @100k over the same
+5000 groups. Marginal per-row str cost = (2572-809)/90000 = 19.6 ns/row; the residual ~613 us at 10k is
+per-group/fixed. At 10k there are 5000 groups over 10k rows — **2 rows per group** — so per-group overhead is
+~40% of fp's total and the workload is in a many-tiny-groups regime that 100k amortizes away. This is
+consistent with the already-ledgered str-key factorization floor (hashbrown ~10.5 ns/row vs khash ~2.5 ns).
+
+**Corrected verdict: KEEP coverage only.** No source lever was attempted. Do
+not cite the `0.856x` direction as a real loss, and do not use it to attribute
+work to string factorization.
+
+Retry predicate: retry `df_groupby_2strkey_sum @10k` only in a harness that
+self-reports the executing ELF SHA-256, runs an A/A null in the same invocation,
+and admits the A/B direction under the median-CI gate. Then require a symbolized
+profile to attribute >5% self-time to the actual DataFrame two-key path before
+proposing a lever. Do not attempt a sixth hash-table variant.
+
+Artifacts:
+
+- `artifacts/bench/cod_fp_uza04_218_groupby_matrix_remaining_10k_100k.json`
+- `artifacts/bench/cod_fp_uza04_218_groupby_matrix_retry_10k_100k.json`
+- `artifacts/perf/cod_fp_uza04_218_groupby_matrix_scorecard_2026-07-25.md`
+
+### 2026-07-25 QuietHarbor — block-storage default-flip: the NAIVE Commit-3 wiring is REJECTED BY DESIGN (733 construction sites pay an O(n*m) copy to benefit `.values` only); correct primitive is lazy consolidation + block-born IO
+
+Campaign cc/STRUCTURAL assignment: "finish the block-storage foundation and make it the default." Preflight
+state, verified: the `block-storage` feature (default-OFF, implies `lazy-transpose-view`) is in-tree from
+`c7559eb35`; Commits 1 and 2 of the `docs/repo_vs_pandas_assessment_dustysummit.md` plan are DONE —
+`Float64BlockStore` holds one column-major `Arc<[f64]>`, and `materialize_column` is already zero-copy
+(`Column::from_f64_all_valid_chunks` borrowing the shared block, per-column `OnceLock` slot cache).
+**Feature build is GREEN at HEAD** (`RCH_REQUIRE_REMOTE=1 ... cargo check -p fp-frame --features block-storage
+--all-targets`, remote worker `ovh-a`, 0 errors) — no cfg rot yet, unlike the 214-site `lazy-transpose-view`
+rot of 2026-07-22.
+
+The remaining planned step (Commit 3) is "wire construction paths to PRODUCE block-backed frames when all
+columns are all-valid f64". **Measured objection to doing that at the universal chokepoint:** every
+construction funnels through `DataFrame::new_with_axes`, and the call-site census is **659
+`new_with_column_order` + 74 `DataFrame::new` = ~733 sites**. Building the block eagerly there is a full
+column-major copy of the frame's data (8 MB for a 100k x 10 f64 frame) added to EVERY homogeneous-f64 frame
+produced anywhere in the library — including every intermediate frame of every op that currently returns
+columns by moving `Arc`s. That trades fp's broad 2–18x surface win for the narrow `.values`/`to_numpy` win.
+**REJECT the naive universal wiring** — it is not a conservative default-flip, it is a whole-surface
+regression wearing a feature flag.
+
+Root asymmetry (this is the actual structural finding): pandas' `.values` is O(1) because its frames are
+**born** as 2-D blocks (read_csv builds a block), not because its `.values` is clever. fp's frames are born
+columnar — which is exactly WHY fp wins nearly everywhere else. Consolidating at construction imports pandas'
+cost model along with its `.values` benefit.
+
+**Correct primitive, split in two (neither is the rejected wiring):**
+1. **Lazy consolidation** — keep per-column storage; build the block on FIRST `.values`/`to_numpy` and cache
+   it in a frame-level `OnceLock`. Repeat access becomes O(1) at zero construction cost. This is campaign
+   §6.1 self-adjusting computation. **Honest limit: first-call cost is unchanged**, so this only pays where a
+   caller touches `.values` on the same frame more than once — it must NOT be benchmarked with a repeated-
+   `.values` loop and reported as a `.values` win, which would be harness-gaming.
+2. **Block-born IO** — have `read_csv`/`read_parquet` parse a homogeneous all-valid f64 result directly into
+   the column-major block. This is the arm that actually matches pandas on FIRST call, it is narrow (a
+   handful of sites, not 733), and it adds no copy because the parser is writing the buffer anyway.
+
+**LEDGERED BLOCKER (scoped, not a ceiling):** the default-flip is blocked on arm 2 being built first; arm 1
+alone cannot honestly be claimed as `.values` parity. Neither arm was implemented this session — this entry
+is a design rejection with a call-site census, not a measured A/B, and it claims no ratio.
+
+Retry predicate: proceed with arm 2 (block-born `read_csv`) when (1) a `df_to_numpy`/`df_values` bench exists
+that constructs a FRESH frame per iteration (the current `df_values` bench reuses one frame and would report
+arm 1's cache as a win it has not earned), and (2) an A/A null control on the target worker establishes the
+floor. Do NOT re-propose eager consolidation in `new_with_axes` without first showing, on that same fresh-frame
+bench, that the ~733-site copy tax is under the null floor for the ordinary op surface.
+
+### 2026-07-25 QuietHarbor — str-groupby "stop hashing": all THREE campaign alternatives checked against this repo's own evidence; two are refuted, and all three converge on REUSE, not a better table
+
+The campaign's cc/STRUCTURAL direction for the str-groupby floor is "the answer to hashbrown-bound is **not**
+a faster hash map — stop hashing: §7.15 minimal perfect hashing, §7.5 ART over an interned dictionary, or
+§8.14 radix-partition so the probe fits in L2." Before proposing any lever I checked each against the four
+factorization rejects already in this ledger (2026-07-23 DustySummit). **Two of the three are already refuted
+by those rejects; the third is inapplicable in the shape it was suggested.** No code was written.
+
+1. **§8.14 radix-partition (make the probe fit in L2) — ALREADY SATISFIED, and already lost.** The premise is
+   that the probe table is too big for cache. It is not: there are ~1000 distinct keys, and hashbrown
+   dynamically sizes to the GROUP count, not the row count, so the table is already L1/L2-resident. The 4th
+   reject built precisely this — a cache-resident table growing from 1024 slots to the group count, with
+   inline `(u64,len)` keys and Fibonacci hashing — and measured **~21% SLOWER** (1400 vs 1160 us). Partitioning
+   cannot help a probe that already fits.
+2. **§7.15 MPH — inapplicable to a ONE-SHOT factorization.** Minimal perfect hashing must see the whole key
+   set before it can build the function. For a groupby that factorizes fresh on every call, MPH construction
+   is strictly more work than the single hashbrown pass it would replace. MPH pays only when the key set is
+   REUSED across many lookups.
+3. **§7.5 ART over an interned dictionary — same precondition.** Interning is only a win if the interned
+   dictionary outlives the call that built it. A trie built per call is one more per-call pass.
+
+**The convergent finding: all three admissible moves require the factorization to be REUSED across calls
+rather than recomputed. That — not a better table — is the actual structural lever, and it is a CACHING lever,
+so it does not violate the "do not attempt a 6th hash-table variant" prohibition.**
+
+**The primitive already exists in-tree and is already proven on a sibling path.** `fp-columnar`'s
+`Column::utf8_default_factorize_columns` (`crates/fp-columnar/src/lib.rs:10171`) is a CACHED first-seen
+factorize witness over an all-valid contiguous-Utf8 column, gated to `sort=false, use_na_sentinel=true` — the
+exact semantics groupby needs. `Series::factorize` already routes through it (witness x8mdu,
+`crates/fp-frame/src/lib.rs:19193`). **`DataFrameGroupBy::compute_dense_group_ids` does not**: its
+contiguous-Utf8 arm (`crates/fp-frame/src/lib.rs:34265`) and Scalar-backed-Utf8 arm (`:34287`) each rebuild an
+`FxHashMap<&[u8], usize>` from scratch on every call, at the ledgered ~10.5 ns/row that is ~90% of str-groupby
+cost (1050 us of ~1140 us @100k / 1000 groups).
+
+Semantics check (why this is expected to be bit-identical, not merely close): the witness returns FIRST-SEEN
+codes, and `dense_group_labels` reads `ks[i]` at each `g == order.len()`, i.e. every dense consumer
+(sum/mean/max/min/var/std/count/cum*/transform) depends on first-seen gid numbering — the same contract the
+wide-i64 open-addressing arm documents. The witness is all-valid-gated, so `dropna` cannot change the result.
+
+**HONESTY PRECONDITION — this must not be measured on the current bench.** The win is on the SECOND and later
+groupby of the same key column; the first call still pays full factorization. `fp-bench`'s groupby rows build
+the frame once and time the call repeatedly, so this lever would post a large number there that it has not
+earned as a *factorization* win. It must be reported as a REPEAT-GROUPBY win and measured with BOTH arms: a
+fresh-frame-per-iteration arm (must show no regression) and a repeat arm (the claim). Anything else is
+harness-gaming of exactly the kind §1 of the campaign exists to catch.
+
+**Status: specified, NOT implemented, NOT measured. No ratio is claimed.** Filed as a bead. This entry's
+contribution is to retire the standing "NOT an agent-level fp-frame lever / no agent-level incremental lever
+remains" blocker: an admissible lever with an existing in-tree primitive does remain, it was simply not the
+kind of lever the previous four attempts were looking for.
+
+Retry predicate for the REFUTED arms: do not re-propose §8.14 radix-partition or a group-count-sized table for
+str-groupby factorization unless a symbolized profile first shows the factorization table exceeding L2 —
+which requires a workload with a group count large enough to matter, not the ~1000-group shape all current
+benches use. The 4th reject already covers everything below that.
+
+### 2026-07-25 CrimsonGate — PERF_CAMPAIGN HARNESS+FRONTIER: contract adopted, VOID top five corrected, and all-valid Float64 axis=1 moments KEEP 1.584547×
+
+Campaign lane: `cod / HARNESS+FRONTIER`, bead `br-frankenpandas-elptw`. The full audit, corrected
+reconstruction details, raw result arrays, and methodology are in `docs/LEDGER_RESURRECTION.md`; this is the
+canonical verdict row. No historical ledger row was deleted or rewritten.
+
+**Meta-Lever 2 contract parts 1–3 are now the harness contract.**
+
+- `fp-bench` hashes its own `env::current_exe()` and prints the running ELF SHA-256, byte length, and path on
+  stdout line 1. The Python/pandas process likewise reports the interpreter ELF that actually hosted it.
+- Every engine invocation emits 25 order-alternating A/A pairs from the same process. Cache-populating
+  `df_to_numpy` / `df_values` arms receive a fresh frame outside each timed region.
+- Schema v4 bootstraps the median A/A ratio with 10,000 deterministic resamples (95% CI). A claim votes only
+  when its absolute log effect clears 2× the widest null-CI log half-width. CV is provenance only: it never
+  keeps, rejects, drops, quarantines, or updates a baseline. The ratchet excludes
+  `NULL_UNDECIDABLE`/invalid rows from comparisons and quarantines them.
+
+**Meta-Lever 1 VOID audit.** Snapshot: 19,011 lines / 843 headings; 256 REJECT-bearing entries audited.
+Automated criteria raised 31 flags; hand review found 16 genuine VOID lever-rejects, 177 WEAK provenance-gap
+rows, 48 decisions that STAND, and 15 classifier false positives. Two previously resurrected lanes had
+already banked yield (`to_flat_index` and the lazy transpose-view family). The corrected top five were
+reconstructed benchmark-only and run strict-remote with exact parity before timing:
+
+| rank | resurrected row | worker / running test ELF SHA-256 | paired ORIG÷candidate | A/A median 95% CI | corrected verdict |
+|---:|---|---|---:|---:|---|
+| 1 | `:9510` axis=1 historical two-full-buffer moment kernel @1M×10 | `vmi1227854` / `26a8b6eac09669fbc30d3e7fcb4d4c6ed2a26c8e8075a5fcf2372b1de9ceafac` | 0.998099× | `[0.843831, 1.006400]` | **NULL_UNDECIDABLE**; candidate 43.26% self |
+| 2a | `:11362` `to_flat_index`, serial 49k | `vmi1227854` / `ea3eb63687ad151744a3f563a9cd1edc35e362e11e143ed564badbd6955873eb` | 3.097997× | `[0.974225, 1.048136]` | **KEEP confirmed**, exact parity |
+| 2b | same ELF, parallel 1M | same | 1.741439× | `[0.763136, 1.057655]` | **KEEP confirmed**, exact parity |
+| 3 | `:10452` eager transpose row constructor | `vmi1264463` / `714a503ccc907f761cc3d214b140efd21a51f25ca503d56ccc78500562180fa2` | current route A/A only | `[0.963400, 1.010678]` | **MOOT**; current lazy route never executes the old eager target |
+| 4 | `:12050` sorted sequential insert | `vmi1227854` / `9e583d86a2225e9c297647fa6858eaa3c6657f07b19f1c4d050f43ff0df9c7c1` | 0.593669× | `[0.944538, 1.021580]` | **REJECT**; candidate wrapper 0.01% self, `BTreeMap::insert` 5.98% |
+| 5 | `:12364` `to_dict(index)` row shards | `vmi1227854` / `e4306216bb6293f83148e6bf75534fe20834bf19ba34aad542e187bd2dcdba2c` | 1.862427× | `[0.939331, 1.039169]` | **KEEP confirmed but superseded** by the current stronger typed pair-build |
+
+The first bounded rank-1 attempt expired on an overloaded worker before reaching the timed path, so it is an
+invalid attempt with no ratio and no verdict; the completed pinned rerun above is the only rank-1 result.
+
+**Profile-attributed frontier continuation: KEEP.** Rank 1's admissible profile named the real target despite
+its NULL result: the candidate itself carried 43.26% self and its output-sized means buffer incurred page
+clearing. The next primitive completes both mean and M2 for one 4096-row tile before advancing, reducing the
+means scratch from 1,000,000 f64s to 4,096 without changing either float fold's column order.
+
+Final strict-remote production-path ELF
+`d6488b2980459e896153f0bf3a1f35711371213664ee5c83a75546d3b960a59f` on `vmi1227854`:
+
+| comparison @1M×10 Float64 | paired ratio | A/A median 95% CI | verdict |
+|---|---:|---:|---|
+| resurrected two-full-buffer → tile-local means | **1.645242×** | `[0.990203, 1.218106]` | **KEEP** |
+| explicit legacy public row-gather → shipped public tile-local route | **1.584547×** | `[0.852740, 1.044968]` | **KEEP** |
+
+All 1,000,000 variance outputs matched both reference arms bit-for-bit before timing. Production
+`var(axis=1)`, `std(axis=1)`, and `sem(axis=1)` use the new path only when every numeric input column is
+all-valid Float64; nullable, NaN-bearing, Int64, mixed, Bool, and generic cases retain their previous
+fallbacks. A 4,097-row exact-bit regression test crosses the tile boundary for all three public APIs.
+Alignment and null/NaN semantics are unchanged.
+
+**Concrete retry predicates.**
+
+- Axis=1 moments: re-open only when a current profile again attributes >20% self to this moment primitive
+  and a different shape removes a measured component without changing float-operation order.
+- `to_flat_index`: re-open only if `core::fmt` returns above 5% self on the contiguous tuple-label build.
+- Eager transpose constructor: re-open only if the public route again eagerly constructs every output row
+  and profiles that constructor above 5% self.
+- Sorted insert: re-open only after a representation removes incremental `BTreeMap::insert` (or profiles it
+  below 1% self); repeating sequential insertion against lexical bulk collect is closed.
+- Old `to_dict(index)` shards: never reintroduce this superseded implementation; compare successors against
+  the current typed pair-build, and retry only after a >5% regression outside its own A/A median CI.
+- Any WEAK ledger row: promote it only after its target independently appears above 5% self in a current
+  profile. From this row forward, a REJECT without same-invocation A/A, running-binary identity, and a
+  median-CI decision is VOID by construction.
+
+Verification: strict-remote workspace check PASS; `fp-frame --lib` 3,186 passed / 0 failed / 23 ignored;
+`fp-conformance --lib` 1,596 passed / 0 failed (remote live-oracle checkout absent, documented smoke skip);
+`fp-bench` 2 passed / 0 failed; touched-package clippy PASS. Full workspace clippy stops in inherited
+`fp-columnar` warnings. Strict RCH refuses `cargo fmt --check` as non-compilation (`RCH-E301`); direct
+rustfmt passes `fp-bench` and the campaign hunks match rustfmt while the large library files retain inherited
+whole-file drift. Bounded fp-frame UBS reproduces the known 180-second inventory stall documented in
+`artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md`; other focused UBS findings are pre-existing or
+false positives outside the touched hunks.
+
+### 2026-07-25 CrimsonGate — exact-order row-parallel axis=1 moments KEEP 1.955356× (br-frankenpandas-bybyw)
+
+This is the next profile-attributed frontier lever after the tile-local axis=1 moment keep above.
+The required pre-proposal ledger grep found no earlier attempt to parallelize the moment family by
+disjoint row ranges. Existing axis=1 rank/arg-extrema evidence establishes the relevant semantic
+boundary: rows may execute independently provided every row retains its exact left-to-right column
+fold. This lever does exactly that; it is not an output-constructor change or a string-groupby hash
+variant.
+
+**Lever.** For all-valid Float64 `var(axis=1)`, `std(axis=1)`, and `sem(axis=1)`, frames with at
+least 200,000 rows split the output into scoped, disjoint row chunks. Each worker retains the exact
+serial mean fold, M2 fold, and finish operation for every row. Thread count is capped at 16 and at
+one worker per 65,536 rows; smaller inputs retain the serial tile-local path. Nullable, NaN-bearing,
+Int64, mixed, Bool, and generic inputs retain their previous fallbacks.
+
+Two strict-remote invocations separate the evidence cleanly:
+
+| proof | worker / running test ELF SHA-256 | serial median | parallel median | paired serial÷parallel | A/A median 95% CI | verdict |
+|---|---|---:|---:|---:|---:|---|
+| pre-ship candidate + symbol profile | `hetzner1` / `d896354be0f720a1c3a41084a48499ab9a31a34e7aae42c3f2b78d2942c5166e` | 11.685248 ms | 5.709939 ms | **2.012495×** | `[0.970443, 1.023018]` | **KEEP** |
+| final production-tree timed gate | `hetzner2` / `ec6e77d7a97d147682b10fb35268ca64ff77cfaaee9a89e518a64070aec55bdd` | 10.267212 ms | 5.389046 ms | **1.955356×** | `[0.939517, 1.009987]` | **KEEP** |
+
+Both invocations used 25 order-alternating `SERIAL / identical SERIAL null / PARALLEL` triplets in
+one process and decided only on the bootstrap median-CI gate. The pre-ship serial/parallel CVs were
+9.52% / 47.48%; the final serial/parallel CVs were 29.44% / 19.82%. Those high CVs are provenance,
+not votes: the paired effect clears the required log margin in both invocations. This is a direct
+demonstration of why the campaign forbids CV gating.
+
+The pre-ship profile attributed **29.77% self-time** to
+`parallel_fused_tile_var_candidate_cod_fp::{closure#1}`; the candidate therefore reached the intended
+primitive. The final `hetzner2` invocation emitted its complete timed KEEP and then exited 101 only
+when the post-timing attribution step discovered that `perf` was absent on that worker. That is an
+infrastructure failure after the timed path, not a code or timing REJECT. A fail-closed pinned retry
+to the already-profiled `hz1` worker was refused before execution because that worker was
+disk-critical. No local fallback and no third measurement were used.
+
+Final production-tree raw milliseconds:
+
+- serial:
+  `[9.835359, 10.102949, 9.96938, 18.845243, 11.285686, 10.310991, 10.10003, 18.388321, 12.15072, 17.973409, 12.174851, 10.189401, 10.11426, 18.01471, 11.251846, 10.237871, 10.244101, 10.22769, 10.267212, 10.15381, 10.615723, 9.98571, 10.20856, 20.520892, 19.934369]`
+- identical-serial null:
+  `[9.953969, 10.706743, 9.946419, 21.713238, 10.02578, 13.328076, 10.000159, 21.266275, 10.09483, 19.816418, 10.082769, 10.897743, 10.05957, 19.603527, 10.231781, 10.859053, 10.201941, 10.842903, 10.24289, 10.807484, 10.15338, 10.695312, 10.312981, 20.003908, 14.838113]`
+- parallel:
+  `[5.141856, 6.01865, 5.95316, 6.459391, 6.394172, 4.771963, 7.459987, 4.883565, 5.389046, 4.578253, 6.226411, 5.547568, 5.230285, 4.668983, 5.008794, 4.805023, 4.997814, 5.9079, 5.261406, 9.859739, 7.434816, 5.296927, 4.995765, 5.490228, 5.395887]`
+
+**Correctness and gates.** Before each timing run, all 1,000,000 public, serial-reference, and
+parallel variance outputs matched bit-for-bit. A production regression test covers 200,003 rows
+(parallel threshold, worker-chunk tails, and the 4,096-row tile boundary) and proves exact bits for
+all three public APIs. Strict-remote workspace check passed; touched-package clippy passed; the
+`fp-frame` library suite passed 3,186 / 0 with 24 ignored; and `fp-conformance` passed 1,596 / 0.
+`git diff --check` passed. Bounded fp-frame UBS reproduced the known 180-second inventory stall
+documented in `artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md`; no focused finding was emitted.
+
+**Concrete retry predicate.** Do not measure this lane again while FrankenPandas is in BUILD/FIX
+allocation. Once a Lane-M window is explicitly granted, re-open the same row-parallel primitive only
+if (a) a current profile still attributes more than 20% self-time to its worker closure and (b) a new
+row/column shape either shows a decisive regression outside its same-invocation A/A median CI or
+justifies a different threshold. Any successor attacking `Column::from_f64_values` or page
+initialization is a separate lever and requires that component above 5% self. A worker used for
+symbol attribution must first prove `perf` is installed; missing `perf` is an infrastructure result,
+never a performance verdict.
+
+### 2026-07-26 QuietHarbor — PRIMITIVE TRANSFER (franken_networkx CachedSnapshotView 77,795x): block-storage Clone audit — NO deep-copy pathology here (counted mechanism), but a wide-frame String residual in the materialized-map clone
+
+Campaign primitive-transfer bus. frankenpandas is a named consumer of the zero-copy view primitive;
+franken_networkx owns it. Their **77,795.5146x** KEEP (`franken_networkx/docs/NEGATIVE_EVIDENCE.md:279`,
+`br-r37-c1-04z53.9176`) came from discovering that cloning a view **deep-copied an owned
+`GraphSnapshot`** — 32 clones of a 2,048-node/8,192-edge graph = **589,824 fresh `String` allocations,
+5,308,416 bytes copied, 24,669,654 ns** — and putting the immutable snapshot behind an `Arc` so
+derived `Clone` shares it. ACK with the full transfers/does-not-transfer analysis sent on thread
+`perf-campaign-20260725-primitives` (msg 3670). NOTE: that thread carried **no** zero-copy-view design
+from anyone at read time (only frankenredis's io_uring handoff), so the vein was reconstructed from
+their ledger row and CloudyTurtle's 03:32Z Lane M note rather than from a posted design.
+
+**The transferred bug hunt, run here. Result: the pathology does NOT exist on the block-storage path.**
+Traced `DataFrame` clone of a block-backed frame end to end (Lane B, source reading only — no
+benchmark, no worker):
+
+1. `LazyDataFrameColumns::Float64Block { store, .. }` clone does `Arc::clone(store)` — the
+   `Float64BlockStore` (and therefore `block: Arc<[f64]>`) is shared, not copied.
+2. Each block column is built by `Column::from_f64_all_valid_chunks`, which stores
+   `values: ScalarValues::lazy_all_valid_float64_chunks(Arc<[Float64Chunk]>, len)` with `data: None`,
+   each `Float64Chunk` being a `(Arc<[f64]>, start, len)` **borrow of the shared block**.
+3. `Column::clone` therefore gets `None` from `clone_dense_values_from_cache` (it matches on
+   `self.data`, which is `None` here) and falls through to `ScalarValues::clone`.
+4. `ScalarValues::clone` for `LazyAllValidFloat64Chunks` does **`Arc::clone(chunks)`** and carries the
+   `all_finite` memo across.
+
+**COUNTED MECHANISM (why this is a valid negative, not an unmeasured guess): the clone path executes
+`Arc::clone` only — refcount increments, ZERO f64 bytes copied and ZERO allocations for the block
+payload, by construction of the types involved.** No null control is required to establish that no
+work was removed, because no work was being done: there is nothing here for the primitive to fix.
+`Arc<[f64]>` also has no safe interior mutability and neither `Arc::get_mut` nor `Arc::make_mut`
+appears anywhere in the block-storage code, so the shared block is copy-on-write **by construction**
+today — an unenforced invariant, not a guarantee (see the retry predicate).
+
+**RESIDUAL FOUND (not fixed — tracked as `br-frankenpandas-4kszu`).**
+`LazyDataFrameColumns::clone` for both the
+`Float64Block` and `HomogeneousTranspose` arms does:
+
+```rust
+if let Some(columns) = materialized.get() { let _ = cloned.set(columns.clone()); }
+```
+
+Once the `OnceLock<BTreeMap<String, Column>>` is populated, each clone deep-copies that map. The
+`Column` values are O(1) `Arc` bumps per (4) above, but the **`String` keys are re-allocated: n
+allocations per DataFrame clone, where n = column count.** That is franken_networkx's exact
+"589,824 fresh `String` allocations" shape at a different scale. It is negligible for a 10-column
+frame and material for a WIDE frame — and wide frames are precisely what the transpose/block lane
+produces (transposing a tall frame yields an n-column output). Fix shape:
+`OnceLock<Arc<BTreeMap<String, Column>>>` so the map is shared rather than copied; this touches all
+three `LazyDataFrameColumns` arms plus `into_materialized`/`make_eager`.
+
+**NOT IMPLEMENTED.** `crates/fp-frame/src/lib.rs` is under an exclusive Agent Mail lease held by
+CrimsonGate. No source edit attempted. Lane B forbids benchmarking, so no ratio is claimed for the
+residual either — its cost is asserted only as an allocation count (n Strings/clone), which is a
+structural property of `BTreeMap<String, _>::clone`, not a timing.
+
+**Retry predicate.** Implement the `Arc<BTreeMap<..>>` share when (1) `crates/fp-frame/src/lib.rs` is
+free, AND (2) a bench exists that clones a WIDE (>=1k column) block-backed or transposed frame — the
+current `df_transpose_materialize`/`df_values` benches do not clone in the timed region, so the
+residual is unobservable there and shipping it would be an unmeasured change. Separately, enforce the
+CoW invariant with a compile-time or test-time guard before block-storage is considered for
+default-on: today nothing prevents a future in-place mutation path from aliasing a shared block, and
+that would be a silent correctness bug, not a perf regression.
+
+### 2026-07-26 CrimsonGate — Lane B adjudication: all 31 disk-critical code-only commits retained after the already-landed compile repair; typed pre-epoch `dt.day_name` correctness bug fixed; executing-ELF coverage 4/4
+
+Allocation-addendum lane: **B / BUILD+FIX** (`br-frankenpandas-89ia0` and
+`br-frankenpandas-ic0q5`). No benchmark and no RCH worker was used. Each historical snapshot was
+checked in its own detached worktree with the same local command and dependency graph:
+
+```text
+CARGO_TARGET_DIR=/data/projects/.local-targets/frankenpandas-codeonly-audit-20260725
+cargo check --locked --offline -p fp-frame --all-targets --quiet
+```
+
+The first twelve snapshots compile raw. Snapshot 13 (`d45ebfb6c`) introduces a duplicate
+`iso_weeks_in_year` definition and therefore fails with E0592; snapshots 14–31 inherit that single
+failure. The exact already-landed repair `8390ac792` removes the duplicate. Applying only that repair
+diff to each red historical worktree makes all nineteen compile. The repair snapshot itself also
+compiles. There is no additional latent compile failure in the stack.
+
+| # | commit | raw snapshot | with exact `8390ac792` repair | verdict |
+|---:|---|---|---|---|
+| 1 | `3be88c6b3` | PASS | PASS | KEEP |
+| 2 | `bb5ec58a9` | PASS | PASS | KEEP |
+| 3 | `8f0fb9644` | PASS | PASS | KEEP |
+| 4 | `9f80ff589` | PASS | PASS | KEEP |
+| 5 | `db4a5dfe5` | PASS | PASS | KEEP |
+| 6 | `bd1287168` | PASS | PASS | KEEP |
+| 7 | `cc8bf0638` | PASS | PASS | KEEP |
+| 8 | `c93fc9aa9` | PASS | PASS | KEEP |
+| 9 | `a383f9721` | PASS | PASS | KEEP |
+| 10 | `f45f23570` | PASS | PASS | KEEP |
+| 11 | `407523a0f` | PASS | PASS | KEEP |
+| 12 | `6114a6231` | PASS | PASS | KEEP |
+| 13 | `d45ebfb6c` | E0592 duplicate `iso_weeks_in_year` | PASS | KEEP with landed repair |
+| 14 | `32cc6fb73` | inherited E0592 | PASS | KEEP with landed repair |
+| 15 | `379ad7ca7` | inherited E0592 | PASS | KEEP with landed repair |
+| 16 | `6d2f5bdef` | inherited E0592 | PASS | KEEP with landed repair |
+| 17 | `9d9d62d6b` | inherited E0592 | PASS | KEEP with landed repair |
+| 18 | `ede53476b` | inherited E0592 | PASS | KEEP with landed repair |
+| 19 | `78adb6c01` | inherited E0592 | PASS | KEEP with landed repair |
+| 20 | `858d342fc` | inherited E0592 | PASS | KEEP with landed repair |
+| 21 | `9e97e25aa` | inherited E0592 | PASS | KEEP with landed repair |
+| 22 | `2dc9138c2` | inherited E0592 | PASS | KEEP with landed repair |
+| 23 | `a42887262` | inherited E0592 | PASS | KEEP with landed repair |
+| 24 | `fa2a83e59` | inherited E0592 | PASS | KEEP with landed repair |
+| 25 | `56ac240dd` | inherited E0592 | PASS | KEEP with landed repair |
+| 26 | `071273d50` | inherited E0592 | PASS | KEEP with landed repair |
+| 27 | `2faf6756c` | inherited E0592 | PASS | KEEP with landed repair |
+| 28 | `71441bdd4` | inherited E0592 | PASS | KEEP with landed repair |
+| 29 | `6beed343d` | inherited E0592 | PASS | KEEP with landed repair |
+| 30 | `1fa4d09ac` | inherited E0592 | PASS | KEEP with landed repair |
+| 31 | `aa8f32668` | inherited E0592 | PASS | KEEP with landed repair |
+| repair | `8390ac792` | PASS | n/a | KEEP |
+
+**Adjudication: KEEP every commit; revert none.** The raw red boundary is real, but it was repaired
+in the same historical sequence. Reverting any of the later commits would discard code that now
+compiles without addressing the actual duplicate-method cause.
+
+**Disk accounting and guardrail.** The first audit closeout check reported 198 GiB free; the latest
+pre-landing compile guard reports **168 GiB free**, still above the new 120 GiB stop threshold. The shared
+Cargo target was 642 MiB after the historical sweep and is **3.8 GiB** after the current-workspace
+quality gates. The unexpected **146 GiB** is the 32 simultaneous detached worktrees: each checkout
+materialized roughly **4.5 GiB of tracked `tests/` artifacts**. `/data/tmp/cargo-target` is a
+separate idle **391 GiB** tree. Therefore the audit did reuse one target directory, but still chose
+the wrong snapshot topology. Future sweeps must use one detached worktree and move it through
+commits sequentially (or an equivalent sparse checkout), never one full checkout per commit. Before
+every compile:
+
+```text
+python3 scripts/perf_candidate_preflight.py \
+  --target-dir /data/projects/.local-targets/frankenpandas-codeonly-audit-20260725 \
+  --run-compile cargo check --locked --offline -p fp-frame --all-targets
+```
+
+That wrapper prints `df -h /data`, exits 2 below 120 GiB free, and refuses to compile without one
+explicit/shared target directory. The 146 GiB audit tree is idle but was not deleted: repository
+policy requires separate explicit file-deletion authorization.
+
+The audit's typed-vs-generic conformance test exposed one live correctness defect in commit
+`cc8bf0638`: typed `dt.day_name()` used truncating division for negative nanoseconds, mapping a
+pre-1970 non-midnight instant to the following civil day. The fast path now uses
+`div_euclid(Timedelta::NANOS_PER_DAY)`, matching every sibling civil-date path. The two deliberately
+ignored tests are enabled; the integration target passes **8 / 8**, including pandas-pinned weekday
+fixtures and typed-vs-generic coverage across 25 datetime accessors.
+
+The harness provenance gap is also closed without timing anything. Before this change, only
+`fp-bench` self-reported its executing ELF. All three formal Criterion bench mains now hash
+`std::env::current_exe()` and print
+`bench_elf_sha256=<sha> (<bytes> bytes) <path>` as their first statement. The formal target inventory
+is exactly `vs_pandas`, `range_index_asof`, and `range_index_indexers`; all three compile together
+under `cargo check --locked --offline -p fp-index -p fp-conformance --benches`. Existing `sha2 =
+0.11.0` pins were reused. Each explicit main preserves Criterion's generated group execution and
+trailing `final_summary()` behavior. The two stale `cv < 5` assertions in the ignored
+transpose-reject audit were removed; CV remains printed provenance and never gates a verdict.
+
+**Closeout gates.** Every Cargo command was local and passed through the shared-target disk wrapper;
+no RCH worker and no benchmark ran. `cargo check --workspace --all-targets` passes. The required
+workspace Clippy attempt reaches unrelated pre-existing `fp-columnar` warnings and stops there
+before any lane file; focused `fp-index` + `fp-conformance` bench Clippy with `--no-deps -D warnings`
+passes. The typed datetime integration target passes **8 / 8, 0 ignored**. Direct Rustfmt checking
+passes all three formal bench sources and the datetime integration test; workspace
+`cargo fmt --check` reproduces broad inherited whole-tree drift, so no unrelated rewrite was taken.
+`git diff --check`, Python byte-compilation, shell syntax checking, and the preflight's twelve
+deterministic policy tests pass. A live sixth-table proposal is mechanically blocked with exit 2
+and prints the existing upstream-primitive retry predicates. Focused UBS on the preflight reports
+**0 critical / 0 warning**. The four small Rust bench/test files reproduce existing fixture
+panic/assert/cast/allocation inventory (the sole scanner-critical is the pre-existing impossible-label
+panic in `range_index_indexers.rs`, outside both ELF-identity hunks); no finding lands on a changed
+hunk. Bounded `timeout 180s ubs crates/fp-frame/src/lib.rs` reproduces the documented whole-file
+stall without emitting a touched-hunk finding.
+
+**Concrete retry predicates.**
+
+- Reopen a historical code-only commit only if a current semantic/conformance failure can be
+  bisected to that commit with `8390ac792` present. A raw E0592 from snapshots 13–31 is not such
+  evidence; it means the repair was omitted.
+- Reopen `dt.day_name` only if a typed Datetime64 fixture disagrees with pandas or the generic path
+  after floor division, especially at a negative-day boundary.
+- Any new executable benchmark target must add the same line-one executing-ELF report before it can
+  supply ledger evidence. Criterion point estimates or CV alone cannot write a KEEP/REJECT; candidate
+  decisions must use the central same-invocation A/A plus median-CI harness.
+- Do not re-enter string-groupby factorization. Its five hash-table attempts remain the ranked
+  high-self VOID head, but the standing predicate requires an upstream short-string hash primitive
+  or approved khash-class dependency—not a sixth in-repo table.
+
+### 2026-07-26 QuietHarbor — CORRECTION to my own block-storage CoW blocker: the invariant is enforced by VALUE SEMANTICS, not convention; tripwire test landed
+
+Correcting the 2026-07-26 primitive-transfer row above (co-landed in `4eb983bcf`). That row said the
+copy-on-write invariant on the shared `Arc<[f64]>` block was **"currently unenforced (no
+`Arc::get_mut`/`make_mut` exists today, but nothing prevents one)"** and listed it as a prerequisite
+that **"must be guarded before block-storage is considered for default-on."**
+
+**That understated the guarantee, and the correction removes a blocker I put in the way of my own
+lane.** Source audit of the whole crate: `fp-frame` exposes **exactly ONE `pub fn` taking `&mut self`**
+— `OnlineEwm::update` (`crates/fp-frame/src/lib.rs:29099`), an EWM accumulator with no relationship to
+frame storage. `DataFrame` and `Series` have **no in-place mutation surface at all**: `with_column`,
+`drop_column`, `rename`, `rename_columns` and the rest all take `&self` and return a new value.
+
+So the shared block cannot be aliased-and-mutated for a structural reason, not a conventional one: a
+frame cannot be mutated. Absence of `Arc::get_mut`/`make_mut` (the weaker fact I originally cited) is a
+consequence of that, not the guarantee itself.
+
+**The residual risk is real but narrower than stated:** it is a *future* `&mut self` method being added
+to `DataFrame`/`Series` that writes through a shared block. Guarded now by
+`crates/fp-frame/tests/block_storage_sharing_conformance.rs` (feature-gated on `block-storage`, 4/4
+green on remote worker):
+
+| test | what it pins |
+|---|---|
+| `block_backed_frame_exposes_an_o1_view` | reachability — the fixture really is block-backed, and the column-major `block[col*rows+row]` layout contract holds |
+| `clone_shares_the_block_rather_than_copying_it` | **`Arc::ptr_eq` on the backing allocation.** Pointer identity is the actual claim; comparing contents would also pass for a deep copy and would test nothing |
+| `transforming_one_frame_does_not_disturb_a_sharing_sibling` | the independence proof — `with_column`/`drop_column`/`rename` on one frame leave a sharing sibling's block byte-for-byte identical |
+| `per_column_reads_agree_with_the_block_layout` | the per-column borrow is a correct span of the shared block |
+
+This is the mirror of franken_networkx's proof obligation on the same primitive: they proved
+*refreshing one shared clone leaves its sibling stale*; we prove *transforming one frame leaves a
+sharing sibling unchanged*. Sharing an `Arc` without an independence proof is just aliasing, in either
+direction.
+
+**Net effect on the lane:** the CoW item is **struck from the default-on prerequisite list**. It was
+never a real gate. The remaining prerequisites are unchanged and both are already tracked — the
+`LazyDataFrameColumns::clone` per-column `String` residual (`br-frankenpandas-4kszu`) and block-born
+IO (`br-frankenpandas-l6uyi`). No ratio is claimed here; this row is correctness and API-surface
+evidence only, and no benchmark was run for it.
+
+### 2026-07-26 CrimsonGate — Lane B block-storage public-feature reachability — LANDED CODE-ONLY
+
+Ledger preflight was clear for target surface `Cargo feature forwarding:
+fp-frame/block-storage`. The `fp-frame` crate already exposed the opt-in `block-storage` feature and
+its `Float64BlockView` return type, but users of the unified `frankenpandas` crate could neither
+enable that inner feature through the umbrella feature graph nor name the view type through the
+umbrella API.
+
+`br-frankenpandas-1iupo` adds the non-default
+`block-storage = ["fp-frame/block-storage"]` forwarding edge and a cfg-gated
+`frankenpandas::Float64BlockView` re-export. This changes no default feature set, constructor, storage
+choice, or runtime behavior. It is API/build plumbing toward the eventual default-on state, not the
+rejected universal-consolidation design.
+
+**Build evidence.** With 627G free on `/data`, the exact fail-closed invocation
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo check --locked -p frankenpandas
+--all-targets --features block-storage` completed on remote worker `hz2` with exit 0. No per-task
+local target directory was created. The required workspace-wide check with
+`--features frankenpandas/block-storage` also completed remotely with exit 0. Workspace Clippy with
+`-D warnings` was attempted remotely and stopped in the inherited `fp-columnar` backlog before
+reaching this crate (25 lib errors plus 66 lib-test errors, including the already-visible duplicate
+`must_use`, dead `Float64DotInput::value_at`, and current-toolchain style lints). Focused
+`frankenpandas` Clippy with `--no-deps -D warnings`, all targets, and `block-storage` then completed
+remotely with exit 0; dependency compilation still printed the same two non-fatal warnings. No
+benchmark ran, so there is no timing verdict or executing-ELF claim.
+
+**Concrete retry predicate.** Do not add `block-storage` to any default feature set and do not wire
+the ~733 universal frame-construction sites. Reopen the default flip only after block-born
+homogeneous all-valid-f64 IO (`br-frankenpandas-l6uyi`) clears its existing fresh-frame-per-iteration
+plus same-invocation A/A predicate. Reopen shared materialized-map cloning
+(`br-frankenpandas-4kszu`) only when its existing wide-frame clone harness predicate is satisfied.
+
+### 2026-07-26 QuietHarbor — df_dot ISA re-decision (Lane M, whole-binary A/B): instrument blocker RESOLVED, the recorded 1.4x does NOT reproduce, measured 1.0327x — premise corrected, CONCLUSION STRENGTHENED
+
+Lane M re-decision of the df_dot LEDGERED BLOCKER after `ovh-b` (2012 Ivy Bridge, no AVX2/FMA) was
+removed from the rust pool, making the fleet ISA floor x86-64-v3. Verified independently in
+`~/.config/rch/workers.toml`: that worker is now tagged `["bun","go","no-avx2"]`; every remaining
+worker carries `rust`.
+
+**Protocol (campaign §2.6 whole-binary A/B).** Two arms, both built AND run remotely via
+`RCH_REQUIRE_REMOTE=1 RUSTFLAGS=… env -u CARGO_TARGET_DIR rch exec -- cargo run --profile
+release-perf -p fp-bench`. Arm A = default target; arm B = `-C target-cpu=x86-64-v3`. `fp-bench`
+self-reports its own ELF SHA-256 from `std::env::current_exe()` (in-process, so it proves which ELF
+actually ran — not a shell-side hash). Same-worker pairs only. Gated on **wall**, never instruction
+count. 50 samples/arm, plus the in-invocation interleaved A/A null control; decision statistic is the
+median of per-round ratios with a deterministic 10,000-resample bootstrap 95% CI.
+
+**⭐ THE HISTORICAL INSTRUMENT BLOCKER IS RESOLVED.** Row `:90` (2026-07-04) recorded that
+`+sse4.1,+avx` builds could not be A/B'd at all: *"both `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`
+candidate builds fell open locally"*, `no admissible workers`. Under strict remote that no longer
+happens — the flag reached the remote compiler and provably changed codegen:
+
+| arm | worker | executing ELF SHA-256 | ELF bytes |
+|---|---|---|---|
+| A default | `ovh-a` | `bdc765dd38ce7bca09c7575dfe8546ec316e0d7ad4f5a4260082349ca836d6dc` | 69,714,072 |
+| B x86-64-v3 | `ovh-a` | `ae9cfc41b9e3861b7ad301de72790af4845ca7d690d41eb3d3290c9efffa3d98` | 69,714,112 |
+
+Same source + same worker + different sha ⇒ codegen changed. Output `checksum` identical
+(`4957dea0fe3e2ed1` both arms) ⇒ numeric parity.
+
+**Results.**
+
+| workload | size | A median | B median | effect (A/B, >1 = v3 faster) | 95% CI | A/A null floor | verdict |
+|---|---|---:|---:|---:|---|---:|---|
+| `df_dot` | 100k | 5239.1 us | 5071.3 us | **1.0327x** | [1.0240, 1.0376] | ±0.24% | **DECIDABLE** (clears floor ~6.6x, CI excludes 1.0) |
+| `df_abs` | 1M | 6709.9 us | 6452.5 us | 1.0071x | [0.9870, 1.0261] | ±0.81% | **NOT decidable** (CI includes 1.0) — neutral |
+
+The first `df_abs` pair was discarded before analysis: arm A landed on `hz2` and arm B on `ovh-a`.
+Cross-worker pairs are invalid (`:92`); arm A was re-run until it matched `ovh-a`.
+
+**⚠️ THE RECORDED 1.4x DOES NOT REPRODUCE.** `docs/repo_vs_pandas_assessment_dustysummit.md:42`
+records *"df_dot AVX2=3850us vs SSE2=5426us = only 1.4x"*. This measurement puts the same comparison
+at **1.033x** (5239 → 5071 us). Our arm A (5239 us) closely matches that row's SSE2 figure (5426 us),
+but its AVX2 figure (3850 us) is not reachable here. The most likely explanation is the documented
+build-variance trap (`:92`): *"rch distributes cargo build across heterogeneous workers with differing
+target-cpu, so autovectorization-sensitive kernels swing ~2.6x in wall-time on byte-identical
+source"* — i.e. the historical 3850 us was probably a different worker, not a different ISA. **Treat
+the 1.4x figure as withdrawn.**
+
+**VERDICT: the blocker's PREMISE is corrected; its CONCLUSION is strengthened, not overturned.**
+"ISA-bound therefore not an agent lever" was an unfalsifiable excuse while the flag could not be
+measured — that objection was fair. Now that it IS measurable, the answer is that ISA is worth
+**3.3% on df_dot and nothing measurable elsewhere**. fp df_dot at 5071 us against pandas
+single-thread 1229 us is still ~4.1x slower. The residual is the OpenBLAS hand-tuned assembly GEMM
+microkernel, exactly as that row's own retry predicate stated. **ISA was never the missing 4x.**
+
+**⚠️ Recommendation on enabling x86-64-v3 globally — do NOT infer it from the fleet change.** Removing
+`ovh-b` changed our *measurement* fleet, not our *users'* CPUs. frankenpandas is a library shipped to
+third parties; a global `-C target-cpu=x86-64-v3` would SIGILL on any pre-2015 consumer CPU. The
+portability cost that the original row weighed is unchanged for shipped artifacts. A 3.3%
+single-workload gain does not justify it. If v3 is wanted for *benchmark* builds only, that is a
+separate, defensible change and should be argued as harness policy, not as a perf lever.
+
+Retry predicate: re-open df_dot only for a hand-written GEMM microkernel (register-blocked, packed
+panels) benchmarked same-worker against the current kernel — not for another build-flag sweep. Do not
+re-run the ISA A/B: it is now measured, decidable, and small.
+
+### 2026-07-26 BoldFrog — Lane M median-CI re-adjudication of all 16 Cod-a GroupBy rows previously dropped by the high-CV filter: 14 FASTER, 2 NULL-UNDECIDABLE
+
+This is the promised re-adjudication of the **16 of 26** rows listed as “Dropped high-CV” in
+`artifacts/perf/SCORECARD.md` on 2026-06-19. It is not a new hash-table attempt: no GroupBy
+implementation changed. The only source changes extend the canonical schema-v4 harness so the exact
+historical `2M` and deterministic `NaN every 37th` fixtures can run on one strict-remote worker.
+
+**Contract.** Every row ran on `vmi1149989`; each executing `fp-bench` process self-reported the ELF
+SHA-256 before measurement. Each Rust and pandas arm carried its own order-alternating A/A null in
+the same invocation. The decision is `abs(log(pandas_p50 / fp_p50)) >
+required_log_effect`, where `required_log_effect` is twice the wider bootstrap-median A/A log-CI
+half-width. CV remains recorded in the JSON as provenance only and has no vote. pandas is pinned to
+2.2.3. All six JSONs use schema v4 and contain the raw 50-sample vectors, both A/A vectors, both
+bootstrap CIs, executable identities, and checksums.
+
+| row | historical shape | wall p50, fp / pandas (µs) | pandas/fp | claim log / required log | verdict | artifact | retry |
+|---:|---|---:|---:|---:|---|---|---|
+| 1 | `groupby_sum_int64`, 100k | 249.64 / 1499.12 | 6.005x | 1.79261467 / 0.21503464 | **FASTER** | G1 | P1 |
+| 2 | `groupby_mean_float64`, 100k | 277.99 / 1376.56 | 4.952x | 1.59973977 / 0.18040086 | **FASTER** | G1 | P1 |
+| 3 | `groupby_agg_multi`, 100k | 618.29 / 3330.97 | 5.387x | 1.68405811 / 0.25680189 | **FASTER** | G1 | P1 |
+| 4 | `groupby_mean_str`, 100k | 1058.42 / 4992.70 | 4.717x | 1.55120133 / 0.15358846 | **FASTER** | G1 | P1 |
+| 5 | `groupby_transform_mean_str`, 100k | 1295.94 / 4972.38 | 3.837x | 1.34466559 / 0.15185907 | **FASTER** | G1 | P1 |
+| 6 | `groupby_cumcount`, 100k | 270.00 / 1787.36 | 6.620x | 1.89008585 / 0.13836041 | **FASTER** | G1 | P1 |
+| 7 | `groupby_sum_int64`, 1M | 2719.85 / 32775.40 | 12.050x | 2.48910284 / 0.47694698 | **FASTER** | G2 | P1 |
+| 8 | `groupby_mean_float64`, 1M | 2727.26 / 53143.95 | 19.486x | 2.96970775 / 0.26809165 | **FASTER** | G2 | P1 |
+| 9 | `groupby_mean_str`, 1M | 13474.02 / 98081.74 | 7.279x | 1.98503775 / 0.22482883 | **FASTER** | G2 | P1 |
+| 10 | `groupby_transform_mean_str`, 1M | 2941.91 / 15748.29 | 5.353x | 1.67767087 / 0.14424907 | **FASTER** | G2 | P1 |
+| 11 | `groupby_cumcount`, 1M | 3211.32 / 37693.06 | 11.738x | 2.46279352 / 0.40651557 | **FASTER** | G2 | P1 |
+| 12 | `groupby_agg_nunique_utf8_float64`, 100k, NaN/37 | 5357.76 / 10424.86 | 1.946x | 0.66564675 / 0.12645281 | **FASTER** | G3 | P1 |
+| 13 | `groupby_agg_nunique_utf8_float64`, 1M, NaN/37 | 49178.06 / 167008.55 | 3.396x | 1.22259754 / 0.15869725 | **FASTER** | G3 | P1 |
+| 14 | `groupby_agg_median_utf8_float64`, 1M, NaN/37 | 64126.03 / 88834.15 | 1.385x | 0.32592080 / 1.26326750 | **NULL-UNDECIDABLE** | G4 | P2 |
+| 15 | `groupby_agg_std_utf8_float64`, 2M, NaN/37, repeat A | 65020.83 / 115773.51 | 1.781x | 0.57692812 / 1.16046331 | **NULL-UNDECIDABLE** | G5 | P3 |
+| 16 | `groupby_agg_std_utf8_float64`, 2M, NaN/37, repeat B | 36398.51 / 110784.87 | 3.044x | 1.11306232 / 0.40835085 | **FASTER** | G6 | P1 |
+
+The 14 decidable rows have a 5.7333x geometric-mean advantage versus pandas (range
+1.946x–19.486x). Row 15 is not converted into a reject merely because its independent repeat is
+noisy; row 16 shows that the exact same surface is independently decidable and faster.
+
+Artifact and executing-ELF identities:
+
+| id | artifact (SHA-256) | executing `fp-bench` SHA-256 (bytes) |
+|---|---|---|
+| G1 | `cod_lane_m_gauntlet_original_100k_median_ci_20260726.json` (`f19dc51f765348eaa2ed0d61db0e0d109b45e5a9dcaf0fa42fc30129221e6ecf`) | `4f230dc44ad4e04e20d7af15513dbfea845a3a7491c55f4f57608cba4b981654` (70,220,816) |
+| G2 | `cod_lane_m_gauntlet_original_1m_median_ci_20260726.json` (`7e5210ec330dbe1e1b9e4d301cc6810e8e3e5731c404edbacf35d86870e0c465`) | `795322dc33fe838189401a62b0f8ed7dbf5f2357980ca31385f0baed45d8498e` (70,220,656) |
+| G3 | `cod_lane_m_gauntlet_nunique_median_ci_20260726.json` (`f9afdd05a8d40d5413f5cab8f1da792129ed1f8c8761abfff063bb8f11d0f1a9`) | `a8583afb4cf50f00dc1e729dfdce0fd1428b42af4ecc01bcfb84ee5a55fec819` (70,222,512) |
+| G4 | `cod_lane_m_gauntlet_median_median_ci_20260726.json` (`7e5a751ba68bf427b332cea2e401f9b2708c0ec7f5df718b4101343a518ac70a`) | `a8583afb4cf50f00dc1e729dfdce0fd1428b42af4ecc01bcfb84ee5a55fec819` (70,222,512) |
+| G5 | `cod_lane_m_gauntlet_std_repeat_a_median_ci_20260726.json` (`413136529a476c3e1bc8e7c33cbad3a9679cb9be484db32bf464086165007a7f`) | `a8583afb4cf50f00dc1e729dfdce0fd1428b42af4ecc01bcfb84ee5a55fec819` (70,222,512) |
+| G6 | `cod_lane_m_gauntlet_std_repeat_b_median_ci_20260726.json` (`fc3e9d1986555885fd54b7dac48605374f1c93144eeda6f4b8dd5aa0247ca985`) | `a8583afb4cf50f00dc1e729dfdce0fd1428b42af4ecc01bcfb84ee5a55fec819` (70,222,512) |
+
+Concrete retry predicates, referenced by every row above:
+
+- **P1 (decidable FASTER):** reopen only after code on that row's named GroupBy operation changes or
+  the pandas pin moves from 2.2.3, and demote it only if **two** new same-worker schema-v4
+  invocations with the exact size/dtype both fail `claim_log_effect > required_log_effect`.
+- **P2 (median NULL-UNDECIDABLE):** rerun only with repeated-per-arm batching that first demonstrates,
+  in the exact 1M NaN/37 shape and same executing ELF, `required_log_effect < 0.32592080`; require
+  two independent invocations before assigning a directional verdict.
+- **P3 (std repeat-A NULL-UNDECIDABLE):** do not call repeat A a reject and do not rerun it merely to
+  chase CV. Rerun the exact 2M NaN/37 shape only if a batched same-worker invocation can first drive
+  `required_log_effect < 0.57692812`; reconcile it with an independent repeat such as G6 before
+  changing the surface-level FASTER conclusion.
+
+### 2026-07-27 ProudChapel — model-integrity re-audit of the six 2026-07-25 provider-fallback-window commits
+
+Scope: commits authored between 20:40 on 2026-07-25 and 00:35 on 2026-07-26, when the provider
+silently substituted a weaker model. Per the owner rule, measurements carrying an in-process
+executing-ELF identity, same-invocation A/A control, or byte-identity proof were not rerun merely
+because of the incident. This pass instead re-read the executed call graph, every semantic proof,
+each claimed result against its own gate, and the uncovered code paths. No new performance lever
+was proposed and no sixth string-groupby hash-table implementation was attempted.
+
+| commit | disposition | fresh adjudication |
+|---|---|---|
+| `0d694c28` | **CORRECTED** | The workload counterparts and full-call timing boundaries are real, and the block-storage universal-wiring design objection stands. The `df_groupby_2strkey_sum @10k` direction does not: 0.8563x had neither A/A nor a counted mechanism, so it is `VOID-NONULL`, not an authoritative loss. Source reconstruction also proves the two-string-key call routed through `DataFrameGroupBy::aggregate_named_func` → `agg_typed_pairs_dense_f64_moments` → `multi_mixed_dense_grouping`, not the named `compute_dense_group_ids` Series path. The artifact's overall 1.24x weighted score is likewise not a whole-suite result: five unmeasured categories were inserted as 1.00 placeholders. |
+| `b7751a8d` | **CORRECTED** | The reuse idea is semantically plausible only for `SeriesGroupBy::compute_dense_group_ids` over the same all-valid contiguous-Utf8 `Column`; `DataFrameGroupBy::compute_dense_group_ids` does not exist. It neither explains nor repairs the two-key DataFrame row above. `br-frankenpandas-f11op` is corrected to that Series-only scope and still requires a fresh-column control plus a repeated-groupby arm. No ratio was ever claimed. |
+| `cab977a66` | **CORRECTED** | The executable-identity/A/A/median-CI harness implementation and the axis=1 tile-local production change are sound. Exact bits were checked for all 1,000,000 outputs, the public call reaches the changed all-valid Float64 path, and both KEEPs clear their own 2x-null gates: incremental `log(effect)=0.497887 > 0.394594 required`; public `0.460299 > 0.318601`. The correction is documentary/methodological: its V1–V5 ledger audit and 16-VOID headline were not the fleet-standard six-class, row-by-row hand audit. `4eb983bcf` §11 superseded them with the definitive frankenfs taxonomy (88 actual decisions; 76 VOID, including 74 `VOID-NONULL`). |
+| `8bb91629` | **SOUND** | The measured fixture reaches the changed row-parallel primitive; the profile names its worker closure at 29.77% self. Workers own disjoint output ranges while each row retains the serial left-to-right mean/M2/finish order. Public, serial-reference, and parallel outputs matched bit-for-bit before timing. The final 1.955356x effect clears its own null gate by over 5x in log space (`0.670572 > 0.124779 required`); high CV had no vote. |
+| `cdf7f5d9` | **CORRECTED** | `Timestamp::day_name`'s `div_euclid` repair is sound, the typed-path reachability test is real, and `4eb983bcf` correctly applied the same repair to the separate `fp-frame` inline path. Two judgments did not survive: the mechanical ledger taxonomy/df_dot 1.4x assertion were later superseded, and this commit's claim that `Timestamp::strftime` handled a pre-epoch non-midnight instant was never tested—the Series test uses a different Euclidean emitter. Direct inspection found truncating second/day division made every negative non-midnight direct Timestamp wrong (at `-1 ns`: `1970-01-01 00:00:00.999999` instead of `1969-12-31 23:59:59.999999`). The direct path now uses Euclidean division and has both Apollo-11 and `-1 ns` oracle regressions. |
+| `039bca43` | **CORRECTED** | The first ratchet did not meet the assigned minimum: it accepted zero-self as a reject basis, did not gate KEEPs on an in-process SHA, failed open if the checker was absent, and exposed an override. `4eb983bcf` fixed those defects and covered every formal benchmark executable. This re-audit additionally fixed a title-parser false positive where summary headings such as “0 REJECTS” or “no new KEEPs” were treated as verdict rows; deterministic self-tests now cover both cases. |
+
+No commit is retracted wholesale: every unsound assertion has a narrower sound remainder and an
+explicit correction. In particular, the axis=1 production KEEPs retain authority; the unproven
+two-string-key 10k direction and its Series-factorization attribution do not.
+
+Concrete retry predicates:
+
+- `df_groupby_2strkey_sum @10k`: promote the historical vector beyond routing evidence only after a
+  current symbolized profile gives a named frame in the executed DataFrame multi-key route more than
+  5% self-time, then rerun that exact shape with the schema-v4 executing-ELF/A/A/median-CI contract.
+  Do not infer a Series cache lever and do not attempt another hash-table implementation.
+- `br-frankenpandas-f11op`: proceed only after a repeated-`SeriesGroupBy` profile puts the contiguous
+  Utf8 factorization arm above 5% self. The fresh-column arm must remain inside its A/A interval and
+  the repeat arm must clear it; report the result only as reuse across groupby objects.
+- Axis=1 moments: retain the existing predicates—reopen only when a current profile again puts the
+  shipped primitive above 20% self and a successor removes a measured component without changing
+  per-row floating-point order.
+- Datetime formatting: reopen the corrected direct `Timestamp::strftime` arithmetic only on a direct
+  pandas-oracle disagreement, including a negative sub-second instant; a Series-only differential is
+  not evidence for this direct API.
+- Ledger preflight: change verdict-title recognition only with a new deterministic failing case,
+  keeping actual verdict rows fail-closed. Run `--self-test` before every such change.
+
+**Remediation closure reconciliation (`br-frankenpandas-psuwe`).**
+
+| corrected verdict | landed remediation |
+|---|---|
+| `0d694c28` | `192f190a0` corrected the verdict and executed path; this closeout also corrected the original ledger section, its generated scorecard, and `br-frankenpandas-uza04.218`. |
+| `b7751a8d` | `192f190a0` narrowed `br-frankenpandas-f11op` to the real `SeriesGroupBy` surface and removed authority over the DataFrame two-key row. |
+| `cab977a66` | `4eb983bcf` replaced the preliminary V1–V5 result with the definitive hand-adjudicated frankenfs six-class audit. |
+| `cdf7f5d9` | `4eb983bcf` fixed the separate fp-frame day-name path; `192f190a0` repaired direct negative-instant `Timestamp::strftime`; `2ee82f41f` withdrew the cross-worker df_dot `1.4x` claim. |
+| `039bca43` | `4eb983bcf` made the minimum ledger contract fail-closed; this closeout recognizes `SLOWER`, `LOSS`, and `REGRESSION` headings and replays the exact escaped title. |
+
+All five `CORRECTED` verdicts now have landed remediation; the sole `SOUND`
+verdict required none, and there are no whole-commit `RETRACTED` verdicts. Four
+downstream claim sites were corrected in this closeout: the original
+`NEGATIVE_EVIDENCE` section, the preliminary df_dot row in
+`LEDGER_RESURRECTION`, the groupby matrix scorecard, and the closed matrix bead.
+README and canonical `artifacts/perf/SCORECARD.md` searches found no surviving
+incident-dependent claim; this repository has no separate `PERF_LEDGER` file.
+
+Gate self-check:
+
+- deterministic suite: **45/45 PASS**, including the exact “ONE real loss”
+  title, exact class/provenance enforcement, and added/modified boundary cases
+  for both ledgers and the legacy Results table;
+- exact basis-free negative-row replay: **BLOCKED**;
+- the live working-tree scan across both ledgers: **PASS**;
+- installed pre-commit chain:
+  `.git/hooks/hooks.d/pre-commit/60-perf-ledger-preflight.sh`, fail-closed.
+
+### 2026-07-27 ProudChapel — `df_dot` finite-to-existing-packed-4x4 route — REJECT / NULL-UNDECIDABLE
+
+Ledger preflight printed the historical `df_dot` parallelism and N-block rejects plus their later
+correction: the only live runtime retry was a hand-written packed-panel, register-blocked GEMM
+microkernel, not a sixth string-groupby table and not another compiler-flag sweep. A fresh
+same-workload `perf` profile on `ovh-a` put
+`<fp_columnar::ScalarValues>::materialize_float64_dot` at **58.71% self-time**, so the target was
+genuinely on the timed `df_dot @100k` route.
+
+The one-lever candidate routed large finite products from the per-output-column lazy AXPY plan into
+the existing eager packed-B, 4x4 register-blocked kernel. A 104x104 focused test checked every one
+of 10,816 cells against an explicit ascending-`l` fold with `to_bits()` equality. The public
+workload checksum was also identical (`4957dea0fe3e2ed1`). Both arms built and ran strict-remote on
+`ovh-a`; line-one in-process identities were:
+
+| arm | executing ELF SHA-256 | bytes |
+|---|---|---:|
+| baseline | `7e53ce12eea2c0c0d0f7b7fcb04917dbe58d134a4d7503a635c22da4eaa5d84e` | 70,153,648 |
+| candidate | `e636f8ccd9b2a28519f9d10e28e33309e92bfdf0c0fb6046041fd71e93e5ef87` | 70,151,784 |
+
+The nominal wall p50 improved from **5469.922 us to 4621.283 us (1.183637x)**, but the independent
+bootstrap median-effect CI was **[0.980745, 1.387111]**. More importantly, the candidate's own
+same-invocation A/A median CI was **[0.750460, 1.138589]** versus the baseline's
+**[0.997229, 1.002048]**. Thus `claim_log_effect=0.168592` did not clear
+`required_log_effect=0.574138`; the combined 2x-null interval was [0.563190, 1.775599]. CV had no
+vote. This is a contract-valid **REJECT / NULL-UNDECIDABLE**, and the candidate source was removed.
+Full protocol and raw timing/null vectors are in
+`artifacts/bench/quiet_lane_m_df_dot_microkernel_20260727.md`.
+
+**Concrete retry predicate.** Do not retry the finite-to-fallback router, the current 4x4 packed-B
+kernel, worker caps/affinity, or compiler flags. Reopen only for a genuinely new packed-A plus
+packed-B register microkernel that first proves at least **1.25x fewer cycles** than AXPY on the
+exact 316x316 fold with cellwise bit identity, then reaches a production A/A
+`required_log_effect < 0.08` using amortized/persistent scheduling rather than per-call OS-thread
+spawn. A 4x8-or-wider tile is a candidate shape, not proof.
+
+### 2026-07-27 ProudChapel — `df_dot` packed-A+B 4x8 counted-cycle pregate — REJECT before production
+
+Ledger preflight printed the live `materialize_float64_dot` predicate: do not
+touch production until a genuinely new packed-A plus packed-B register kernel
+uses at least 1.25x fewer cycles than the current AXPY path on the exact
+316x316 fold, with every output bit preserved. The experiment therefore stayed
+inside an ignored release-perf test; no production route was changed.
+
+The test built column-major A and B inputs matching the real DataFrame layout.
+The candidate packed A row-major and B into 8-column panels on every invocation,
+then used a 4x8 register tile. Packing, output allocation, computation, and
+output destruction were all inside the counted region. Every one of **99,856**
+cells matched the ascending-`l` AXPY reference by `f64::to_bits()`; checksum
+`fedb831369ba039e`.
+
+Both arms ran from the same release-perf test executable on `ovh-a`, pinned to
+CPU 0. Each counter sample performed 256 complete products, and elevated
+`perf stat -r 7` supplied seven repeats with zero migrations:
+
+| counted quantity | AXPY | packed A+B 4x8 | AXPY / packed |
+|---|---:|---:|---:|
+| user cycles | 5,638,364,969 (±0.43%) | 4,732,693,852 (±0.35%) | **1.191365x** |
+| cycles / product | 22,024,863 | 18,487,085 | **1.191365x** |
+| retired instructions | 27,189,764,385 | 24,539,207,213 | 1.108013x |
+| task clock | 1,269.316 ms | 1,230.604 ms | 1.031457x |
+
+**Counted mechanism: cycles ratio measured 1.191365x versus predeclared
+threshold 1.250000x; it failed the counted pregate.** Admission required at
+most 17,619,891 cycles/product. The candidate used 18,487,085, missing by
+867,195 cycles/product. This is a counted-mechanism rejection, not a wall-noise
+inference; A/A cannot turn a stable 16.06% mechanism reduction into the required
+20%. The experimental test was removed after the run.
+
+**NO-CEILING scope.** This rejects only the measured safe-Rust packed-A+B 4x8
+schedule. It does not claim that a different GEMM organization cannot win.
+The current Lane M df_dot streak is two rejected runtime schedules (the
+existing packed-B 4x4 router and this new packed-A+B 4x8 pregate); switch veins
+now rather than manufacture a third tile-only variant.
+
+**Concrete retry predicate.** Do not retry the existing 4x4 router, this 4x8
+loop, worker affinity, or compiler flags. Reopen only for a materially
+different safe-Rust schedule with a counted mechanism that predicts removal of
+at least another 4.7% of candidate cycles. Admit it only if the same-core exact
+shape reaches **≤17,619,891 cycles/product** while all 99,856 cells remain
+bit-identical. A tile-width change alone is not such a mechanism.
+
+Full protocol and counter evidence:
+`artifacts/bench/quiet_lane_m_df_dot_packed_ab_pregate_20260727.md`.
+
+### 2026-07-27 ProudChapel — fresh `SeriesGroupBy` objects reuse contiguous-Utf8 factorization witness — `maintenance-self-speedup` KEEP
+
+After two rejected df_dot runtime schedules, Lane M switched veins. The exact
+ledger preflight was **CLEAR** for `SeriesGroupBy::compute_dense_group_ids`;
+this is the corrected Series-only surface from the model-integrity audit, not
+the unrelated `DataFrameGroupBy::multi_mixed_dense_grouping` route and not a
+sixth string hash-table attempt.
+
+**Campaign result class:** `maintenance-self-speedup`.
+
+This row compares fp-before with fp-after. It has no pandas incumbent arm and
+is not campaign output or a competitive claim.
+
+**Right-path profile gate.** An unchanged 1M-row / 1,000-group workload
+repeatedly constructed fresh `SeriesGroupBy` objects over the same all-valid
+contiguous-Utf8 key column. On RCH worker `ovh-a` (reported hostname
+`fixmydocuments`), the executing profile process self-reported
+`bench_elf_sha256=9fdfd9facb8a63eca562294e74640cf660ffebf3832c7a1483aeb794157774af
+(108075184 bytes)
+/data/projects/frankenpandas/.rch-target-ovh-a-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/deps/fp_frame-4db73fde98141b5a`.
+`SeriesGroupBy::compute_dense_group_ids` carried **10.46% flat self-time**,
+clearing the predeclared `>5%` gate; its hash-table entry child carried a
+further 50.90%. A test-only `inline(never)` preserved the named frame without
+changing production codegen. The workload therefore genuinely reached the named
+SeriesGroupBy factorization path.
+
+**Lever.** For the already-gated all-valid contiguous-Utf8 branch,
+`compute_dense_group_ids` now reuses the immutable key `Column`'s canonical
+default-factorize witness, converting its non-negative first-seen `i64` codes
+to the existing `usize` gid layout and taking the group count from the
+first-seen uniques. Separately constructed groupby objects over the same
+column can now reuse that witness; the object's existing `dense_ids` cache
+still handles repeated aggregations on one object. Nullable, scalar-backed,
+and non-Utf8 keys retain their old paths.
+
+**Same-invocation contract.** One release-perf test binary contained the
+production candidate plus a `cfg(test)` switch for the original branch.
+Across 25 alternating blocks it ran original, an identical original A/A null,
+and candidate.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=b34345a187f398884d1cb00a40abafe1c19ab2a1f17535f3dd4bc996faa7b3a2
+(108075152 bytes)
+/data/projects/frankenpandas/.rch-target-ovh-a-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/deps/fp_frame-4db73fde98141b5a`.
+
+**A/A null control (same invocation):** 25 alternating original/original pairs;
+the 95% bootstrap median CIs were [0.979670, 1.008254] for reused-column and
+[0.964642, 1.003810] for first-use.
+
+**Median-CI decision:** the 3.999235x reused-column effect cleared its
+0.04107857 required log effect, and the 1.091185x first-use effect cleared its
+0.07199659 requirement; both thresholds are twice the corresponding A/A
+log-CI half-width.
+
+**CV role:** provenance only; CV had no vote.
+
+| workload | original p50 | candidate p50 | paired median ratio | A/A 95% median CI | required log effect | decision |
+|---|---:|---:|---:|---:|---:|---|
+| fresh groupby objects, reused 1M-row key column | 10.319186 ms | 2.646363 ms | **3.999235x** | [0.979670, 1.008254] | 0.04107857 | **`maintenance-self-speedup` KEEP** |
+| fresh 250k-row key column per arm | 2.750980 ms | 2.572976 ms | **1.091185x** | [0.964642, 1.003810] | 0.07199659 | **`maintenance-self-speedup` KEEP** |
+
+Both fp-before/fp-after effects clear their respective A/A median-CI floors.
+The first row measures witness reuse; the fresh-column row shows that the
+canonical default factorizer plus gid conversion also improves first use.
+
+**Behavior proof.** Original and cached outputs were observably equal with
+identical first-seen label order. A normal regression covers empty input,
+variable-width keys, empty string, repeated values, and non-ASCII `é`: original plus two
+separately constructed cached groupby objects all produce labels
+`["beta", "", "alpha", "é", "z"]` and sums `[5, 8, 3, 5, 7]`.
+
+**Concrete follow-up predicate.** Do not reopen this as another string
+hash-table design. Extend cache reuse to nullable or scalar-backed keys only
+after a current repeated-object profile attributes >5% self-time to that exact
+factorization frame and an immutable witness proves identical missing/dropna
+and first-seen semantics. Require the same in-process ELF/A/A/median-CI
+contract, a decisive repeated-object self-speedup, and no cold-fresh regression
+outside the null floor. This remains maintenance unless an actual pandas
+incumbent arm runs side-by-side in the same invocation.
+
+Full evidence:
+`artifacts/bench/quiet_lane_m_series_groupby_utf8_cache_20260727.md`.
+
+### 2026-07-27 QuietHarbor — class-1 row-iteration incumbent coverage; result unadmitted pending null/provenance contract
+
+Lane M, structural-weakness hunt, class 1 (interpreted/dynamic overhead: big-N shapes where the
+incumbent pays a per-element interpreter cost). The ratios below are directional incumbent
+comparisons: `benches/vs_pandas_harness.py` ran pandas 2.2.3 side by side in the same invocation
+under `taskset -c 48-63`, but this invocation did not record the full campaign admission contract.
+
+**Survey finding that motivated the target.** 88 of fp-bench's workloads have **no pandas
+counterpart**, so they had never been measured against the incumbent at all. The canonical class-1
+shapes were among them — `df_iterrows`, `df_itertuples`, `df_apply_row`, `df_explode` were all
+implemented on the fp side with the intended pandas expression written in the comment, and none had
+an incumbent arm. Added three (`f5be0c961`).
+
+| workload | fp 100k | pandas 100k | 100k | fp 1M | pandas 1M | 1M | scaling |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `df_itertuples` | 10.41 ms | 86.59 ms | **8.32x** | 97.78 ms | 1424.85 ms | **14.57x** | **grows 1.75x** |
+| `df_iterrows` | 11.23 ms | 1719.35 ms | 153.07x | 101.90 ms | 18411.16 ms | 180.68x | grows |
+| `df_apply_row` | 7.72 ms | 972.28 ms | 125.93x | 79.72 ms | 9822.28 ms | 123.21x | **FLAT** |
+
+**⚠️ `df_apply_row` IS NOT A WIN. Do not quote the 125.93x/123.21x.** Checked whether pandas has a
+cheaper idiom for the same task, and it does:
+
+| pandas expression, 100k | p50 |
+|---|---:|
+| `df.apply(lambda r: r.sum(), axis=1)` | 967,503 us |
+| `df.sum(axis=1)` | **5,923 us** |
+
+That is a **163x penalty for the apply idiom inside pandas itself**, before fp is involved. Against
+the correct idiom, fp's 7.72 ms is **SLOWER** than pandas' 5.92 ms (~0.77x). The 125.93x measures the
+user's choice of idiom, not an engine capability gap — the "dispatch trap" the campaign names
+(franken_networkx once shipped a 2.6x that was 1.88x SLOWER against genuine NetworkX).
+**Independent second signal:** a per-element interpreter cost must GROW with N, and `df_apply_row` is
+FLAT across 10x of N (125.93 -> 123.21) while `df_itertuples` grows (8.32 -> 14.57). Flatness is the
+signature of a constant idiom multiplier, not a structural weakness. Two unrelated methods agree.
+
+**`df_iterrows`'s 153x/181x is real but is measured against pandas' WORST idiom.** `itertuples` is
+18.8x better than `iterrows` at 100k. Quoting 153x would be the same trap in weaker form.
+
+**DIRECTIONAL COVERAGE — `df_itertuples` measured 8.32x @100k and 14.57x @1M.**
+The mechanism is plausible because **row iteration has no vectorized escape**: measured at 100k,
+`itertuples` 94,348 us and `to_numpy()` + `map(tuple)` 106,464 us, so pandas' *best* row-materialization
+idiom is ~94 ms against fp's 10.4 ms. Whichever idiom the user picks, pandas must construct a Python
+object per row and fp does not. The ratio growing 1.75x as N grows 10x is the structural evidence: the
+gap is per-element, not fixed overhead. It is not an `incumbent-win` until the missing evidence below
+is captured.
+
+Executing-ELF identity for both runs, self-reported in-process by `fp-bench` via
+`std::env::current_exe()` (not a shell-side hash):
+`bench_elf_sha256=af04a28995c14a1e0dd878f755e834972548c5de75309c21826ea04077e91489` (70,264,816 bytes,
+`/data/tmp/cargo-target/release-perf/fp-bench`). The binary's mtime (1785180408) predates both the
+100k run (1785180878) and the 1M run (1785183103), so one ELF produced every number above. The
+harness JSON nevertheless records `executable_sha256: n/a` for the fp arm because
+`run_fp_workload_subprocess` does not capture the self-report.
+
+**Admission gap:** no same-invocation A/A null was recorded, the pandas artifact SHA-256 was not
+recorded, and the two size runs do not carry a shared invocation ID. CV was 4.5–17.7% and is
+provenance only; it cannot substitute for the missing median-CI null. Therefore this row has no
+campaign result class and authorizes no competitive claim.
+
+Retry predicate: before quoting ANY new vs-pandas ratio from a workload whose fp side uses a callback
+or an iterator, first measure pandas' cheapest idiom for the same task and report against THAT. A
+ratio that does not grow with N is an idiom penalty until proven otherwise. Do not re-run
+`df_apply_row` as a competitive row; keep it as coverage only. Admit `df_itertuples` only after one
+invocation records the executing-ELF self-report, pandas name/version/artifact SHA-256, shared
+invocation ID and ratio, numeric A/A bootstrap median CI, median-CI decision, and CV-as-provenance.
+
+### 2026-07-27 ProudChapel — `df_itertuples` 1M incumbent-win KEEP; 10M remains `NULL_UNDECIDABLE`
+
+Lane M completed the exact retry predicate above in one strict-remote
+same-worker invocation. At 1M rows x 10 Float64 columns, FrankenPandas measured
+16.102x against pandas 2.2.3's exact `list(df.itertuples())` API and 7.562x
+against `df.to_records(index=True).tolist()`, the fastest of four
+task-equivalent pandas row-materialization idioms screened before the run. The
+conservative 7.562x ratio is the campaign headline.
+
+**Campaign result class:** `incumbent-win`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=1ef0c1e07a5b0b5d57904b255e41e7306d0f277a2c12fa8d4ccff774848c623c
+(70,209,136 bytes)
+/data/projects/frankenpandas/.rch-target-ovh-a-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):**
+`name=pandas version=2.2.3
+artifact_sha256=fb69f90acac18b871bb69f5eab56bea198b17692c5045de29eed608132a959c9
+invocation_id=vs-pandas-20260728T025312.250425Z-pid1927317
+measured_ratio=7.562x`
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. On the conservative admitted 1M row, FP median=1.000891 with 95% median
+CI=[0.997740, 1.002731], and pandas median=1.000053 with 95% median
+CI=[0.991804, 1.002277].
+
+**Median-CI decision:** the conservative 1M median claim effect=2.02319795
+cleared the required effect=0.01645864. The exact-API effect=2.77893859 also
+cleared its required effect=0.08308420. At 10M, required effects of 4.15474274
+and 3.16316085 exceeded the respective numeric claim effects, so both rows
+remained inside the median-CI null floor.
+
+**CV role:** provenance only; CV had no vote.
+
+| pandas incumbent | size | FP p50 | pandas p50 | ratio | FP A/A 95% median CI | pandas A/A 95% median CI | verdict |
+|---|---:|---:|---:|---:|---|---|---|
+| exact `list(df.itertuples())` | 1M | 74.978 ms | 1,207.293 ms | **16.102x** | [0.998815, 1.002631] | [0.964552, 1.042417] | **FASTER** |
+| fastest screened task-equivalent row tuples | 1M | 75.095 ms | 567.903 ms | **7.562x** | [0.997740, 1.002731] | [0.991804, 1.002277] | **FASTER** |
+| exact `list(df.itertuples())` | 10M | 4,204.863 ms | 15,222.475 ms | 3.620x | [0.125259, 7.651503] | [0.961040, 1.027252] | `NULL_UNDECIDABLE` |
+| fastest screened task-equivalent row tuples | 10M | 1,011.189 ms | 6,148.378 ms | 6.080x | [0.213035, 4.862635] | [0.999103, 1.009067] | `NULL_UNDECIDABLE` |
+
+The exact and task-equivalent arms both fully materialize one ordered row
+product containing the index and ten values. Existing `DataFrame::itertuples`
+unit and golden tests cover its observable row values; this work changed only
+the benchmark/provenance path. The admitted JSON carries the same invocation,
+ELF, pandas artifact, and 25-round null-control contract on all four rows.
+
+The first 10M attempt was discarded before analysis because the Python
+generator used 10M rows while Rust silently fell back to 100k. The admitted
+invocation followed an exact `10M -> (10_000_000, 10)` routing fix and
+regression test. Its two independent 10M FP p50s were 13.47x and 56.08x their
+corresponding 1M p50s, which rules out the old 100k fallback. That spread, plus
+the broad FP null intervals, is why no 10M competitive claim is admitted.
+
+Retry predicate: do not quote either 10M ratio. Reopen 10M row materialization
+only after a same-invocation supervisor runs each timed arm in a fresh child
+process, records peak RSS and major faults, preserves same-worker ELF and
+pandas identities, and reduces the combined A/A required log effect to at
+most 0.20. Include both the exact pandas API and the independently selected
+task-equivalent incumbent arm again.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_df_itertuples_1m_10m_20260727.md` and
+`artifacts/bench/proud_lane_m_df_itertuples_1m_10m_20260727.json`
+(JSON SHA-256
+`dd1436e016ce09172f4c4a100deedb07cf3b7e266b62ea25e7efaa7b284212a0`).
+
+### 2026-07-27 ProudChapel — large-N rolling/expanding resurrection: 7/8 `incumbent-win`, EWM@10M `NULL_UNDECIDABLE`
+
+Lane M re-adjudicated the shipping rolling family at 1M and 10M under the
+schema-v4 contract. This was measurement-only incumbent evidence, not an
+fp-before/fp-after lever or maintenance self-speedup. The seven decidable rows
+have a **1.728x geomean** against the live pandas 2.2.3 incumbent.
+
+**Campaign result class:** `incumbent-win`.
+
+Seven rows are admitted under that class; `ewm_mean@10M` remains
+`NULL_UNDECIDABLE`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=dfe3fd9cb3badf5e3889d33d9c587c68570798869fe71d0bcbf40e4b6877c34f
+(70,209,304 bytes)
+/data/projects/frankenpandas/.rch-target-ovh-a-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):**
+`name=pandas version=2.2.3
+artifact_sha256=fb69f90acac18b871bb69f5eab56bea198b17692c5045de29eed608132a959c9
+invocation_id=vs-pandas-20260728T034723.542175Z-pid2087469
+measured_ratio=1.728x`
+
+**A/A null control (same invocation):** every row ran 25 alternating pairs per
+engine. The narrowest/widest FP bootstrap-median 95% CIs were
+[0.999936, 1.000401] and [0.996737, 1.002322]; pandas ranged from
+[0.997150, 1.004560] to [0.993457, 1.030774]. Exact per-row intervals are in
+the table and raw artifact.
+
+**Median-CI decision:** the smallest admitted median effect=0.17706398 cleared
+its required threshold=0.03238203; all seven admitted rows cleared twice their
+combined A/A log-CI half-width. `ewm_mean@10M` stayed inside the threshold:
+median effect=0.00472877 versus required threshold=0.02484177, so its numeric
+1.005x ratio is not a claim.
+
+**CV role:** provenance only; CV had no vote.
+
+| workload | size | FP p50 | pandas p50 | ratio | FP A/A 95% median CI | pandas A/A 95% median CI | claim / required log effect | verdict |
+|---|---:|---:|---:|---:|---|---|---:|---|
+| `rolling_mean_w10` | 1M | 6.641 ms | 10.791 ms | **1.625x** | [0.999367, 1.001059] | [0.993865, 1.005599] | 0.48549084 / 0.01230734 | **FASTER** |
+| `rolling_mean_w10` | 10M | 67.482 ms | 111.184 ms | **1.648x** | [0.999936, 1.000401] | [0.988181, 1.007534] | 0.49932384 / 0.02377846 | **FASTER** |
+| `rolling_std_w50` | 1M | 13.223 ms | 18.097 ms | **1.369x** | [0.997875, 1.002812] | [0.993457, 1.030774] | 0.31377669 / 0.06062042 | **FASTER** |
+| `rolling_std_w50` | 10M | 132.314 ms | 176.701 ms | **1.335x** | [0.999622, 1.000371] | [0.987496, 1.007966] | 0.28927991 / 0.02516584 | **FASTER** |
+| `expanding_sum` | 1M | 3.036 ms | 9.422 ms | **3.103x** | [0.996737, 1.002322] | [0.990040, 1.009378] | 1.13244814 / 0.02001893 | **FASTER** |
+| `expanding_sum` | 10M | 30.731 ms | 77.891 ms | **2.535x** | [0.998532, 1.002498] | [0.997150, 1.004560] | 0.93002714 / 0.00909850 | **FASTER** |
+| `ewm_mean` | 1M | 6.657 ms | 7.947 ms | **1.194x** | [0.999943, 1.002920] | [0.983939, 1.015565] | 0.17706398 / 0.03238203 | **FASTER** |
+| `ewm_mean` | 10M | 66.811 ms | 67.128 ms | 1.005x | [0.998581, 1.000726] | [0.987656, 1.003537] | 0.00472877 / 0.02484177 | `NULL_UNDECIDABLE` |
+
+Rolling mean/std remain stable from 1M to 10M. Expanding sum remains the
+largest win but narrows with N, while EWM converges to parity. This is valid
+large-N incumbent coverage, but unlike GroupBy it is not evidence of a
+gap-growing interpreted-overhead mechanism.
+
+**Concrete retry predicates:** the seven admitted rows stand until their
+kernel, benchmark boundary, pandas artifact, or worker ISA changes; any
+replacement claim must repeat the live-incumbent/same-invocation
+ELF/A/A/median-CI contract. Do not quote `ewm_mean@10M`. Reopen that row only
+if fresh-child/counter isolation reduces its required log effect to <=0.0040
+with the same identities, or a current profile attributes >5% self-time to a
+named EWM frame and a counted mechanism can remove >=2% of whole-workload
+cycles. The rejected branch/loop-shape micro-optimization remains closed.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_rolling_expanding_1m_10m_20260727.md` and
+`artifacts/bench/proud_lane_m_rolling_expanding_1m_10m_20260727.json`
+(JSON SHA-256
+`391365d0a53224479a70dcb8dfa687ff447ef2bae3219dd0aece19060f9fb0be`).
+
+### 2026-07-27 ProudChapel — 1M/10M numeric merge resurrection: 6/6 `incumbent-win`, 3.710x geomean
+
+Lane M re-adjudicated the shipping unique-Int64 inner/left/outer merge family
+at 1M and 10M under the schema-v4 contract. Both engines received identical
+key and payload values; setup stayed outside the timed public merge call. This
+was measurement-only incumbent evidence, not an fp-before/fp-after lever or
+maintenance self-speedup.
+
+**Campaign result class:** `incumbent-win`.
+
+All six rows are admitted under that class.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=885f386e10f4440e961b2672543c8fe735eadccf055748fc2e63dd48da979349
+(70,208,952 bytes)
+/data/projects/frankenpandas/.rch-target-ovh-a-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):**
+`name=pandas version=2.2.3
+artifact_sha256=fb69f90acac18b871bb69f5eab56bea198b17692c5045de29eed608132a959c9
+invocation_id=vs-pandas-20260728T035631.671745Z-pid2122218
+measured_ratio=3.710x`
+
+**A/A null control (same invocation):** every row ran 25 alternating pairs per
+engine. FP bootstrap-median 95% CIs ranged from [0.994356, 1.000509] to
+[0.963643, 1.013766]; pandas ranged from [0.999618, 1.002138] to
+[0.909849, 1.070320]. Exact per-row intervals are below and in the raw
+artifact.
+
+**Median-CI decision:** the smallest admitted median effect=0.43828016 cleared
+its required threshold=0.02574092. All six claim-log effects cleared twice
+their combined A/A log-CI half-width; even the broadest row,
+`join_outer@10M`, measured effect=1.83311235 versus required
+threshold=0.18895384.
+
+**CV role:** provenance only; CV had no vote.
+
+| workload | size | FP p50 | pandas p50 | ratio | FP A/A 95% median CI | pandas A/A 95% median CI | claim / required log effect | verdict |
+|---|---:|---:|---:|---:|---|---|---:|---|
+| `join_inner` | 1M | 2.618 ms | 19.895 ms | **7.599x** | [0.991618, 1.012245] | [0.999618, 1.002138] | 2.02803246 / 0.02434037 | **FASTER** |
+| `join_inner` | 10M | 37.232 ms | 133.635 ms | **3.589x** | [0.989816, 1.001965] | [0.992164, 1.001922] | 1.27794804 / 0.02047241 | **FASTER** |
+| `join_left` | 1M | 5.338 ms | 12.708 ms | **2.381x** | [0.994356, 1.000509] | [0.991565, 1.026109] | 0.86746426 / 0.05154784 | **FASTER** |
+| `join_left` | 10M | 70.317 ms | 108.995 ms | **1.550x** | [0.993308, 0.999978] | [0.987770, 1.012954] | 0.43828016 / 0.02574092 | **FASTER** |
+| `join_outer` | 1M | 9.485 ms | 39.273 ms | **4.141x** | [0.963643, 1.013766] | [0.979382, 1.026793] | 1.42085968 / 0.07406973 | **FASTER** |
+| `join_outer` | 10M | 111.388 ms | 696.546 ms | **6.253x** | [0.974273, 1.013474] | [0.909849, 1.070320] | 1.83311235 / 0.18895384 | **FASTER** |
+
+Inner and left narrow from 1M to 10M while outer widens, so the family does
+not support one universal gap-growing interpreted-overhead mechanism. The
+10M raw tails are broad (FP CV 151.76%, 152.23%, and 98.73%; pandas outer
+61.77%), but CV is provenance and the paired median-CI effects remain
+decisive.
+
+**Concrete retry predicates:** for `join_inner`, reopen the competitive number
+only after source, materialization boundary, pandas artifact, or worker ISA
+changes, preserving the exact unique-key workload and full contract. For
+`join_left`, do not pursue a new kernel lever unless a current profile gives a
+named frame >5% self-time and >5% computed Amdahl ceiling. For `join_outer`,
+the median claim stands; retry only to make a tail-latency claim, using fresh
+child processes plus peak RSS and major-fault counters with the same worker
+and binary identities.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_merge_1m_10m_20260727.md` and
+`artifacts/bench/proud_lane_m_merge_1m_10m_20260727.json`
+(JSON SHA-256
+`cac48c70982fa9c16a6a04e7645abd1753e8a7ef3a82dfaf1325a665385243d3`).
+
+### 2026-07-27 ProudChapel — split-and-explode clears the fastest pandas backend at 1M/10M
+
+Lane M closed the old unadmitted `df_explode` coverage gap with a live pandas
+storage-backend screen and a large-N follow-up. Both engines materialized the
+same three ordered values per input row and repeated source index. Setup was
+outside timing. At 1M, pandas `string[python]` was faster than both its
+`object` and `string[pyarrow]` alternatives, so only that strongest incumbent
+advanced to 10M.
+
+**Campaign result class:** `incumbent-win`.
+
+All four measured rows are admitted. The conservative headline is the
+fastest-incumbent comparison: 9.656x at 1M and 9.927x at 10M.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=1004f1a94d113ce7491d598b96948c19bcfeb7a54d6b3c050456f2e37b4d60d6
+(70293280 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`;
+the separately self-reported 10M ELF was
+`d8ed875bd0d9b1e057bb81dc09fc532d1a9cd91efefd218ce5b9f5952c0ed59d`
+(70,293,304 bytes) at the same absolute path. Both invocations reported
+harness-source SHA-256
+`b58aabad2ada84132e40f8f504f9f7cca21a9482dcaae736a9b9017f07c3dd6a`.
+
+**Legacy incumbent arm (same invocation):**
+`name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260728T042541.777759Z-pid1487265
+measured_ratio=9.656x`
+at 1M. The 10M row used the same pandas artifact and
+`invocation_id=vs-pandas-20260728T044019.007957Z-pid1509753`, measuring
+9.927x. The screened Arrow arm used pyarrow 24.0.0 content-tree SHA-256
+`2e701e78b2e69a481b6e901b584db29c4151221f59568dcb7cde7f036bca5f17`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. On the fastest-incumbent arm, 1M FP median CI=[0.955614, 0.999670] and
+pandas median CI=[0.953308, 1.035103]; 10M FP median
+CI=[0.930059, 1.123736] and pandas median CI=[0.876962, 1.162040].
+
+**Median-CI decision:** at 1M the numeric median effect=2.26762913 cleared
+required threshold=0.09563501; at 10M effect=2.29522199 cleared required
+threshold=0.30035482. The object and Arrow 1M effects also cleared their
+respective numeric requirements.
+
+**CV role:** provenance only; CV had no vote.
+
+| pandas storage | size | FP p50 | pandas p50 | ratio | FP A/A 95% median CI | pandas A/A 95% median CI | effect / required | verdict |
+|---|---:|---:|---:|---:|---|---|---:|---|
+| `object` | 1M | 134.263 ms | 1,329.562 ms | **9.903x** | [0.963659, 1.089874] | [0.919331, 1.081146] | 2.29280112 / 0.17212484 | **FASTER** |
+| `string[python]` | 1M | 129.557 ms | 1,251.063 ms | **9.656x** | [0.955614, 0.999670] | [0.953308, 1.035103] | 2.26762913 / 0.09563501 | **FASTER** |
+| `string[pyarrow]` | 1M | 134.662 ms | 1,316.825 ms | **9.779x** | [0.929549, 1.058178] | [0.900276, 0.980604] | 2.28020920 / 0.21010809 | **FASTER** |
+| `string[python]` | 10M | 1,600.738 ms | 15,889.945 ms | **9.927x** | [0.930059, 1.123736] | [0.876962, 1.162040] | 2.29522199 / 0.30035482 | **FASTER** |
+
+Against the fastest pandas backend, the ratio grows 2.8% from 1M to 10M and
+the absolute median-time advantage grows from 1.122 seconds to 14.289
+seconds. The 10M FP CV is 60.74%, but its median effect remains 7.6x the
+required log-effect threshold. This admits a median claim, not a tail-latency
+claim.
+
+**Concrete retry predicates:** the median rows stand until the explode
+implementation, timed boundary, harness source, pandas/pyarrow artifact,
+worker ISA, or allocator changes. Re-screen all pandas storage backends after
+a pandas or pyarrow version change and carry only the fastest semantically
+identical arm to 10M. Retry the 10M row only to make a p95/p99 claim, using
+fresh child processes plus peak RSS and major-fault counters. Do not propose
+another fp-side explode lever without a current profile naming a frame above
+5% self-time and a computed Amdahl ceiling above 5%; the prior contiguous-Utf8
+and typed-index levers remain closed.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_explode_1m_10m_20260727.md`,
+`artifacts/bench/proud_lane_m_explode_backends_1m_20260727.json` (SHA-256
+`3ebd597232ddfb653b8898f263d4500d96ac9e57a256dad6c3135d13fb3ba735`),
+and
+`artifacts/bench/proud_lane_m_explode_string_python_10m_20260727.json`
+(SHA-256
+`edc3865261bfb684711f5db52cf8efc2ec421ae01e98c870821cfa8aed3c190f`).
+
+### 2026-07-28 QuietHarbor — strings @1M measured against BOTH pandas backends: 1.39–2.82x vs pandas' best backend, not the 4.33–10.60x the object arm reports
+
+Class-1 hunt at scale. The string workloads had always built their key/name columns from Python
+string lists, so the incumbent arm ran pandas' **object** dtype — pandas 2.x's default and also its
+slow path. Added an arrow arm (`57195e1ed`, `FP_HARNESS_PANDAS_STRING_BACKEND=arrow`) and ran the
+same three workloads against both, one invocation per arm, backend recorded in each artifact's
+`parameters.pandas_string_backend`.
+
+| workload @1M | fp p50 | pandas object | vs object | pandas arrow | **vs arrow** |
+|---|---:|---:|---:|---:|---:|
+| `str_sort` | 33,296.5 us | 352,888.8 us | 10.598x | 50,102.4 us | **1.386x** |
+| `str_value_counts` | 9,702.2 us | 59,433.6 us | 6.126x | 13,282.2 us | **1.411x** |
+| `str_groupby_sum` | 7,407.8 us | 32,105.6 us | 4.334x | 19,405.8 us | **2.819x** |
+
+**Campaign result class:** `incumbent-win`.
+
+Claimed at the ARROW ratios only (1.386x / 1.411x / 2.819x). The object-arm ratios are a labelled
+secondary row and must not be quoted as the headline:
+they measure the incumbent's worst configuration, which is the same error as quoting
+`df.apply(..., axis=1)` when `df.sum(axis=1)` exists. Publishing 10.6x here would inflate the real
+result by ~7.6x.
+
+**Legacy incumbent arm (same invocation):**
+`name=pandas version=2.2.3
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+invocation_id=vs-pandas-20260728T061146.857571Z-pid284880
+measured_ratio=1.386x`
+for `str_sort` on the claimed Arrow arm; the same pandas artifact and invocation measured
+`measured_ratio=1.411x` for `str_value_counts` and `measured_ratio=2.819x` for `str_groupby_sum`.
+The object arm used the same pandas artifact under
+`invocation_id=vs-pandas-20260728T061115.397425Z-pid275166`, measuring 10.598x / 6.126x / 4.334x.
+Artifact identity is `importlib-metadata-content-tree-v1` over 2,922 files / 70,681,559 bytes; host
+`/usr/bin/python3.13` sha256
+`efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e`. The Arrow arm used pyarrow
+24.0.0.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=934f1d90638810ee55e459e68a95ecba2729ccd4b0eac0082f56a1479cd08780`
+(70,265,048 bytes) `/data/tmp/cargo-target/release-perf/fp-bench` — one ELF across both arms.
+
+**A/A null control (same invocation):** Arrow arm FP median CI=[0.929143, 1.135435] and pandas median CI=[0.978625, 1.073681] for str_sort; FP median CI=[0.986533, 1.020855] and pandas median CI=[0.982134, 1.043175] for str_value_counts; FP median CI=[0.945936, 1.047888] and pandas median CI=[0.986492, 1.020957] for str_groupby_sum. Object arm FP median CI=[0.927767, 1.066073] and pandas median CI=[0.986603, 1.012244] for str_sort; FP median CI=[0.984923, 1.025190] and pandas median CI=[0.876922, 1.058382] for str_value_counts; FP median CI=[0.961203, 1.031073] and pandas median CI=[0.974180, 1.078560] for str_groupby_sum. 25 alternating pairs per engine per arm, both engines. Shared invocation identity: Arrow vs-pandas-20260728T061146.857571Z-pid284880, object vs-pandas-20260728T061115.397425Z-pid275166.
+
+**Median-CI decision:** all six rows decidable at the 2x margin. On the claimed arrow arm,
+`str_sort` numeric median effect=0.32615080 cleared required threshold=0.25403238;
+`str_value_counts` effect=0.34450000 cleared required threshold=0.08450000;
+`str_groupby_sum` effect=1.03650000 cleared required threshold=0.11120000. The object-arm effects
+also cleared their respective numeric requirements (effect=2.36070000 vs threshold=0.14990000;
+effect=1.81250000 vs threshold=0.26270000; effect=1.46650000 vs threshold=0.15130000).
+
+**CV role:** provenance only; CV had no vote.
+
+**Why this matters more over time, not less:** pandas 3 makes arrow-backed strings the default
+(`pd.options.future.infer_string`), so every object-arm string claim erodes without anyone touching
+the code. Suspect published claims not yet re-measured: `joins str 17.3x`, the Utf8-BYPASS family
+(unique/value_counts/nunique/mode/dup/isin), `astype(str)`, and the strings row of any scorecard.
+Tracked as `br-frankenpandas-ltmk9`.
+
+**Also invalidated, in BOTH directions — `dt_date` / `dt_time` are not measurable as written.** A
+pre-existing harness comment already documents it: fp-bench's datetime generator overflows i64 at
+n >= 100,000 (release wraps silently) so pandas cannot build the same series, AND pandas returns
+object arrays of Python `date`/`time` while fp returns an ISO-8601 Utf8 column. Different input and
+different output. The 4.04x/12.11x I measured at 1M are withdrawn, and the arrow comparison that
+appeared to flip `.dt.date` into a large loss is equally invalid and is NOT claimed as one. The
+representation-equivalent pandas call is `s.dt.strftime(...)`; measuring that is the fix.
+
+Retry predicate: no string- or datetime-surface ratio may be published from the object arm alone.
+Run both arms and report the arrow one. For any surface whose fp side uses a callback, an iterator,
+or a different output representation, first establish that the two halves compute the same thing from
+the same input — `dt_date` failed that test and `df_apply_row` failed the cheapest-idiom test.
+
+### 2026-07-28 ProudChapel — joint string-backend screen plus 10M follow-up: 9/9 FASTER, 2.126x strongest-incumbent geomean
+
+This follow-up makes the object/Arrow selection explicit inside one 1M
+invocation, then carries only pandas `string[pyarrow]`, the fastest incumbent
+for all three workloads, to 10M. The preceding separate-invocation screen
+remains valid routing evidence; this row is the canonical competitive result.
+
+**Campaign result class:** `incumbent-win`.
+
+The strongest-incumbent rows are 1.776x/2.526x for string sort,
+1.481x/1.458x for string value-counts, and 3.200x/2.982x for string-key
+groupby-sum at 1M/10M. Their geomean is 2.126x. Object-only ratios are
+secondary diagnostics and are not competitive headlines.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=4ac48e4c83e07a1750c64e8d3d48aa0f9ce43ebe2e4fda298b4dd77df9f2dd2d
+(70294216 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`
+at 1M. The 10M invocation separately reported
+`86614d5dd206fa0573677787907006e5b21e06b25db5703725e586c68b2e8ba2`
+(70,294,368 bytes) at the same path. Both ran on `vmi1264463` and reported
+harness-source SHA-256
+`55c7f737d6d18b460b566338e6f8859dcc9dcc51ff5b0c91b1aa3373c4b8de47`.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260728T064511.318611Z-pid1785126
+measured_ratio=1.458x
+The 1M backend screen used invocation
+`vs-pandas-20260728T063309.699807Z-pid1758322`. Both used pyarrow 24.0.0
+content-tree SHA-256
+`2e701e78b2e69a481b6e901b584db29c4151221f59568dcb7cde7f036bca5f17`
+and Python executable SHA-256
+`efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. On the conservative 10M value-counts row, FrankenPandas median
+CI=[0.952319, 1.014717] and pandas median CI=[0.943298, 1.019154].
+All nine exact intervals are recorded below and in the raw schema-v4
+artifacts.
+
+**Median-CI decision:** all nine rows are decidable. The narrowest claimed
+row is 10M value-counts: numeric median effect=0.37732781 cleared required
+threshold=0.11674512. The closest row to its gate is 1M Arrow sort:
+effect=0.57427493 cleared required threshold=0.49294904.
+
+**CV role:** provenance only; CV had no vote.
+
+| pandas backend | workload | size | FP p50 | pandas p50 | ratio | FP A/A 95% median CI | pandas A/A 95% median CI | effect / required | verdict |
+|---|---|---:|---:|---:|---:|---|---|---:|---|
+| object | `str_sort` | 1M | 86.492 ms | 660.871 ms | **7.641x** | [0.897760, 1.144962] | [0.975916, 1.019528] | 2.03351189 / 0.27074301 | **FASTER** |
+| `string[pyarrow]` | `str_sort` | 1M | 87.174 ms | 154.807 ms | **1.776x** | [0.781551, 1.190955] | [0.954701, 1.086849] | 0.57427493 / 0.49294904 | **FASTER** |
+| object | `str_value_counts` | 1M | 22.301 ms | 98.563 ms | **4.420x** | [0.953335, 1.034170] | [0.933980, 1.044445] | 1.48606678 / 0.13660123 | **FASTER** |
+| `string[pyarrow]` | `str_value_counts` | 1M | 22.359 ms | 33.124 ms | **1.481x** | [0.962780, 1.068560] | [0.976184, 1.051414] | 0.39305010 / 0.13262302 | **FASTER** |
+| object | `str_groupby_sum` | 1M | 14.918 ms | 61.871 ms | **4.147x** | [0.958645, 1.036576] | [0.974951, 1.041829] | 1.42248959 / 0.08446952 | **FASTER** |
+| `string[pyarrow]` | `str_groupby_sum` | 1M | 14.191 ms | 45.405 ms | **3.200x** | [0.985028, 1.117088] | [0.978088, 1.063541] | 1.16301003 / 0.22145032 | **FASTER** |
+| `string[pyarrow]` | `str_sort` | 10M | 656.105 ms | 1,657.029 ms | **2.526x** | [0.946730, 1.037833] | [0.988864, 1.023574] | 0.92646044 / 0.10948346 | **FASTER** |
+| `string[pyarrow]` | `str_value_counts` | 10M | 218.066 ms | 318.024 ms | **1.458x** | [0.952319, 1.014717] | [0.943298, 1.019154] | 0.37732781 / 0.11674512 | **FASTER** |
+| `string[pyarrow]` | `str_groupby_sum` | 10M | 145.070 ms | 432.653 ms | **2.982x** | [0.945491, 1.038132] | [0.950300, 1.032075] | 1.09272211 / 0.11210124 | **FASTER** |
+
+String sort is the requested scale-amplified class: the ratio grows 42.2%
+from 1M to 10M and the absolute median advantage grows from 67.6 ms to 1.001
+seconds. Value-counts and groupby-sum remain decisive but approximately
+ratio-stable; their absolute advantages grow to 100.0 ms and 287.6 ms.
+
+A 1,000-row pandas semantic probe produced identical values and index order
+across object and Arrow for all three operations. Both aliases route to the
+same unchanged FP contiguous-Utf8 workload. Existing stable-sort,
+nullable-Utf8 value-count, and Utf8-key groupby guards cover the FP contract.
+
+**Concrete retry predicates:** the rows stand until the workload boundary,
+fixture, FP implementation, harness source, pandas/pyarrow artifact,
+allocator, worker ISA, or backend inventory changes. Re-screen every available
+pandas string backend after a pandas or pyarrow change and carry only the
+fastest semantically identical arm to large N. Do not quote object-only ratios
+as competitive claims. Re-run sort only for a tail claim using fresh child
+processes plus peak RSS and major-fault counters. Do not infer an FP source
+lever without a current profile naming a non-zero-self frame and a computed
+Amdahl ceiling.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_string_backends_1m_10m_20260728.md`,
+`artifacts/bench/proud_lane_m_string_backends_1m_20260728.json` (SHA-256
+`079a8aa05c9e00442c88b7e8929638deb75a77cbfd3c153e02548b89c9b736bf`),
+and
+`artifacts/bench/proud_lane_m_string_arrow_10m_20260728.json` (SHA-256
+`431a097cd70dbf5fce9054529913a9e9c4c9d2580aadb46d5ef49d778da450ec`).
+
+### 2026-07-28 QuietHarbor + ProudChapel — pivot-family incumbent WIN is reproducible; relative scaling is ELF/host-sensitive
+
+Commit `c9267880d` added live pandas arms for `df_pivot` and
+`df_pivot_table`. Three self-identifying FrankenPandas ELFs then produced nine
+same-invocation incumbent rows at 1M and 10M: eight median-CI-decidable wins,
+one null-undecidable row, and nine point estimates above 1.0x.
+
+**Campaign result class:** `incumbent-win`.
+
+The complete strict-remote gate on `vmi1264463` produced:
+
+| workload | size | FP p50 | pandas p50 | ratio | effect / required | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| `df_pivot` | 1M | 55.980 ms | 135.162 ms | **2.414x** | 0.88148262 / 0.19865211 | FASTER |
+| `df_pivot` | 10M | 1,215.589 ms | 1,398.645 ms | 1.151x | 0.14027514 / 0.36357417 | NULL_UNDECIDABLE |
+| `df_pivot_table` | 1M | 25.042 ms | 65.996 ms | **2.635x** | 0.96902563 / 0.24872262 | FASTER |
+| `df_pivot_table` | 10M | 266.440 ms | 553.235 ms | **2.076x** | 0.73063521 / 0.19131626 | FASTER |
+
+A bounded 10M `df_pivot` confirmation on the same remote worker built a
+different self-identifying ELF and measured 1.289x, effect=0.25410519 against
+required threshold=0.17693107: FASTER. A local same-invocation run under a
+third ELF measured decisive 3.368x/3.996x pivot and 2.805x/3.626x
+pivot_table rows at 1M/10M.
+
+The local ELF's ratios increased with N, but the complete strict-remote ELF's
+ratios decreased from 2.414x to 1.151x and from 2.635x to 2.076x. Absolute
+time saved increased with N, while relative scaling was binary/host-sensitive.
+This is a competitive pivot-family win, not evidence for a portable
+ratio-amplifying Class-1 mechanism.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260728T230137.754366Z-pid3096432
+measured_ratio=2.414x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=a4178caffbf7cf26b99f162dd68646c2994a37015a94204b52f99f0809a0d1d5
+(70294112 bytes) /data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The independent 10M confirmation self-reported
+`95bcac44a908ea7db67c069a319ef0b37886892892c9c55b581cde82c4b8d37a`;
+the local corroborating ELF self-reported
+`e3f48b7795e4cdde321e6cda4304cde6a859b7798a3a9e8bc8590b593bed42a5`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. In the complete strict-remote gate, FP/pandas median CIs were
+`df_pivot` 1M [0.985448,1.052660]/[0.931436,1.104426],
+`df_pivot` 10M [0.955749,1.017278]/[0.879676,1.199359],
+`df_pivot_table` 1M [0.969502,1.021514]/[1.000525,1.132425], and
+`df_pivot_table` 10M [0.951242,1.040232]/[0.908775,1.026735].
+
+**Median-CI decision:** eight of nine rows cleared their numeric median-effect
+thresholds. The narrowest strict-remote decisive row was the 10M confirmation:
+effect=0.25410519 cleared required threshold=0.17693107. The complete gate's
+10M pivot row was inside its null floor: effect=0.14027514 did not clear
+required threshold=0.36357417.
+
+**CV role:** provenance only; CV had no vote.
+
+**Concrete retry predicates:** keep the incumbent-win classification until
+the workload boundary, fixture, FrankenPandas implementation, harness source,
+pandas artifact, allocator, compiler, or worker ISA changes. Re-open a
+monotonic ratio-growth claim only when the same self-identified ELF runs both
+sizes on the same worker in one invocation and two clean repeats show the
+ratio increase outside the combined A/A intervals. Re-run 10M pivot after any
+provenance change because one complete strict-remote gate was
+null-undecidable. Do not propose a source lever without a current profile
+naming a non-zero-self frame and a computed Amdahl ceiling.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_pivot_1m_10m_20260728.md`,
+`artifacts/bench/quiet_lane_m_pivot_1m_20260728.json` (SHA-256
+`6b8d912abfe9429b6cac94f8bc71f498e9a118620d20c3ae68725f8de56025ab`),
+`artifacts/bench/quiet_lane_m_pivot_10m_20260728.json` (SHA-256
+`07251adb354b258a594ce05b4d57fe15410dca5cfe5dce5a17af9881f817c929`),
+`artifacts/bench/proud_lane_m_pivot_1m_10m_20260728.json` (SHA-256
+`634d3999907e969ae78330ad55dfc40692d6236d44c3b1cee84224164380788b`),
+and `artifacts/bench/proud_lane_m_pivot_10m_confirm_20260728.json` (SHA-256
+`10cdfc68b1cd20b52a83020c6c64f9d8714759409de560da84d6bb54d0ed0f6b`).
+
+### 2026-07-28 ProudChapel — DataFrame melt live-incumbent WIN at 1M/10M; absolute advantage grows, ratio does not
+
+The public comparison table quoted `df_melt` without a live pandas arm in the
+schema-v4 harness. Added the exact pandas `df.melt()` counterpart to
+`df.melt(&[], &[], None, None)` and ran both sizes in one invocation on the
+same remote worker and FrankenPandas ELF.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | output rows | FP p50 | pandas p50 | ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---:|---|
+| 1M | 10M | 46.759 ms | 327.968 ms | **7.014x** | 1.94792031 / 0.22190937 | FASTER |
+| 10M | 100M | 477.967 ms | 3,101.565 ms | **6.489x** | 1.87011998 / 0.32408655 | FASTER |
+
+The absolute median advantage grows from 281.210 ms to 2.624 seconds, but the
+ratio decreases 7.5% from 1M to 10M. Melt is a strong incumbent win, not a
+ratio-amplifying Class-1 result on this ELF.
+
+Both engines used ten all-valid Float64 input columns. Fixture construction
+was outside timing; empty id/value selections melt all ten columns into the
+default `variable` and `value` outputs. Existing auto-value-var/default-name
+unit coverage and the live pandas melt oracle lock the behavior boundary.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T001542.350934Z-pid3244074
+measured_ratio=7.014x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=95bcac44a908ea7db67c069a319ef0b37886892892c9c55b581cde82c4b8d37a
+(70294080 bytes) /data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas median CIs were [0.942553,1.009586]/[0.894979,1.032962]
+at 1M and [0.939184,1.175911]/[0.984187,1.050304] at 10M.
+
+**Median-CI decision:** both rows were decidable. At 1M numeric median
+effect=1.94792031 cleared required threshold=0.22190937; at 10M
+effect=1.87011998 cleared required threshold=0.32408655.
+
+**CV role:** provenance only; CV had no vote.
+
+**Concrete retry predicates:** keep the incumbent-win classification until
+the workload boundary, column count/dtype, FrankenPandas implementation,
+harness source, pandas artifact, allocator, compiler, or worker ISA changes.
+Re-open a ratio-growth claim only when the same self-identified ELF runs both
+sizes on the same worker in one invocation and two clean repeats show a larger
+10M ratio outside the combined A/A intervals. Do not propose a source lever
+without a current profile naming a non-zero-self frame and a computed Amdahl
+ceiling.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_melt_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_melt_1m_10m_20260728.json` (SHA-256
+`6fd1aeba21a743549c902db456e02e51c0d547895bd44f60853964ced06cdb30`).
+
+### 2026-07-28 ProudChapel — datetime `dt_strftime` live-incumbent WIN at 1M/10M; absolute advantage grows, ratio does not
+
+The prior audit identified `s.dt.strftime("%Y-%m-%d")` as the
+representation-equivalent pandas counterpart for FrankenPandas' Utf8
+datetime formatting. The benchmark generator now uses the identical in-range
+sequence on both sides (`2000-01-01 + i * 600s`) through 10M rows, and the
+schema-v4 harness runs the actual pandas 2.2.3 call live beside FrankenPandas.
+The pandas `.dt.date` and `.dt.time` object-producing arms remain excluded.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | FP p50 | pandas p50 | ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 76.239 ms | 991.039 ms | **12.999x** | 2.56487794 / 0.12830703 | FASTER |
+| 10M | 1,256.212 ms | 11,130.928 ms | **8.861x** | 2.18162684 / 1.08638672 | FASTER |
+
+The two-row geomean is 10.732x. Absolute median time saved grows from
+914.800 ms to 9.875 seconds, while the ratio contracts 31.8%. This is a
+decisive incumbent win, not evidence for a ratio-amplifying Class-1 mechanism
+on this ELF.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T003944.972139Z-pid3276902
+measured_ratio=12.999x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=ed445e842c6ef4fffc19dc2e6ae047cc9c7984ef49a546df27c2f676ccff62d4
+(70294592 bytes) /data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas median CIs were [0.956368,1.052630]/[0.937861,1.025801] at 1M
+and [0.580890,1.660819]/[0.922031,1.023460] at 10M. The combined 2x intervals
+were [0.879583,1.136902] and [0.337434,2.963547].
+
+**Median-CI decision:** at 1M, median effect
+claim_log_effect=2.56487794 cleared the required threshold
+required_log_effect=0.12830703; at 10M, median effect
+claim_log_effect=2.18162684 cleared the required threshold
+required_log_effect=1.08638672.
+
+**CV role:** provenance only; CV had no vote, including the 58.77% 10M
+FrankenPandas CV.
+
+**Concrete retry predicates:** keep the incumbent-win classification until
+the format, datetime sequence, FrankenPandas implementation, harness source,
+pandas artifact, allocator, compiler, worker ISA, or executing ELF changes.
+Re-open a ratio-growth claim only when the same self-identified ELF runs both
+sizes on one worker in one invocation and two clean repeats put the 10M ratio
+above the 1M ratio outside the combined A/A intervals. Do not use `.dt.date`
+or `.dt.time` as the incumbent until both engines expose the same logical and
+physical output contract.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_dt_strftime_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_dt_strftime_1m_10m_20260728.json` (SHA-256
+`6f3c6ac279221851d345ecf159e48e24377f8c3ad3fdd867a669cd1abd4c4aa3`).
+
+### 2026-07-28 ProudChapel — stateful Series callback incumbent WIN at 1M/10M; 19.713x geomean
+
+Lane M added a large-N ordered callback whose output is the full prefix
+recurrence `state = (state * 31 + value) & 0x7fffffff` over `0..n`. Every
+callback invocation affects every later output, so a built-in reduction cannot
+replace the callback while preserving the observed Series. Population remains
+outside timing on both engines.
+
+A six-route pandas 2.2.3 screen found `Series.map` the fastest
+task-equivalent route at 1M: 313.244 ms versus 318.525 ms for
+`Series.transform`, 326.596 ms for exact `Series.apply`, 359.640 ms for
+`Series(np.fromiter(...))`, 411.551 ms for a list comprehension plus Series,
+and 435.176 ms for `Series(map(...))`. All six outputs and final states were
+exactly equal. The fastest arm advanced to the canonical gate.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | FP p50 | pandas p50 | ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 32.628 ms | 692.448 ms | **21.223x** | 3.05506638 / 0.10051494 | FASTER |
+| 10M | 433.931 ms | 7,945.613 ms | **18.311x** | 2.90749025 / 0.44077829 | FASTER |
+
+The two-row geomean is 19.713x. Absolute median time saved grows from
+659.820 ms to 7.512 seconds, while the ratio contracts 13.7%. This is a
+decisive ordered-callback incumbent win, not a ratio-amplifying Class-1 result
+on this ELF. A separate exact-`Series.apply` diagnostic measured
+21.963x/18.484x; those larger ratios are not the headline.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T020458.526396Z-pid3412769
+measured_ratio=21.223x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=a51f3952bce4d8d551d3f2dac1536414d0a524096481748071fd6a1cae1cfc06
+(70315096 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The committed harness source SHA-256 is
+`4661081137c47bdfa48baba2917f45cd33456b08ac7e5b889815fcffb962408a`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.984570,1.030109]/[0.980584,1.051542] at 1M and
+[0.938003,1.246562]/[0.969347,1.077802] at 10M.
+
+**Median-CI decision:** median effect 3.05506638 cleared the required
+log-effect threshold 0.10051494 at 1M; median effect 2.90749025 cleared the
+required log-effect threshold 0.44077829 at 10M.
+
+**CV role:** provenance only; CV had no vote, including the 92.51% FP CV at
+10M.
+
+**Decision: KEEP** the incumbent harness coverage and the two admitted rows.
+This is measurement-only campaign output, not an FP-before/FP-after
+self-speedup or production source lever. The strict-remote recurrence fixture
+test passed 1/1; the canonical raw artifact passed the schema-v4 contract and
+its worker/local SHA-256 matched.
+
+**Concrete retry predicates:** keep the ratios until the callback recurrence,
+input order, Series callback implementation, harness source, pandas artifact,
+allocator, compiler, worker ISA, or executing ELF changes. Re-open a
+ratio-growth claim only when one self-identified ELF runs both sizes on one
+worker in one invocation and two independent gates put the 10M ratio above
+the 1M ratio outside the combined A/A intervals. Re-screen callable pandas
+routes after a pandas version change. Do not infer a production
+`Series::apply` lever without a current profile naming a non-zero-self frame
+and a computed Amdahl ceiling.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_series_apply_stateful_1m_10m_20260728.md`,
+`artifacts/bench/proud_lane_m_series_apply_stateful_fastest_map_1m_10m_20260728.json`
+(SHA-256
+`0cf53b4d18a28f34f4bb15a3eadb4d8244ea7a014751f146bc55df49b2a7dda5`),
+and the exact-apply diagnostic
+`artifacts/bench/proud_lane_m_series_apply_stateful_1m_10m_20260728.json`
+(SHA-256
+`9645721969dc4930b50bcce0e522bec87d1b04632ee17c1b30de171660c97387`).
+
+### 2026-07-28 ProudChapel — stateful Rolling.apply incumbent WIN at 1M/10M; 8.114x geomean
+
+Lane M added a width-10 rolling callback over `value[i] = i % 997`. The
+callback runs the ordered recurrence
+`state = (state * 31 + window_sum) & 0x7fffffff`; every output depends on every
+preceding callback invocation. Population remains outside timing on both
+engines.
+
+An eight-route pandas 2.2.3 screen found `rolling.sum()` plus a stateful
+generator driven into `np.fromiter` the fastest task-equivalent route at 1M:
+174.846 ms versus 186.628 ms for `itertools.accumulate`, 204.617 ms for
+`ufunc.accumulate`, 248.072 ms for `Series.map`, 282.538 ms for
+`Series.apply`, 299.585 ms for `Series.transform`, 1,417.559 ms for exact
+`rolling.apply(raw=True)`, and 22,679.292 ms for exact
+`rolling.apply(raw=False)`. All eight outputs and final states were exactly
+equal. The fastest arm advanced to the canonical gate.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | FP p50 | pandas p50 | ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 45.768 ms | 452.062 ms | **9.877x** | 2.29023087 / 0.16091064 | FASTER |
+| 10M | 667.503 ms | 4,449.835 ms | **6.666x** | 1.89707813 / 0.64651052 | FASTER |
+
+The two-row geomean is 8.114x. Absolute median time saved grows from
+406.294 ms to 3.782 seconds, while the ratio contracts 32.5%. This is a
+decisive ordered rolling-callback incumbent win, not a ratio-amplifying
+Class-1 result on this ELF. The exact pandas API's much larger idiom penalty
+is route-screen evidence only and is not the headline.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T025159.104971Z-pid3510691
+measured_ratio=6.666x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=30ad2f887b84c55faf7ef921c1d1b21f17b8ec941927b80a17ea6eadd500f11d
+(70357352 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The worker's direct post-run SHA-256 matched the in-process self-report. The
+committed harness source SHA-256 is
+`6330f14ab9fcd4d189d5609bbc4d40c007fd50bee3fc03c5c7a38ff97929b51f`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.995149,1.079558]/[0.946752,1.083780] at 1M and
+[0.723789,1.364822]/[0.980225,1.027574] at 10M.
+
+**Median-CI decision:** median effect 2.29023087 cleared the required
+log-effect threshold 0.16091064 at 1M; median effect 1.89707813 cleared the
+required log-effect threshold 0.64651052 at 10M.
+
+**CV role:** provenance only; CV had no vote, including the 78.22% FP CV at
+10M.
+
+**Decision: KEEP** the incumbent harness coverage and both admitted rows.
+This is measurement-only campaign output, not an FP-before/FP-after
+self-speedup or production source lever. The strict-remote recurrence fixture
+test passed 1/1; the canonical raw artifact passed the schema-v4 contract and
+its remote/local SHA-256 matched.
+
+**Concrete retry predicates:** keep the ratios until the rolling width, input
+sequence, recurrence, FrankenPandas rolling callback implementation, harness
+source, pandas or NumPy artifact, allocator, compiler, worker ISA, or
+executing ELF changes. Re-open a ratio-growth claim only when one
+self-identified ELF runs both sizes on one worker in one invocation and two
+independent gates put the 10M ratio above the 1M ratio outside the combined
+A/A intervals. Re-screen callable pandas routes after a pandas or NumPy
+version change. Retry 10M for a tail-latency claim only with fresh child
+processes plus peak RSS and major-fault counters. Do not infer a production
+`Rolling::apply` lever without a current profile naming a non-zero-self frame
+and a computed Amdahl ceiling.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_rolling_apply_stateful_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_rolling_apply_stateful_1m_10m_20260728.json`
+(SHA-256
+`811a0c96f76d12e31ef4f72feaaf0a2e0c57401264fa9a6e80ca52a324de305b`).
+
+### 2026-07-28 ProudChapel — stateful Expanding.apply incumbent WIN at 1M/10M; 22.245x geomean
+
+Lane M added an ordered expanding-prefix callback over
+`value[i] = i % 997`. The callback runs
+`state = (state * 31 + value[i] + prefix_len) & 0x7fffffff`; each output
+depends on the newest prefix member, prefix length, and every preceding
+callback invocation. Population remains outside timing on both engines.
+
+An eight-route pandas 2.2.3 screen on canonical worker `vmi1264463` found a
+stateful scalar callback driven by `np.fromiter(map(...))` fastest at 1M:
+491.419 ms versus 511.099 ms for generator-driven `np.fromiter`, 526.040 ms
+for `itertools.accumulate`, 586.065 ms for `Series.apply`, 606.179 ms for
+`Series.transform`, 628.080 ms for `Series.map`, 1,071.759 ms for exact
+`Expanding.apply(raw=True)`, and 29,797.105 ms for exact
+`Expanding.apply(raw=False)`. All eight outputs and final states were exactly
+equal. The fastest arm advanced to the canonical gate.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | FP p50 | pandas p50 | ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 22.774 ms | 563.862 ms | **24.759x** | 3.20917814 / 0.62273492 | FASTER |
+| 10M | 299.330 ms | 5,982.580 ms | **19.987x** | 2.99506041 / 0.22873088 | FASTER |
+
+The two-row geomean is 22.245x. Absolute median time saved grows from
+541.087 ms to 5.683 seconds, while the ratio contracts 19.3%. This is a
+decisive ordered expanding-callback incumbent win, not a ratio-amplifying
+Class-1 result on this ELF. The exact pandas API's larger idiom penalty is
+route-screen evidence only and is not the headline.
+
+The first gate used the locally fastest generator route. The same-worker
+screen then showed `np.fromiter(map(...))` was 3.9% faster, so no campaign
+claim is based on that first gate. Its raw JSON remains a
+weaker-incumbent diagnostic; only the following map-arm invocation is
+canonical.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T034520.201126Z-pid3599005
+measured_ratio=19.987x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=f3e65361ae1f089b2b3d2b95f6938a046b558c1aa14ab04a4ee15c4bfaffd86e
+(70379320 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The worker's direct post-run SHA-256 matched the in-process self-report. The
+canonical harness source SHA-256 is
+`126797478b435c4021ae1d8b71f1094b1813327764c786acf4af424037cafcbe`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.973233,1.028115]/[0.732445,1.055421] at 1M and
+[0.918880,1.114410]/[0.990895,1.121162] at 10M.
+
+**Median-CI decision:** median effect 3.20917814 cleared the required
+log-effect threshold 0.62273492 at 1M; median effect 2.99506041 cleared the
+required log-effect threshold 0.22873088 at 10M.
+
+**CV role:** provenance only; CV had no vote, including FP/pandas CV of
+43.80%/35.84% at 1M and 43.77%/22.89% at 10M.
+
+**Decision: KEEP** the incumbent harness coverage and both admitted rows.
+This is measurement-only campaign output, not an FP-before/FP-after
+self-speedup or production source lever. The strict-remote recurrence fixture
+test passed 1/1; the canonical raw artifact passed the schema-v4 contract and
+its remote/local SHA-256 matched.
+
+**Concrete retry predicates:** keep the ratios until the input sequence,
+recurrence, expanding `min_periods`, FrankenPandas expanding callback
+implementation, harness source, pandas or NumPy artifact, allocator, compiler,
+worker ISA, or executing ELF changes. Re-open a ratio-growth claim only when
+one self-identified ELF runs both sizes on one worker in one invocation and
+two independent gates put the 10M ratio above the 1M ratio outside the
+combined A/A intervals. Re-screen callable pandas routes after a pandas,
+NumPy, or worker-class change. Retry 10M for a tail-latency claim only with
+fresh child processes plus peak RSS and major-fault counters. Do not infer a
+production `Expanding::apply` lever without a current profile naming a
+non-zero-self frame and a computed Amdahl ceiling.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_expanding_apply_stateful_1m_10m_20260728.md`.
+Canonical raw JSON:
+`artifacts/bench/proud_lane_m_expanding_apply_stateful_map_canonical_1m_10m_20260728.json`
+(SHA-256
+`eecebb7761ed1a6bfd87ac33243a991c6f073c3c63fccbff060f74f78dc13cb2`).
+Weaker-incumbent diagnostic:
+`artifacts/bench/proud_lane_m_expanding_apply_stateful_1m_10m_20260728.json`
+(SHA-256
+`f5181b63d20158755ef891d45ed01020c3ba6eaac131b8218901d5bff790b156`).
+
+### 2026-07-28 ProudChapel — literal `str.contains` Arrow-incumbent REJECT at 1M/10M; 0.749x geomean
+
+Lane M screened the pandas object, `string[python]`, and
+`string[pyarrow]` backends on the exact `item_{i:010d}` fixture before
+admitting an incumbent. At 1M their medians were 177.904 ms, 156.607 ms,
+and 41.948 ms, respectively. All three output arrays were exactly equal with
+468,559 true elements. Only the fastest Arrow arm advanced.
+
+The canonical gate compared literal, case-sensitive substring search:
+pandas `Series.str.contains("5", regex=False)` versus FrankenPandas
+`Series::str().contains("5")`. Both arms used the same all-valid ordered
+names, and population stayed outside timing. The strict-remote focused
+`str_contains` filter passed 13/13 tests before measurement.
+
+| size | FP p50 | pandas Arrow p50 | FP/pandas ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 50.187 ms | 42.342 ms | **0.844x** | 0.16997788 / 0.16244565 | SLOWER |
+| 10M | 630.038 ms | 418.686 ms | **0.665x** | 0.40865758 / 0.21203502 | SLOWER |
+
+The two-row geomean is 0.749x (pandas is 1.335x faster). The FP/pandas
+ratio worsens 21.2% with scale, and the absolute median deficit grows from
+7.845 ms to 211.351 ms.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T043315.046949Z-pid3676335
+measured_ratio=0.665x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=ad25a86447134d5fac336cdb0d9af3def77adb2bd921e3854aaaa9b0b58256b1
+(70379784 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The worker's direct post-run SHA-256 matched the in-process self-report. The
+worker/local Rust source SHA-256 matched
+`5ba72d89a3bf5888b635cc6c0937213bd03ae536536b6467a3058656548f1484`;
+the worker/local/in-process Python harness source SHA-256 matched
+`a3968444b266656cf8cdbbf142b98445e486f39634251e6ff6131c7b973b19c1`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.921988,1.076340]/[0.937536,1.006525] at 1M and
+[0.985473,1.111841]/[0.955177,1.028445] at 10M.
+
+**Median-CI decision:** the absolute median log effects
+0.16997788 and 0.40865758 cleared the required thresholds
+0.16244565 and 0.21203502 at 1M and 10M. Both losses are decidable.
+
+**CV role:** provenance only; CV had no vote, including FP/pandas CV of
+30.81%/16.37% at 1M and 23.79%/15.43% at 10M.
+
+**Decision: REJECT** the competitive claim; retain the Arrow incumbent arm
+as measurement coverage. This is an honest strongest-incumbent loss, not an
+object-dtype strawman or a self-speedup.
+
+**Concrete retry predicates:** re-open only after (1) a profile of this exact
+10M workload names a non-zero-self FP frame, records its self-time and Amdahl
+ceiling, and supports a production lever capable of removing at least 33.6%
+of FP median time (the parity floor); (2) the FP literal-contains
+implementation, contiguous-Utf8 representation, allocator, compiler, worker
+ISA, or fixture changes; or (3) the pandas or pyarrow artifact changes and a
+fresh same-worker backend screen selects the new fastest semantically
+identical arm. Do not retry with pandas object or `string[python]`; both
+weaker arms were already screened out. Any retry still requires one
+self-identified ELF, the fastest live pandas arm in the same invocation,
+alternating A/A controls, and median-CI admission.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_str_contains_arrow_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_str_contains_arrow_1m_10m_20260728.json`
+(SHA-256
+`78650f5cca479b7352b804c14f4263a823923dde2796ea2558868eabfaea5da5`).
+
+### 2026-07-28 ProudChapel — `str.startswith` Arrow-incumbent REJECT at 1M/10M; 0.420x geomean
+
+Lane M re-adjudicated the historical object-string result under the live
+incumbent policy. A same-worker pandas 2.2.3 screen on the exact
+`item_{i:010d}` fixture measured object at 193.081 ms,
+`string[python]` at 146.044 ms, and `string[pyarrow]` at 10.394 ms.
+All three output arrays were exactly equal with 1,000,000 true values. Only
+the fastest Arrow arm advanced.
+
+The canonical gate compared pandas `Series.str.startswith("item")` with
+FrankenPandas `Series::str().startswith("item")`. Both arms used the same
+all-valid ordered names, and population stayed outside timing. The
+strict-remote focused `str_startswith` filter passed 6/6 tests before
+measurement.
+
+| size | FP p50 | pandas Arrow p50 | FP/pandas ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 25.440 ms | 10.329 ms | **0.406x** | 0.90132742 / 0.17251561 | SLOWER |
+| 10M | 250.332 ms | 108.572 ms | **0.434x** | 0.83537229 / 0.31271556 | SLOWER |
+
+The two-row geomean is 0.420x (pandas is 2.382x faster). The ratio improves
+6.9% with scale but remains a large loss; the absolute median deficit grows
+from 15.110 ms to 141.760 ms.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T050418.942527Z-pid3741365
+measured_ratio=0.434x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=64a5bcccd668d2c05cf76f0f25458cf6d444c719f7347079ce1ddf63677f1ae0
+(70379840 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The worker's direct post-run SHA-256 matched the in-process self-report. The
+worker/local Rust source SHA-256 matched
+`bf155d88b2fc76b163b021375adb9b5674ba47ed4792253d1512285a47902cc4`;
+the worker/local/in-process Python harness source SHA-256 matched
+`798465900ee2052aba24b7d523594e7226d1df19f448761ca776360ff6a2faa7`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.954257,1.090087]/[0.963220,1.041711] at 1M and
+[0.955747,1.023732]/[0.855253,0.996646] at 10M.
+
+**Median-CI decision:** the absolute median log effects
+0.90132742 and 0.83537229 cleared the required thresholds
+0.17251561 and 0.31271556 at 1M and 10M. Both losses are decidable.
+
+**CV role:** provenance only; CV had no vote, including FP/pandas CV of
+12.78%/12.98% at 1M and 10.37%/21.28% at 10M.
+
+**Decision: REJECT** the competitive claim; retain the Arrow incumbent arm
+as measurement coverage. The historical object-only ratio is not an
+admissible competitive claim under the current policy.
+
+**Concrete retry predicates:** re-open only after (1) a profile of this exact
+10M workload names a non-zero-self FP frame, records its self-time and Amdahl
+ceiling, and supports a production lever capable of removing at least 56.7%
+of FP median time (the parity floor); (2) the FP prefix implementation,
+contiguous-Utf8 representation, Bool output, allocator, compiler, worker ISA,
+or fixture changes; or (3) the pandas or pyarrow artifact changes and a fresh
+same-worker backend screen selects the new fastest semantically identical
+arm. Do not retry with pandas object or `string[python]`; both weaker arms
+were already screened out. Any retry still requires one self-identified ELF,
+the fastest live pandas arm in the same invocation, alternating A/A controls,
+and median-CI admission.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_str_startswith_arrow_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_str_startswith_arrow_1m_10m_20260728.json`
+(SHA-256
+`a14dce9be27576dfeb90ac7f8afb1a3a81077256e240a27471e221f394f1e6d6`).
+
+### 2026-07-28 ProudChapel — `dt.day_name` fastest-incumbent KEEP at 1M/10M; 3.587x geomean
+
+Lane M re-adjudicated the historical direct-API result under the live
+incumbent policy. A same-worker pandas 2.2.3 screen on the exact 1M-row,
+600-second fixture measured direct `Series.dt.day_name()` at 563.805 ms,
+`Series.dt.strftime("%A")` at 7,465.375 ms, and `Series.dt.dayofweek`
+followed by a NumPy weekday-name gather and full Series construction at
+54.286 ms. All three Series were exactly equal, including dtype, index, and
+name. Only the fastest task-equivalent route advanced.
+
+The canonical gate compared that live pandas route with FrankenPandas
+`Series::dt().day_name()`. Both arms used the same all-valid ordered
+timestamps, and population stayed outside timing. The strict-remote focused
+`dt_day_name` test passed 1/1 before measurement.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | FP p50 | pandas fastest p50 | pandas/FP ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 13.204 ms | 45.721 ms | **3.463x** | 1.24205526 / 0.10970379 | FASTER |
+| 10M | 130.697 ms | 485.621 ms | **3.716x** | 1.31254780 / 0.20945764 | FASTER |
+
+The two-row geomean is 3.587x. Absolute median time saved grows from
+32.517 ms to 354.924 ms, and the ratio improves 7.3% with scale. This is a
+decisive live-incumbent win and a modest ratio-amplifying Class-1 result on
+this ELF. Historical ratios against direct `.dt.day_name()` are
+weaker-incumbent diagnostics, not current competitive claims.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T053143.056179Z-pid3783239
+measured_ratio=3.716x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=0b212606e7b27a180f4d01e74f12965aa67c59a2cef8f9b3d3de2410629766cd
+(70379824 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The worker's direct post-run SHA-256 matched the in-process self-report. The
+worker/local Rust source SHA-256 matched
+`bf155d88b2fc76b163b021375adb9b5674ba47ed4792253d1512285a47902cc4`;
+the worker/local/in-process Python harness source SHA-256 matched
+`251ac27c48c2f484da72af4d0ab58e1e22c310b5b6c707879bbba5df267b4d75`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.954469,1.041674]/[0.990359,1.056384] at 1M and
+[0.975424,1.110409]/[0.998803,1.054907] at 10M.
+
+**Median-CI decision:** the median effect was 1.24205526 against the required
+threshold 0.10970379 at 1M and 1.31254780 against 0.20945764 at 10M. Both
+wins are decidable.
+
+**CV role:** provenance only; CV had no vote, including FP/pandas CV of
+98.51%/8.17% at 1M and 276.57%/7.27% at 10M.
+
+**Decision: KEEP** the competitive claim and retain the fastest pandas arm
+as measurement coverage. Production source did not change.
+
+**Concrete retry predicates:** re-open only after (1) the FrankenPandas
+day-name kernel, datetime representation, Utf8 output, allocator, compiler,
+worker ISA, fixture, pandas artifact, NumPy artifact, harness source, or
+executing ELF changes; (2) a fresh same-worker pandas screen finds a faster
+route producing an exactly equal complete Series; or (3) a fresh canonical
+run with one self-identified ELF and 25 alternating A/A pairs per engine
+makes either row non-decidable or places its ratio at or below 1.0 outside
+the combined null interval. Any revalidation still requires the fastest live
+pandas arm in the same invocation and median-CI admission at both sizes.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_dt_day_name_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_dt_day_name_1m_10m_20260728.json`
+(SHA-256
+`ac6e425f512f86d756a30281b8aec4ecfca999216243fc935213b1c62d434913`).
+
+### 2026-07-28 ProudChapel — `dt.month_name` fastest-incumbent KEEP at 1M/10M; 1.631x geomean
+
+Lane M re-adjudicated the historical direct-API result under the live
+incumbent policy. A same-worker pandas 2.2.3 / NumPy 2.4.3 screen on the
+exact 1M-row, 600-second fixture measured direct
+`Series.dt.month_name()` at 266.402 ms, `Series.dt.strftime("%B")` at
+6,800.564 ms, `Series.dt.month` plus NumPy name gather and full Series
+construction at 52.999 ms, and public `Series.array.month` plus the same
+gather and construction at 38.571 ms. All four Series were exactly equal,
+including dtype, index, and name. Only the fastest task-equivalent route
+advanced.
+
+The canonical gate compared that live pandas route with FrankenPandas
+`Series::dt().month_name()`. Both arms used the same all-valid ordered
+timestamps, and population stayed outside timing. The strict-remote focused
+`dt_month_name` test passed 1/1 before measurement.
+
+**Campaign result class:** `incumbent-win`.
+
+| size | FP p50 | pandas fastest p50 | pandas/FP ratio | effect / required | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1M | 26.223 ms | 41.446 ms | **1.580x** | 0.45773268 / 0.26653188 | FASTER |
+| 10M | 265.554 ms | 447.255 ms | **1.684x** | 0.52130954 / 0.11355576 | FASTER |
+
+The two-row geomean is 1.631x. Absolute median time saved grows from
+15.222 ms to 181.701 ms, and the ratio improves 6.6% with scale. This is a
+live-incumbent win and a modest ratio-amplifying Class-1 result on this ELF.
+Historical ratios against direct `.dt.month_name()` are weaker-incumbent
+diagnostics, not current competitive claims.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=051be80fe43b4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T061653.224380Z-pid3877027
+measured_ratio=1.684x
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=a3a1cf82c4a7f5e0dfee9e5cdbfd59caacc96270fa009b72ae65599529bf5438
+(70378976 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1264463-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+The worker's direct post-run SHA-256 matched the in-process self-report. The
+worker/local Rust source SHA-256 matched
+`bf155d88b2fc76b163b021375adb9b5674ba47ed4792253d1512285a47902cc4`;
+the worker/local/in-process Python harness source SHA-256 matched
+`87ce0065fcf194501f93ab140201cf8f25fc7d62ffe5138c11291d46e221a388`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+[0.972114,1.014791]/[0.925429,1.142554] at 1M and
+[0.971938,1.058421]/[0.961573,1.057509] at 10M.
+
+**Median-CI decision:** the median effect was 0.45773268 against the required
+threshold 0.26653188 at 1M and 0.52130954 against 0.11355576 at 10M. Both
+wins are decidable.
+
+**CV role:** provenance only; CV had no vote, including FP/pandas CV of
+7.24%/21.78% at 1M and 9.70%/13.73% at 10M.
+
+**Decision: KEEP** the competitive claim and retain the fastest pandas arm
+as measurement coverage. Production source did not change.
+
+The first attempted invocation self-reported the prior Python harness hash
+and failed on the unknown workload before measurement. It produced no row
+and has no verdict. Only the retry whose process self-reported the exact
+current harness hash above was admitted.
+
+**Concrete retry predicates:** re-open only after (1) the FrankenPandas
+month-name kernel, datetime representation, Utf8 output, allocator, compiler,
+worker ISA, fixture, pandas or NumPy artifact, harness source, or executing
+ELF changes; (2) a fresh same-worker pandas screen finds a faster route
+producing an exactly equal complete Series; or (3) a fresh canonical run
+with one self-identified ELF and 25 alternating A/A pairs per engine makes
+either row non-decidable or places its ratio at or below 1.0 outside the
+combined null interval. Any revalidation still requires the fastest live
+pandas arm in the same invocation and median-CI admission at both sizes.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_dt_month_name_1m_10m_20260728.md` and
+`artifacts/bench/proud_lane_m_dt_month_name_1m_10m_20260728.json`
+(SHA-256
+`94751388626aa6a7b7a047fd08702fc204361647c2df6da03356c1c7104cd7bf`).
+
+### 2026-07-29 ProudChapel — trj 5995WX full thread sweep: no operation exceeds 10 workers; join peaks at 8.169x, sort returns to a 0.921x loss at the 128-thread cap
+
+Lane M ran the required full `1/2/4/8/16/32/64/128` affinity sweep
+side-by-side with the live pandas 2.2.3 incumbent. The four exact Float64
+surfaces were `groupby_mean_float64`, `df_abs`, `join_inner`, and
+`sort_values_single`, each at 1M and 10M rows. Every cap used `taskset` over
+logical CPU IDs `0..N-1`; population and the operation-thread probe stayed
+outside the timed region.
+
+**Hardware and actual-thread provenance:** host identity `threadripperje`
+(`trj`), AMD Ryzen Threadripper PRO 5995WX, 64 physical cores, 128 logical
+threads, 536,069,869,568 bytes RAM, one NUMA node, eight 8-core L3 domains.
+Runtime detection reported AVX2, FMA, BMI2, and VAES, with AVX-512F absent.
+No engine inferred its used-thread count from the affinity: the untimed
+CPU-time-active probe measured FP/pandas operation workers. GroupBy used
+`1/1` at every cap; `df_abs` and sort used
+`1/1, 2/1, 4/1, 8/1, 10/1, 10/1, 10/1, 10/1`; join used
+`1/1, 2/1, 3/1, 3/1, 3/1, 3/1, 3/1, 3/1`.
+
+**Campaign result class:** `incumbent-win`.
+
+| surface | current trj one-thread ratio, 1M / 10M | best ratio, 1M / 10M | full-cap ratio, 1M / 10M | scaling finding |
+|---|---:|---:|---:|---|
+| `groupby_mean_float64` | 3.971x / 3.403x | 4.341x (cap 2, actual 1) / 3.473x (cap 8, actual 1) | 4.028x / 3.438x | flat; both engines remain serial |
+| `df_abs` | 1.662x / 1.433x | 3.237x (cap 16, actual 10) / 3.537x (cap 128, actual 10) | 2.365x / 3.537x | FP scales only to the 10-column ceiling |
+| `join_inner` | 7.825x / 3.712x | **8.169x / 3.874x** (cap 4, actual 3) | 3.208x / 2.476x | three-worker ceiling; cross-L3 placement erases advantage |
+| `sort_values_single` | 1.131x / **0.769x SLOWER** | 1.932x (cap 32, actual 10) / 1.332x (cap 64, actual 10) | 1.863x / **0.921x SLOWER** | 10-column gather scales, serial residual remains, SMT-wide placement regresses |
+
+Across the 64 rows, 61 are decidably FASTER, two sort/10M rows are
+decidably SLOWER, and sort/10M at cap 2 is `NULL_UNDECIDABLE` at 1.002x.
+The current trj GroupBy result corrects the assumption that the older
+19.486x worker number transferred to this machine: the old artifact omitted
+host/thread topology and measured pandas at 53.144 ms. Across all eight trj
+caps pandas is 8.596–9.923 ms at 1M, FP remains serial, and the ratio is
+3.835x–4.341x. The old number remains historical worker evidence, not a trj
+baseline.
+
+At 10M, `df_abs` improves from 47.090 ms at one thread to 19.482 ms with
+10 workers (2.417x FP-side) while pandas stays at one worker. Join is
+locality-sensitive: cap 4 keeps its three workers inside one L3 domain and
+measures 34.729 ms, but cap 128 permits wide placement and rises to
+60.500 ms. Sort moves from 1,581.088 ms at one thread to a best FP median of
+919.016 ms at cap 32, then regresses to 1,383.717 ms when all SMT siblings
+are allowed at cap 128.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=80c4fc7efcc4d8deabf0faf971a49013556a22109ae402df6913962a577d227e
+invocation_id=vs-pandas-20260729T074115.919872Z-pid1543968
+measured_ratio=1.143x
+
+That marker names the first decidable 10M sort win. All other cells carry
+their own non-placeholder shared invocation ID in the canonical raw JSON;
+there was no cross-invocation pairing.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=50e9e4001486513763eca3fe4a7904f24ec94b849fd1d28b18b7937e29888fad
+(73636568 bytes)
+/data/projects/frankenpandas-thread-sweep/target/release-perf/fp-bench`.
+All 32 canonical invocations reported this same ELF. Python self-reported
+`bench_elf_sha256=efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e
+(6894448 bytes) /usr/bin/python3.13`.
+
+**A/A null control (same invocation):** every engine and row has 25
+alternating pairs. Representative FP/pandas bootstrap-median 95% CIs were
+GroupBy cap-1 1M `[0.997632,1.002880]`/`[0.998300,1.000724]` and 10M
+`[1.000456,1.010495]`/`[0.969965,1.001129]`; `df_abs` cap-128 10M
+`[0.992366,1.030057]`/`[0.997553,1.002759]`; join cap-4 1M
+`[0.995512,1.010284]`/`[0.998077,1.002746]` and 10M
+`[0.989580,1.007539]`/`[0.997233,1.002357]`; sort cap-1 10M
+`[0.996273,1.003961]`/`[0.994320,1.000427]`, cap-2 10M
+`[0.995707,1.005368]`/`[0.996662,1.004690]`, cap-32 10M
+`[0.990699,1.004603]`/`[0.997461,1.007806]`, and cap-128 10M
+`[0.991175,1.013266]`/`[0.988862,1.039408]`.
+
+**Median-CI decision:** representative absolute median-CI log effect /
+required threshold pairs are GroupBy cap-1 `1.37901534/0.00575174` at 1M and
+`1.22469461/0.06098999` at 10M; `df_abs` cap-128 10M
+`1.26316912/0.05922756`; join cap-4 `2.10032636/0.02046256` at 1M and
+`1.35417195/0.02094929` at 10M; and sort/10M
+`0.26220226/0.01139286` SLOWER at cap 1,
+`0.00214967/0.01070736` NULL_UNDECIDABLE at cap 2,
+`0.28045168/0.01868900` FASTER at cap 32, and
+`0.08270452/0.07730210` SLOWER at cap 128. Every directional verdict was
+made by this gate.
+
+**CV role:** provenance only; CV had no vote. Across all 64 rows, FP CV
+ranged from 0.25% to 17.62% and pandas CV from 0.41% to 6.38%. In
+particular, sort cap-128 10M remains a median-CI loss despite FP CV 15.23%.
+
+**Decision: KEEP** the 61 cell-specific live-incumbent wins, including the
+decisive 8.169x 1M join result. **Decision: REJECT** a competitive claim for
+sort/10M at caps 1 and 128; their exact A/A controls make both losses
+decidable. Keep cap 2 as `NULL_UNDECIDABLE`, not a reject. This sweep changes
+no production source and does not claim a new optimization lever.
+
+**Concrete retry predicates:** for GroupBy, do not resweep this ELF until a
+row-partitioned implementation makes the exact operation probe report more
+than one active worker; then retain byte/parity proof and the live pandas
+arm. For `df_abs`, re-open beyond the 10-worker ceiling only after a
+row-chunk path or a fixture wider than 10 columns exists, with a bandwidth
+profile first; reaching 5x at 10M from the current best requires at least a
+29.3% FP-time removal. For join, retry caps above 4 only after same-L3
+placement or scheduler-aware worker pinning exists; the retry must prove the
+same three-worker count and exact output while recovering the cap-4 median.
+For sort, source mutation requires a profile of this exact 10M path naming a
+non-zero-self frame and computed Amdahl ceiling. Reaching 5x from the
+cap-32 median requires reducing 919.016 ms to at most 243.305 ms, a 73.5%
+total-time removal; do not retry the rejected small-size gather-floor or
+pair-sort levers. Any remeasurement still requires trj topology, exact
+affinity, actual operation threads, runtime ISA, one self-reported ELF,
+same-invocation live pandas and A/A arms, and median-CI admission.
+
+Full evidence:
+`artifacts/bench/cod_trj_5995wx_partitionable_thread_sweep_20260729.md`,
+`artifacts/bench/cod_trj_5995wx_partitionable_thread_sweep_20260729.json`,
+and the four
+`tests/artifacts/perf/cod_trj_5995wx_*_thread_sweep_20260729/raw`
+directories. A mechanical pass validated 32 canonical files and 64/64
+contract-valid rows after remote-to-local transfer.
+
+### 2026-07-29 ProudChapel — `df_abs` row×column scheduler exceeds the ten-column worker ceiling but is 18.9% slower at its best raised cap — REJECTED
+
+Lane M consumed the prior row-chunk retry predicate with one portable safe-Rust
+candidate. The candidate admitted only homogeneous all-valid Float64 frames,
+split each column into nonempty row chunks, released one scoped thread per
+worker through a shared start condition, and collected each worker's exact
+output directly into `Arc<[f64]>`. Mixed, nullable, Int64, Bool, and small
+worker-count calls retained the existing column path. Exact-bit, validity,
+index, column-order, and cached-finiteness tests passed before timing.
+
+The exact current 10M ELF was profiled first on an exclusive `trj`.
+`<fp_columnar::Column>::abs` carried 96.51% self-time across 8,779 samples
+with zero lost samples, admitting the experiment but not proving that the
+self-time was profitably parallel. The first post-profile invocation was
+invalidated in full when the scheduled `git-prune-broken-refs` service ran
+`git fsck` and the all-online-CPU post-arm bracket observed CPUs 38 and 63
+above the 20% busy ceiling. No completed 1M row from that invocation was
+salvaged. After three clear admission samples, the retry proceeded.
+
+**Hardware and execution provenance:** host `threadripperje`, AMD Ryzen
+Threadripper PRO 5995WX, 64 physical cores, 128 logical threads, two threads
+per core, 536,069,869,568 bytes RAM, one NUMA node, kernel
+`6.17.0-41-generic`, uniform `performance` governor, SMT and boost enabled.
+Runtime detection recorded SSE2, AVX, AVX2, FMA, BMI1, BMI2, AES, and VAES,
+with AVX-512F absent. Every row records its exact affinity, requested workers,
+and operation-probed actual workers.
+
+**Result class:** maintenance reject; no new competitive claim.
+
+| requested cap | current actual workers 1M→10M / p50 1M / 10M | candidate actual workers 1M→10M / p50 1M / 10M | candidate 10M pandas ratio |
+|---:|---:|---:|---:|
+| 1 | 1→1 / 4.293 / 47.350 ms | 1→1 / 4.320 / 47.458 ms | 1.422x |
+| 2 | 2→2 / 3.883 / 43.616 ms | 2→2 / 4.486 / 43.564 ms | 1.546x |
+| 4 | 4→4 / 3.906 / 43.974 ms | 4→4 / 3.988 / 44.251 ms | 1.524x |
+| 8 | 8→8 / 4.171 / 44.694 ms | 8→8 / 4.365 / 44.811 ms | 1.516x |
+| 16 | 10→10 / 2.771 / 26.465 ms | 13→16 / 3.803 / 37.778 ms | 1.786x |
+| 32 | 10→10 / 2.341 / **20.022 ms** | 13→32 / 3.224 / 29.068 ms | 2.318x |
+| 64 | 10→10 / 2.913 / 20.336 ms | 13→64 / 3.333 / **24.173 ms** | **2.812x** |
+| 128 | 10→10 / 3.116 / 20.680 ms | 13→128 / 3.440 / 24.527 ms | 2.796x |
+
+The candidate therefore removed the worker ceiling mechanically but not the
+time. Its best raised-cap row was 18.9% slower than current at the same cap
+and 20.7% slower than current's best row. It remained 75.4% above the
+13.780 ms budget required for a 5x incumbent result. The 128-SMT row did not
+improve over 64 physical threads.
+
+The separate current-ELF placement control kept actual workers fixed at ten.
+Compact/spread medians were 2.909/2.940 ms at 1M and 26.701/22.433 ms at
+10M, with the descriptive large-N crossover between 6M and 8M. These were
+separate live-pandas invocations, so this is topology-routing evidence, not a
+directional placement keep.
+
+**Amount-of-work audit:** every canonical row ran 50 timed FrankenPandas calls
+and 50 timed pandas calls: 25 alternating A/A pairs per engine. Current and
+candidate used the same ten-column Float64 fixtures and stable checksums.
+There is no hidden iteration-count or input-cardinality mismatch. The
+candidate kept the same number of cellwise `abs` evaluations but added up to
+128 scoped-thread lifecycles and independently allocated Arc chunks where the
+current path uses at most ten column tasks and ten owned output buffers. That
+coordination/allocation split is an inference until a rejected-candidate
+profile attributes it, but the measured loss itself is decisive enough to
+stop.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=80c4fc7efcc4e0be4e04af314c42db966950eb877b0634d482099f42535e9bb
+invocation_id=vs-pandas-20260729T225002.460674Z-pid3913647
+measured_ratio=2.812x
+
+Every candidate cell carried its own live pandas arm and shared invocation ID;
+no positive cross-invocation candidate claim is made.
+
+**Executing ELF SHA-256 (self-reported by process):**
+current=`6b37a4d1a613953f1a3d15a6459029a1784424522c4af5f21bddefc9391eaada`
+(73,715,112 bytes);
+candidate=`067bcf3bd6122ff916cfeed507c96c09f6b42e4a993cf34b7462d8d0623a6262`
+(73,880,632 bytes);
+Python=`efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e`
+(6,894,448 bytes).
+External hashes matched process line-one identities. The admitted harness
+source SHA-256 was
+`17994e77586614a4c54fc0a2edb2bcef140ff690a37344fdaa747899691cb209`.
+Commit `ec06548826eee926f8f84cb477307ee5eeca81c7` retains that exact measured
+source; the subsequent equivalent Python 3.13 `cache` spelling was made only
+after timing.
+
+**A/A null control (same invocation):** every engine and row has 25
+alternating pairs. At the current cap-32 10M best, FP/pandas bootstrap-median
+95% CIs were `[0.988765,1.021688]`/`[0.997242,1.002281]`; absolute log effect
+`1.22023605` cleared required `0.04291175`. At candidate cap 64 10M they were
+`[0.929819,1.044281]`/`[0.997381,1.002582]`; effect `1.03372583` cleared
+required `0.14553132`. These gates establish each same-invocation pandas win;
+they do not turn the slower candidate into a maintenance keep.
+
+**CV role:** provenance only; CV had no vote. Representative FP/pandas CVs
+were 2.07%/1.59% for current cap-32 10M and 14.53%/1.09% for candidate
+cap-64 10M.
+
+**Decision: REJECT** the scoped-thread, worker-private-Arc row×column
+scheduler. Its production source and focused tests were removed after the
+proof corpus was copied. The fixed-cardinality cap-13 threshold series was
+not run: a threshold cannot rescue a production candidate that lost at every
+raised cap, so further exclusive-host work would only tune a rejected family.
+
+**Concrete retry predicate:** do not retry this scoped-thread/per-worker-Arc
+design, its row threshold, or its maximum-worker cap. Re-open only after a
+materially different implementation removes per-call thread creation and
+per-worker output allocation—such as a reusable scheduler plus a proven safe
+contiguous-output partition—and an allocation plus named-frame profile of the
+exact 10M path predicts at most 13.780 ms. A future positive result must place
+live pandas, the actual current FrankenPandas scheduler, and the new candidate
+in the same invocation; give every arm its own A/A null; preserve exact output;
+record host, 64C/128T topology, governor, ISA, exact affinity, requested and
+actual threads, and all executable SHA-256s; and clear the two-times-null
+median-CI gate. CV remains provenance only.
+
+Full evidence:
+`tests/artifacts/perf/cod_trj_5995wx_df_abs_row_partition_20260729/`.
+The directory contains the DEFINE/design/hypothesis ledgers, exact-current
+profile, invalid fail-closed attempt, ten admission retries, and 65 copied raw
+files. Eighteen canonical JSON files / 44 rows passed the mechanical contract
+audit, and the local raw tree matched the released `trj` tree recursively by
+SHA-256 before Agent Mail release 6264.
+
+### 2026-07-29 cod-pandas — the "ten worker thread cap" is `ncols`, not a thread pool: source-provenance correction, no lift exists to take
+
+A thread-cap hunt was opened on the premise that FrankenPandas is limited to
+ten worker threads by a hardcoded constant, a rayon `ThreadPoolBuilder`
+`num_threads` call, an environment default, or a config file, and that lifting
+it would unlock the remaining core count. **No such cap exists.** The ten is
+the benchmark frame's column count meeting a per-column decomposition. This
+entry banks the source coordinates so the next agent does not spend another
+exclusive-host sweep rediscovering it.
+
+**Absence is mechanically established, not assumed.** The tree has no rayon
+dependency at all: `grep -c rayon Cargo.lock` is `0`. `ThreadPoolBuilder`,
+`num_threads`, and `RAYON_NUM_THREADS` have zero occurrences anywhere in the
+repository, source or config. No `usize` constant in any crate equals ten, and
+no `.min(10)` exists. Every parallel path in the tree derives its width from
+`std::thread::available_parallelism()` over `std::thread::scope` workers; there
+is no process-global pool to reconfigure.
+
+**Where the ten actually comes from — two coordinates at `d44b1e419`:**
+
+1. `crates/fp-bench/src/main.rs:314-326` — `size_rows_cols` returns a fixed
+   ten columns for *every* size: `10k`, `100k`, `1M`, `2M`, `4M`, `6M`, `8M`,
+   `10M`, and the fallback all pair their row count with `10`.
+2. `crates/fp-frame/src/lib.rs:70948-70953` — `par_map_columns_min` computes
+   `worker_count = available_parallelism().min(ncols)`. The unit of parallel
+   work is one column, claimed off an `AtomicUsize` cursor by scoped workers.
+
+The full chain for the sort surface is
+`DataFrame::sort_values` (`crates/fp-frame/src/lib.rs:58192`) →
+`sort_values_na` (`:58199`) →
+`reorder_rows_by_positions_unchecked` (`:54749`, gather at `:54763`) →
+`par_map_columns` (`:70919`, default floor 16 384) →
+`par_map_columns_min` (`:70936`). `DataFrame::abs` (`:73212`) reaches the same
+`.min(ncols)` through `apply_per_column_min(131_072, …)` at `:73229`.
+`ncols = 10` therefore yields exactly ten workers no matter how many logical
+CPUs the affinity mask exposes — which is precisely the actual-worker plateau
+the trj sweep observed and recorded.
+
+**Classification: LOAD-BEARING, structurally — not inherited.** `.min(ncols)`
+is not a throttle someone chose conservatively and forgot; it is the arity of
+the decomposition. Ten column tasks cannot occupy thirty-two workers. The
+number is not tunable in the sense the premise assumes: raising it requires
+replacing the decomposition, not editing a bound. Deleting the `.min(ncols)`
+clamp alone would only spawn idle threads that immediately observe an exhausted
+cursor and exit, paying spawn cost for no work — a strict regression with no
+scheduling change.
+
+**The lift the premise asks for was already built and already measured.** The
+row×column scheduler that breaks the ten-column ceiling is banked immediately
+above as *`df_abs` row×column scheduler exceeds the ten-column worker ceiling
+but is 18.9% slower at its best raised cap — REJECTED* (commit `d44b1e419`).
+It did remove the ceiling mechanically — candidate actual workers reached
+13→128 — and was 18.9% slower than current at the same cap, 20.7% slower than
+current's best row, and 75.4% above the budget a 5x incumbent result needs.
+The 128-SMT row did not improve on 64 physical threads. The ceiling is not what
+costs the time.
+
+**The requested sort thread sweep also already exists, at fleet-standard
+provenance.** `artifacts/bench/cod_trj_5995wx_partitionable_thread_sweep_20260729.md`
+(machine-readable manifest alongside as `.json`) carries the full
+`1/2/4/8/16/32/64/128` affinity sweep of `sort_values_single` at 1M and 10M
+against the live pandas 2.2.3 incumbent in the same invocation, with host
+identity, physical/logical core counts, RAM, NUMA-node count, per-row affinity
+mask, actual-observed operation workers, both engine artifact SHA-256s, and a
+bootstrap median-CI gate at a 2x null margin with CV as provenance only. Its
+sort rows report FP/pandas actual workers of `1/1, 2/1, 4/1, 8/1, 10/1, 10/1,
+10/1, 10/1` — the plateau from cap 16 upward is the ten columns, and the
+residual cost is the serial argsort, not the parallel gather.
+
+**Two reasons this sweep was not re-run on `thinkstation1` this turn.** First,
+the premise's "128-thread box" is `threadripperje`, not this host:
+`thinkstation1` is an AMD Ryzen Threadripper PRO 5975WX, 32 physical cores, 64
+logical threads, two threads per core, 231,691,894,784 bytes RAM, one NUMA
+node, kernel `6.17.0-35-generic`. A row at 128 observed worker threads is
+physically unreachable here, and rows at 32 and 64 would reproduce the same ten
+actual workers the banked trj table already reports. Second, the host was
+neither exclusive nor comparable: load average 4.41 with a 233%-CPU `ast-grep`
+and several peer agent processes active, and the governor is `powersave` where
+every banked trj row was taken under `performance`. The `df_abs` retry banked
+above was invalidated in full for two CPUs merely exceeding the 20% busy
+ceiling, so a sweep taken under this load would fail the project's own
+admission contract before it could support any claim, and a `powersave` number
+would not be commensurable with the trj table even if it passed.
+
+**Result class:** source-provenance correction. No timing was taken and no
+competitive claim is made or withdrawn; the cited ratios are the already-banked
+trj measurements, unchanged. The actionable consequence is that the sort
+frontier is the serial argsort residual named by the trj sweep's routing item
+4, and any future lever must name a non-zero-self frame and an Amdahl ceiling
+inside that residual. A thread-cap lift is not available because there is no
+thread cap.
+
+### 2026-07-29 ProudChapel — bounded Float64 telemetry display strings beat the fastest exact pandas/NumPy route by 3.961x geomean at 1M/10M — KEEP
+
+Lane M added a realistic Class-1 sink for all-valid finite Float64 telemetry:
+format `value[i] = i * 1.5`, preserve the global `RangeIndex` and Series name
+`s`, materialize and consume complete string Series in 250,000-row batches,
+observe cardinality and endpoints, then destroy each batch. Population remains
+outside timing; result creation, observation, and destruction are timed.
+
+A same-worker nine-route screen named the incumbent instead of defaulting to a
+favorable pandas spelling. At 1M rows, seven interleaved medians were
+168.554 ms for NumPy 2.4.3
+`np.frompyfunc("{:.1f}".format)` plus complete pandas 2.2.3 Series
+construction, 190.744 ms for `frompyfunc(str)`, 219.202 ms for
+`Series.transform(str)`, 220.342 ms for `Series.map(str)`, 237.962 ms for
+`Series.apply(str)`, 390.377 ms for NumPy `astype(str)` plus Series,
+460.534 ms for direct `Series.astype(str)`, 477.775 ms for `np.char.mod`, and
+596.663 ms for Arrow string followed by object. All nine outputs were exactly
+equal in every value, object dtype, index, name, cardinality, and endpoints.
+Only the fastest task-equivalent arm advanced.
+
+**Campaign result class:** `incumbent-win`.
+
+The chooser-facing subtype is `realistic-workload-win`: this is a complete
+application-shaped sink rather than a maintenance self-speedup.
+
+| size | FP p50 / p95 / p99 | fastest incumbent p50 / p95 / p99 | pandas/FP ratio | absolute p50 saving | effect / required |
+|---:|---:|---:|---:|---:|---:|
+| 1M | 49.975 / 55.757 / 60.546 ms | 205.205 / 241.198 / 258.769 ms | **4.106x** | 155.230 ms | 1.41248836 / 0.25873895 |
+| 10M | 510.755 / 677.284 / 994.424 ms | 1,952.351 / 2,160.928 / 2,265.398 ms | **3.822x** | **1,441.596 ms** | 1.34089870 / 0.08428759 |
+
+The two-row geomean is 3.961x. The ratio narrows at 10M and is not presented
+as ratio-amplifying. The useful large-N gap is absolute: median time saved
+grows 9.287x, from 155.230 ms to 1.442 s.
+
+**Incumbent isolation proof:** the subject is FrankenPandas
+`Series::astype(DType::Utf8)` over each prebuilt 250,000-row Float64 Series.
+The incumbent is pandas 2.2.3 Series construction over NumPy 2.4.3
+`np.frompyfunc("{:.1f}".format)` output with the same batch labels and name.
+Both sides observe and destroy the complete result. Direct
+`Series.astype(str)` is a weaker secondary diagnostic and does not headline.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3 numpy_version=2.4.3
+artifact_sha256=f8760652a7b02d2f3f03be104a86e68bcf259353c2b4fd626548c542ff9df9cf
+invocation_id=vs-pandas-20260730T034525.887023Z-pid1518869
+measured_ratio=3.822x
+
+**Hardware and runtime provenance:** `vmi1149989`, AMD EPYC Processor (with
+IBPB), 10 physical/10 logical cores, SMT inactive, CPUs 0-9, 63,196,901,376
+bytes RAM, one NUMA node, kernel `6.17.0-40-generic`. Runtime-present host ISA
+was SSE2, AVX, AVX2, FMA, BMI1, BMI2, and AES; VAES and AVX-512F were absent.
+FrankenPandas reported scalar, SSE2, AVX2, FMA, and BMI2. Actual operation
+threads were eight for FrankenPandas and one for the incumbent at both sizes.
+
+**Builder/execution provenance:** remote fleet worker `vmi1152480` built the
+FrankenPandas ELF; `vmi1149989` executed it. FrankenPandas ELF SHA-256
+`c585d7fa4e7df9bb880317158609e56644402d6a6a6fa2a3b9d3db480869e0b4`
+(73,472,496 bytes); Python 3.13 ELF
+`efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e`
+(6,894,448 bytes); harness source
+`eea8716f3b0a3815ed6feddb58e2a1af395c40ea783341534edfaebe0a4589cf`;
+Rust benchmark source
+`dca845060b208a857387caf669aa98033b4dcc24c9568f90a8df991d01b5b809`.
+The worker's stale Git metadata is not used for attribution: the compiled
+closure had no diff from local base `6774e9a37`, and the two changed sources
+were overlaid and matched byte-for-byte.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=c585d7fa4e7df9bb880317158609e56644402d6a6a6fa2a3b9d3db480869e0b4
+(73472496 bytes)
+/data/projects/frankenpandas/.rch-target-vmi1149989-pool-bc445989bdf88102bcbc62abd4347d69/release-perf/fp-bench`.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. FP/pandas bootstrap-median 95% CIs were
+`[0.878649,1.073213]`/`[0.946530,1.028709]` at 1M and
+`[0.958732,1.015645]`/`[0.988441,1.042336]` at 10M. Both claim effects clear
+the two-times-null threshold by wide margins.
+
+**Median-CI decision:** the median effect log deviation 1.41248836 cleared
+the required log-effect threshold 0.25873895 at 1M, and the median effect log
+deviation 1.34089870 cleared the required log-effect threshold 0.08428759 at
+10M. Both decisions are `FASTER`.
+
+**Primitive-transfer gate audit:** the current harness does not require either
+A/A null confidence interval to straddle 1.0. `compute_comparison` decides from
+the claim's log deviation versus twice the larger null log-CI half-width; there
+is no `nulls_hold` or CI-straddle veto. The final FP/pandas null medians were
+0.996454/0.983506 at 1M and 0.996087/1.016231 at 10M, all within the corrected
+2% arm-order-bias bound. Both workload verdicts were `FASTER`, as they were in
+the earlier fully admitted invocations, so the verdict is stable rather than
+randomly moving with null precision. The transferred defect is therefore not
+exhibited here and the gate was left unchanged. Null CIs remain reported as
+telemetry.
+
+**CV role:** provenance only; CV had no vote. FP/incumbent CVs were
+11.01%/10.64% at 1M and 20.61%/6.23% at 10M.
+
+**Lifecycle/exclusivity:** linked mimalloc v2 normally delays page purges.
+The admitted arm sets `MIMALLOC_PURGE_DELAY=0`, making purge immediate when
+the timed drop frees rendered-batch pages. This charges cleanup at the
+semantic boundary; it does not add a post-arm grace period. All ten all-CPU
+pre/post checkpoints cleared the unchanged 20% threshold, with 8.081% maximum
+observed busy. Twelve earlier invocations either failed closed or were superseded
+for incomplete machine-readable provenance. None contributes a row or ratio.
+
+**Chooser statement:** choose FrankenPandas for this measured shape only:
+formatting 1M or 10M all-valid finite half-integer Float64 telemetry values
+into complete ordered string Series, preserving the global `RangeIndex` and
+name `s`, then consuming/destroying results in 250,000-row batches on the
+recorded 10-core EPYC/AVX2 host. Do not generalize to arbitrary Float64
+spelling; null/NaN/infinity; scientific notation; locale or precision;
+retained monolithic output; Python bindings; Arrow-native output; another
+batch size; a thread-normalized comparison; other hardware; or other APIs.
+
+**Decision: KEEP** the competitive workload claim and its strongest-incumbent
+coverage. Production source did not change.
+
+**Concrete retry predicate:** do not rerun this exact shape to seek a larger
+ratio. Reopen only for a different chooser question: arbitrary/nullable
+Float64 semantics, retained monolithic output, another batch size,
+thread-normalized incumbents, or another hardware class. Any revalidation
+must re-screen complete task-equivalent incumbents on the final worker, name
+both arms, retain exact output and executable/ISA provenance, give both
+engines same-invocation A/A controls, and clear the unchanged median-CI and
+all-CPU gates.
+
+Full evidence:
+`artifacts/bench/proud_lane_m_astype_str_f64_realistic_1m_10m_20260729.md`
+and
+`artifacts/bench/proud_lane_m_astype_str_f64_realistic_1m_10m_20260729.json`
+(SHA-256
+`257ef3dc7015976ac291cf2179e219405a7ba41cc573abe36b186f49c8b33b10`).
+
+**Reset-safe handoff:** this lane proved the bounded 3.961x geomean telemetry
+display-string win, strongest task-equivalent incumbent, complete-output
+parity, runtime ISA/executable provenance, A/A margin, and the absence of the
+CI-straddle gate defect. It did **not** prove the exact trj cap-1/cap-32 10M
+sort residual profile, and ProudChapel does not hold a trj claim. That work
+remains queued at the canonical back in Agent Mail message 6423 after the
+formal predecessors. The single next step is: after every predecessor posts
+`[trj] RELEASE`, post a fresh claim and capture exact-current named cap-1 and
+cap-32 sort frames plus an Amdahl ceiling before any source edit.
+
+### 2026-07-30 CyanLynx — co-permuted radix key payload converts a 2.16–2.39x maintenance self-speedup into a 5.110x live-pandas 10M sort win — KEEP
+
+The landed `radix_argsort_u64` lever carries `(u64, usize)` as one payload
+through the eight stable LSD passes, replacing the dependent random
+`keys[idx]` load on every pass with a sequential read of the key already
+placed by the previous pass. The earlier same-host baseline/candidate proof was
+bit-identical and improved the complete 10M×10 Float64
+`sort_values_single` operation by 2.391x and 2.158x on two affinities, with
+fp-columnar 592/0 and fp-frame 3207/0 green. **That result is a `SELF-speedup`,
+so its campaign class is MAINTENANCE, not a win.**
+
+**Campaign result class:** `incumbent-win`.
+
+**Legacy incumbent arm (same invocation):**
+name=pandas version=2.2.3
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+invocation_id=vs-pandas-20260730T062823.212746Z-pid1749690
+measured_ratio=5.110x
+
+The conversion used the live pandas 2.2.3 arm in the same canonical invocation
+as the exact FrankenPandas ELF. Every sample times the complete
+`df.sort_values("col_0")` operation over the identical 10M-row,
+ten-Float64-column fixture; population is outside timing. Each engine supplied
+50 samples from 25 alternating A/A pairs.
+
+| row | invocation | FP p50 / p95 / p99 | pandas p50 / p95 / p99 | pandas / FP | independent effect CI95 | 2x-null upper | verdict |
+|---|---|---:|---:|---:|---|---:|---|
+| primary | `vs-pandas-20260730T062823.212746Z-pid1749690` | 547.572 / 1,160.802 / 1,745.289 ms | 2,798.268 / 3,238.291 / 3,440.199 ms | **5.110x** | **[4.543, 5.737]** | 1.454x | **FASTER** |
+| replication | `vs-pandas-20260730T063725.213861Z-pid1759655` | 493.561 / 1,067.227 / 1,352.823 ms | 2,911.805 / 3,345.684 / 3,650.424 ms | **5.900x** | **[5.408, 6.309]** | 1.976x | **FASTER** |
+
+The primary 5.110x ratio is the conservative headline. The effect intervals
+use 20,000 independent bootstrap resamples of
+`median(pandas) / median(FrankenPandas)`, seed `0xF2A_2026_0725`. Point
+log-effect / required two-times-null log-effect was
+`1.63126103 / 0.37418856` and `1.77488231 / 0.68106454`; both complete effect
+CIs sit above the ratio bound induced by twice the larger per-engine null
+log-CI half-width.
+
+**A/A null control (same invocation):** 25 alternating pairs per engine and
+row. Primary FrankenPandas/pandas bootstrap-median 95% CIs were
+`[0.829366,1.186423]`/`[0.968692,1.038915]`; replication CIs were
+`[0.711392,1.218157]`/`[0.981589,1.028369]`.
+
+**Median-CI decision:** the primary median log effect 1.63126103 cleared the
+required two-times-null log-effect threshold 0.37418856, and its independent
+effect CI was `[4.543053,5.737131]`; the replication median log effect
+1.77488231 cleared 0.68106454, with effect CI
+`[5.407723,6.309032]`. Both decisions are `FASTER`.
+
+**Actual observed threads, not requested threads:** the affinity cap was ten,
+but FrankenPandas observed `10` operation threads and pandas observed `1` in
+both rows. Execution host for every row was `vmi1149989`, AMD EPYC Processor
+(with IBPB), 10 physical/10 logical cores, SMT inactive, CPUs 0-9,
+63,196,901,376 bytes RAM, one NUMA node, kernel `6.17.0-40-generic`. Host ISA
+was SSE2/AVX/AVX2/FMA/BMI1/BMI2/AES, with VAES and AVX-512F absent.
+
+**Artifact provenance:** the subject was built only through
+`RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 rch exec --no-self-healing
+--base 9d21f64314042f31d4e09327390e403f87e068d1 --clean-overlay --no-overlay --
+cargo build -p fp-bench --profile release-perf`. Worker `vmi1153651` produced
+the exact measured artifact.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=088ce5728aedce97a589f927032dfb16468a43797d65d7e6b71f8367df1a6ecc
+(73771288 bytes)
+/data/tmp/cod-cyanlynx-frankenpandas-radix-vs-pandas-20260730/target/release-perf/fp-bench`.
+
+Pandas distribution SHA-256 was
+`c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f`
+(70,681,559 bytes, 2,922 files); Python ELF was
+`efb29ce53d36ebaeee80e3aa44fd6c7f9d71bbded5fe1665240b2ed8ecaeee0e`;
+harness source was
+`eea8716f3b0a3815ed6feddb58e2a1af395c40ea783341534edfaebe0a4589cf`.
+
+**CV role:** provenance only; CV had no vote. FP/pandas CV was 49.37%/8.33%
+in the primary and 39.94%/8.65% in the replication. The high FP dispersion
+is already charged in the wide effect and null intervals; both decisions
+remain far outside the 2x null bound.
+
+**Primitive-transfer gate audit — no change:** neither the maintenance A/B
+gate nor `benches/vs_pandas_harness.py` vetoes a row because an A/A null CI
+fails to straddle 1.0. The canonical gate reports null bootstrap CIs and
+compares claim log-effect with twice the larger null log-CI half-width; there
+is no `nulls_hold`, and CV has no vote. Two fully admitted invocations retained
+the same FASTER verdict, so the transferred precision-coupled/moving-verdict
+defect is not exhibited. The missing effect-CI clause was checked
+independently above; the harness was not changed.
+
+For full disclosure, the note's alternative three-clause rule would mark both
+rows undecidable on its additional null-median-within-2% clause:
+FrankenPandas null medians were 1.028251 and 1.033124, while pandas null
+medians were 1.005420 and 1.008509. Its effect-CI and 2x-margin clauses pass.
+Because the live gates have no CI-straddle defect, the verdict is stable, and
+the order was to report rather than change the gate, that stricter clause is
+diagnostic only here. Do not reuse these rows as proof under a campaign that
+explicitly adopts the alternative rule.
+
+Every admitted row cleared invocation preflight, immediate pre/post checks for
+both arms, and invocation postflight across every online CPU; maximum observed
+busy fraction was 16.67% and 19.00% against the unchanged 20% ceiling.
+Twenty-four earlier invocations refused at a checkpoint and wrote no result;
+none contributes a timing or ratio.
+
+**Decision: KEEP** the source optimization as maintenance and keep the
+competitive **5.110x** whole-operation claim for this exact 10M×10 Float64
+shape.
+
+**Concrete retry predicate:** do not rerun this exact shape to seek a larger
+ratio. Reopen only for another dtype, null/NaN semantics, another column width,
+thread-normalized execution, another hardware class, or changed
+pandas/harness artifacts. Any new claim must use a strict RCH-built exact ELF,
+live pandas in the same invocation, complete host/actual-thread/artifact
+provenance, an effect bootstrap CI that clears the 2x null margin, and CV as
+provenance only.
+
+Full evidence:
+`artifacts/bench/cod_thinkstation1_radix_payload_ab_20260730.md`,
+`artifacts/bench/cod_vmi1149989_radix_payload_vs_pandas_10m_20260730.json`
+(SHA-256
+`58831b9ed14a34a3502e56b834c612c0bb4ee41bf5442dcb2e1947821808ea77`),
+and
+`artifacts/bench/cod_vmi1149989_radix_payload_vs_pandas_10m_20260730_replication.json`
+(SHA-256
+`ef1ff9728a75778cdfa390029c62043a70648c2ecd4fec512a86a4ec59ea87cb`).
+
+### 2026-07-31 CyanLynx — parallel stable lower-radix scatter is a corrected-gate 1.475x maintenance self-speedup — KEEP
+
+The exact-current 10M Float64 profile named the main-thread residual instead
+of treating the ten-column fixture width as a thread cap. The main thread held
+20.703% of aggregate cycles. `radix_argsort_u64` alone held 17.61%; within
+that kernel, instruction samples attributed 73.26% to stable scatter, 20.57%
+to histograms, and 6.17% to initialization/prefix/copy work. The eight LSD
+digits are inherently ordered because each digit consumes the previous
+digit's permutation. Work within a digit is not inherently serial.
+
+The one-lever candidate performs a stable high-16-bit partition, then gives
+disjoint prefix slices to scoped workers for the six lower-byte stable passes.
+It uses no unsafe code, shared output writes, or atomics, and falls back to the
+serial implementation when fewer than two non-trivial prefixes exist.
+
+**Campaign result class:** `maintenance-self-speedup`.
+
+**Accepted same-host A/B:** on `vmi1149989`, the exact-base ELF improved from
+508.580 ms to 344.811 ms p50, a **1.474951x** median speedup with independent
+20,000-resample bootstrap CI **[1.428928, 1.533264]**. All sixteen interleaved
+round ratios exceeded one. Both arms observed ten operation threads and returned
+checksum `4957dea0fe3e2ed1`.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=2bb3b92f2e5ccaa258868ce1613c9e0c2716f31bc29f7dfa6e946ea6c894a5d3
+(73873472 bytes)
+/data/tmp/cod-j5841-final-target/release-perf/fp-bench`.
+
+**A/A null control (same invocation):** 800 samples gave median ratio
+1.002850 and bootstrap CI [0.971527, 1.033379], only 0.2850% from unity.
+
+**Median-CI decision:** the median effect ratio was 1.474951 with independent
+CI [1.428928, 1.533264]; its effect deviation 0.474951 cleared the required
+two-times-null-CI threshold 0.061852.
+
+**CV role:** provenance only; CV had no vote. Baseline/candidate CV was
+42.07%/57.77%, already charged through the median and null intervals.
+
+The first final-ELF eight-round invocation is retained as rejected evidence:
+its effect was 1.383108x with CI [1.336659, 1.447884], but its A/A median
+1.023310 was 2.3310% from unity, so corrected clause 3 failed. After the
+host's one-minute load returned below 1 and no RCH work remained on that host,
+one predeclared confirmatory retry doubled sampling to sixteen rounds. That
+higher-information retry is the accepted row above; no third attempt ran.
+
+**Host identity for the accepted row:** `vmi1149989`, AMD EPYC Processor
+(with IBPB), 10 physical/10 logical cores, SMT inactive, CPUs 0-9,
+63,196,901,376 bytes RAM, one NUMA node, kernel `6.17.0-40-generic`. The
+headline thread count is the observed ten, not the requested ten-CPU affinity
+cap.
+
+**Strict build provenance:** worker `vmi1264463` built the measured candidate
+and worker `vmi1153651` built the exact-source focused test from base
+`7a5bf7143bc996d7956dc5faf38628a71390c331` with `--clean-overlay` and only
+`crates/fp-columnar/src/lib.rs` overlaid. A final exact-base, clean-overlay
+`release-perf` confirmation on `vmi1264463` exited zero after Cargo reported
+39m52s; local fallback was disabled. Baseline ELF SHA-256 was
+`4aa06eda20230eb79ff02d29ba00f9cba4839db8451034cca9cd84c19a852f8d`;
+candidate ELF SHA-256 was
+`2bb3b92f2e5ccaa258868ce1613c9e0c2716f31bc29f7dfa6e946ea6c894a5d3`.
+
+**Post-change routing profile:** the candidate main-thread share fell to
+5.560% of aggregate cycles and main-thread `radix_argsort_u64` fell to 3.203%.
+Lower-byte `radix_scatter_entries` appears on workers at 6.69% aggregate.
+Parallel `Column::take_positions` is now the aggregate leader at 84.92%.
+Baseline profiling was on `vmi1227854` and candidate profiling on
+`vmi1149989`, so this symbol transfer is routing evidence only; the accepted
+timing above is same-host. The candidate profile used the algorithm-identical
+pre-lint ELF
+`df5aff7e7f0c79190182c5ecd1cbe5040eb716b12dbb452d112d57b72c0af346`;
+the accepted timing uses the final ELF named above.
+
+**Decision: KEEP** the source change as a corrected-gate maintenance
+self-speedup. It is not campaign output.
+
+Full evidence:
+`artifacts/bench/cod_vmi1149989_radix_parallel_residual_20260731.md` and
+`artifacts/bench/cod_vmi1149989_radix_parallel_residual_20260731_ab.json`.
+
+### 2026-07-31 CyanLynx — math-unary x86-64-v3 wins floor/ceil/trunc/round vs live pandas — KEEP
+
+The 2026-06-26 math-unary predicate (generic x86-64 cannot emit the needed wide
+round/sqrt instructions) is now satisfied by the fleet floor of x86-64-v3.
+Immutable v3 whole-binary candidate vs live pandas 2.2.3 and default-target
+control, one workload per invocation.
+
+**Campaign result class:** `incumbent-win`.
+
+| workload, 1M Float64 | pandas / v3 | effect-median 95% CI | observed threads, v3 / pandas | v3/default |
+|---|---:|---:|---:|---:|
+| floor | **1.285x** | [1.277046, 1.339627] | 1 / 1 | 10.849x |
+| ceil | **1.452x** | [1.442989, 1.461650] | 1 / 1 | 11.742x |
+| trunc | **1.303x** | [1.273292, 1.341008] | 1 / 1 | 13.539x |
+| round(decimals=2) | **1.098x** | [1.083005, 1.102684] | 1 / 1 | 2.381x |
+
+**Executing ELF SHA-256 (self-reported by process):**
+bench_elf_sha256=97d30b363332e7f687ea74331973461fade550898202f988b1f4bdc34cd545ee (75329736 bytes) /data/tmp/cargo-target/release-perf/fp-bench
+
+**A/A null control (same invocation):** 6 pairs across four KEEP workloads; FrankenPandas median ratio 0.996x CI [0.990, 1.004]; pandas median ratio 0.999x CI [0.992, 1.004]. Per-workload FP/pandas A/A medians were 0.996101/0.998843, 0.990558/1.003823, 0.998107/0.999936, and 0.989954/1.000172.
+
+**Median-CI decision:** median effect 1.285x (floor) cleared required threshold; CI [1.277046, 1.339627] excludes unity and is above twice the A/A null half-width. Companion workloads ceil 1.452x [1.442989, 1.461650], trunc 1.303x [1.273292, 1.341008], round 1.098x [1.083005, 1.102684] each clear the same floor.
+
+**CV role:** provenance only; CV had no vote.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 artifact_sha256=a5747a243aba6bcbe01fdb4bcfd77c2dea7ac4ca801f7b1cf32cc8d866a31489 invocation_id=math-unary-v3-threadripperje-20260731 measured_ratio=1.285x
+
+**Host:** threadripperje, Threadripper PRO 5995WX, affinity 0-9, 54 admission checkpoints, max busy 16%/20%. Built on vmi1227854 from base e7eb7b5a0edcbf16a891f59d0b80ef85d2c0d932. Full evidence: `artifacts/bench/cod_math_unary_isa_retest_20260731.*`.
+
+### 2026-07-31 CyanLynx — math-unary x86-64-v3 loses sqrt and log vs live pandas — REJECT
+
+Same host/ELF family as the KEEP companion. Under immutable v3 vs live pandas 2.2.3:
+
+| workload | pandas / v3 | effect-median 95% CI | v3/default |
+|---|---:|---:|---:|
+| sqrt | **0.361x** | [0.357630, 0.364423] | 1.443x |
+| log | **0.630x** | [0.625947, 0.638700] | 0.758x |
+
+**A/A null control (same invocation):** sqrt FP/pandas A/A medians 0.996720/0.992018; log 1.001090/1.000209; median ratio 0.997x CI [0.990, 1.010] — within 2% of unity, so the losses are not null noise.
+
+**Counted mechanism:** 0 additional instructions from a blanket target flag can close the residual: log regresses versus the default-target binary (0.758x) and sqrt remains a 0.361x loss despite 7 `vsqrtpd` emissions in the v3 ELF; required predeclared gate is competitive win vs pandas and was failed.
+
+**Decision: REJECT** blanket global x86-64-v3 Cargo target policy. No production policy changed. Retry predicates: profile residual for sqrt; explain 3-worker log routing or ship a vector-log before reopening.
+
+### 2026-07-31 CyanLynx — live-pandas corrected-null reruns remain inadmissible — REJECT
+
+Six complete live-pandas same-invocation rows cleared every host-wide
+checkpoint and the older log-margin gate, but each failed the explicit
+A/A-median-within-2% clause for at least one engine:
+
+**A/A null control (same invocation):** every row below used numeric
+within-invocation A/A median ratios. At least one engine in every row lay more
+than 2% from unity, so all six corrected verdicts are reject.
+
+| host | pandas / FP diagnostic ratio | observed operation threads, FP / pandas | FP A/A median | pandas A/A median | corrected verdict |
+|---|---:|---:|---:|---:|---|
+| `vmi1149989` | 7.745x | 10 / 1 | 0.916468 | 0.985557 | reject |
+| `vmi1149989` | 6.391x | 10 / 1 | 1.072611 | 0.988726 | reject |
+| `vmi1149989` | 7.120x | 10 / 1 | 1.071710 | 0.992730 | reject |
+| `vmi1227854` | 7.664x | 10 / 1 | 1.114704 | 1.043016 | reject |
+| `vmi1227854` | 7.882x | 10 / 1 | 0.971774 | 1.053060 | reject |
+| `vmi1227854` | 9.014x | 10 / 1 | 0.894001 | 0.989966 | reject |
+
+These ratios are diagnostic only. No live-incumbent headline is published from
+this run. These rows used the algorithm-identical pre-lint candidate ELF
+`df5aff7e7f0c79190182c5ecd1cbe5040eb716b12dbb452d112d57b72c0af346`;
+the final maintenance ELF does not promote them.
+
+**Concrete retry predicate:** retry the live incumbent comparison only after
+the infrastructure supplies a whole-invocation exclusive worker window that
+prevents periodic RCH capability-probe `npm` processes, or after the canonical
+harness predeclares and implements randomized within-engine A/A arm order to
+remove fixed-order bias while enforcing the same three corrected clauses.
+Reuse the exact candidate, pandas 2.2.3, Python, and harness hashes or declare
+any changed artifact as a new campaign. A retry must again clear every
+all-online-CPU checkpoint and report observed, not requested, threads.
+
+Full evidence:
+`artifacts/bench/cod_vmi1149989_radix_parallel_residual_20260731.md` and
+`artifacts/bench/cod_vmi1149989_radix_parallel_residual_20260731_ab.json`.

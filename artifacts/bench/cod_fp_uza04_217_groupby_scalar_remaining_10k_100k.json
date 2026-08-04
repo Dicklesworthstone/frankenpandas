@@ -1,0 +1,282 @@
+{
+  "schema_version": "v3",
+  "timestamp": "2026-07-24T04:13:59.074668+00:00",
+  "engine_identity": {
+    "frankenpandas": {
+      "version": "0.1.0",
+      "profile": "release-perf",
+      "role": "Subject"
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "role": "Oracle"
+    }
+  },
+  "parameters": {
+    "sizes": [
+      "10k",
+      "100k"
+    ],
+    "dtypes": [
+      "float64"
+    ],
+    "categories": [
+      "groupby"
+    ],
+    "cv_threshold": 5.0,
+    "min_iterations": 10,
+    "warmup_iterations": 3
+  },
+  "results": [
+    {
+      "workload": "groupby_kurt_str",
+      "category": "groupby",
+      "size": "10k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 181.72,
+        "p95_us": 200.96,
+        "p99_us": 203.69,
+        "mean_us": 184.84,
+        "stddev_us": 6.73,
+        "cv_pct": 3.64,
+        "throughput_rows_sec": 55028505,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 39783.23,
+        "p95_us": 40075.55,
+        "p99_us": 40097.27,
+        "mean_us": 39762.13,
+        "stddev_us": 237.95,
+        "cv_pct": 0.6,
+        "throughput_rows_sec": 251362,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 218.921,
+      "verdict": "FASTER"
+    },
+    {
+      "workload": "groupby_kurt_str",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 1503.63,
+        "p95_us": 1541.52,
+        "p99_us": 1548.22,
+        "mean_us": 1507.2,
+        "stddev_us": 18.34,
+        "cv_pct": 1.22,
+        "throughput_rows_sec": 66505767,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 42658.81,
+        "p95_us": 44495.7,
+        "p99_us": 45553.72,
+        "mean_us": 42911.7,
+        "stddev_us": 1049.67,
+        "cv_pct": 2.45,
+        "throughput_rows_sec": 2344182,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 28.371,
+      "verdict": "FASTER"
+    },
+    {
+      "workload": "groupby_quantile_str",
+      "category": "groupby",
+      "size": "10k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 486.17,
+        "p95_us": 507.22,
+        "p99_us": 545.52,
+        "mean_us": 488.96,
+        "stddev_us": 17.09,
+        "cv_pct": 3.5,
+        "throughput_rows_sec": 20568894,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 1973.12,
+        "p95_us": 2054.31,
+        "p99_us": 2071.9,
+        "mean_us": 1988.73,
+        "stddev_us": 36.51,
+        "cv_pct": 1.84,
+        "throughput_rows_sec": 5068121,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 4.058,
+      "verdict": "FASTER"
+    },
+    {
+      "workload": "groupby_quantile_str",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 3334.86,
+        "p95_us": 3391.54,
+        "p99_us": 3409.23,
+        "mean_us": 3341.1,
+        "stddev_us": 25.43,
+        "cv_pct": 0.76,
+        "throughput_rows_sec": 29986275,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 5480.27,
+        "p95_us": 5541.3,
+        "p99_us": 5549.06,
+        "mean_us": 5476.17,
+        "stddev_us": 46.23,
+        "cv_pct": 0.84,
+        "throughput_rows_sec": 18247264,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 1.643,
+      "verdict": "FASTER"
+    },
+    {
+      "workload": "groupby_unique_str",
+      "category": "groupby",
+      "size": "10k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 597.18,
+        "p95_us": 630.7,
+        "p99_us": 665.08,
+        "mean_us": 603.94,
+        "stddev_us": 19.53,
+        "cv_pct": 3.23,
+        "throughput_rows_sec": 16745342,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 22247.14,
+        "p95_us": 22632.22,
+        "p99_us": 22693.34,
+        "mean_us": 22298.48,
+        "stddev_us": 232.12,
+        "cv_pct": 1.04,
+        "throughput_rows_sec": 449496,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 37.254,
+      "verdict": "FASTER"
+    },
+    {
+      "workload": "groupby_unique_str",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 5067.97,
+        "p95_us": 5112.45,
+        "p99_us": 5132.6,
+        "mean_us": 5070.23,
+        "stddev_us": 24.1,
+        "cv_pct": 0.48,
+        "throughput_rows_sec": 19731759,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 27178.37,
+        "p95_us": 27825.74,
+        "p99_us": 27881.5,
+        "mean_us": 27245.41,
+        "stddev_us": 387.72,
+        "cv_pct": 1.42,
+        "throughput_rows_sec": 3679397,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 5.363,
+      "verdict": "FASTER"
+    },
+    {
+      "workload": "groupby_unique_i64",
+      "category": "groupby",
+      "size": "10k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 586.79,
+        "p95_us": 623.0,
+        "p99_us": 654.02,
+        "mean_us": 591.98,
+        "stddev_us": 20.12,
+        "cv_pct": 3.4,
+        "throughput_rows_sec": 17041814,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 21559.32,
+        "p95_us": 22798.54,
+        "p99_us": 23423.47,
+        "mean_us": 21748.76,
+        "stddev_us": 669.08,
+        "cv_pct": 3.08,
+        "throughput_rows_sec": 463836,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 36.741,
+      "verdict": "FASTER"
+    },
+    {
+      "workload": "groupby_unique_i64",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 4903.84,
+        "p95_us": 4939.63,
+        "p99_us": 4956.84,
+        "mean_us": 4899.6,
+        "stddev_us": 31.7,
+        "cv_pct": 0.65,
+        "throughput_rows_sec": 20392178,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 25116.48,
+        "p95_us": 25395.78,
+        "p99_us": 25483.26,
+        "mean_us": 25132.59,
+        "stddev_us": 189.22,
+        "cv_pct": 0.75,
+        "throughput_rows_sec": 3981450,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 5.122,
+      "verdict": "FASTER"
+    }
+  ],
+  "summary": {
+    "total_workloads": 8,
+    "valid_workloads": 8,
+    "dropped_high_cv": 0,
+    "category_scores": {
+      "groupby": 14.094
+    },
+    "weighted_score": 3.919,
+    "claim_validated": false
+  }
+}

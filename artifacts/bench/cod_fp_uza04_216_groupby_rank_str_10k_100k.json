@@ -1,0 +1,102 @@
+{
+  "schema_version": "v3",
+  "timestamp": "2026-07-24T04:11:16.411466+00:00",
+  "engine_identity": {
+    "frankenpandas": {
+      "version": "0.1.0",
+      "profile": "release-perf",
+      "role": "Subject"
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "role": "Oracle"
+    }
+  },
+  "parameters": {
+    "sizes": [
+      "10k",
+      "100k"
+    ],
+    "dtypes": [
+      "float64"
+    ],
+    "categories": [
+      "groupby"
+    ],
+    "cv_threshold": 5.0,
+    "min_iterations": 10,
+    "warmup_iterations": 3
+  },
+  "results": [
+    {
+      "workload": "groupby_rank_str",
+      "category": "groupby",
+      "size": "10k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 599.17,
+        "p95_us": 613.99,
+        "p99_us": 616.11,
+        "mean_us": 600.14,
+        "stddev_us": 8.03,
+        "cv_pct": 1.34,
+        "throughput_rows_sec": 16689615,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 1822.61,
+        "p95_us": 1859.88,
+        "p99_us": 1873.28,
+        "mean_us": 1829.7,
+        "stddev_us": 18.26,
+        "cv_pct": 1.0,
+        "throughput_rows_sec": 5486643,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 3.042,
+      "verdict": "FASTER"
+    },
+    {
+      "workload": "groupby_rank_str",
+      "category": "groupby",
+      "size": "100k",
+      "dtype": "float64",
+      "frankenpandas": {
+        "p50_us": 5316.1,
+        "p95_us": 5348.44,
+        "p99_us": 5359.4,
+        "mean_us": 5318.18,
+        "stddev_us": 20.3,
+        "cv_pct": 0.38,
+        "throughput_rows_sec": 18810779,
+        "iterations": 25,
+        "valid": true
+      },
+      "pandas": {
+        "p50_us": 18971.37,
+        "p95_us": 19038.77,
+        "p99_us": 19048.32,
+        "mean_us": 18969.08,
+        "stddev_us": 46.0,
+        "cv_pct": 0.24,
+        "throughput_rows_sec": 5271101,
+        "iterations": 10,
+        "valid": true
+      },
+      "ratio": 3.569,
+      "verdict": "FASTER"
+    }
+  ],
+  "summary": {
+    "total_workloads": 2,
+    "valid_workloads": 2,
+    "dropped_high_cv": 0,
+    "category_scores": {
+      "groupby": 3.295
+    },
+    "weighted_score": 1.759,
+    "claim_validated": false
+  }
+}

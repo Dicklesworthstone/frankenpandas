@@ -1,0 +1,159 @@
+{
+  "schema_version": "v3-retry",
+  "bead": "br-frankenpandas-uza04.218",
+  "agent": "QuietHarbor",
+  "timestamp": "2026-07-25T20:45:00+00:00",
+  "engine_identity": {
+    "frankenpandas": {
+      "version": "0.1.0",
+      "profile": "release-perf",
+      "role": "Subject"
+    },
+    "pandas": {
+      "version": "2.2.3",
+      "role": "Oracle"
+    }
+  },
+  "substrate": {
+    "binary": "/data/tmp/cargo-target/release-perf/fp-bench",
+    "binary_built": "2026-07-25T20:34:05Z",
+    "binary_freshness_checked": "no crates/**/*.rs newer than the binary at run time",
+    "pinning": "taskset -c 48-63",
+    "host": "64-thread shared dev host with concurrent peer agents",
+    "elf_sha256_recorded": false,
+    "elf_sha256_note": "harness-contract \u00a72.1 (self-reporting ELF sha) NOT yet adopted in this repo"
+  },
+  "gate": {
+    "primary": "median of per-run p50 ratios across all attempts",
+    "provenance_only": "cv_pct is reported but is NOT the deciding gate",
+    "rationale": "campaign \u00a72.3 \u2014 cv<5% is unreachable on this shared host; it discarded 3 of 4 mutually-agreeing runs on both rows"
+  },
+  "results": [
+    {
+      "workload": "groupby_agg3_str",
+      "size": "100k",
+      "category": "groupby",
+      "dtype": "float64",
+      "attempts": [
+        {
+          "attempt": 1,
+          "fp_p50_us": 1588.83,
+          "fp_cv_pct": 4.85,
+          "fp_cv_admitted": true,
+          "pandas_p50_us": 4782.35,
+          "pandas_cv_pct": 9.61,
+          "pandas_cv_admitted": false,
+          "p50_ratio": 3.01,
+          "harness_verdict": "DROPPED_HIGH_CV",
+          "harness_ratio": null
+        },
+        {
+          "attempt": 2,
+          "fp_p50_us": 1611.09,
+          "fp_cv_pct": 7.81,
+          "fp_cv_admitted": false,
+          "pandas_p50_us": 4880.19,
+          "pandas_cv_pct": 4.88,
+          "pandas_cv_admitted": true,
+          "p50_ratio": 3.0291,
+          "harness_verdict": "DROPPED_HIGH_CV",
+          "harness_ratio": null
+        },
+        {
+          "attempt": 3,
+          "fp_p50_us": 1650.32,
+          "fp_cv_pct": 2.75,
+          "fp_cv_admitted": true,
+          "pandas_p50_us": 4927.26,
+          "pandas_cv_pct": 1.84,
+          "pandas_cv_admitted": true,
+          "p50_ratio": 2.9856,
+          "harness_verdict": "FASTER",
+          "harness_ratio": 2.986
+        },
+        {
+          "attempt": 4,
+          "fp_p50_us": 1698.07,
+          "fp_cv_pct": 7.78,
+          "fp_cv_admitted": false,
+          "pandas_p50_us": 4774.04,
+          "pandas_cv_pct": 1.57,
+          "pandas_cv_admitted": true,
+          "p50_ratio": 2.8115,
+          "harness_verdict": "DROPPED_HIGH_CV",
+          "harness_ratio": null
+        }
+      ],
+      "n_attempts": 4,
+      "n_cv_admitted": 1,
+      "p50_ratio_min": 2.8115,
+      "p50_ratio_max": 3.0291,
+      "p50_ratio_median": 2.9978,
+      "cv_admitted_ratio": 2.9856,
+      "verdict": "FASTER"
+    },
+    {
+      "workload": "df_groupby_2strkey_sum",
+      "size": "10k",
+      "category": "groupby",
+      "dtype": "float64",
+      "attempts": [
+        {
+          "attempt": 1,
+          "fp_p50_us": 1644.36,
+          "fp_cv_pct": 15.41,
+          "fp_cv_admitted": false,
+          "pandas_p50_us": 1434.45,
+          "pandas_cv_pct": 4.54,
+          "pandas_cv_admitted": true,
+          "p50_ratio": 0.8723,
+          "harness_verdict": "DROPPED_HIGH_CV",
+          "harness_ratio": null
+        },
+        {
+          "attempt": 2,
+          "fp_p50_us": 1535.18,
+          "fp_cv_pct": 6.02,
+          "fp_cv_admitted": false,
+          "pandas_p50_us": 1305.06,
+          "pandas_cv_pct": 1.21,
+          "pandas_cv_admitted": true,
+          "p50_ratio": 0.8501,
+          "harness_verdict": "DROPPED_HIGH_CV",
+          "harness_ratio": null
+        },
+        {
+          "attempt": 3,
+          "fp_p50_us": 1553.12,
+          "fp_cv_pct": 9.37,
+          "fp_cv_admitted": false,
+          "pandas_p50_us": 1300.17,
+          "pandas_cv_pct": 1.52,
+          "pandas_cv_admitted": true,
+          "p50_ratio": 0.8371,
+          "harness_verdict": "DROPPED_HIGH_CV",
+          "harness_ratio": null
+        },
+        {
+          "attempt": 4,
+          "fp_p50_us": 1559.63,
+          "fp_cv_pct": 3.84,
+          "fp_cv_admitted": true,
+          "pandas_p50_us": 1345.14,
+          "pandas_cv_pct": 3.17,
+          "pandas_cv_admitted": true,
+          "p50_ratio": 0.8625,
+          "harness_verdict": "SLOWER",
+          "harness_ratio": 0.862
+        }
+      ],
+      "n_attempts": 4,
+      "n_cv_admitted": 1,
+      "p50_ratio_min": 0.8371,
+      "p50_ratio_max": 0.8723,
+      "p50_ratio_median": 0.8563,
+      "cv_admitted_ratio": 0.8625,
+      "verdict": "SLOWER"
+    }
+  ]
+}

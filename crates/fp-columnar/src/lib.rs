@@ -2240,6 +2240,20 @@ enum ScalarValues {
         expanded: OnceLock<Vec<f64>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Deferred arbitrary permutation over shared all-valid Float64 data.
+    ///
+    /// Sorts already own an output-row -> source-row permutation. Keeping that
+    /// immutable tape shared across every Float64 payload column removes the
+    /// eager random gather from the sort critical path; a consumer that needs a
+    /// contiguous typed/scalar view materializes the exact same gather once.
+    LazyGatherFloat64 {
+        data: Arc<[f64]>,
+        source_start: usize,
+        positions: Arc<Vec<usize>>,
+        gathered: OnceLock<Vec<f64>>,
+        all_finite: OnceLock<bool>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyNullableFloat64 {
         data: Vec<f64>,
         validity: ValidityMask,
@@ -2742,8 +2756,10 @@ impl ScalarValues {
     fn all_valid_float64_finite_witness(&self) -> Option<bool> {
         match self {
             Self::LazyAllValidFloat64 { all_finite, .. }
+            | Self::LazyAllValidFloat64Vec { all_finite, .. }
             | Self::LazyAllValidFloat64Chunks { all_finite, .. }
-            | Self::LazyAllValidFloat64Slice { all_finite, .. } => all_finite.get().copied(),
+            | Self::LazyAllValidFloat64Slice { all_finite, .. }
+            | Self::LazyGatherFloat64 { all_finite, .. } => all_finite.get().copied(),
             _ => None,
         }
     }
@@ -2786,6 +2802,22 @@ impl ScalarValues {
             step,
             len,
             expanded: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_gather_float64(
+        data: Arc<[f64]>,
+        source_start: usize,
+        positions: Arc<Vec<usize>>,
+        all_finite: Option<bool>,
+    ) -> Self {
+        Self::LazyGatherFloat64 {
+            data,
+            source_start,
+            positions,
+            gathered: OnceLock::new(),
+            all_finite: Self::bool_once_lock(all_finite),
             values: OnceLock::new(),
         }
     }
@@ -3982,6 +4014,29 @@ impl ScalarValues {
         None
     }
 
+    fn gather_float64_data(&self) -> Option<&[f64]> {
+        if let Self::LazyGatherFloat64 {
+            data,
+            source_start,
+            positions,
+            gathered,
+            ..
+        } = self
+        {
+            return Some(
+                gathered
+                    .get_or_init(|| {
+                        positions
+                            .iter()
+                            .map(|&position| data[source_start + position])
+                            .collect()
+                    })
+                    .as_slice(),
+            );
+        }
+        None
+    }
+
     fn materialize_float64_dot(a_cols: &[Float64DotInput], b_col: &[f64], len: usize) -> Vec<f64> {
         debug_assert_eq!(a_cols.len(), b_col.len());
         // AXPY loop order: outer over the k A-columns, inner streaming over the
@@ -4370,6 +4425,28 @@ impl ScalarValues {
                 .get_or_init(|| {
                     expanded
                         .get_or_init(|| Self::expand_strided_float64(data, *start, *step, *len))
+                        .iter()
+                        .copied()
+                        .map(Scalar::Float64)
+                        .collect()
+                })
+                .as_slice(),
+            Self::LazyGatherFloat64 {
+                data,
+                source_start,
+                positions,
+                gathered,
+                values,
+                ..
+            } => values
+                .get_or_init(|| {
+                    gathered
+                        .get_or_init(|| {
+                            positions
+                                .iter()
+                                .map(|&position| data[source_start + position])
+                                .collect()
+                        })
                         .iter()
                         .copied()
                         .map(Scalar::Float64)
@@ -4972,6 +5049,7 @@ impl ScalarValues {
             Self::LazyAllValidFloat64TransposeRow { plan, .. } => plan.column_len(),
             Self::LazyCombineFirstFloat64 { len, .. } => *len,
             Self::LazyStridedFloat64 { len, .. } => *len,
+            Self::LazyGatherFloat64 { positions, .. } => positions.len(),
             Self::LazyNullableFloat64 { data, .. } => data.len(),
             Self::LazyAllValidBool { data, .. } => data.len(),
             Self::LazyShiftedBool { len, .. } => *len,
@@ -5313,6 +5391,18 @@ impl Clone for ScalarValues {
                 len,
                 ..
             } => Self::lazy_strided_float64(Arc::clone(data), *start, *step, *len),
+            Self::LazyGatherFloat64 {
+                data,
+                source_start,
+                positions,
+                all_finite,
+                ..
+            } => Self::lazy_gather_float64(
+                Arc::clone(data),
+                *source_start,
+                Arc::clone(positions),
+                all_finite.get().copied(),
+            ),
             Self::LazyNullableFloat64 { data, validity, .. } => {
                 Self::lazy_nullable_float64(data.clone(), validity.clone())
             }
@@ -7514,6 +7604,187 @@ fn par_map_vec_f64<G: Fn(usize) -> f64 + Sync>(n: usize, g: G) -> Vec<f64> {
     out
 }
 
+/// Fused sibling of [`par_map_vec_f64`] for maps that may yield NaN: each worker
+/// writes its own value chunk AND that chunk's packed validity words in the SAME
+/// pass, and the `(all_valid, all_finite)` witness comes back as a reduction.
+///
+/// The unfused shape — `par_map_vec_f64`, then a serial `for` over the result to
+/// derive validity — pays an extra full read of the output on a serial dependence
+/// the parallel map already spent threads to avoid. On 1M Float64 `sqrt` that scan
+/// is a serial 8 MB pass whose 128 KB of words are then DISCARDED outright, because
+/// a strictly-positive input leaves the mask all-valid. Fusing deletes the pass.
+///
+/// Bit-identical to the unfused form: `g` is unchanged and per-index, the
+/// NaN ⇒ invalid rule is per-index, and `all_valid`/`all_finite` are boolean AND
+/// reductions — so neither the values, the mask, nor the witness depends on how
+/// the range is split.
+///
+/// Chunking is rounded UP to a multiple of 64 so each worker owns whole validity
+/// words and no two workers ever touch the same `u64`. The nested-ceiling identity
+/// `ceil(ceil(n/64) / (c/64)) == ceil(n/c)` for `64 | c` makes the value-chunk and
+/// word-chunk iterators yield the same count, so the `zip` below drops no work.
+fn par_map_vec_f64_with_witness<G: Fn(usize) -> f64 + Sync>(
+    n: usize,
+    g: G,
+) -> (Vec<f64>, Vec<u64>, bool, bool) {
+    const PAR_MIN: usize = 200_000;
+    let mut out = vec![0.0_f64; n];
+    let mut words = vec![0_u64; n.div_ceil(64)];
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(8);
+
+    if workers <= 1 || n < PAR_MIN {
+        let (mut all_valid, mut all_finite) = (true, true);
+        for (i, o) in out.iter_mut().enumerate() {
+            let y = g(i);
+            all_finite &= y.is_finite();
+            if y.is_nan() {
+                all_valid = false;
+            } else {
+                words[i / 64] |= 1_u64 << (i % 64);
+            }
+            *o = y;
+        }
+        return (out, words, all_valid, all_finite);
+    }
+
+    let chunk = n.div_ceil(workers).div_ceil(64) * 64;
+    let mut flags = vec![(true, true); n.div_ceil(chunk)];
+    std::thread::scope(|scope| {
+        for (ci, ((out_c, words_c), flag)) in out
+            .chunks_mut(chunk)
+            .zip(words.chunks_mut(chunk / 64))
+            .zip(flags.iter_mut())
+            .enumerate()
+        {
+            let g = &g;
+            let base = ci * chunk;
+            scope.spawn(move || {
+                let (mut all_valid, mut all_finite) = (true, true);
+                for (j, o) in out_c.iter_mut().enumerate() {
+                    let y = g(base + j);
+                    all_finite &= y.is_finite();
+                    if y.is_nan() {
+                        all_valid = false;
+                    } else {
+                        words_c[j / 64] |= 1_u64 << (j % 64);
+                    }
+                    *o = y;
+                }
+                *flag = (all_valid, all_finite);
+            });
+        }
+    });
+
+    let all_valid = flags.iter().all(|&(valid, _)| valid);
+    let all_finite = flags.iter().all(|&(_, finite)| finite);
+    (out, words, all_valid, all_finite)
+}
+
+/// Mask of the low `len` bits (`len <= 64`); `u64::MAX` for a full word.
+#[inline(always)]
+fn low_bit_mask(len: usize) -> u64 {
+    debug_assert!(len <= 64);
+    if len >= 64 {
+        u64::MAX
+    } else {
+        (1_u64 << len) - 1
+    }
+}
+
+/// Map one worker's input slice into its output slice and pack that slice's
+/// validity words, 64 values at a time.
+///
+/// The value loop is a pure slice zip over a 64-value block, so it carries no
+/// per-element bounds check and LLVM vectorizes it (`vsqrtpd` for `sqrt`); the
+/// witness loop then reads those same 64 values while they are still in L1
+/// rather than re-reading the output from DRAM.
+///
+/// Bit-identical to the per-element form: `f` is unchanged and per-index, and
+/// bit `k` of word `b` is set iff `!f(x).is_nan()` for the element at chunk
+/// offset `b * 64 + k` — exactly the `words[j / 64] |= 1 << (j % 64)` rule.
+#[inline(always)]
+fn map_block_with_witness<T: Copy, F: Fn(T) -> f64>(
+    out_c: &mut [f64],
+    words_c: &mut [u64],
+    in_c: &[T],
+    f: &F,
+) -> (bool, bool) {
+    let (mut all_valid, mut all_finite) = (true, true);
+    for ((word, out_b), in_b) in words_c
+        .iter_mut()
+        .zip(out_c.chunks_mut(64))
+        .zip(in_c.chunks(64))
+    {
+        for (o, &x) in out_b.iter_mut().zip(in_b.iter()) {
+            *o = f(x);
+        }
+        let mut bits = 0_u64;
+        for (k, &y) in out_b.iter().enumerate() {
+            all_finite &= y.is_finite();
+            bits |= u64::from(!y.is_nan()) << k;
+        }
+        all_valid &= bits == low_bit_mask(out_b.len());
+        *word = bits;
+    }
+    (all_valid, all_finite)
+}
+
+/// Slice-shaped sibling of [`par_map_vec_f64_with_witness`] for the contiguous,
+/// all-valid inputs that dominate `sqrt`/`ln`/`exp`.
+///
+/// The by-index form hands each worker a closure `g(base + j)` that indexes a
+/// captured slice. LLVM cannot prove those accesses stay in bounds, so the loop
+/// keeps a **per-element bounds check** and lowers to scalar `movsd` — profiling
+/// 1M `sqrt` on the shipped binary shows exactly that: `cmp`/`jae` then `movsd`,
+/// one f64 per iteration, no AVX. Handing each worker its own input SLICE
+/// removes the check and lets the value loop vectorize.
+///
+/// Chunking is rounded UP to a multiple of 64 so each worker owns whole validity
+/// words and no two workers touch the same `u64`. With `64 | chunk`, the value,
+/// word, and input chunk iterators all yield `ceil(n / chunk)` items, so the
+/// zips drop no work.
+fn par_map_slice_f64_with_witness<T: Copy + Sync, F: Fn(T) -> f64 + Sync>(
+    input: &[T],
+    f: F,
+) -> (Vec<f64>, Vec<u64>, bool, bool) {
+    const PAR_MIN: usize = 200_000;
+    let n = input.len();
+    let mut out = vec![0.0_f64; n];
+    let mut words = vec![0_u64; n.div_ceil(64)];
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(8);
+
+    if workers <= 1 || n < PAR_MIN {
+        let (all_valid, all_finite) = map_block_with_witness(&mut out, &mut words, input, &f);
+        return (out, words, all_valid, all_finite);
+    }
+
+    let chunk = n.div_ceil(workers).div_ceil(64) * 64;
+    let mut flags = vec![(true, true); n.div_ceil(chunk)];
+    std::thread::scope(|scope| {
+        for (((out_c, words_c), in_c), flag) in out
+            .chunks_mut(chunk)
+            .zip(words.chunks_mut(chunk / 64))
+            .zip(input.chunks(chunk))
+            .zip(flags.iter_mut())
+        {
+            let f = &f;
+            scope.spawn(move || {
+                *flag = map_block_with_witness(out_c, words_c, in_c, f);
+            });
+        }
+    });
+
+    let all_valid = flags.iter().all(|&(valid, _)| valid);
+    let all_finite = flags.iter().all(|&(_, finite)| finite);
+    (out, words, all_valid, all_finite)
+}
+
 /// `i64` sibling of [`par_map_vec_f64`] for compute-bound i64 index maps
 /// (python_mod_i64 / python_floor_div_i64 — integer idiv + sign adjustment).
 fn par_map_vec_i64<G: Fn(usize) -> i64 + Sync>(n: usize, g: G) -> Vec<i64> {
@@ -7587,22 +7858,204 @@ fn radix_sort_i64_values(data: &[i64], ascending: bool) -> Vec<i64> {
     out
 }
 
+#[inline]
+fn radix_scatter_entries(input: &[(u64, usize)], output: &mut [(u64, usize)], shift: u32) {
+    debug_assert_eq!(input.len(), output.len());
+    let mut count = [0usize; 256];
+    for &(key, _) in input {
+        count[((key >> shift) & 0xff) as usize] += 1;
+    }
+    // Keep the ping-pong orientation fixed even when this byte is constant.
+    // A contiguous copy is cheaper than the bucket-addressed scatter and lets
+    // every independently sorted prefix finish in the same backing buffer.
+    if count.contains(&input.len()) {
+        output.copy_from_slice(input);
+        return;
+    }
+    let mut running = 0usize;
+    for slot in &mut count {
+        let bucket_len = *slot;
+        *slot = running;
+        running += bucket_len;
+    }
+    for &entry in input {
+        let bucket = ((entry.0 >> shift) & 0xff) as usize;
+        output[count[bucket]] = entry;
+        count[bucket] += 1;
+    }
+}
+
+/// Sort the lower 48 bits of one fixed-high-16-bit prefix.
+///
+/// Six stable LSD passes start and finish in `entries`; `scratch` is only the
+/// alternate backing. Prefix buckets are disjoint, so callers may run this on
+/// separate bucket slices concurrently without synchronization.
+fn radix_sort_lower_48(entries: &mut [(u64, usize)], scratch: &mut [(u64, usize)]) {
+    debug_assert_eq!(entries.len(), scratch.len());
+    for (pass, shift) in (0..48).step_by(8).enumerate() {
+        if pass % 2 == 0 {
+            radix_scatter_entries(entries, scratch, shift);
+        } else {
+            radix_scatter_entries(scratch, entries, shift);
+        }
+    }
+}
+
+type RadixSlicePair<'a> = (&'a mut [(u64, usize)], &'a mut [(u64, usize)]);
+
+/// Safe stable parallel radix argsort for large, high-prefix-diverse inputs.
+///
+/// One stable 16-bit prefix scatter establishes the final order between
+/// prefixes. The resulting contiguous prefix buckets are independent: each is
+/// sorted by its lower 48 bits in a scoped worker, using paired disjoint slices
+/// from the two existing ping-pong buffers. No shared output writes, atomics, or
+/// unsafe code are needed. Returns `None` when fewer than two non-trivial prefix
+/// buckets exist, because that shape has no useful bucket-level parallelism.
+fn parallel_radix_argsort_u64(keys: &[u64], workers: usize) -> Option<Vec<usize>> {
+    const PREFIX_BUCKETS: usize = 1 << 16;
+
+    let n = keys.len();
+    let mut prefix_counts = vec![0usize; PREFIX_BUCKETS];
+    for &key in keys {
+        prefix_counts[(key >> 48) as usize] += 1;
+    }
+    let sortable_prefixes = prefix_counts.iter().filter(|&&len| len > 1).count();
+    if sortable_prefixes < 2 {
+        return None;
+    }
+
+    let mut running = 0usize;
+    for slot in &mut prefix_counts {
+        let bucket_len = *slot;
+        *slot = running;
+        running += bucket_len;
+    }
+
+    let mut cur: Vec<(u64, usize)> = keys.iter().copied().zip(0..n).collect();
+    let mut partitioned = vec![(0, 0); n];
+    let mut prefix_ends = prefix_counts.clone();
+    for &entry in &cur {
+        let prefix = (entry.0 >> 48) as usize;
+        partitioned[prefix_ends[prefix]] = entry;
+        prefix_ends[prefix] += 1;
+    }
+
+    let ranges: Vec<(usize, usize)> = prefix_counts
+        .into_iter()
+        .zip(prefix_ends)
+        .filter(|(start, end)| *end - *start > 1)
+        .collect();
+    let worker_count = workers.min(ranges.len()).max(1);
+
+    let mut items = Vec::with_capacity(ranges.len());
+    let mut entries_rest = partitioned.as_mut_slice();
+    let mut scratch_rest = cur.as_mut_slice();
+    let mut consumed = 0usize;
+    for (start, end) in ranges {
+        let skip = start - consumed;
+        let (_, entries_after_skip) = entries_rest.split_at_mut(skip);
+        let (_, scratch_after_skip) = scratch_rest.split_at_mut(skip);
+        let len = end - start;
+        let (entries, entries_tail) = entries_after_skip.split_at_mut(len);
+        let (scratch, scratch_tail) = scratch_after_skip.split_at_mut(len);
+        entries_rest = entries_tail;
+        scratch_rest = scratch_tail;
+        consumed = end;
+        items.push((entries, scratch));
+    }
+
+    // Largest-prefix-first greedy assignment keeps the scoped workers balanced
+    // when the high bits are skewed (for example, positive finite floats).
+    items.sort_by_key(|item| std::cmp::Reverse(item.0.len()));
+    let mut groups: Vec<Vec<RadixSlicePair<'_>>> = (0..worker_count).map(|_| Vec::new()).collect();
+    let mut group_loads = vec![0usize; worker_count];
+    for item in items {
+        let worker = group_loads
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, load)| **load)
+            .map_or(0, |(worker, _)| worker);
+        group_loads[worker] += item.0.len();
+        groups[worker].push(item);
+    }
+
+    std::thread::scope(|scope| {
+        for group in groups {
+            scope.spawn(move || {
+                for (entries, scratch) in group {
+                    radix_sort_lower_48(entries, scratch);
+                }
+            });
+        }
+    });
+
+    Some(
+        partitioned
+            .into_iter()
+            .map(|(_, position)| position)
+            .collect(),
+    )
+}
+
 /// O(n) per pass, comparison-free — replaces the O(n log n) `Scalar`-enum
 /// comparator for all-valid numeric columns.
 fn radix_argsort_u64(keys: &[u64]) -> Vec<usize> {
     let n = keys.len();
-    let mut idx: Vec<usize> = (0..n).collect();
     if n < 2 {
-        return idx;
+        return (0..n).collect();
     }
-    let mut scratch: Vec<usize> = vec![0; n];
+    // The exact-current 10M Float64 profile after the co-permuted-payload keep
+    // put 73.3% of this kernel in the stable scatter and 20.6% in its histogram.
+    // The eight LSD passes are dependent, but elements WITHIN a pass are not.
+    // A two-byte stable prefix partition exposes disjoint buckets, then the
+    // remaining six passes run concurrently without changing the permutation.
+    const PARALLEL_MIN_LEN: usize = 1 << 20;
+    const PARALLEL_MAX_WORKERS: usize = 16;
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(PARALLEL_MAX_WORKERS)
+        .min(n);
+    if n >= PARALLEL_MIN_LEN
+        && workers >= 2
+        && let Some(order) = parallel_radix_argsort_u64(keys, workers)
+    {
+        return order;
+    }
+    // CO-PERMUTED KEY PAYLOAD (br-frankenpandas-radixpay). The previous shape
+    // permuted `idx: Vec<usize>` alone and re-read the key through it
+    // (`keys[i]`) inside the scatter. That indirect read is a RANDOM 8-byte load
+    // over the whole key buffer — at 10M rows an 80 MB working set no prefetcher
+    // can predict — and the bucket, hence the `count[bucket]` address and the
+    // store address, all depend on it. A 10M `sort_values` profile put 94.33% of
+    // this function in the scatter loop against 5.18% in the histogram, with
+    // 70.32% of the whole function landing on the single instruction directly
+    // after `mov (%r13,%rdi,8),%rdx` — i.e. the skid of that dependent random
+    // load. Parallelizing the histogram would therefore have chased ~5% of the
+    // cost; the load itself is the target.
+    //
+    // Carrying each key NEXT TO its index and permuting the pair converts that
+    // dependent random read into a sequential one: pass k+1 reads the keys pass
+    // k already placed. The pair is one 16-byte tuple, so the scatter still
+    // touches a SINGLE destination cache line per element rather than two
+    // parallel 8-byte streams.
+    //
+    // BIT-IDENTICAL to the index-only shape: the visited order is the same
+    // (`cur` is in `idx` order), each element's bucket is computed from the same
+    // key, and the stable counting scatter is unchanged, so the emitted
+    // permutation is identical element for element. The pass-skip test is also
+    // unchanged: `cur` always holds a permutation of the same key multiset as
+    // `keys`, and a histogram is invariant under permutation, so `count` — and
+    // therefore both `count.contains(&n)` and every prefix offset — matches the
+    // value the old code computed off `keys` directly.
+    let mut cur: Vec<(u64, usize)> = keys.iter().copied().zip(0..n).collect();
+    let mut scratch: Vec<(u64, usize)> = vec![(0, 0); n];
     for shift in (0..64).step_by(8) {
         let mut count = [0usize; 256];
-        for &k in keys {
+        for &(k, _) in &cur {
             count[((k >> shift) & 0xff) as usize] += 1;
         }
         // Skip a pass whose byte is constant across the whole column (common
-        // for clustered / small-magnitude data) — keeps `idx` in place.
+        // for clustered / small-magnitude data) — keeps `cur` in place.
         if count.contains(&n) {
             continue;
         }
@@ -7612,14 +8065,14 @@ fn radix_argsort_u64(keys: &[u64]) -> Vec<usize> {
             *slot = running;
             running += c;
         }
-        for &i in &idx {
-            let bucket = ((keys[i] >> shift) & 0xff) as usize;
-            scratch[count[bucket]] = i;
+        for &entry in &cur {
+            let bucket = ((entry.0 >> shift) & 0xff) as usize;
+            scratch[count[bucket]] = entry;
             count[bucket] += 1;
         }
-        std::mem::swap(&mut idx, &mut scratch);
+        std::mem::swap(&mut cur, &mut scratch);
     }
-    idx
+    cur.into_iter().map(|(_, position)| position).collect()
 }
 
 /// Stable LSD radix argsort of an `i64` slice (br-frankenpandas-y5s15): the
@@ -7655,6 +8108,157 @@ pub fn radix_argsort_f64(values: &[f64], ascending: bool) -> Vec<usize> {
     radix_argsort_u64(&keys)
 }
 
+#[inline]
+fn radix_scatter_positions(
+    input: &[usize],
+    output: &mut [usize],
+    keys: &[u64],
+    shift: u32,
+) -> bool {
+    debug_assert_eq!(input.len(), output.len());
+    let mut count = [0usize; 256];
+    for &position in input {
+        count[((keys[position] >> shift) & 0xff) as usize] += 1;
+    }
+    if count.contains(&input.len()) {
+        return false;
+    }
+    let mut running = 0usize;
+    for slot in &mut count {
+        let bucket_len = *slot;
+        *slot = running;
+        running += bucket_len;
+    }
+    for &position in input {
+        let bucket = ((keys[position] >> shift) & 0xff) as usize;
+        output[count[bucket]] = position;
+        count[bucket] += 1;
+    }
+    true
+}
+
+/// Finish one multi-key lexsort bucket after the primary key's high 16 bits
+/// have already placed the bucket in its final global range. Secondary columns
+/// retain all eight stable LSD passes; the primary needs only its lower six.
+fn radix_sort_multi_prefix_bucket(
+    entries: &mut [usize],
+    scratch: &mut [usize],
+    keys_by_col: &[Vec<u64>],
+) {
+    debug_assert_eq!(entries.len(), scratch.len());
+    let mut entries_are_input = true;
+    for (column, keys) in keys_by_col.iter().enumerate().rev() {
+        let upper_shift = if column == 0 { 48 } else { 64 };
+        for shift in (0..upper_shift).step_by(8) {
+            let scattered = if entries_are_input {
+                radix_scatter_positions(entries, scratch, keys, shift)
+            } else {
+                radix_scatter_positions(scratch, entries, keys, shift)
+            };
+            if scattered {
+                entries_are_input = !entries_are_input;
+            }
+        }
+    }
+    if !entries_are_input {
+        entries.copy_from_slice(scratch);
+    }
+}
+
+type RadixIndexSlicePair<'a> = (&'a mut [usize], &'a mut [usize]);
+
+/// Stable shared-nothing multi-key radix sort for large inputs.
+///
+/// A stable scatter on the primary key's high 16 bits establishes final,
+/// disjoint output ranges. Every range can then complete the remaining
+/// lexicographic digits independently on a scoped worker. No lock, atomic, or
+/// shared output write is needed; stability inside the prefix scatter plus the
+/// stable per-bucket LSD passes preserves the serial permutation exactly.
+fn parallel_radix_argsort_multi_u64(
+    keys_by_col: &[Vec<u64>],
+    workers: usize,
+) -> Option<Vec<usize>> {
+    const PREFIX_BUCKETS: usize = 1 << 16;
+
+    let primary = keys_by_col.first()?;
+    let n = primary.len();
+    let mut prefix_counts = vec![0usize; PREFIX_BUCKETS];
+    for &key in primary {
+        prefix_counts[(key >> 48) as usize] += 1;
+    }
+    let sortable_prefixes = prefix_counts.iter().filter(|&&len| len > 1).count();
+    if sortable_prefixes < 2 {
+        return None;
+    }
+
+    let mut running = 0usize;
+    for slot in &mut prefix_counts {
+        let bucket_len = *slot;
+        *slot = running;
+        running += bucket_len;
+    }
+
+    let mut partitioned = vec![0usize; n];
+    let mut prefix_ends = prefix_counts.clone();
+    for (position, &key) in primary.iter().enumerate() {
+        let prefix = (key >> 48) as usize;
+        partitioned[prefix_ends[prefix]] = position;
+        prefix_ends[prefix] += 1;
+    }
+
+    let ranges: Vec<(usize, usize)> = prefix_counts
+        .into_iter()
+        .zip(prefix_ends)
+        .filter(|(start, end)| *end - *start > 1)
+        .collect();
+    let worker_count = workers.min(ranges.len()).max(1);
+    let mut scratch = vec![0usize; n];
+    let mut items = Vec::with_capacity(ranges.len());
+    let mut entries_rest = partitioned.as_mut_slice();
+    let mut scratch_rest = scratch.as_mut_slice();
+    let mut consumed = 0usize;
+    for (start, end) in ranges {
+        let skip = start - consumed;
+        let (_, entries_after_skip) = entries_rest.split_at_mut(skip);
+        let (_, scratch_after_skip) = scratch_rest.split_at_mut(skip);
+        let len = end - start;
+        let (entries, entries_tail) = entries_after_skip.split_at_mut(len);
+        let (scratch, scratch_tail) = scratch_after_skip.split_at_mut(len);
+        entries_rest = entries_tail;
+        scratch_rest = scratch_tail;
+        consumed = end;
+        items.push((entries, scratch));
+    }
+
+    // Largest-prefix-first greedy placement balances skewed Float64 exponent
+    // ranges while preserving complete ownership of every destination slice.
+    items.sort_by_key(|item| std::cmp::Reverse(item.0.len()));
+    let mut groups: Vec<Vec<RadixIndexSlicePair<'_>>> =
+        (0..worker_count).map(|_| Vec::new()).collect();
+    let mut group_loads = vec![0usize; worker_count];
+    for item in items {
+        let worker = group_loads
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, load)| **load)
+            .map_or(0, |(worker, _)| worker);
+        group_loads[worker] += item.0.len();
+        groups[worker].push(item);
+    }
+
+    std::thread::scope(|scope| {
+        for group in groups {
+            scope.spawn(move || {
+                for (entries, scratch) in group {
+                    radix_sort_multi_prefix_bucket(entries, scratch, keys_by_col);
+                }
+            });
+        }
+    });
+
+    Some(partitioned)
+}
+
 /// Stable LSD radix lexsort over several `u64` key columns
 /// (br-frankenpandas-lnsu6). Returns the permutation that orders rows
 /// lexicographically by `keys_by_col[0]`, then `keys_by_col[1]`, …, with equal
@@ -7669,6 +8273,23 @@ pub fn radix_argsort_multi_u64(keys_by_col: &[Vec<u64>]) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..n).collect();
     if n < 2 || keys_by_col.is_empty() {
         return idx;
+    }
+    // The exact-current whole-job profile put 95.12% of 1M multi-key sort
+    // self-time here, with one operation thread. The digit dependencies are
+    // serial, but primary-prefix buckets are final disjoint ranges, so complete
+    // the remaining lexsort independently across all available CPUs.
+    const PARALLEL_MIN_LEN: usize = 1 << 19;
+    const PARALLEL_MAX_WORKERS: usize = 64;
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(PARALLEL_MAX_WORKERS)
+        .min(n);
+    if n >= PARALLEL_MIN_LEN
+        && workers >= 2
+        && keys_by_col.iter().all(|keys| keys.len() == n)
+        && let Some(order) = parallel_radix_argsort_multi_u64(keys_by_col, workers)
+    {
+        return order;
     }
     let mut scratch: Vec<usize> = vec![0; n];
     for keys in keys_by_col.iter().rev() {
@@ -9854,6 +10475,9 @@ impl Column {
             if let Some(data) = self.values.strided_float64_data() {
                 return Some(data);
             }
+            if let Some(data) = self.values.gather_float64_data() {
+                return Some(data);
+            }
             if let Some(data) = self.values.repeated_slices_f64_data() {
                 return Some(data);
             }
@@ -11034,6 +11658,46 @@ impl Column {
             validity: ValidityMask::from_words(words, n),
             data: None,
         }
+    }
+
+    /// Whether this column can share an arbitrary row-permutation tape and
+    /// defer its all-valid Float64 gather.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn can_defer_all_valid_float64_take(&self) -> bool {
+        self.dtype == DType::Float64
+            && self.validity.all()
+            && self.float64_arc_view_source().is_some()
+    }
+
+    /// Build an all-valid Float64 permutation view over a caller-owned shared
+    /// position tape. The caller guarantees every position is in bounds.
+    ///
+    /// This is observationally identical to [`Self::take_positions`]: output
+    /// row `i` is the source value at `positions[i]`, with the same raw f64
+    /// bits and all-valid mask. Only materialization timing changes.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn take_positions_deferred_all_valid_float64(
+        &self,
+        positions: Arc<Vec<usize>>,
+    ) -> Option<Self> {
+        if self.dtype != DType::Float64 || !self.validity.all() {
+            return None;
+        }
+        let (data, source_start) = self.float64_arc_view_source()?;
+        let len = positions.len();
+        Some(Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_gather_float64(
+                data,
+                source_start,
+                positions,
+                self.f64_finite_witness(),
+            ),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        })
     }
 
     /// Whether [`Self::take_position_runs`] can gather this column without
@@ -13072,6 +13736,11 @@ impl Column {
             }
             ScalarValues::LazyStridedFloat64 { len, .. } if *len == self.validity.len() => {
                 self.values.strided_float64_data()
+            }
+            ScalarValues::LazyGatherFloat64 { positions, .. }
+                if positions.len() == self.validity.len() =>
+            {
+                self.values.gather_float64_data()
             }
             ScalarValues::LazyNullableFloat64 { data, .. } if data.len() == self.validity.len() => {
                 Some(data.as_slice())
@@ -24005,16 +24674,21 @@ impl Column {
     }
 
     /// Parallel sibling of [`typed_float_unary_nullable_owned`] for compute-bound
-    /// maps that may yield NaN (sqrt/ln of negatives → NaN → missing). The
-    /// expensive `f(x)` runs in parallel (par_map_vec_f64); the validity/finiteness
-    /// scan stays a single cheap serial pass over the result. Bit-identical to the
-    /// serial helper (same `f`, same NaN→invalid rule, same order/witness).
+    /// maps that may yield NaN (sqrt/ln of negatives → NaN → missing). Both the
+    /// expensive `f(x)` and the validity/finiteness witness run in parallel, FUSED
+    /// into one pass by [`par_map_vec_f64_with_witness`]; the witness used to be a
+    /// second, serial read of the whole output. Bit-identical to the serial helper
+    /// (same `f`, same NaN→invalid rule, same order/witness).
     fn typed_float_unary_nullable_owned_par<F: Fn(f64) -> f64 + Sync>(&self, f: F) -> Option<Self> {
         let len = self.len();
-        let out = if let Some(data) = self.as_f64_slice() {
-            par_map_vec_f64(len, |i| f(data[i]))
+        let (out, validity_words, all_valid, all_finite) = if let Some(data) = self.as_f64_slice() {
+            // Contiguous + all-valid: hand each worker its own INPUT SLICE so the
+            // value loop is a bounds-check-free slice zip that vectorizes. The
+            // by-index sibling below stays for the nullable arms, whose per-element
+            // validity lookup is inherently indexed.
+            par_map_slice_f64_with_witness(data, |x| f(x))
         } else if let Some(data) = self.as_i64_slice() {
-            par_map_vec_f64(len, |i| f(data[i] as f64))
+            par_map_slice_f64_with_witness(data, |x: i64| f(x as f64))
         } else if self.dtype == DType::Float64
             && let Some((data, validity)) = self.as_f64_slice_with_validity()
         {
@@ -24024,7 +24698,7 @@ impl Column {
             // the validity scan below marks missing — bit-identical to those ops'
             // Scalar arm (`missing ⇒ Float64(NaN)`); valid slot ⇒ f(v), itself NaN
             // for e.g. sqrt(negative), also ⇒ missing (same as the Scalar path).
-            par_map_vec_f64(len, |i| {
+            par_map_vec_f64_with_witness(len, |i| {
                 if validity.get(i) {
                     f(data[i])
                 } else {
@@ -24040,7 +24714,7 @@ impl Column {
             // validity scan below marks missing — bit-identical to those ops' Scalar
             // arm (`missing ⇒ Float64(NaN)`); valid slot ⇒ f(v as f64) (== the Scalar
             // arm's f(x as f64)), itself NaN for e.g. sqrt(negative) ⇒ also missing.
-            par_map_vec_f64(len, |i| {
+            par_map_vec_f64_with_witness(len, |i| {
                 if validity.get(i) {
                     f(data[i] as f64)
                 } else {
@@ -24050,17 +24724,6 @@ impl Column {
         } else {
             return None;
         };
-        let mut validity_words = vec![0_u64; len.div_ceil(64)];
-        let mut all_valid = true;
-        let mut all_finite = true;
-        for (idx, &y) in out.iter().enumerate() {
-            all_finite &= y.is_finite();
-            if y.is_nan() {
-                all_valid = false;
-            } else {
-                validity_words[idx / 64] |= 1_u64 << (idx % 64);
-            }
-        }
         let validity = if all_valid {
             ValidityMask::all_valid(len)
         } else {
@@ -27791,6 +28454,49 @@ mod tests {
             assert!(values.get().is_some());
         }
         assert_eq!(gathered.validity(), expected.validity());
+    }
+
+    #[test]
+    fn deferred_sort_gather_column_matches_eager_bits() {
+        let source = Column::from_f64_values(vec![
+            8.5,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(1),
+            3.25,
+        ]);
+        let positions = Arc::new(vec![4, 1, 5, 0, 3, 2, 4]);
+        let eager = source.take_positions(positions.as_slice());
+        let deferred = source
+            .take_positions_deferred_all_valid_float64(Arc::clone(&positions))
+            .expect("all-valid Arc-backed Float64 supports deferred gather");
+
+        assert!(matches!(
+            &deferred.values,
+            ScalarValues::LazyGatherFloat64 {
+                gathered,
+                values,
+                ..
+            } if gathered.get().is_none() && values.get().is_none()
+        ));
+        assert_eq!(deferred.len(), positions.len());
+        assert_eq!(deferred.validity(), eager.validity());
+        assert_eq!(
+            deferred
+                .as_f64_slice()
+                .expect("deferred gather materializes a typed slice")
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            eager
+                .as_f64_slice()
+                .expect("eager gather has a typed slice")
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(deferred.values(), eager.values());
     }
 
     #[test]
@@ -33534,6 +34240,23 @@ mod tests {
         }
 
         #[test]
+        fn abs_preserves_owned_f64_cached_finiteness_witness() {
+            for (input, expected_witness) in [
+                (vec![-1.5, 0.0, f64::MAX], Some(true)),
+                (vec![-1.5, f64::NEG_INFINITY], Some(false)),
+            ] {
+                let input = Column::from_f64_values(input);
+                assert_eq!(input.f64_finite_witness(), expected_witness);
+                let output = input.abs().expect("all-valid Float64 abs");
+                assert_eq!(
+                    output.f64_finite_witness(),
+                    expected_witness,
+                    "owned Float64 output dropped the cached witness"
+                );
+            }
+        }
+
+        #[test]
         fn abs_nullable_int64_typed_matches_reference_cf() {
             // Nullable Int64 abs routes through the typed as_i64_slice_with_validity
             // arm: present ⇒ Int64(wrapping_abs); missing ⇒ Null; dtype preserved;
@@ -34935,6 +35658,75 @@ mod tests {
                     "parallel radix != stable byte sort (asc={ascending})"
                 );
             }
+        }
+
+        #[test]
+        fn parallel_numeric_radix_matches_stable_reference_j5841() {
+            // Exercise the parallel helper directly at a test-sized N. The
+            // high 16 bits span many non-trivial prefixes (parallel work), while
+            // the narrow low-bit domain forces exact-key ties (stability).
+            let n = 50_000usize;
+            let mut state = 0xA076_1D64_78BD_642F_u64;
+            let keys: Vec<u64> = (0..n)
+                .map(|i| {
+                    state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                    let mut z = state;
+                    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    z ^= z >> 31;
+                    (((i % 257) as u64) << 48) | (z % 4_096)
+                })
+                .collect();
+
+            let got = crate::parallel_radix_argsort_u64(&keys, 4).expect("diverse prefix fan-out");
+            let mut want: Vec<usize> = (0..n).collect();
+            want.sort_by_key(|&position| keys[position]);
+            assert_eq!(got, want);
+
+            assert!(
+                crate::parallel_radix_argsort_u64(&vec![7; n], 4).is_none(),
+                "one non-trivial prefix must retain the serial fallback"
+            );
+        }
+
+        #[test]
+        fn parallel_multi_numeric_radix_matches_stable_reference() {
+            // Exercise the shared-nothing multi-key helper directly below its
+            // production size gate. Primary prefixes provide parallel ranges;
+            // narrow low-bit domains create ties that pin stable row order.
+            let n = 50_000usize;
+            let mut state = 0xD1B5_4A32_D192_ED03_u64;
+            let mut primary = Vec::with_capacity(n);
+            let mut secondary = Vec::with_capacity(n);
+            let mut tertiary = Vec::with_capacity(n);
+            for row in 0..n {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                primary.push((((row % 257) as u64) << 48) | (z % 1_024));
+                secondary.push(z.rotate_left(19) % 127);
+                tertiary.push(z.rotate_right(11) % 17);
+            }
+            let keys = vec![primary, secondary, tertiary];
+
+            let got = crate::parallel_radix_argsort_multi_u64(&keys, 8)
+                .expect("diverse primary prefixes expose independent buckets");
+            let mut want: Vec<usize> = (0..n).collect();
+            want.sort_by(|&left, &right| {
+                keys.iter()
+                    .map(|column| column[left].cmp(&column[right]))
+                    .find(|order| *order != std::cmp::Ordering::Equal)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            assert_eq!(got, want);
+
+            let one_prefix = vec![vec![7; n], keys[1].clone()];
+            assert!(
+                crate::parallel_radix_argsort_multi_u64(&one_prefix, 8).is_none(),
+                "one primary prefix must retain the serial fallback"
+            );
         }
 
         #[test]
@@ -38791,6 +39583,177 @@ mod tests {
                     check(&col.sin().unwrap(), &ref_op(&vals, f64::sin), "sin", trial);
                     check(&col.cbrt().unwrap(), &ref_op(&vals, f64::cbrt), "cbrt", trial);
                     check(&col.arctan().unwrap(), &ref_op(&vals, f64::atan), "atan", trial);
+                }
+            }
+        }
+
+        #[test]
+        fn fused_par_witness_matches_scalar_reference_across_chunk_boundaries() {
+            // `par_map_vec_f64_with_witness` packs validity words per WORKER CHUNK, so a
+            // boundary bug (a chunk not owning whole `u64` words, or a `zip` dropping a
+            // tail) can only appear at or above its 200_000-row parallel threshold. Every
+            // other nullable-unary test in this file uses n < 200 — the SERIAL fallback —
+            // so this is the only coverage of the chunked packing. Lengths straddle the
+            // threshold and avoid multiples of 64 and of the worker count, exercising a
+            // ragged final chunk and a ragged final validity word together.
+            let bit_eq = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                    (Scalar::Null(_), Scalar::Null(_)) => true,
+                    _ => false,
+                }
+            };
+            // Replica of the ops' Scalar path + Self::new (missing ⇒ NaN ⇒ missing).
+            fn ref_op(vals: &[Scalar], f: impl Fn(f64) -> f64) -> Column {
+                let out: Vec<Scalar> = vals
+                    .iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            Scalar::Float64(f64::NAN)
+                        } else {
+                            match v {
+                                Scalar::Float64(x) => Scalar::Float64(f(*x)),
+                                Scalar::Int64(x) => Scalar::Float64(f(*x as f64)),
+                                _ => unreachable!(),
+                            }
+                        }
+                    })
+                    .collect();
+                Column::new(DType::Float64, out).unwrap()
+            }
+
+            let mut state: u64 = 0x0BAD_5EED_1234_9E37;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+
+            for &n in &[199_999_usize, 200_003, 262_145, 393_281] {
+                let mut vf = crate::ValidityMask::all_valid(n);
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let r = next();
+                        // Force NaN-producing slots onto the first and last row of every
+                        // 64-bit validity word, where a mis-owned word would corrupt.
+                        let boundary = i % 64 == 0 || i % 64 == 63;
+                        match r % 16 {
+                            0 => {
+                                vf.set(i, false); // gap: missing INPUT
+                                0.0
+                            }
+                            1 => f64::NAN, // valid bit set, NaN payload
+                            2 => -1.5,     // sqrt/log ⇒ NaN ⇒ missing OUTPUT
+                            _ if boundary && (r >> 8) % 3 == 0 => -2.5,
+                            _ => ((r % 300) as f64) + 0.5,
+                        }
+                    })
+                    .collect();
+                let col = Column::from_f64_values_with_validity(fdata, vf);
+                let vals = col.values().to_vec();
+
+                for (name, got, want) in [
+                    ("sqrt", col.sqrt().unwrap(), ref_op(&vals, f64::sqrt)),
+                    ("log", col.log().unwrap(), ref_op(&vals, f64::ln)),
+                ] {
+                    let gv = got.values();
+                    let wv = want.values();
+                    assert_eq!(gv.len(), wv.len(), "{name} n={n} len");
+                    for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
+                        assert!(bit_eq(g, w), "{name} n={n} idx {k}: {g:?} != {w:?}");
+                    }
+                }
+            }
+
+            // All-valid, NaN-free input at the same scale must take the `all_valid`
+            // witness branch and stay all-valid — the shape the sqrt benchmark measures,
+            // and the one where the discarded validity words used to cost a serial pass.
+            let n = 300_007_usize;
+            let clean: Vec<f64> = (0..n).map(|i| 1.0 + (i % 9973) as f64).collect();
+            let got = Column::from_f64_values(clean.clone()).sqrt().unwrap();
+            assert_eq!(got.len(), n, "clean sqrt len");
+            let gv = got.values();
+            for (i, x) in clean.iter().enumerate() {
+                match &gv[i] {
+                    Scalar::Float64(y) => {
+                        assert_eq!(y.to_bits(), x.sqrt().to_bits(), "clean sqrt idx {i}");
+                    }
+                    other => panic!("clean sqrt idx {i} unexpectedly missing: {other:?}"),
+                }
+            }
+        }
+
+        #[test]
+        fn slice_par_witness_all_valid_input_producing_nan_matches_scalar_reference() {
+            // The ALL-VALID CONTIGUOUS arms (`as_f64_slice` / `as_i64_slice`) are served
+            // by `par_map_slice_f64_with_witness`, which packs each 64-value block's word
+            // as `bits |= !y.is_nan() << k` and folds `all_valid &= bits == low_bit_mask`.
+            // The test above cannot reach it: its NaN-heavy columns carry input gaps, so
+            // `as_f64_slice` bails and they take the nullable by-index arm, and its only
+            // all-valid column is NaN-FREE — which leaves `bits` full and `all_valid` true
+            // no matter how the packing is written. Coverage of the slice kernel therefore
+            // needs an input with NO missing slots whose OUTPUT is NaN, above the 200_000
+            // parallel threshold. Lengths avoid multiples of 64 and of the worker count so
+            // the final worker chunk and the final validity word are both ragged, and the
+            // NaN-producing rows are forced onto word boundaries (k = 0 and k = 63), where
+            // an off-by-one in the shift or the mask would corrupt a neighbouring word.
+            for &n in &[200_003_usize, 262_145, 393_281] {
+                let negative_at = |i: usize| i % 64 == 0 || i % 64 == 63 || i % 1021 == 7;
+                let fdata: Vec<f64> = (0..n)
+                    .map(|i| {
+                        if negative_at(i) {
+                            -((i % 97) as f64) - 1.5
+                        } else {
+                            1.0 + (i % 9973) as f64
+                        }
+                    })
+                    .collect();
+
+                for (name, got, want) in [
+                    (
+                        "f64 sqrt",
+                        Column::from_f64_values(fdata.clone()).sqrt().unwrap(),
+                        fdata.iter().map(|x| x.sqrt()).collect::<Vec<f64>>(),
+                    ),
+                    (
+                        "f64 log",
+                        Column::from_f64_values(fdata.clone()).log().unwrap(),
+                        fdata.iter().map(|x| x.ln()).collect::<Vec<f64>>(),
+                    ),
+                    (
+                        "i64 sqrt",
+                        Column::from_i64_values(fdata.iter().map(|&x| x as i64).collect())
+                            .sqrt()
+                            .unwrap(),
+                        fdata.iter().map(|&x| (x as i64 as f64).sqrt()).collect(),
+                    ),
+                ] {
+                    assert_eq!(got.len(), n, "{name} n={n} len");
+                    let gv = got.values();
+                    let mut saw_missing = false;
+                    for (i, y) in want.iter().enumerate() {
+                        if y.is_nan() {
+                            // A NaN result must surface as MISSING, exactly as the
+                            // per-element `if y.is_nan() { all_valid = false }` rule does.
+                            saw_missing = true;
+                            assert!(
+                                gv[i].is_missing(),
+                                "{name} n={n} idx {i}: NaN result must be missing, got {:?}",
+                                gv[i]
+                            );
+                        } else {
+                            match &gv[i] {
+                                Scalar::Float64(g) => assert_eq!(
+                                    g.to_bits(),
+                                    y.to_bits(),
+                                    "{name} n={n} idx {i} bits"
+                                ),
+                                other => panic!("{name} n={n} idx {i}: {other:?}"),
+                            }
+                        }
+                    }
+                    assert!(saw_missing, "{name} n={n} produced no NaN — test is vacuous");
                 }
             }
         }

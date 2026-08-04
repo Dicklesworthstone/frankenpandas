@@ -1345,6 +1345,481 @@ fn all_valid_int64_key_values(column: &Column) -> Option<&[Scalar]> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PositiveAffineI64Witness {
+    start: i128,
+    step: i128,
+    len: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AffineInnerPositionPlan {
+    left_start: usize,
+    left_step: usize,
+    right_start: usize,
+    right_step: usize,
+    len: usize,
+}
+
+const AFFINE_I64_INNER_MAX_MORSELS: usize = 64;
+
+fn affine_inner_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(AFFINE_I64_INNER_MAX_MORSELS)
+}
+
+fn balanced_partition(total: usize, index: usize, parts: usize) -> (usize, usize) {
+    debug_assert!(parts > 0);
+    debug_assert!(index < parts);
+    let base = total / parts;
+    let remainder = total % parts;
+    let start = index * base + index.min(remainder);
+    let end = start + base + usize::from(index < remainder);
+    (start, end)
+}
+
+fn positive_affine_i64_shape(values: &[i64]) -> Option<PositiveAffineI64Witness> {
+    if values.len() < 2 {
+        return None;
+    }
+    let start = i128::from(values[0]);
+    let step = i128::from(values[1]) - start;
+    // Keeping the step within positive i64 makes every CRT intermediate below
+    // fit i128. Rarer two-point sequences spanning more than i64::MAX retain
+    // the existing ordered/hash route.
+    if step <= 0 || step > i128::from(i64::MAX) {
+        return None;
+    }
+    Some(PositiveAffineI64Witness {
+        start,
+        step,
+        len: values.len(),
+    })
+}
+
+/// Prove two positive affine i64 key sequences with independent row morsels.
+///
+/// Every adjacent edge is checked exactly once, including boundaries between
+/// morsels. A failed proof simply declines the affine route; no result is
+/// emitted from speculative work. Large ordered joins therefore replace two
+/// serial O(n) order scans with up to 64 shared-nothing scans while preserving
+/// the exact strict-unique certificate required by pandas inner-join semantics.
+fn certify_positive_affine_i64_pair(
+    left: &[i64],
+    right: &[i64],
+) -> Option<(PositiveAffineI64Witness, PositiveAffineI64Witness)> {
+    let left_shape = positive_affine_i64_shape(left)?;
+    let right_shape = positive_affine_i64_shape(right)?;
+    let left_edges = left.len() - 1;
+    let right_edges = right.len() - 1;
+    let max_edges = left_edges.max(right_edges);
+    let worker_count = affine_inner_worker_count().min(max_edges.max(1));
+
+    let matches_shape = |values: &[i64], shape: PositiveAffineI64Witness| {
+        values
+            .windows(2)
+            .all(|pair| i128::from(pair[1]) - i128::from(pair[0]) == shape.step)
+    };
+    if max_edges < DENSE_I64_INNER_PARALLEL_MIN_VALUES || worker_count < 2 {
+        return (matches_shape(left, left_shape) && matches_shape(right, right_shape))
+            .then_some((left_shape, right_shape));
+    }
+
+    let proved = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        for worker in 0..worker_count {
+            handles.push(scope.spawn(move || {
+                let (left_start, left_end) = balanced_partition(left_edges, worker, worker_count);
+                let (right_start, right_end) =
+                    balanced_partition(right_edges, worker, worker_count);
+                let left_ok = (left_start..left_end).all(|idx| {
+                    i128::from(left[idx + 1]) - i128::from(left[idx]) == left_shape.step
+                });
+                let right_ok = (right_start..right_end).all(|idx| {
+                    i128::from(right[idx + 1]) - i128::from(right[idx]) == right_shape.step
+                });
+                left_ok && right_ok
+            }));
+        }
+        handles
+            .into_iter()
+            .all(|handle| handle.join().expect("affine join proof worker panicked"))
+    });
+    proved.then_some((left_shape, right_shape))
+}
+
+fn positive_i128_gcd(mut left: i128, mut right: i128) -> i128 {
+    debug_assert!(left > 0 && right > 0);
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
+}
+
+fn coprime_mod_inverse(value: i128, modulus: i128) -> Option<i128> {
+    debug_assert!(value > 0 && modulus > 1);
+    let (mut old_remainder, mut remainder) = (value, modulus);
+    let (mut old_coefficient, mut coefficient) = (1i128, 0i128);
+    while remainder != 0 {
+        let quotient = old_remainder / remainder;
+        (old_remainder, remainder) = (
+            remainder,
+            old_remainder.checked_sub(quotient.checked_mul(remainder)?)?,
+        );
+        (old_coefficient, coefficient) = (
+            coefficient,
+            old_coefficient.checked_sub(quotient.checked_mul(coefficient)?)?,
+        );
+    }
+    (old_remainder == 1).then(|| old_coefficient.rem_euclid(modulus))
+}
+
+fn empty_affine_inner_position_plan() -> AffineInnerPositionPlan {
+    AffineInnerPositionPlan {
+        left_start: 0,
+        left_step: 1,
+        right_start: 0,
+        right_step: 1,
+        len: 0,
+    }
+}
+
+/// Intersect two certified positive affine sequences analytically.
+///
+/// The generalized CRT yields the first shared key and the common step. Those
+/// map back to affine row selections on each input, so the join needs neither
+/// the serial two-pointer merge nor its two O(matches) position vectors.
+fn affine_i64_inner_position_plan(
+    left: PositiveAffineI64Witness,
+    right: PositiveAffineI64Witness,
+) -> Option<AffineInnerPositionPlan> {
+    let left_last = left
+        .start
+        .checked_add(left.step.checked_mul(i128::try_from(left.len - 1).ok()?)?)?;
+    let right_last = right.start.checked_add(
+        right
+            .step
+            .checked_mul(i128::try_from(right.len - 1).ok()?)?,
+    )?;
+    let low = left.start.max(right.start);
+    let high = left_last.min(right_last);
+    if low > high {
+        return Some(empty_affine_inner_position_plan());
+    }
+
+    let gcd = positive_i128_gcd(left.step, right.step);
+    let difference = right.start.checked_sub(left.start)?;
+    if difference % gcd != 0 {
+        return Some(empty_affine_inner_position_plan());
+    }
+    let left_reduced = left.step / gcd;
+    let right_reduced = right.step / gcd;
+    let left_solution = if right_reduced == 1 {
+        0
+    } else {
+        let inverse = coprime_mod_inverse(left_reduced.rem_euclid(right_reduced), right_reduced)?;
+        difference
+            .checked_div(gcd)?
+            .checked_mul(inverse)?
+            .rem_euclid(right_reduced)
+    };
+    let common_step = left.step.checked_mul(right_reduced)?;
+    let mut first = left
+        .start
+        .checked_add(left.step.checked_mul(left_solution)?)?;
+    if first < low {
+        let delta = low.checked_sub(first)?;
+        let jumps = delta
+            .checked_add(common_step - 1)?
+            .checked_div(common_step)?;
+        first = first.checked_add(jumps.checked_mul(common_step)?)?;
+    }
+    if first > high {
+        return Some(empty_affine_inner_position_plan());
+    }
+
+    let len = usize::try_from((high - first) / common_step + 1).ok()?;
+    let left_start = usize::try_from((first - left.start) / left.step).ok()?;
+    let right_start = usize::try_from((first - right.start) / right.step).ok()?;
+    let left_step = usize::try_from(common_step / left.step).ok()?;
+    let right_step = usize::try_from(common_step / right.step).ok()?;
+    debug_assert!(
+        left_start
+            .checked_add(left_step.saturating_mul(len.saturating_sub(1)))
+            .is_some_and(|last| last < left.len)
+    );
+    debug_assert!(
+        right_start
+            .checked_add(right_step.saturating_mul(len.saturating_sub(1)))
+            .is_some_and(|last| last < right.len)
+    );
+    Some(AffineInnerPositionPlan {
+        left_start,
+        left_step,
+        right_start,
+        right_step,
+        len,
+    })
+}
+
+enum AffineInnerOutputLane<'a> {
+    Int64 {
+        source: &'a [i64],
+        start: usize,
+        step: usize,
+    },
+    Built(Column),
+}
+
+struct AffineInnerOutputSpec<'a> {
+    name: String,
+    lane: AffineInnerOutputLane<'a>,
+}
+
+fn affine_selection_positions(start: usize, step: usize, len: usize) -> Vec<usize> {
+    (0..len).map(|idx| start + idx * step).collect()
+}
+
+fn affine_inner_output_lane<'a>(
+    column: &'a Column,
+    start: usize,
+    step: usize,
+    len: usize,
+) -> Option<AffineInnerOutputLane<'a>> {
+    if let Some(source) = column.as_i64_slice() {
+        return Some(AffineInnerOutputLane::Int64 {
+            source,
+            start,
+            step,
+        });
+    }
+    column.as_f64_slice()?;
+    let built = if len == 0 {
+        Column::from_f64_values(Vec::new())
+    } else if let Some(view) =
+        column.take_affine_positions_without_materialized_positions(start, step, len)
+    {
+        view
+    } else {
+        let positions = affine_selection_positions(start, step, len);
+        column.take_positions(&positions)
+    };
+    Some(AffineInnerOutputLane::Built(built))
+}
+
+/// Zero-copy Int64 output for a unit-stride side of an affine match.
+///
+/// Shared inner-join keys are byte-identical on both sides. If either side's
+/// matched rows form one contiguous range, reuse that immutable Arc-backed
+/// range as a one-chunk output instead of filling an O(matches) key buffer.
+fn affine_unit_stride_i64_view(
+    column: &Column,
+    start: usize,
+    step: usize,
+    len: usize,
+) -> Option<Column> {
+    if len == 0 {
+        return Some(Column::from_i64_values_owned(Vec::new()));
+    }
+    if step != 1 {
+        return None;
+    }
+    let (data, base) = column.as_i64_arc_view_source()?;
+    let view_start = base.checked_add(start)?;
+    view_start
+        .checked_add(len)
+        .filter(|&end| end <= data.len())?;
+    Some(Column::from_i64_all_valid_chunks(
+        vec![(data, view_start, len)],
+        len,
+    ))
+}
+
+/// Fill all Int64 affine output lanes by row morsel into disjoint buffers.
+/// Float64 lanes are descriptor-only strided views and never enter this fill.
+fn build_affine_inner_i64_lanes(sources: &[(&[i64], usize, usize)], len: usize) -> Vec<Vec<i64>> {
+    let mut output: Vec<Vec<i64>> = sources.iter().map(|_| vec![0i64; len]).collect();
+    if sources.is_empty() || len == 0 {
+        return output;
+    }
+    let worker_count = affine_inner_worker_count().min(len);
+    if len < DENSE_I64_INNER_PARALLEL_MIN_VALUES || worker_count < 2 {
+        for (lane, &(source, start, step)) in output.iter_mut().zip(sources) {
+            for (row, value) in lane.iter_mut().enumerate() {
+                *value = source[start + row * step];
+            }
+        }
+        return output;
+    }
+
+    let mut bundles: Vec<Vec<&mut [i64]>> = (0..worker_count)
+        .map(|_| Vec::with_capacity(output.len()))
+        .collect();
+    for lane in &mut output {
+        let mut remainder = lane.as_mut_slice();
+        for (worker, bundle) in bundles.iter_mut().enumerate() {
+            let (row_start, row_end) = balanced_partition(len, worker, worker_count);
+            let (chunk, tail) = remainder.split_at_mut(row_end - row_start);
+            bundle.push(chunk);
+            remainder = tail;
+        }
+    }
+
+    std::thread::scope(|scope| {
+        for (worker, mut bundle) in bundles.into_iter().enumerate() {
+            let (row_start, _) = balanced_partition(len, worker, worker_count);
+            scope.spawn(move || {
+                for (lane, &(source, start, step)) in bundle.iter_mut().zip(sources) {
+                    for (local_row, value) in lane.iter_mut().enumerate() {
+                        *value = source[start + (row_start + local_row) * step];
+                    }
+                }
+            });
+        }
+    });
+    output
+}
+
+/// Shared-nothing affine Int64 inner merge.
+///
+/// This is deliberately narrow but structural: all-valid typed Int64 keys are
+/// certified as positive affine sequences; every carried lane must be an
+/// all-valid Int64 or Float64. The match relation is then a pair of affine row
+/// selections. Float64 payloads become zero-copy strided views, while all
+/// Int64 lanes are filled together across row morsels. Any unsupported shape
+/// falls through to the general ordered/dense/hash implementations.
+fn build_single_key_affine_i64_inner_merge_output(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    left_key: &Column,
+    right_key: &Column,
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<Option<MergedDataFrame>, JoinError> {
+    debug_assert_eq!(left_on.len(), 1);
+    debug_assert_eq!(right_on.len(), 1);
+    let (Some(left_keys), Some(right_keys)) = (left_key.as_i64_slice(), right_key.as_i64_slice())
+    else {
+        return Ok(None);
+    };
+    let Some((left_shape, right_shape)) = certify_positive_affine_i64_pair(left_keys, right_keys)
+    else {
+        return Ok(None);
+    };
+    let Some(plan) = affine_i64_inner_position_plan(left_shape, right_shape) else {
+        return Ok(None);
+    };
+
+    let left_col_names: HashSet<&String> = left.columns().keys().collect();
+    let right_col_names: HashSet<&String> = right.columns().keys().collect();
+    let shared_key_names = if left_on[0] == right_on[0] {
+        [left_on[0]].into_iter().collect::<HashSet<&str>>()
+    } else {
+        HashSet::new()
+    };
+    let overlapping_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
+    ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
+
+    let mut specs = Vec::<AffineInnerOutputSpec<'_>>::new();
+    for name in left.column_names() {
+        let column = left
+            .columns()
+            .get(name)
+            .expect("left column listed in column_names must exist");
+        let out_name = if name.as_str() == left_on[0] {
+            name.clone()
+        } else if right_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.left.as_deref())
+        } else {
+            name.clone()
+        };
+        let shared_key_view = (name.as_str() == left_on[0] && left_on[0] == right_on[0])
+            .then(|| {
+                affine_unit_stride_i64_view(left_key, plan.left_start, plan.left_step, plan.len)
+                    .or_else(|| {
+                        affine_unit_stride_i64_view(
+                            right_key,
+                            plan.right_start,
+                            plan.right_step,
+                            plan.len,
+                        )
+                    })
+                    .map(AffineInnerOutputLane::Built)
+            })
+            .flatten();
+        let Some(lane) = shared_key_view.or_else(|| {
+            affine_inner_output_lane(column, plan.left_start, plan.left_step, plan.len)
+        }) else {
+            return Ok(None);
+        };
+        specs.push(AffineInnerOutputSpec {
+            name: out_name,
+            lane,
+        });
+    }
+    for name in right.column_names() {
+        if name.as_str() == right_on[0] && shared_key_names.contains(name.as_str()) {
+            continue;
+        }
+        let column = right
+            .columns()
+            .get(name)
+            .expect("right column listed in column_names must exist");
+        let out_name = if left_col_names.contains(name) {
+            apply_merge_suffix(name, suffixes.right.as_deref())
+        } else {
+            name.clone()
+        };
+        let Some(lane) =
+            affine_inner_output_lane(column, plan.right_start, plan.right_step, plan.len)
+        else {
+            return Ok(None);
+        };
+        specs.push(AffineInnerOutputSpec {
+            name: out_name,
+            lane,
+        });
+    }
+
+    let i64_sources: Vec<(&[i64], usize, usize)> = specs
+        .iter()
+        .filter_map(|spec| match &spec.lane {
+            AffineInnerOutputLane::Int64 {
+                source,
+                start,
+                step,
+            } => Some((*source, *start, *step)),
+            AffineInnerOutputLane::Built(_) => None,
+        })
+        .collect();
+    let mut i64_lanes = build_affine_inner_i64_lanes(&i64_sources, plan.len).into_iter();
+    let index = Index::new_known_unique_int64_unit_range(0, plan.len);
+    let mut columns = std::collections::BTreeMap::new();
+    let mut column_order = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let column = match spec.lane {
+            AffineInnerOutputLane::Int64 { .. } => Column::from_i64_values_owned(
+                i64_lanes
+                    .next()
+                    .expect("one filled lane for every affine Int64 output"),
+            ),
+            AffineInnerOutputLane::Built(column) => column,
+        };
+        debug_assert_eq!(column.len(), plan.len);
+        insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
+    }
+    Ok(Some(MergedDataFrame {
+        index,
+        columns,
+        column_order,
+    }))
+}
+
 fn ordered_unique_int64_inner_positions(
     left_key: &Column,
     right_key: &Column,
@@ -6087,7 +6562,14 @@ fn build_single_key_ordered_unique_left_merge_output(
     let overlapping_names =
         collect_overlapping_column_names(&left_col_names, &right_col_names, &shared_key_names);
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
-    let right_utf8_plan = shared_optional_utf8_gather_plan(right_positions, right.len());
+    // Building the shared Utf8 gather plan is O(output_rows): it scans every
+    // optional position and, for a non-contiguous match pattern, allocates an
+    // additional position tape plus validity bitmap. Most ordered Int64 joins
+    // have only numeric payloads, where every column ignores that plan and uses
+    // its typed reindexer. Defer the work until the first Utf8 payload actually
+    // asks for it; subsequent Utf8 columns still share the single immutable
+    // plan exactly as before.
+    let right_utf8_plan: OnceLock<Option<SharedOptionalUtf8GatherPlan>> = OnceLock::new();
 
     for name in left.column_names() {
         let col = left
@@ -6114,8 +6596,14 @@ fn build_single_key_ordered_unique_left_merge_output(
             continue;
         }
 
-        let reindexed =
-            reindex_with_shared_utf8_plan(col, right_positions, right_utf8_plan.as_ref())?;
+        let utf8_plan = if col.dtype() == DType::Utf8 {
+            right_utf8_plan
+                .get_or_init(|| shared_optional_utf8_gather_plan(right_positions, right.len()))
+                .as_ref()
+        } else {
+            None
+        };
+        let reindexed = reindex_with_shared_utf8_plan(col, right_positions, utf8_plan)?;
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
@@ -8147,6 +8635,17 @@ fn merge_single_key_inner_unsorted(
         return build_single_key_ordered_identity_inner_merge_output(
             left, right, left_on, right_on, suffixes,
         );
+    }
+    if let Some(merged) = build_single_key_affine_i64_inner_merge_output(
+        left,
+        right,
+        left_on,
+        right_on,
+        left_key_columns[0],
+        right_key_columns[0],
+        suffixes,
+    )? {
+        return Ok(merged);
     }
     if let Some((left_positions, right_positions)) =
         ordered_unique_int64_inner_positions(left_key_columns[0], right_key_columns[0])
@@ -14490,6 +14989,43 @@ mod tests {
     }
 
     #[test]
+    fn merge_left_ordered_unique_int64_retains_lazy_utf8_payload_plan() {
+        let left = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                ("id", (0..5_i64).map(Scalar::Int64).collect::<Vec<_>>()),
+                ("v", (10..15_i64).map(Scalar::Int64).collect::<Vec<_>>()),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["id", "tag"],
+            vec![
+                (
+                    "id",
+                    [0_i64, 2, 4, 6].into_iter().map(Scalar::Int64).collect(),
+                ),
+                (
+                    "tag",
+                    ["zero", "two", "four", "six"]
+                        .into_iter()
+                        .map(|value| Scalar::Utf8(value.to_owned()))
+                        .collect(),
+                ),
+            ],
+        )
+        .unwrap();
+
+        let merged = merge_dataframes(&left, &right, "id", JoinType::Left).unwrap();
+        let tags = merged.columns.get("tag").unwrap().values();
+        assert_eq!(tags[0], Scalar::Utf8("zero".to_owned()));
+        assert!(tags[1].is_missing());
+        assert_eq!(tags[2], Scalar::Utf8("two".to_owned()));
+        assert!(tags[3].is_missing());
+        assert_eq!(tags[4], Scalar::Utf8("four".to_owned()));
+    }
+
+    #[test]
     fn merge_left_dense_int64_duplicates_matches_generic_validated_route() {
         let left = DataFrame::from_dict(
             &["id", "v"],
@@ -16280,6 +16816,138 @@ mod tests {
             &unsorted_left,
             &unsorted_right
         ));
+    }
+
+    #[test]
+    fn affine_i64_inner_plan_solves_nontrivial_stride_intersection() {
+        let left = super::PositiveAffineI64Witness {
+            start: -3,
+            step: 4,
+            len: 8,
+        };
+        let right = super::PositiveAffineI64Witness {
+            start: 1,
+            step: 6,
+            len: 6,
+        };
+        assert_eq!(
+            super::affine_i64_inner_position_plan(left, right),
+            Some(super::AffineInnerPositionPlan {
+                left_start: 1,
+                left_step: 3,
+                right_start: 0,
+                right_step: 2,
+                len: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn affine_i64_inner_plan_matches_brute_force_small_domain() {
+        const LENGTHS: [usize; 4] = [2, 3, 7, 11];
+        for left_start in -8i128..=8 {
+            for right_start in -8i128..=8 {
+                for left_step in 1i128..=7 {
+                    for right_step in 1i128..=7 {
+                        for left_len in LENGTHS {
+                            for right_len in LENGTHS {
+                                let left = super::PositiveAffineI64Witness {
+                                    start: left_start,
+                                    step: left_step,
+                                    len: left_len,
+                                };
+                                let right = super::PositiveAffineI64Witness {
+                                    start: right_start,
+                                    step: right_step,
+                                    len: right_len,
+                                };
+                                let plan = super::affine_i64_inner_position_plan(left, right)
+                                    .expect("small affine sequences cannot overflow");
+                                let expected = (0..left_len)
+                                    .flat_map(|left_row| {
+                                        (0..right_len).filter_map(move |right_row| {
+                                            let left_key = left_start
+                                                + left_step * i128::try_from(left_row).unwrap();
+                                            let right_key = right_start
+                                                + right_step * i128::try_from(right_row).unwrap();
+                                            (left_key == right_key).then_some((left_row, right_row))
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                let actual = (0..plan.len)
+                                    .map(|row| {
+                                        (
+                                            plan.left_start + row * plan.left_step,
+                                            plan.right_start + row * plan.right_step,
+                                        )
+                                    })
+                                    .collect::<Vec<_>>();
+                                assert_eq!(actual, expected);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn affine_i64_inner_merge_matches_left_major_values() {
+        let left_keys = vec![-3, 1, 5, 9, 13, 17, 21, 25];
+        let right_keys = vec![1, 7, 13, 19, 25, 31];
+        let mut left_columns = std::collections::BTreeMap::new();
+        left_columns.insert("id".to_owned(), Column::from_i64_values(left_keys));
+        left_columns.insert(
+            "left_value".to_owned(),
+            Column::from_f64_values((0..8).map(|row| row as f64 + 0.5).collect()),
+        );
+        let left = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 8),
+            left_columns,
+            vec!["id".to_owned(), "left_value".to_owned()],
+        )
+        .unwrap();
+        let mut right_columns = std::collections::BTreeMap::new();
+        right_columns.insert("id".to_owned(), Column::from_i64_values(right_keys));
+        right_columns.insert(
+            "right_value".to_owned(),
+            Column::from_i64_values((100..106).collect()),
+        );
+        let right = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 6),
+            right_columns,
+            vec!["id".to_owned(), "right_value".to_owned()],
+        )
+        .unwrap();
+        let suffixes = resolve_merge_suffixes(None);
+        let merged = super::build_single_key_affine_i64_inner_merge_output(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            left.columns().get("id").unwrap(),
+            right.columns().get("id").unwrap(),
+            &suffixes,
+        )
+        .unwrap()
+        .expect("certified affine typed inputs must use the fast path");
+
+        assert_eq!(
+            merged.columns.get("id").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(13), Scalar::Int64(25)]
+        );
+        assert_eq!(
+            merged.columns.get("left_value").unwrap().values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Float64(4.5),
+                Scalar::Float64(7.5),
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("right_value").unwrap().values(),
+            &[Scalar::Int64(100), Scalar::Int64(102), Scalar::Int64(104)]
+        );
     }
 
     #[test]
