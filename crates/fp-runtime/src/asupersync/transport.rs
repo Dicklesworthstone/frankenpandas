@@ -49,7 +49,7 @@ pub trait TransportLayer {
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryTransport {
-    storage: Arc<Mutex<BTreeMap<String, EncodedArtifact>>>,
+    storage: Arc<Mutex<BTreeMap<String, Arc<EncodedArtifact>>>>,
 }
 
 impl InMemoryTransport {
@@ -72,7 +72,7 @@ impl TransportLayer for InMemoryTransport {
         })?;
         let bytes_transferred = artifact.encoded_bytes.len();
         let artifact_id = artifact.artifact_id.clone();
-        guard.insert(artifact_id.clone(), artifact);
+        guard.insert(artifact_id.clone(), Arc::new(artifact));
 
         Ok(TransferReport {
             artifact_id,
@@ -89,12 +89,80 @@ impl TransportLayer for InMemoryTransport {
     ) -> Result<EncodedArtifact, AsupersyncError> {
         validate_capability_gate(config, self.required_capabilities())?;
 
-        let guard = self.storage.lock().map_err(|_| {
-            AsupersyncError::Transport("in-memory transport lock poisoned".to_string())
-        })?;
-        guard
-            .get(artifact_id)
-            .cloned()
-            .ok_or_else(|| AsupersyncError::ArtifactNotFound(artifact_id.to_string()))
+        let artifact = {
+            let guard = self.storage.lock().map_err(|_| {
+                AsupersyncError::Transport("in-memory transport lock poisoned".to_string())
+            })?;
+            guard
+                .get(artifact_id)
+                .cloned()
+                .ok_or_else(|| AsupersyncError::ArtifactNotFound(artifact_id.to_string()))?
+        };
+
+        match std::panic::catch_unwind(|| (*artifact).clone()) {
+            Ok(artifact) => Ok(artifact),
+            Err(payload) => {
+                let _guard = self.storage.lock().map_err(|_| {
+                    AsupersyncError::Transport("in-memory transport lock poisoned".to_string())
+                })?;
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::{InMemoryTransport, TransportLayer};
+    use crate::asupersync::{
+        codec::EncodedArtifact, config::AsupersyncConfig, error::AsupersyncError,
+    };
+
+    fn artifact() -> EncodedArtifact {
+        EncodedArtifact {
+            artifact_id: "transport-artifact-3nzz3".to_string(),
+            source_len: 7,
+            encoded_bytes: b"payload".to_vec(),
+            repair_symbols: 1,
+        }
+    }
+
+    #[test]
+    fn receive_returns_a_deep_copy_after_storing_an_arc_3nzz3() -> Result<(), AsupersyncError> {
+        let transport = InMemoryTransport::new();
+        let config = AsupersyncConfig::default();
+        transport.send(artifact(), &config)?;
+
+        let mut received = transport.receive("transport-artifact-3nzz3", &config)?;
+        received.encoded_bytes = b"changed".to_vec();
+
+        assert_eq!(
+            transport
+                .receive("transport-artifact-3nzz3", &config)?
+                .encoded_bytes,
+            b"payload"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn receive_preserves_lock_poisoning_failure_3nzz3() {
+        let transport = InMemoryTransport::new();
+        let storage = transport.storage.clone();
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = storage
+                .lock()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+            std::panic::resume_unwind(Box::new("poison in-memory transport lock"));
+        }));
+
+        let error = transport
+            .receive("transport-artifact-3nzz3", &AsupersyncConfig::default())
+            .expect_err("poisoned storage must be rejected");
+        assert!(
+            matches!(error, AsupersyncError::Transport(message) if message.contains("poisoned"))
+        );
     }
 }

@@ -561,13 +561,13 @@ impl PyDataFrame {
     /// Return the shape of the DataFrame as (rows, cols).
     #[getter]
     fn shape(&self) -> (usize, usize) {
-        (self.inner.len(), self.inner.columns().len())
+        self.inner.shape()
     }
 
     /// Return the column names.
     #[getter]
     fn columns(&self) -> Vec<String> {
-        self.inner.columns().keys().cloned().collect()
+        self.inner.column_names().into_iter().cloned().collect()
     }
 
     /// Return the number of rows.
@@ -1266,4 +1266,45 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_jsonl, m)?)?;
     m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
     Ok(())
+}
+
+#[cfg(all(test, feature = "lazy-transpose-view"))]
+mod tests {
+    use fp_frame::DataFrame;
+    use fp_types::Scalar;
+
+    use super::PyDataFrame;
+
+    #[test]
+    fn dataframe_observers_preserve_lazy_transpose_storage() {
+        let source = DataFrame::from_dict(
+            &["left", "right"],
+            vec![
+                (
+                    "left",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+                (
+                    "right",
+                    vec![Scalar::Int64(40), Scalar::Int64(50), Scalar::Int64(60)],
+                ),
+            ],
+        )
+        .expect("source frame"); // ubs:ignore — static unit-test fixture is valid
+        let dataframe = PyDataFrame {
+            inner: source.transpose().expect("lazy transpose"), // ubs:ignore — homogeneous static fixture supports transpose
+        };
+
+        assert!(dataframe.inner.is_lazy_transpose_storage());
+        assert_eq!(dataframe.shape(), (2, 3));
+        assert_eq!(dataframe.columns(), vec!["0", "1", "2"]);
+        assert!(dataframe.inner.is_lazy_transpose_storage());
+
+        let selected = dataframe.__getitem__("1").expect("selected column"); // ubs:ignore — asserted static transpose label exists
+        assert_eq!(
+            selected.inner.values(),
+            &[Scalar::Int64(20), Scalar::Int64(50)]
+        );
+        assert!(dataframe.inner.is_lazy_transpose_storage());
+    }
 }
