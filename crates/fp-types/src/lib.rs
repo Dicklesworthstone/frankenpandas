@@ -6742,10 +6742,7 @@ mod tests {
                 }
             }
             if count == 0 {
-                return (
-                    Scalar::Timedelta64(0),
-                    Scalar::Timedelta64(Timedelta::NAT),
-                );
+                return (Scalar::Timedelta64(0), Scalar::Timedelta64(Timedelta::NAT));
             }
             let sum = sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
             let mean = (sum / count).clamp(i128::from(i64::MIN), i128::from(i64::MAX));
@@ -8746,7 +8743,9 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             if samples.is_empty() {
-                return Scalar::Null(NullKind::NaN);
+                // Per br-frankenpandas-k7apg: a NaT-only Timedelta input stays in
+                // the Timedelta family (pandas returns NaT, not float NaN).
+                return Scalar::Timedelta64(Timedelta::NAT);
             }
             samples.sort_by(|left, right| left.partial_cmp(right).expect("finite values"));
             Scalar::Timedelta64(interpolated(&samples, q) as i64)

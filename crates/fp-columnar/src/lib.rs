@@ -6117,7 +6117,11 @@ fn cum_accum_nullable_i64(
 /// by STRICT `<`/`>` so the FIRST original position wins on a tie, and the index is
 /// the original 0..n position (the enumerate index of the contiguous slice), byte-
 /// identical to the generic path. Empty / all-missing ⇒ `None`.
-fn argextreme_nullable_f64(data: &[f64], validity: Option<&ValidityMask>, want_max: bool) -> Option<usize> {
+fn argextreme_nullable_f64(
+    data: &[f64],
+    validity: Option<&ValidityMask>,
+    want_max: bool,
+) -> Option<usize> {
     let mut best: Option<(usize, f64)> = None;
     for (i, &x) in data.iter().enumerate() {
         let present = validity.is_none_or(|v| v.get(i)) && !x.is_nan();
@@ -6143,7 +6147,11 @@ fn argextreme_nullable_f64(data: &[f64], validity: Option<&ValidityMask>, want_m
 /// Int64 sibling of [`argextreme_nullable_f64`]: present iff validity-set (Int64
 /// has no NaN); comparison is on `v as f64` — EXACTLY nanargmin's `to_f64` compare
 /// (same >2^53 precision behaviour), so bit-identical.
-fn argextreme_nullable_i64(data: &[i64], validity: Option<&ValidityMask>, want_max: bool) -> Option<usize> {
+fn argextreme_nullable_i64(
+    data: &[i64],
+    validity: Option<&ValidityMask>,
+    want_max: bool,
+) -> Option<usize> {
     let mut best: Option<(usize, f64)> = None;
     for (i, &v) in data.iter().enumerate() {
         if validity.is_none_or(|vm| vm.get(i)) {
@@ -6619,7 +6627,9 @@ fn count_distinct_i64_singletable(data: &[i64]) -> i64 {
     // (HIGH bits). Bit-identical count (table layout doesn't change membership).
     // >= 2 so `shift = 64 - log2(cap)` <= 63.
     let n = data.len();
-    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut cap = 1024usize
+        .min(n.saturating_add(n / 2).next_power_of_two())
+        .max(2);
     let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
     let mut count = 0i64;
@@ -6857,7 +6867,9 @@ fn mode_i64_wide(data: &[i64]) -> Vec<i64> {
     // so it never enters the table. Bit-identical: same key→count mapping and
     // ascending winners (hashing only moves probe positions).
     // >= 2 so `shift = 64 - log2(cap)` <= 63 (a 64-bit `>>` is invalid).
-    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut cap = 1024usize
+        .min(n.saturating_add(n / 2).next_power_of_two())
+        .max(2);
     let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
     let mut cnt = vec![0u32; cap];
@@ -6972,7 +6984,9 @@ fn mode_f64_wide(data: &[f64]) -> Vec<f64> {
     // first-seen originals, ascending total_cmp winners. `EMPTY = i64::MIN` = -0.0
     // bits, which normalization maps to +0.0 (key 0), so no real key hits the empty.
     // >= 2 so `shift = 64 - log2(cap)` is <= 63 (a 64-bit `>>` shift is invalid).
-    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut cap = 1024usize
+        .min(n.saturating_add(n / 2).next_power_of_two())
+        .max(2);
     let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
     let mut cnt = vec![0u32; cap];
@@ -6990,8 +7004,7 @@ fn mode_f64_wide(data: &[f64]) -> Vec<f64> {
             let mut nfirst = vec![0.0f64; ncap];
             for p in 0..cap {
                 if keys[p] != EMPTY {
-                    let mut q =
-                        ((keys[p] as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
+                    let mut q = ((keys[p] as u64).wrapping_mul(GOLDEN) >> nshift) as usize;
                     while nkeys[q] != EMPTY {
                         q = (q + 1) & nmask;
                     }
@@ -7062,7 +7075,9 @@ fn duplicated_first_i64_wide(data: &[i64]) -> Vec<bool> {
     // Fibonacci `>> (64 - log2 cap)` (HIGH bits). Byte-identical: `flags` is a
     // per-row first-seen membership test (independent of table layout).
     // >= 2 so `shift = 64 - log2(cap)` <= 63.
-    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut cap = 1024usize
+        .min(n.saturating_add(n / 2).next_power_of_two())
+        .max(2);
     let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
     let mut seen_sentinel = false;
@@ -7140,7 +7155,9 @@ fn unique_f64_wide(data: &[f64]) -> Vec<f64> {
         return out;
     }
     // >= 2 so `shift = 64 - log2(cap)` <= 63 (a 64-bit `>>` is invalid).
-    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut cap = 1024usize
+        .min(n.saturating_add(n / 2).next_power_of_two())
+        .max(2);
     let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
     let mut filled = 0usize;
@@ -7193,7 +7210,9 @@ fn unique_i64_wide(data: &[i64]) -> Vec<i64> {
     if n == 0 {
         return out;
     }
-    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut cap = 1024usize
+        .min(n.saturating_add(n / 2).next_power_of_two())
+        .max(2);
     let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
     let mut seen_sentinel = false;
@@ -7284,7 +7303,9 @@ fn factorize_i64_wide(data: &[i64]) -> (Vec<i64>, Vec<i64>) {
     // codes/uniques are the first-seen assignment (code = uniques.len() at insert),
     // which depends only on order, not table layout. `i64::MIN` sentinel via min_code.
     // >= 2 so `shift = 64 - log2(cap)` <= 63 (a 64-bit `>>` is invalid).
-    let mut cap = 1024usize.min(n.saturating_add(n / 2).next_power_of_two()).max(2);
+    let mut cap = 1024usize
+        .min(n.saturating_add(n / 2).next_power_of_two())
+        .max(2);
     let mut shift = 64 - cap.trailing_zeros();
     let mut keys = vec![EMPTY; cap];
     let mut code_at = vec![0u32; cap];
@@ -9138,9 +9159,11 @@ impl Column {
         }
     }
 
-    /// Like [`from_i64_values`] but MOVES the `Vec<i64>` into the backing (one
-    /// `Arc::new`) instead of `Arc::from(Vec)`'s alloc+memcpy (~28ms/5M). The i64
-    /// sibling of [`from_f64_values_owned`]; all-valid (i64 has no NaN sentinel).
+    /// Like [`from_i64_values`](Self::from_i64_values) but MOVES the `Vec<i64>`
+    /// into the backing (one `Arc::new`) instead of `Arc::from(Vec)`'s
+    /// alloc+memcpy (~28ms/5M). The i64 sibling of
+    /// [`from_f64_values_owned`](Self::from_f64_values_owned); all-valid (i64
+    /// has no NaN sentinel).
     #[must_use]
     pub fn from_i64_values_owned(data: Vec<i64>) -> Self {
         let len = data.len();
@@ -11544,7 +11567,10 @@ impl Column {
                     words[out_idx / 64] |= 1_u64 << (out_idx % 64);
                 }
             }
-            return Self::from_i64_values_with_validity(gathered, ValidityMask::from_words(words, n));
+            return Self::from_i64_values_with_validity(
+                gathered,
+                ValidityMask::from_words(words, n),
+            );
         }
 
         // Nullable temporal / Bool siblings of the LazyNullableInt64 gather above.
@@ -13329,7 +13355,10 @@ impl Column {
                     }
                     let final_validity =
                         result_validity.and_mask(&ValidityMask::from_f64(&result_data));
-                    return Some(Ok(Self::from_f64_values_nullable(result_data, final_validity)));
+                    return Some(Ok(Self::from_f64_values_nullable(
+                        result_data,
+                        final_validity,
+                    )));
                 }
                 let left_data = ColumnData::from_scalars(&self.values, DType::Float64);
                 let right_data = ColumnData::from_scalars(&right.values, DType::Float64);
@@ -13372,7 +13401,10 @@ impl Column {
                 // sentinel so from_f64 keeps them set — combined does the masking).
                 let final_validity =
                     result_validity.and_mask(&ValidityMask::from_f64(&result_data));
-                Some(Ok(Self::from_f64_values_nullable(result_data, final_validity)))
+                Some(Ok(Self::from_f64_values_nullable(
+                    result_data,
+                    final_validity,
+                )))
             }
             DType::Int64 if !matches!(op, ArithmeticOp::Div) => {
                 // Both must actually be Int64 for the i64 fast path.
@@ -13410,8 +13442,7 @@ impl Column {
                     self.as_i64_slice_with_validity(),
                     right.as_i64_slice_with_validity(),
                 ) {
-                    let (result_data, result_validity) =
-                        vectorized_binary_i64(l, r, lv, rv, op)?;
+                    let (result_data, result_validity) = vectorized_binary_i64(l, r, lv, rv, op)?;
                     return Some(Ok(Self::from_i64_values_with_validity(
                         result_data,
                         result_validity,
@@ -14578,9 +14609,9 @@ impl Column {
         }
         // Typed Int64 fast path (both-present ⇒ Int64(x << clamp(y)), else Null(Null));
         // same kernel + missing rule as the Scalar loop below, no Scalar materialization.
-        if let Some(out) = self.typed_i64_both_present_binary(other, |x, y| {
-            x.wrapping_shl(y.clamp(0, 63) as u32)
-        }) {
+        if let Some(out) =
+            self.typed_i64_both_present_binary(other, |x, y| x.wrapping_shl(y.clamp(0, 63) as u32))
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -14617,9 +14648,9 @@ impl Column {
         }
         // Typed Int64 fast path (both-present ⇒ Int64(x >> clamp(y)), else Null(Null));
         // same kernel + missing rule as the Scalar loop below, no Scalar materialization.
-        if let Some(out) = self.typed_i64_both_present_binary(other, |x, y| {
-            x.wrapping_shr(y.clamp(0, 63) as u32)
-        }) {
+        if let Some(out) =
+            self.typed_i64_both_present_binary(other, |x, y| x.wrapping_shr(y.clamp(0, 63) as u32))
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -14656,13 +14687,18 @@ impl Column {
         // from_i64_values_with_validity's cleared bit == the loop's v.clone() of an
         // Int64-missing slot. Mirror of the abs/neg nullable-Int64 arms.
         if let Some(data) = self.as_i64_slice() {
-            return Ok(Self::from_i64_values_owned(data.iter().map(|&x| !x).collect()));
+            return Ok(Self::from_i64_values_owned(
+                data.iter().map(|&x| !x).collect(),
+            ));
         }
         if self.dtype == DType::Int64
             && let Some((data, _)) = self.as_i64_slice_with_validity()
         {
             let out: Vec<i64> = data.iter().map(|&x| !x).collect();
-            return Ok(Self::from_i64_values_with_validity(out, self.validity.clone()));
+            return Ok(Self::from_i64_values_with_validity(
+                out,
+                self.validity.clone(),
+            ));
         }
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
@@ -14779,11 +14815,7 @@ impl Column {
         Some(Self::from_i64_values_with_validity(out, vmask))
     }
 
-    fn typed_nan_propagate_binary(
-        &self,
-        other: &Self,
-        f: fn(f64, f64) -> f64,
-    ) -> Option<Self> {
+    fn typed_nan_propagate_binary(&self, other: &Self, f: fn(f64, f64) -> f64) -> Option<Self> {
         let (sa, sb) = (self.typed_numeric_values()?, other.typed_numeric_values()?);
         let n = sa.len().min(sb.len());
         let out: Vec<f64> = (0..n)
@@ -14805,11 +14837,7 @@ impl Column {
     /// (present, present) cases collapse to this match. get_present KEEPS ±inf.
     /// Output is Float64; from_f64_values marks the both-absent NaN slots missing,
     /// exactly as Self::new(Float64, [Float64(NaN)]) does. Covers mixed i64×f64.
-    fn typed_nan_ignore_binary(
-        &self,
-        other: &Self,
-        f: fn(f64, f64) -> f64,
-    ) -> Option<Self> {
+    fn typed_nan_ignore_binary(&self, other: &Self, f: fn(f64, f64) -> f64) -> Option<Self> {
         let (sa, sb) = (self.typed_numeric_values()?, other.typed_numeric_values()?);
         let n = sa.len().min(sb.len());
         let out: Vec<f64> = (0..n)
@@ -14982,11 +15010,7 @@ impl Column {
         if ld.len() != rd.len() {
             return None;
         }
-        let bools: Vec<bool> = ld
-            .iter()
-            .zip(rd)
-            .map(|(&a, &b)| op(a, b))
-            .collect();
+        let bools: Vec<bool> = ld.iter().zip(rd).map(|(&a, &b)| op(a, b)).collect();
         let out_valid = lv.and_mask(rv);
         Some(Self::from_bool_values_with_validity(bools, out_valid))
     }
@@ -15109,7 +15133,10 @@ impl Column {
             && let Some((data, validity)) = self.as_i64_slice_with_validity()
         {
             let bools: Vec<bool> = data.iter().map(|&x| x == 0).collect();
-            return Ok(Self::from_bool_values_with_validity(bools, validity.clone()));
+            return Ok(Self::from_bool_values_with_validity(
+                bools,
+                validity.clone(),
+            ));
         }
         if self.dtype == DType::Float64
             && let Some((data, validity)) = self.as_f64_slice_with_validity()
@@ -15674,7 +15701,10 @@ impl Column {
                 ComparisonOp::Ge => (0..n).map(|i| row(i) >= needle).collect(),
                 ComparisonOp::Le => (0..n).map(|i| row(i) <= needle).collect(),
             };
-            return Ok(Self::from_bool_values_with_validity(bools, validity.clone()));
+            return Ok(Self::from_bool_values_with_validity(
+                bools,
+                validity.clone(),
+            ));
         }
 
         // Typed TEMPORAL scalar fast path: a Datetime64 column vs a (non-NaT) Datetime64
@@ -16153,26 +16183,42 @@ impl Column {
         // slot takes the fill ns. Every slot is filled ⇒ all-valid output. Bit-identical to the
         // loop: present ⇒ the same value, missing ⇒ the fill, dtype unchanged. A NaT fill keeps
         // nulls (its post-cast scalar IS missing) so it falls to the generic path.
-        if let (Scalar::Datetime64(fill), ScalarValues::LazyNullableDatetime64 { data, validity, .. }) =
-            (&cast_fill, &self.values)
+        if let (
+            Scalar::Datetime64(fill),
+            ScalarValues::LazyNullableDatetime64 { data, validity, .. },
+        ) = (&cast_fill, &self.values)
             && *fill != Timestamp::NAT
         {
             let out: Vec<i64> = data
                 .iter()
                 .enumerate()
-                .map(|(i, &v)| if validity.get(i) && v != Timestamp::NAT { v } else { *fill })
+                .map(|(i, &v)| {
+                    if validity.get(i) && v != Timestamp::NAT {
+                        v
+                    } else {
+                        *fill
+                    }
+                })
                 .collect();
             return Ok(Self::from_datetime64_values(out));
         }
-        if let (Scalar::Timedelta64(fill), ScalarValues::LazyNullableTimedelta64 { data, validity, .. }) =
-            (&cast_fill, &self.values)
+        if let (
+            Scalar::Timedelta64(fill),
+            ScalarValues::LazyNullableTimedelta64 { data, validity, .. },
+        ) = (&cast_fill, &self.values)
             && *fill != Timedelta::NAT
         {
             let n = data.len();
             let out: Vec<i64> = data
                 .iter()
                 .enumerate()
-                .map(|(i, &v)| if validity.get(i) && v != Timedelta::NAT { v } else { *fill })
+                .map(|(i, &v)| {
+                    if validity.get(i) && v != Timedelta::NAT {
+                        v
+                    } else {
+                        *fill
+                    }
+                })
                 .collect();
             return Ok(Self::from_timedelta64_values_with_validity(
                 out,
@@ -17176,7 +17222,8 @@ impl Column {
         // Float64, KEEPING ±inf; validity-set for Int64), so the same pairwise-present
         // (v,w) pairs accumulate sum += vf*wf / weight_sum += wf in the same 0..n
         // order, and the `weight_sum == 0.0 ⇒ Null(NaN)` guard is unchanged.
-        if let (Some(sv), Some(sw)) = (self.typed_numeric_values(), weights.typed_numeric_values()) {
+        if let (Some(sv), Some(sw)) = (self.typed_numeric_values(), weights.typed_numeric_values())
+        {
             let n = sv.len().min(sw.len());
             let mut sum = 0.0_f64;
             let mut weight_sum = 0.0_f64;
@@ -18016,9 +18063,7 @@ impl Column {
                 }
             }
             return Scalar::Int64(
-                i64::from(seen_false)
-                    + i64::from(seen_true)
-                    + i64::from(!dropna && seen_missing),
+                i64::from(seen_false) + i64::from(seen_true) + i64::from(!dropna && seen_missing),
             );
         }
 
@@ -20478,8 +20523,10 @@ impl Column {
             // no cond-missing. Bit-identical (missing Int64 ⇒ Null(Null) in both paths).
             if self.dtype == DType::Int64
                 && other.dtype == DType::Int64
-                && let (Some((sd, sv)), Some((od, ov))) =
-                    (self.as_i64_slice_with_validity(), other.as_i64_slice_with_validity())
+                && let (Some((sd, sv)), Some((od, ov))) = (
+                    self.as_i64_slice_with_validity(),
+                    other.as_i64_slice_with_validity(),
+                )
             {
                 let n = sd.len();
                 let mut out = vec![0_i64; n];
@@ -20571,8 +20618,10 @@ impl Column {
             // slot keeps its datum, a taken missing slot clears the bit. Bit-identical.
             if self.dtype == DType::Int64
                 && other.dtype == DType::Int64
-                && let (Some((sd, sv)), Some((od, ov))) =
-                    (self.as_i64_slice_with_validity(), other.as_i64_slice_with_validity())
+                && let (Some((sd, sv)), Some((od, ov))) = (
+                    self.as_i64_slice_with_validity(),
+                    other.as_i64_slice_with_validity(),
+                )
             {
                 let n = sd.len();
                 let mut out = vec![0_i64; n];
@@ -21198,8 +21247,7 @@ impl Column {
             && let Some(perm) = self.typed_radix_perm(ascending)
         {
             let present_count = validity.count_valid();
-            let (ranks, out_valid) =
-                nullable_rank_values(data, &perm, present_count, len, method);
+            let (ranks, out_valid) = nullable_rank_values(data, &perm, present_count, len, method);
             return Ok(Self::from_f64_values_with_validity(ranks, out_valid));
         }
         if self.dtype == DType::Float64
@@ -21209,8 +21257,7 @@ impl Column {
             let present_count = (0..len)
                 .filter(|&i| validity.get(i) && !data[i].is_nan())
                 .count();
-            let (ranks, out_valid) =
-                nullable_rank_values(data, &perm, present_count, len, method);
+            let (ranks, out_valid) = nullable_rank_values(data, &perm, present_count, len, method);
             return Ok(Self::from_f64_values_with_validity(ranks, out_valid));
         }
         // Temporal Datetime64/Timedelta64 (all-valid no-NaT, or nullable/NaT): rank
@@ -21757,7 +21804,7 @@ impl Column {
 
     /// Return bin indices for values given sorted bin edges.
     ///
-    /// Matches np.digitize(). Returns indices such that bins[i-1] <= x < bins[i].
+    /// Matches np.digitize(). Returns indices such that `bins[i-1] <= x < bins[i]`.
     pub fn digitize(&self, bins: &Self, right: bool) -> Result<Self, ColumnError> {
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
@@ -21775,7 +21822,7 @@ impl Column {
 
     /// Count occurrences of each non-negative integer value.
     ///
-    /// Matches np.bincount(). Returns array where output[i] = count of i in input.
+    /// Matches np.bincount(). Returns array where `output[i]` = count of `i` in input.
     /// Requires non-negative Int64 values.
     pub fn bincount(&self, minlength: usize) -> Result<Self, ColumnError> {
         let mut max_val = 0i64;
@@ -21820,7 +21867,7 @@ impl Column {
     /// Compute histogram using provided bin edges.
     ///
     /// Matches np.histogram(a, bins=edges). Returns counts for each bin.
-    /// Bins are [edges[i], edges[i+1]) except the last which is [edges[n-1], edges[n]].
+    /// Bins are `[edges[i], edges[i+1])` except the last which is `[edges[n-1], edges[n]]`.
     pub fn histogram(&self, bin_edges: &[f64]) -> Result<Self, ColumnError> {
         if bin_edges.len() < 2 {
             return Err(ColumnError::Type(TypeError::NonNumericValue {
@@ -23458,7 +23505,9 @@ impl Column {
                     }
                 })
                 .collect();
-            return Ok(Self::from_bool_values(duplicated_flags_typed(&keys, policy)));
+            return Ok(Self::from_bool_values(duplicated_flags_typed(
+                &keys, policy,
+            )));
         }
 
         let mut flags = vec![false; self.values.len()];
@@ -24547,7 +24596,13 @@ impl Column {
         {
             return Some(Self::from_f64_values_owned(
                 (0..data.len())
-                    .map(|i| if validity.get(i) { f(data[i]) } else { f64::NAN })
+                    .map(|i| {
+                        if validity.get(i) {
+                            f(data[i])
+                        } else {
+                            f64::NAN
+                        }
+                    })
                     .collect(),
             ));
         }
@@ -24602,7 +24657,13 @@ impl Column {
         {
             return Some(Self::from_f64_values_owned(par_map_vec_f64(
                 data.len(),
-                |i| if validity.get(i) { f(data[i]) } else { f64::NAN },
+                |i| {
+                    if validity.get(i) {
+                        f(data[i])
+                    } else {
+                        f64::NAN
+                    }
+                },
             )));
         }
         if self.dtype == DType::Int64
@@ -24610,7 +24671,13 @@ impl Column {
         {
             return Some(Self::from_f64_values_owned(par_map_vec_f64(
                 data.len(),
-                |i| if validity.get(i) { f(data[i] as f64) } else { f64::NAN },
+                |i| {
+                    if validity.get(i) {
+                        f(data[i] as f64)
+                    } else {
+                        f64::NAN
+                    }
+                },
             )));
         }
         None
@@ -24770,7 +24837,13 @@ impl Column {
         {
             return Some(Self::from_f64_values(
                 (0..data.len())
-                    .map(|i| if validity.get(i) { f(data[i]) } else { f64::NAN })
+                    .map(|i| {
+                        if validity.get(i) {
+                            f(data[i])
+                        } else {
+                            f64::NAN
+                        }
+                    })
                     .collect(),
             ));
         }
@@ -24779,7 +24852,13 @@ impl Column {
         {
             return Some(Self::from_f64_values(
                 (0..data.len())
-                    .map(|i| if validity.get(i) { f(data[i] as f64) } else { f64::NAN })
+                    .map(|i| {
+                        if validity.get(i) {
+                            f(data[i] as f64)
+                        } else {
+                            f64::NAN
+                        }
+                    })
                     .collect(),
             ));
         }
@@ -25519,7 +25598,11 @@ impl Column {
             }
         } else {
             let bits = x.to_bits() as i64;
-            let next_bits = if (x > 0.0) == (y > x) { bits + 1 } else { bits - 1 };
+            let next_bits = if (x > 0.0) == (y > x) {
+                bits + 1
+            } else {
+                bits - 1
+            };
             f64::from_bits(next_bits as u64)
         }
     }
@@ -28853,8 +28936,12 @@ mod tests {
                     _ => Some((next() % src_n as u64) as usize),
                 })
                 .collect();
-            let a = col_typed.reindex_by_positions(&positions).expect("typed reindex");
-            let b = col_eager.reindex_by_positions(&positions).expect("eager reindex");
+            let a = col_typed
+                .reindex_by_positions(&positions)
+                .expect("typed reindex");
+            let b = col_eager
+                .reindex_by_positions(&positions)
+                .expect("eager reindex");
             assert_eq!(a.values(), b.values(), "reindex trial {trial}");
             assert_eq!(a.validity(), b.validity(), "reindex validity trial {trial}");
         }
@@ -28901,10 +28988,18 @@ mod tests {
                     _ => Some((next() % src_n as u64) as usize),
                 })
                 .collect();
-            let a = col_typed.reindex_by_positions(&positions).expect("typed reindex");
-            let b = col_eager.reindex_by_positions(&positions).expect("eager reindex");
+            let a = col_typed
+                .reindex_by_positions(&positions)
+                .expect("typed reindex");
+            let b = col_eager
+                .reindex_by_positions(&positions)
+                .expect("eager reindex");
             assert_eq!(a.values(), b.values(), "bool reindex trial {trial}");
-            assert_eq!(a.validity(), b.validity(), "bool reindex validity trial {trial}");
+            assert_eq!(
+                a.validity(),
+                b.validity(),
+                "bool reindex validity trial {trial}"
+            );
         }
     }
 
@@ -30599,7 +30694,7 @@ mod tests {
         };
         // Every pandas-defined combo: (left_is_dt, right_is_dt, is_add, out_is_dt).
         let combos: [(bool, bool, bool, bool); 6] = [
-            (true, true, false, false),  // dt - dt -> td
+            (true, true, false, false),   // dt - dt -> td
             (false, false, false, false), // td - td -> td
             (false, false, true, false),  // td + td -> td
             (true, false, true, true),    // dt + td -> dt
@@ -30618,7 +30713,11 @@ mod tests {
                         .expect("temporal arith must not error");
                     assert_eq!(
                         got.dtype(),
-                        if out_dt { DType::Datetime64 } else { DType::Timedelta64 }
+                        if out_dt {
+                            DType::Datetime64
+                        } else {
+                            DType::Timedelta64
+                        }
                     );
                     let expected: Vec<Scalar> = (0..n)
                         .map(|i| {
@@ -30647,13 +30746,14 @@ mod tests {
         // Combos that must keep rejecting (match pandas raising / IncompatibleDtypes).
         let dt = Column::from_datetime64_values(vec![10, 20]);
         let dt2 = Column::from_datetime64_values(vec![1, 2]);
-        let td = Column::from_timedelta64_values_with_validity(
-            vec![3, 4],
-            ValidityMask::all_valid(2),
-        );
+        let td =
+            Column::from_timedelta64_values_with_validity(vec![3, 4], ValidityMask::all_valid(2));
         assert!(dt.add(&dt2).is_err(), "dt + dt must raise");
         assert!(dt.mul(&dt2).is_err(), "dt * dt must raise");
-        assert!(td.sub(&dt).is_err(), "td - dt must raise (can't subtract a datetime from a duration)");
+        assert!(
+            td.sub(&dt).is_err(),
+            "td - dt must raise (can't subtract a datetime from a duration)"
+        );
         assert!(td.mul(&dt).is_err(), "td * dt must raise");
     }
 
@@ -30673,8 +30773,24 @@ mod tests {
             }
             Column::from_i64_values_with_validity(data, validity)
         };
-        let lv = [Some(5_i64), Some(-3), None, Some(i64::MAX), Some(0), None, Some(7)];
-        let rv = [Some(2_i64), None, Some(9), Some(1), Some(-8), None, Some(-7)];
+        let lv = [
+            Some(5_i64),
+            Some(-3),
+            None,
+            Some(i64::MAX),
+            Some(0),
+            None,
+            Some(7),
+        ];
+        let rv = [
+            Some(2_i64),
+            None,
+            Some(9),
+            Some(1),
+            Some(-8),
+            None,
+            Some(-7),
+        ];
         let left = build(&lv);
         let right = build(&rv);
         assert!(
@@ -30728,8 +30844,24 @@ mod tests {
             }
             Column::from_f64_values_with_validity(data, validity)
         };
-        let lv = [Some(5.0), Some(-3.5), None, Some(2.0), Some(0.0), None, Some(7.25)];
-        let rv = [Some(2.0), None, Some(9.0), Some(4.0), Some(0.0), None, Some(-1.5)];
+        let lv = [
+            Some(5.0),
+            Some(-3.5),
+            None,
+            Some(2.0),
+            Some(0.0),
+            None,
+            Some(7.25),
+        ];
+        let rv = [
+            Some(2.0),
+            None,
+            Some(9.0),
+            Some(4.0),
+            Some(0.0),
+            None,
+            Some(-1.5),
+        ];
         let left = build(&lv);
         let right = build(&rv);
 
@@ -30742,9 +30874,21 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(left.add(&right).expect("add").values(), reference(|a, b| a + b), "add");
-        assert_eq!(left.sub(&right).expect("sub").values(), reference(|a, b| a - b), "sub");
-        assert_eq!(left.mul(&right).expect("mul").values(), reference(|a, b| a * b), "mul");
+        assert_eq!(
+            left.add(&right).expect("add").values(),
+            reference(|a, b| a + b),
+            "add"
+        );
+        assert_eq!(
+            left.sub(&right).expect("sub").values(),
+            reference(|a, b| a - b),
+            "sub"
+        );
+        assert_eq!(
+            left.mul(&right).expect("mul").values(),
+            reference(|a, b| a * b),
+            "mul"
+        );
 
         // div: op-produced NaN (0/0 at idx 4) stays a present Float64(NaN); the
         // absent-operand slots stay Null. NaN needs a bit-compare, not ==.
@@ -30814,12 +30958,32 @@ mod tests {
                 .collect()
         };
         // Int64 (left) op Float64 (right).
-        assert_eq!(left.add(&right).expect("add").values(), reference(|a, b| a + b), "i64+f64");
-        assert_eq!(left.sub(&right).expect("sub").values(), reference(|a, b| a - b), "i64-f64");
-        assert_eq!(left.mul(&right).expect("mul").values(), reference(|a, b| a * b), "i64*f64");
+        assert_eq!(
+            left.add(&right).expect("add").values(),
+            reference(|a, b| a + b),
+            "i64+f64"
+        );
+        assert_eq!(
+            left.sub(&right).expect("sub").values(),
+            reference(|a, b| a - b),
+            "i64-f64"
+        );
+        assert_eq!(
+            left.mul(&right).expect("mul").values(),
+            reference(|a, b| a * b),
+            "i64*f64"
+        );
         // Float64 (left) op Int64 (right): exercises the reverse view combo.
-        assert_eq!(right.add(&left).expect("radd").values(), reference(|a, b| b + a), "f64+i64");
-        assert_eq!(right.sub(&left).expect("rsub").values(), reference(|a, b| b - a), "f64-i64");
+        assert_eq!(
+            right.add(&left).expect("radd").values(),
+            reference(|a, b| b + a),
+            "f64+i64"
+        );
+        assert_eq!(
+            right.sub(&left).expect("rsub").values(),
+            reference(|a, b| b - a),
+            "f64-i64"
+        );
     }
 
     #[test]
@@ -31615,8 +31779,7 @@ mod tests {
             // reference: a selected present slot keeps its datum; a selected
             // missing slot stays missing; a NaN in a LazyAllValidFloat64 source
             // folds to missing. mask-true positions: 0, 2, 3, 5, 6.
-            let mask =
-                Column::from_bool_values(vec![true, false, true, true, false, true, true]);
+            let mask = Column::from_bool_values(vec![true, false, true, true, false, true, true]);
 
             // (a) LazyNullableInt64 (missing ⇒ Null(Null)).
             let mut ival = ValidityMask::all_valid(7);
@@ -31640,8 +31803,10 @@ mod tests {
             let mut fval = ValidityMask::all_valid(7);
             fval.set(2, false);
             fval.set(5, false);
-            let fcol =
-                Column::from_f64_values_with_validity(vec![1.5, 2.0, 0.0, -3.5, 7.0, 0.0, 9.25], fval);
+            let fcol = Column::from_f64_values_with_validity(
+                vec![1.5, 2.0, 0.0, -3.5, 7.0, 0.0, 9.25],
+                fval,
+            );
             let fr = fcol.filter_by_mask(&mask).expect("f64 filter");
             assert_eq!(fr.dtype(), DType::Float64);
             let fv = fr.values();
@@ -31665,8 +31830,7 @@ mod tests {
             // validity-cleared (missing) but its datum stays a PRESENT Float64(NaN)
             // in values() — the three-way rep — so the filtered slot must too (the
             // Scalar-clone path clones Float64(NaN) and Self::new re-marks it missing).
-            let ncol =
-                Column::from_f64_values(vec![1.0, 2.0, f64::NAN, 4.0, 5.0, f64::NAN, 7.0]);
+            let ncol = Column::from_f64_values(vec![1.0, 2.0, f64::NAN, 4.0, 5.0, f64::NAN, 7.0]);
             let nr = ncol.filter_by_mask(&mask).expect("nan filter");
             let nv = nr.values();
             match &nv[0] {
@@ -31936,11 +32100,11 @@ mod tests {
                     "fixture must exercise the typed contiguous-Utf8 backing"
                 );
                 let needles = [
-                    String::new(),          // empty ⇒ before-all non-empty
-                    "a".to_string(),        // prefix / short
-                    "abc".to_string(),      // mid
-                    "cc".to_string(),       // mid
-                    "dddddd".to_string(),   // after-all (len 6 > max 5)
+                    String::new(),                                // empty ⇒ before-all non-empty
+                    "a".to_string(),                              // prefix / short
+                    "abc".to_string(),                            // mid
+                    "cc".to_string(),                             // mid
+                    "dddddd".to_string(),                         // after-all (len 6 > max 5)
                     strings.first().cloned().unwrap_or_default(), // equal-to-a-row
                 ];
                 for needle_str in &needles {
@@ -31958,12 +32122,8 @@ mod tests {
                             .iter()
                             .map(|s| {
                                 Scalar::Bool(
-                                    scalar_compare(
-                                        &Scalar::Utf8(s.clone()),
-                                        &needle,
-                                        op,
-                                    )
-                                    .expect("reference"),
+                                    scalar_compare(&Scalar::Utf8(s.clone()), &needle, op)
+                                        .expect("reference"),
                                 )
                             })
                             .collect();
@@ -32075,31 +32235,33 @@ mod tests {
                 state
             };
             // Build a contiguous-Utf8 column of `n` rows; `nullable` ⇒ ~25% missing.
-            let build =
-                |n: usize, nullable: bool, next: &mut dyn FnMut() -> u64| -> (Column, Vec<Option<String>>) {
-                    let mut validity = crate::ValidityMask::all_valid(n);
-                    let mut opt: Vec<Option<String>> = Vec::with_capacity(n);
-                    let mut bytes: Vec<u8> = Vec::new();
-                    let mut offsets: Vec<usize> = vec![0];
-                    for i in 0..n {
-                        if nullable && next().is_multiple_of(4) {
-                            validity.set(i, false);
-                            opt.push(None);
-                        } else {
-                            let len = (next() % 6) as usize;
-                            let s: String = (0..len)
-                                .map(|_| (b'a' + (next() % 4) as u8) as char)
-                                .collect();
-                            bytes.extend_from_slice(s.as_bytes());
-                            opt.push(Some(s));
-                        }
-                        offsets.push(bytes.len());
+            let build = |n: usize,
+                         nullable: bool,
+                         next: &mut dyn FnMut() -> u64|
+             -> (Column, Vec<Option<String>>) {
+                let mut validity = crate::ValidityMask::all_valid(n);
+                let mut opt: Vec<Option<String>> = Vec::with_capacity(n);
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut offsets: Vec<usize> = vec![0];
+                for i in 0..n {
+                    if nullable && next().is_multiple_of(4) {
+                        validity.set(i, false);
+                        opt.push(None);
+                    } else {
+                        let len = (next() % 6) as usize;
+                        let s: String = (0..len)
+                            .map(|_| (b'a' + (next() % 4) as u8) as char)
+                            .collect();
+                        bytes.extend_from_slice(s.as_bytes());
+                        opt.push(Some(s));
                     }
-                    (
-                        Column::from_utf8_values_with_validity(bytes, offsets, validity),
-                        opt,
-                    )
-                };
+                    offsets.push(bytes.len());
+                }
+                (
+                    Column::from_utf8_values_with_validity(bytes, offsets, validity),
+                    opt,
+                )
+            };
             for trial in 0..150 {
                 let n = (next() % 200) as usize;
                 for (ln, rn) in [(false, false), (true, false), (false, true), (true, true)] {
@@ -32771,7 +32933,11 @@ mod tests {
                             });
                         }
                     }
-                    let dtype = if is_dt { DType::Datetime64 } else { DType::Timedelta64 };
+                    let dtype = if is_dt {
+                        DType::Datetime64
+                    } else {
+                        DType::Timedelta64
+                    };
                     let col_typed = if is_dt {
                         Column::from_datetime64_values_with_validity(data.clone(), validity)
                     } else {
@@ -34003,9 +34169,7 @@ mod tests {
                     })
                     .collect();
                 // f64: float-of-integer (variation in the HIGH to_bits() bits).
-                let fdata: Vec<f64> = (0..n)
-                    .map(|_| (next() % distinct as u64) as f64)
-                    .collect();
+                let fdata: Vec<f64> = (0..n).map(|_| (next() % distinct as u64) as f64).collect();
                 assert!(crate::i64_direct_address_range(&idata).is_none());
 
                 let mut iseen: HashSet<i64> = HashSet::new();
@@ -34207,8 +34371,7 @@ mod tests {
                     offsets.clone(),
                     validity.clone(),
                 );
-                let col_warm =
-                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let col_warm = Column::from_utf8_values_with_validity(bytes, offsets, validity);
                 let _ = col_warm.values(); // warm cache ⇒ generic path (oracle)
                 let cold = col_cold.unique().expect("cold unique");
                 let warm = col_warm.unique().expect("warm unique");
@@ -34268,8 +34431,7 @@ mod tests {
             let mut validity = ValidityMask::all_valid(5);
             validity.set(1, false);
             validity.set(3, false);
-            let col =
-                Column::from_i64_values_with_validity(vec![-3, 0, i64::MIN, 7, -5], validity);
+            let col = Column::from_i64_values_with_validity(vec![-3, 0, i64::MIN, 7, -5], validity);
             let r = col.abs().expect("abs");
             assert_eq!(r.dtype(), DType::Int64);
             let v = r.values();
@@ -34524,13 +34686,10 @@ mod tests {
                 let len = (next(&mut seed) % 61 + 1) as usize;
                 let lower = bound(&mut seed);
                 let upper = bound(&mut seed);
-                let (expected_lower, expected_upper) =
-                    match (normalize(lower), normalize(upper)) {
-                        (Some(lower), Some(upper)) if lower > upper => {
-                            (Some(upper), Some(lower))
-                        }
-                        bounds => bounds,
-                    };
+                let (expected_lower, expected_upper) = match (normalize(lower), normalize(upper)) {
+                    (Some(lower), Some(upper)) if lower > upper => (Some(upper), Some(lower)),
+                    bounds => bounds,
+                };
 
                 let mut values = Vec::with_capacity(len);
                 for _ in 0..len {
@@ -34589,7 +34748,11 @@ mod tests {
 
             assert_eq!(
                 reversed.values(),
-                &[Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]
+                &[
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(5.0)
+                ]
             );
             assert_eq!(reversed, ordered);
         }
@@ -35021,8 +35184,7 @@ mod tests {
                     offsets.clone(),
                     validity.clone(),
                 );
-                let col_warm =
-                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let col_warm = Column::from_utf8_values_with_validity(bytes, offsets, validity);
                 let _ = col_warm.values(); // warm cache ⇒ generic path (oracle)
                 // Needle sets: subset of {a,b,c,d} short strings + a null + an Int64.
                 let needle_variants: [Vec<Scalar>; 3] = [
@@ -35083,7 +35245,7 @@ mod tests {
                         Scalar::Int64(5),
                         Scalar::Int64(-10),
                         Scalar::Null(NullKind::Null),
-                        Scalar::Float64(5.0), // inert vs Int64 value
+                        Scalar::Float64(5.0),          // inert vs Int64 value
                         Scalar::Utf8("5".to_string()), // inert
                     ],
                     vec![Scalar::Int64(-20), Scalar::Int64(19)],
@@ -35091,7 +35253,13 @@ mod tests {
                 for needles in &needle_variants {
                     let int_needles: Vec<i64> = needles
                         .iter()
-                        .filter_map(|s| if let Scalar::Int64(v) = s { Some(*v) } else { None })
+                        .filter_map(|s| {
+                            if let Scalar::Int64(v) = s {
+                                Some(*v)
+                            } else {
+                                None
+                            }
+                        })
                         .collect();
                     let expected: Vec<Scalar> = (0..n)
                         .map(|i| Scalar::Bool(vbits[i] && int_needles.contains(&data[i])))
@@ -35300,9 +35468,7 @@ mod tests {
                     for ascending in [true, false] {
                         // Reference == the pre-change generic fallthrough.
                         let mut want: Vec<&Scalar> = vals.iter().collect();
-                        want.sort_by(|a, b| {
-                            crate::compare_scalars_na_last(a, b, ascending)
-                        });
+                        want.sort_by(|a, b| crate::compare_scalars_na_last(a, b, ascending));
                         let want: Vec<Scalar> = want.into_iter().cloned().collect();
                         assert_eq!(
                             col.sort_values(ascending).expect("sort_values").values(),
@@ -35436,7 +35602,7 @@ mod tests {
                                 vd.set(i, false);
                                 55
                             }
-                            1 => i64::MIN, // present-NaT
+                            1 => i64::MIN,             // present-NaT
                             _ => (r % 8) as i64 * 100, // ties
                         }
                     })
@@ -35545,7 +35711,7 @@ mod tests {
                                 validity.set(i, false);
                                 0.0 // Null-missing slot (sentinel)
                             }
-                            1 => f64::NAN,          // present-NaN ⇒ na-last too
+                            1 => f64::NAN, // present-NaN ⇒ na-last too
                             2 => f64::INFINITY,
                             3 => f64::NEG_INFINITY,
                             4 => -0.0,
@@ -35603,7 +35769,10 @@ mod tests {
                     let col = if dt64 {
                         Column::from_datetime64_values_with_validity(data.clone(), validity.clone())
                     } else {
-                        Column::from_timedelta64_values_with_validity(data.clone(), validity.clone())
+                        Column::from_timedelta64_values_with_validity(
+                            data.clone(),
+                            validity.clone(),
+                        )
                     };
                     let vals = col.values();
                     for ascending in [true, false] {
@@ -36056,8 +36225,7 @@ mod tests {
             let mut validity = ValidityMask::all_valid(5);
             validity.set(1, false);
             validity.set(3, false);
-            let col =
-                Column::from_i64_values_with_validity(vec![-3, 0, i64::MIN, 7, -5], validity);
+            let col = Column::from_i64_values_with_validity(vec![-3, 0, i64::MIN, 7, -5], validity);
             let r = col.neg().expect("neg");
             assert_eq!(r.dtype(), DType::Int64);
             let v = r.values();
@@ -36840,7 +37008,11 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(got_flags, exp_flags, "duplicated trial {trial}");
-                assert_eq!(col.nunique(), Scalar::Int64(exp_nunique), "nunique trial {trial}");
+                assert_eq!(
+                    col.nunique(),
+                    Scalar::Int64(exp_nunique),
+                    "nunique trial {trial}"
+                );
             }
         }
 
@@ -37117,12 +37289,9 @@ mod tests {
             const LEN: usize = 1_000_000;
             const SAMPLES: usize = 15;
             let (data, validity) = nullable_i64_dup_input_a9zs0(LEN);
-            let reference_a =
-                Column::from_i64_values_with_validity(data.clone(), validity.clone());
-            let reference_b =
-                Column::from_i64_values_with_validity(data.clone(), validity.clone());
-            let candidate_a =
-                Column::from_i64_values_with_validity(data.clone(), validity.clone());
+            let reference_a = Column::from_i64_values_with_validity(data.clone(), validity.clone());
+            let reference_b = Column::from_i64_values_with_validity(data.clone(), validity.clone());
+            let candidate_a = Column::from_i64_values_with_validity(data.clone(), validity.clone());
             let candidate_b = Column::from_i64_values_with_validity(data, validity);
 
             let former = duplicated_nullable_i64_last_former_body_a9zs0(&reference_a);
@@ -37133,12 +37302,8 @@ mod tests {
             assert_nullable_i64_unmaterialized_a9zs0(&candidate_a);
 
             for _ in 0..3 {
-                std::hint::black_box(duplicated_nullable_i64_last_former_body_a9zs0(
-                    &reference_a,
-                ));
-                std::hint::black_box(duplicated_nullable_i64_last_former_body_a9zs0(
-                    &reference_b,
-                ));
+                std::hint::black_box(duplicated_nullable_i64_last_former_body_a9zs0(&reference_a));
+                std::hint::black_box(duplicated_nullable_i64_last_former_body_a9zs0(&reference_b));
                 std::hint::black_box(candidate_a.duplicated_keep("last").unwrap());
                 std::hint::black_box(candidate_b.duplicated_keep("last").unwrap());
             }
@@ -37198,12 +37363,9 @@ mod tests {
             const LEN: usize = 1_000_000;
             const SAMPLES: usize = 15;
             let (data, validity) = nullable_i64_dup_input_a9zs0(LEN);
-            let reference_a =
-                Column::from_i64_values_with_validity(data.clone(), validity.clone());
-            let reference_b =
-                Column::from_i64_values_with_validity(data.clone(), validity.clone());
-            let candidate_a =
-                Column::from_i64_values_with_validity(data.clone(), validity.clone());
+            let reference_a = Column::from_i64_values_with_validity(data.clone(), validity.clone());
+            let reference_b = Column::from_i64_values_with_validity(data.clone(), validity.clone());
+            let candidate_a = Column::from_i64_values_with_validity(data.clone(), validity.clone());
             let candidate_b = Column::from_i64_values_with_validity(data, validity);
 
             let former = duplicated_nullable_i64_none_former_body_dxh4b(&reference_a);
@@ -37214,12 +37376,8 @@ mod tests {
             assert_nullable_i64_unmaterialized_a9zs0(&candidate_a);
 
             for _ in 0..3 {
-                std::hint::black_box(duplicated_nullable_i64_none_former_body_dxh4b(
-                    &reference_a,
-                ));
-                std::hint::black_box(duplicated_nullable_i64_none_former_body_dxh4b(
-                    &reference_b,
-                ));
+                std::hint::black_box(duplicated_nullable_i64_none_former_body_dxh4b(&reference_a));
+                std::hint::black_box(duplicated_nullable_i64_none_former_body_dxh4b(&reference_b));
                 let _ = std::hint::black_box(candidate_a.duplicated_keep("false"));
                 let _ = std::hint::black_box(candidate_b.duplicated_keep("false"));
             }
@@ -37233,12 +37391,8 @@ mod tests {
                     former_a.push(measure_nanos_a9zs0(|| {
                         duplicated_nullable_i64_none_former_body_dxh4b(&reference_a)
                     }));
-                    typed_a.push(measure_nanos_a9zs0(|| {
-                        candidate_a.duplicated_keep("false")
-                    }));
-                    typed_b.push(measure_nanos_a9zs0(|| {
-                        candidate_b.duplicated_keep("false")
-                    }));
+                    typed_a.push(measure_nanos_a9zs0(|| candidate_a.duplicated_keep("false")));
+                    typed_b.push(measure_nanos_a9zs0(|| candidate_b.duplicated_keep("false")));
                     former_b.push(measure_nanos_a9zs0(|| {
                         duplicated_nullable_i64_none_former_body_dxh4b(&reference_b)
                     }));
@@ -37246,12 +37400,8 @@ mod tests {
                     former_b.push(measure_nanos_a9zs0(|| {
                         duplicated_nullable_i64_none_former_body_dxh4b(&reference_b)
                     }));
-                    typed_b.push(measure_nanos_a9zs0(|| {
-                        candidate_b.duplicated_keep("false")
-                    }));
-                    typed_a.push(measure_nanos_a9zs0(|| {
-                        candidate_a.duplicated_keep("false")
-                    }));
+                    typed_b.push(measure_nanos_a9zs0(|| candidate_b.duplicated_keep("false")));
+                    typed_a.push(measure_nanos_a9zs0(|| candidate_a.duplicated_keep("false")));
                     former_a.push(measure_nanos_a9zs0(|| {
                         duplicated_nullable_i64_none_former_body_dxh4b(&reference_a)
                     }));
@@ -37265,9 +37415,7 @@ mod tests {
             let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
             let typed_mean = (typed_a_p50 + typed_b_p50) as f64 / 2.0;
 
-            println!(
-                "nullable Int64 duplicated(keep=False), len={LEN}, samples={SAMPLES}"
-            );
+            println!("nullable Int64 duplicated(keep=False), len={LEN}, samples={SAMPLES}");
             println!("former generic p50 A/B: {former_a_p50} / {former_b_p50} ns");
             println!("typed raw p50 A/B: {typed_a_p50} / {typed_b_p50} ns");
             println!("former/typed p50 ratio: {:.3}x", former_mean / typed_mean);
@@ -37313,17 +37461,12 @@ mod tests {
                     offsets.clone(),
                     validity.clone(),
                 );
-                let col_warm =
-                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let col_warm = Column::from_utf8_values_with_validity(bytes, offsets, validity);
                 let _ = col_warm.values(); // warm cache ⇒ generic path (oracle)
                 for keep in ["first", "last", "false"] {
                     let cold = col_cold.duplicated_keep(keep).expect("cold duplicated");
                     let warm = col_warm.duplicated_keep(keep).expect("warm duplicated");
-                    assert_eq!(
-                        cold.values(),
-                        warm.values(),
-                        "trial {trial} keep={keep}"
-                    );
+                    assert_eq!(cold.values(), warm.values(), "trial {trial} keep={keep}");
                 }
             }
         }
@@ -37573,13 +37716,20 @@ mod tests {
                     offsets.clone(),
                     validity.clone(),
                 );
-                let col_warm =
-                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let col_warm = Column::from_utf8_values_with_validity(bytes, offsets, validity);
                 let _ = col_warm.values(); // warm cache ⇒ generic path (oracle)
                 let (cc, cu) = col_cold.factorize().expect("cold factorize");
                 let (wc, wu) = col_warm.factorize().expect("warm factorize");
-                assert_eq!(cc.values(), wc.values(), "codes trial {trial} null_mode={null_mode}");
-                assert_eq!(cu.values(), wu.values(), "uniques trial {trial} null_mode={null_mode}");
+                assert_eq!(
+                    cc.values(),
+                    wc.values(),
+                    "codes trial {trial} null_mode={null_mode}"
+                );
+                assert_eq!(
+                    cu.values(),
+                    wu.values(),
+                    "uniques trial {trial} null_mode={null_mode}"
+                );
             }
         }
 
@@ -38275,7 +38425,8 @@ mod tests {
                     .collect();
                 let f_null = Column::from_f64_values_with_validity(fdata, vf);
                 let i_null = Column::from_i64_values_with_validity(idata, vi);
-                let i_all = Column::from_i64_values_owned((0..n).map(|i| (i % 3) as i64 - 1).collect());
+                let i_all =
+                    Column::from_i64_values_owned((0..n).map(|i| (i % 3) as i64 - 1).collect());
                 for col in [&f_null, &i_null, &i_all] {
                     let vals = col.values().to_vec();
                     let got = col.logical_not().unwrap();
@@ -38758,7 +38909,10 @@ mod tests {
                 let wv = want.values();
                 assert_eq!(gv.len(), wv.len(), "isclose len trial {trial}");
                 for (k, (g, w)) in gv.iter().zip(wv.iter()).enumerate() {
-                    assert!(bit_eq(g, w), "isclose trial {trial} idx {k}: {g:?} != {w:?}");
+                    assert!(
+                        bit_eq(g, w),
+                        "isclose trial {trial} idx {k}: {g:?} != {w:?}"
+                    );
                 }
             }
         }
@@ -38879,9 +39033,7 @@ mod tests {
                 let want_h = ref_heaviside(&vals, h0);
                 let lv = col.ldexp(exp).unwrap();
                 let want_l = ref_ldexp(&vals, exp);
-                for (name, got, want) in
-                    [("heaviside", &hv, &want_h), ("ldexp", &lv, &want_l)]
-                {
+                for (name, got, want) in [("heaviside", &hv, &want_h), ("ldexp", &lv, &want_l)] {
                     let gv = got.values();
                     let wv = want.values();
                     assert_eq!(gv.len(), wv.len(), "{name} len trial {trial}");
@@ -38921,7 +39073,9 @@ mod tests {
                             Scalar::Null(NullKind::Null)
                         } else {
                             match (x, y) {
-                                (Scalar::Int64(xi), Scalar::Int64(yi)) => Scalar::Int64(f(*xi, *yi)),
+                                (Scalar::Int64(xi), Scalar::Int64(yi)) => {
+                                    Scalar::Int64(f(*xi, *yi))
+                                }
                                 _ => unreachable!(),
                             }
                         }
@@ -39016,7 +39170,9 @@ mod tests {
                             Scalar::Null(NullKind::Null)
                         } else {
                             match (x, y) {
-                                (Scalar::Int64(xi), Scalar::Int64(yi)) => Scalar::Int64(f(*xi, *yi)),
+                                (Scalar::Int64(xi), Scalar::Int64(yi)) => {
+                                    Scalar::Int64(f(*xi, *yi))
+                                }
                                 _ => unreachable!(),
                             }
                         }
@@ -39044,11 +39200,31 @@ mod tests {
                 let av = a.values().to_vec();
                 let bv = b.values().to_vec();
                 let cases: [(&str, Column, Column); 5] = [
-                    ("gcd", a.gcd(&b).unwrap(), ref_binop(&av, &bv, Column::compute_gcd_i64)),
-                    ("lcm", a.lcm(&b).unwrap(), ref_binop(&av, &bv, Column::compute_lcm_i64)),
-                    ("and", a.bitwise_and(&b).unwrap(), ref_binop(&av, &bv, |x, y| x & y)),
-                    ("or", a.bitwise_or(&b).unwrap(), ref_binop(&av, &bv, |x, y| x | y)),
-                    ("xor", a.bitwise_xor(&b).unwrap(), ref_binop(&av, &bv, |x, y| x ^ y)),
+                    (
+                        "gcd",
+                        a.gcd(&b).unwrap(),
+                        ref_binop(&av, &bv, Column::compute_gcd_i64),
+                    ),
+                    (
+                        "lcm",
+                        a.lcm(&b).unwrap(),
+                        ref_binop(&av, &bv, Column::compute_lcm_i64),
+                    ),
+                    (
+                        "and",
+                        a.bitwise_and(&b).unwrap(),
+                        ref_binop(&av, &bv, |x, y| x & y),
+                    ),
+                    (
+                        "or",
+                        a.bitwise_or(&b).unwrap(),
+                        ref_binop(&av, &bv, |x, y| x | y),
+                    ),
+                    (
+                        "xor",
+                        a.bitwise_xor(&b).unwrap(),
+                        ref_binop(&av, &bv, |x, y| x ^ y),
+                    ),
                 ];
                 for (name, got, want) in cases {
                     let gv = got.values();
@@ -39110,7 +39286,7 @@ mod tests {
                             1 => f64::NAN,
                             2 => f64::INFINITY,
                             3 => f64::NEG_INFINITY,
-                            4 => 0.0, // nextafter x==0
+                            4 => 0.0,                               // nextafter x==0
                             _ => ((r % 400) as f64 - 200.0) * 0.25, // includes negatives (float_power ⇒ NaN)
                         }
                     })
@@ -39141,10 +39317,26 @@ mod tests {
                 let av = a.values().to_vec();
                 let bv = b.values().to_vec();
                 let cases: [(&str, Column, Column); 4] = [
-                    ("float_power", a.float_power(&b).unwrap(), ref_binop(&av, &bv, |x, y| x.powf(y))),
-                    ("logaddexp", a.logaddexp(&b).unwrap(), ref_binop(&av, &bv, Column::logaddexp_kernel)),
-                    ("logaddexp2", a.logaddexp2(&b).unwrap(), ref_binop(&av, &bv, Column::logaddexp2_kernel)),
-                    ("nextafter", a.nextafter(&b).unwrap(), ref_binop(&av, &bv, Column::nextafter_kernel)),
+                    (
+                        "float_power",
+                        a.float_power(&b).unwrap(),
+                        ref_binop(&av, &bv, |x, y| x.powf(y)),
+                    ),
+                    (
+                        "logaddexp",
+                        a.logaddexp(&b).unwrap(),
+                        ref_binop(&av, &bv, Column::logaddexp_kernel),
+                    ),
+                    (
+                        "logaddexp2",
+                        a.logaddexp2(&b).unwrap(),
+                        ref_binop(&av, &bv, Column::logaddexp2_kernel),
+                    ),
+                    (
+                        "nextafter",
+                        a.nextafter(&b).unwrap(),
+                        ref_binop(&av, &bv, Column::nextafter_kernel),
+                    ),
                 ];
                 for (name, got, want) in cases {
                     let gv = got.values();
@@ -39235,10 +39427,26 @@ mod tests {
                 let av = a.values().to_vec();
                 let bv = b.values().to_vec();
                 let cases: [(&str, Column, Column); 4] = [
-                    ("atan2", a.atan2(&b).unwrap(), ref_binop(&av, &bv, |y, x| y.atan2(x))),
-                    ("hypot", a.hypot(&b).unwrap(), ref_binop(&av, &bv, |x, y| x.hypot(y))),
-                    ("fmod", a.fmod(&b).unwrap(), ref_binop(&av, &bv, |x, y| x % y)),
-                    ("copysign", a.copysign(&b).unwrap(), ref_binop(&av, &bv, |m, s| m.copysign(s))),
+                    (
+                        "atan2",
+                        a.atan2(&b).unwrap(),
+                        ref_binop(&av, &bv, |y, x| y.atan2(x)),
+                    ),
+                    (
+                        "hypot",
+                        a.hypot(&b).unwrap(),
+                        ref_binop(&av, &bv, |x, y| x.hypot(y)),
+                    ),
+                    (
+                        "fmod",
+                        a.fmod(&b).unwrap(),
+                        ref_binop(&av, &bv, |x, y| x % y),
+                    ),
+                    (
+                        "copysign",
+                        a.copysign(&b).unwrap(),
+                        ref_binop(&av, &bv, |m, s| m.copysign(s)),
+                    ),
                 ];
                 for (name, got, want) in cases {
                     let gv = got.values();
@@ -39521,10 +39729,30 @@ mod tests {
                 let f_null = Column::from_f64_values_with_validity(fdata, vf);
                 for col in [&i_null, &f_null] {
                     let vals = col.values().to_vec();
-                    check(&col.rint().unwrap(), &ref_op(&vals, f64::round_ties_even), "rint", trial);
-                    check(&col.radians().unwrap(), &ref_op(&vals, f64::to_radians), "radians", trial);
-                    check(&col.degrees().unwrap(), &ref_op(&vals, f64::to_degrees), "degrees", trial);
-                    check(&col.reciprocal().unwrap(), &ref_op(&vals, |x| 1.0 / x), "reciprocal", trial);
+                    check(
+                        &col.rint().unwrap(),
+                        &ref_op(&vals, f64::round_ties_even),
+                        "rint",
+                        trial,
+                    );
+                    check(
+                        &col.radians().unwrap(),
+                        &ref_op(&vals, f64::to_radians),
+                        "radians",
+                        trial,
+                    );
+                    check(
+                        &col.degrees().unwrap(),
+                        &ref_op(&vals, f64::to_degrees),
+                        "degrees",
+                        trial,
+                    );
+                    check(
+                        &col.reciprocal().unwrap(),
+                        &ref_op(&vals, |x| 1.0 / x),
+                        "reciprocal",
+                        trial,
+                    );
                 }
             }
         }
@@ -39606,10 +39834,25 @@ mod tests {
                 let f_null = Column::from_f64_values_with_validity(fdata, vf);
                 for col in [&i_null, &f_null] {
                     let vals = col.values().to_vec();
-                    check(&col.log10().unwrap(), &ref_op(&vals, f64::log10), "log10", trial);
+                    check(
+                        &col.log10().unwrap(),
+                        &ref_op(&vals, f64::log10),
+                        "log10",
+                        trial,
+                    );
                     check(&col.sin().unwrap(), &ref_op(&vals, f64::sin), "sin", trial);
-                    check(&col.cbrt().unwrap(), &ref_op(&vals, f64::cbrt), "cbrt", trial);
-                    check(&col.arctan().unwrap(), &ref_op(&vals, f64::atan), "atan", trial);
+                    check(
+                        &col.cbrt().unwrap(),
+                        &ref_op(&vals, f64::cbrt),
+                        "cbrt",
+                        trial,
+                    );
+                    check(
+                        &col.arctan().unwrap(),
+                        &ref_op(&vals, f64::atan),
+                        "atan",
+                        trial,
+                    );
                 }
             }
         }
@@ -39780,7 +40023,10 @@ mod tests {
                             }
                         }
                     }
-                    assert!(saw_missing, "{name} n={n} produced no NaN — test is vacuous");
+                    assert!(
+                        saw_missing,
+                        "{name} n={n} produced no NaN — test is vacuous"
+                    );
                 }
             }
         }
@@ -39881,9 +40127,16 @@ mod tests {
                 }
             };
             // Replica of the generic loop + Self::new's Float64 null normalization.
+            // Mirrors clip's reversed-bound interval normalization (t3idc): pandas
+            // treats scalar bounds as unordered interval endpoints, so lower > upper
+            // swaps rather than sequentially clamping everything to the upper bound.
             fn ref_clip(vals: &[Scalar], lo: Option<f64>, hi: Option<f64>) -> Vec<Scalar> {
                 let lo = lo.filter(|v| !v.is_nan());
                 let hi = hi.filter(|v| !v.is_nan());
+                let (lo, hi) = match (lo, hi) {
+                    (Some(l), Some(h)) if l > h => (Some(h), Some(l)),
+                    bounds => bounds,
+                };
                 vals.iter()
                     .map(|v| {
                         if v.is_missing() {
@@ -40202,7 +40455,10 @@ mod tests {
                 Scalar::Float64((ss / (nums.len() as f64 - 1.0)).sqrt())
             }
             let std_of = |d: &[(&'static str, Scalar)]| -> Scalar {
-                d.iter().find(|(k, _)| *k == "std").map(|(_, v)| v.clone()).unwrap()
+                d.iter()
+                    .find(|(k, _)| *k == "std")
+                    .map(|(_, v)| v.clone())
+                    .unwrap()
             };
             for trial in 0..300 {
                 let n = (next() % 250) as usize;
@@ -41058,7 +41314,9 @@ mod tests {
                     Vec::new()
                 } else {
                     let m = ic.values().copied().max().unwrap();
-                    ic.iter().filter_map(|(&k, &c)| (c == m).then_some(k)).collect()
+                    ic.iter()
+                        .filter_map(|(&k, &c)| (c == m).then_some(k))
+                        .collect()
                 };
                 iwant.sort_unstable();
                 // Float64 reference over present (by bits; no -0.0 in data).
@@ -41182,8 +41440,7 @@ mod tests {
                     offsets.clone(),
                     validity.clone(),
                 );
-                let col_warm =
-                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let col_warm = Column::from_utf8_values_with_validity(bytes, offsets, validity);
                 let _ = col_warm.values(); // warm cache ⇒ generic path (oracle)
                 let cold = col_cold.mode().expect("cold mode");
                 let warm = col_warm.mode().expect("warm mode");
@@ -42025,8 +42282,7 @@ mod tests {
                     offsets.clone(),
                     validity.clone(),
                 );
-                let col_warm =
-                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let col_warm = Column::from_utf8_values_with_validity(bytes, offsets, validity);
                 let _ = col_warm.values(); // warm cache ⇒ generic path (oracle)
                 for dropna in [true, false] {
                     assert_eq!(
@@ -43876,7 +44132,11 @@ mod tests {
                         }
                         cbits.push(next() % 2 == 0);
                     }
-                    let dtype = if is_dt { DType::Datetime64 } else { DType::Timedelta64 };
+                    let dtype = if is_dt {
+                        DType::Datetime64
+                    } else {
+                        DType::Timedelta64
+                    };
                     let col_typed = if is_dt {
                         Column::from_datetime64_values_with_validity(data.clone(), validity)
                     } else {
@@ -43891,7 +44151,11 @@ mod tests {
                     };
                     let wt = col_typed.where_cond(&cond, &other).expect("typed where");
                     let we = col_eager.where_cond(&cond, &other).expect("eager where");
-                    assert_eq!(wt.values(), we.values(), "is_dt={is_dt} where trial {trial}");
+                    assert_eq!(
+                        wt.values(),
+                        we.values(),
+                        "is_dt={is_dt} where trial {trial}"
+                    );
                     let mt = col_typed.mask(&cond, &other).expect("typed mask");
                     let me = col_eager.mask(&cond, &other).expect("eager mask");
                     assert_eq!(mt.values(), me.values(), "is_dt={is_dt} mask trial {trial}");
@@ -43943,7 +44207,11 @@ mod tests {
                         });
                     }
                 }
-                let dtype = if is_dt { DType::Datetime64 } else { DType::Timedelta64 };
+                let dtype = if is_dt {
+                    DType::Datetime64
+                } else {
+                    DType::Timedelta64
+                };
                 let typed = if is_dt {
                     Column::from_datetime64_values_with_validity(data.clone(), validity)
                 } else {
@@ -43963,12 +44231,28 @@ mod tests {
                     let (o_typed, o_eager) = build(n, is_dt, nat, &mut next);
                     let cbits: Vec<bool> = (0..n).map(|_| next() % 2 == 0).collect();
                     let cond = Column::from_bool_values(cbits);
-                    let wt = s_typed.where_cond_series(&cond, &o_typed).expect("typed where_series");
-                    let we = s_eager.where_cond_series(&cond, &o_eager).expect("eager where_series");
-                    assert_eq!(wt.values(), we.values(), "is_dt={is_dt} where_series trial {trial}");
-                    let mt = s_typed.mask_series(&cond, &o_typed).expect("typed mask_series");
-                    let me = s_eager.mask_series(&cond, &o_eager).expect("eager mask_series");
-                    assert_eq!(mt.values(), me.values(), "is_dt={is_dt} mask_series trial {trial}");
+                    let wt = s_typed
+                        .where_cond_series(&cond, &o_typed)
+                        .expect("typed where_series");
+                    let we = s_eager
+                        .where_cond_series(&cond, &o_eager)
+                        .expect("eager where_series");
+                    assert_eq!(
+                        wt.values(),
+                        we.values(),
+                        "is_dt={is_dt} where_series trial {trial}"
+                    );
+                    let mt = s_typed
+                        .mask_series(&cond, &o_typed)
+                        .expect("typed mask_series");
+                    let me = s_eager
+                        .mask_series(&cond, &o_eager)
+                        .expect("eager mask_series");
+                    assert_eq!(
+                        mt.values(),
+                        me.values(),
+                        "is_dt={is_dt} mask_series trial {trial}"
+                    );
                 }
             }
         }
@@ -44011,8 +44295,12 @@ mod tests {
                 let (o_typed, o_eager) = build(n, &mut next);
                 let cbits: Vec<bool> = (0..n).map(|_| next() % 2 == 0).collect();
                 let cond = Column::from_bool_values(cbits);
-                let wt = s_typed.where_cond_series(&cond, &o_typed).expect("typed where");
-                let we = s_eager.where_cond_series(&cond, &o_eager).expect("eager where");
+                let wt = s_typed
+                    .where_cond_series(&cond, &o_typed)
+                    .expect("typed where");
+                let we = s_eager
+                    .where_cond_series(&cond, &o_eager)
+                    .expect("eager where");
                 assert_eq!(wt.values(), we.values(), "where_series i64 trial {trial}");
                 let mt = s_typed.mask_series(&cond, &o_typed).expect("typed mask");
                 let me = s_eager.mask_series(&cond, &o_eager).expect("eager mask");
@@ -44809,8 +45097,7 @@ mod tests {
                         non_missing.push((i, v));
                     }
                 }
-                non_missing
-                    .sort_by(|a, b| crate::compare_scalars_na_last(a.1, b.1, ascending));
+                non_missing.sort_by(|a, b| crate::compare_scalars_na_last(a.1, b.1, ascending));
                 let mut ranks = vec![Scalar::Null(NullKind::NaN); len];
                 let n = non_missing.len();
                 let mut cursor = 0usize;
@@ -45109,7 +45396,7 @@ mod tests {
                                 vd.set(i, false); // validity-false missing
                                 77
                             }
-                            1 => i64::MIN, // present-NaT at a valid slot
+                            1 => i64::MIN,               // present-NaT at a valid slot
                             _ => (r % 7) as i64 * 1_000, // ns, narrow range ⇒ ties
                         }
                     })
@@ -45403,10 +45690,10 @@ mod tests {
                 // sorted views
                 let iview: Vec<i64> = isorter.iter().map(|&i| idata[i]).collect();
                 let fview: Vec<f64> = fsorter.iter().map(|&i| fdata[i]).collect();
-                let needles_i: Vec<Scalar> =
-                    (-12..=12).map(Scalar::Int64).collect();
-                let needles_f: Vec<Scalar> =
-                    (-12..=12).map(|k| Scalar::Float64(k as f64 * 0.5)).collect();
+                let needles_i: Vec<Scalar> = (-12..=12).map(Scalar::Int64).collect();
+                let needles_f: Vec<Scalar> = (-12..=12)
+                    .map(|k| Scalar::Float64(k as f64 * 0.5))
+                    .collect();
                 for side in ["left", "right"] {
                     let left = side == "left";
                     let iwant: Vec<i64> = needles_i
@@ -45530,8 +45817,7 @@ mod tests {
             validity.set(2, false);
             validity.set(4, false);
             validity.set(7, false);
-            let reference =
-                Column::from_bool_values_with_validity(data.clone(), validity.clone());
+            let reference = Column::from_bool_values_with_validity(data.clone(), validity.clone());
             let candidate = Column::from_bool_values_with_validity(data, validity);
 
             assert_eq!(former_body_akbew(&reference), 3);
@@ -45618,12 +45904,8 @@ mod tests {
             let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
             let typed_mean = (typed_a_p50 + typed_b_p50) as f64 / 2.0;
 
-            println!(
-                "nullable Bool count_nonzero, len={LEN}, samples={SAMPLES}, count={witness}"
-            );
-            println!(
-                "former nonzero().len() p50 A/B: {former_a_p50} / {former_b_p50} ns"
-            );
+            println!("nullable Bool count_nonzero, len={LEN}, samples={SAMPLES}, count={witness}");
+            println!("former nonzero().len() p50 A/B: {former_a_p50} / {former_b_p50} ns");
             println!("typed raw count p50 A/B: {typed_a_p50} / {typed_b_p50} ns");
             println!("former/typed p50 ratio: {:.3}x", former_mean / typed_mean);
             assert_nullable_bool_unmaterialized_akbew(&candidate_a);
@@ -45697,8 +45979,7 @@ mod tests {
                     offsets.clone(),
                     validity.clone(),
                 );
-                let col_warm =
-                    Column::from_utf8_values_with_validity(bytes, offsets, validity);
+                let col_warm = Column::from_utf8_values_with_validity(bytes, offsets, validity);
                 // Pre-materialize the Scalar cache so the cold-cache gate defers col_warm
                 // to the generic path (the oracle). col_cold is never touched ⇒ stays cold.
                 let _ = col_warm.values();
@@ -45938,8 +46219,7 @@ mod tests {
                     if x < bin_edges[0] || x > bin_edges[n_bins] {
                         continue;
                     }
-                    let bin =
-                        (bin_edges.partition_point(|&edge| edge <= x) - 1).min(n_bins - 1);
+                    let bin = (bin_edges.partition_point(|&edge| edge <= x) - 1).min(n_bins - 1);
                     counts[bin] += 1;
                     continue;
                 }
@@ -45998,8 +46278,7 @@ mod tests {
             ];
             let mut validity = ValidityMask::all_valid(data.len());
             validity.set(10, false);
-            let reference =
-                Column::from_f64_values_with_validity(data.clone(), validity.clone());
+            let reference = Column::from_f64_values_with_validity(data.clone(), validity.clone());
             let candidate = Column::from_f64_values_with_validity(data, validity);
 
             for edges in [vec![-1.0, 0.0, 1.0, 2.0], vec![-1.0, 0.0, 0.0, 2.0]] {
@@ -46034,12 +46313,9 @@ mod tests {
             let edges = (0..=64)
                 .map(|idx| -1024.0 + idx as f64 * 32.0)
                 .collect::<Vec<_>>();
-            let reference_a =
-                Column::from_f64_values_with_validity(data.clone(), validity.clone());
-            let reference_b =
-                Column::from_f64_values_with_validity(data.clone(), validity.clone());
-            let candidate_a =
-                Column::from_f64_values_with_validity(data.clone(), validity.clone());
+            let reference_a = Column::from_f64_values_with_validity(data.clone(), validity.clone());
+            let reference_b = Column::from_f64_values_with_validity(data.clone(), validity.clone());
+            let candidate_a = Column::from_f64_values_with_validity(data.clone(), validity.clone());
             let candidate_b = Column::from_f64_values_with_validity(data, validity);
 
             let former = histogram_former_body_wl4jg(&reference_a, &edges)
@@ -46051,14 +46327,8 @@ mod tests {
             assert_nullable_f64_unmaterialized_wl4jg(&candidate_a);
 
             for _ in 0..3 {
-                let _ = std::hint::black_box(histogram_former_body_wl4jg(
-                    &reference_a,
-                    &edges,
-                ));
-                let _ = std::hint::black_box(histogram_former_body_wl4jg(
-                    &reference_b,
-                    &edges,
-                ));
+                let _ = std::hint::black_box(histogram_former_body_wl4jg(&reference_a, &edges));
+                let _ = std::hint::black_box(histogram_former_body_wl4jg(&reference_b, &edges));
                 let _ = std::hint::black_box(candidate_a.histogram(&edges));
                 let _ = std::hint::black_box(candidate_b.histogram(&edges));
             }
@@ -46096,9 +46366,7 @@ mod tests {
             let former_mean = (former_a_p50 + former_b_p50) as f64 / 2.0;
             let typed_mean = (typed_a_p50 + typed_b_p50) as f64 / 2.0;
 
-            println!(
-                "nullable Float64 histogram, len={LEN}, bins=64, samples={SAMPLES}"
-            );
+            println!("nullable Float64 histogram, len={LEN}, bins=64, samples={SAMPLES}");
             println!("former Scalar p50 A/B: {former_a_p50} / {former_b_p50} ns");
             println!("typed raw p50 A/B: {typed_a_p50} / {typed_b_p50} ns");
             println!("former/typed p50 ratio: {:.3}x", former_mean / typed_mean);

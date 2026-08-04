@@ -5774,8 +5774,7 @@ fn isin_apply_column(
     // `idx.contains(&values[i])` path: the bitset is Some only when every needle is
     // Int64, so a present slot's `idx.contains(Int64(v))` reduces to `ints.contains`
     // == `bits[v-min]`; a missing slot probes the exact same materialized Scalar.
-    if let (Some((data, validity)), Some((min, bits))) =
-        (col.as_i64_slice_with_validity(), bitset)
+    if let (Some((data, validity)), Some((min, bits))) = (col.as_i64_slice_with_validity(), bitset)
     {
         let scalar_values = col.values();
         let len = bits.len() as i128;
@@ -9685,7 +9684,7 @@ impl Series {
     /// position is then kept only if it is reachable under the chosen direction
     /// — `forward` requires a left anchor within `limit` steps, `backward` a
     /// right anchor within `limit`, `both` either — otherwise it stays missing.
-    /// `forward` with no limit reproduces [`interpolate`] exactly; `backward`
+    /// `forward` with no limit reproduces [`interpolate`](Self::interpolate) exactly; `backward`
     /// additionally fills leading gaps and `both` fills every bounded gap
     /// (br-frankenpandas-su1dm).
     pub fn interpolate_with_direction(
@@ -16244,7 +16243,7 @@ impl Series {
         }
     }
 
-    /// Cumulative product with an explicit `skipna` (see [`cumsum_with_skipna`]).
+    /// Cumulative product with an explicit `skipna` (see [`cumsum_with_skipna`](Self::cumsum_with_skipna)).
     pub fn cumprod_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
         if skipna {
             self.cumprod()
@@ -16253,7 +16252,7 @@ impl Series {
         }
     }
 
-    /// Cumulative maximum with an explicit `skipna` (see [`cumsum_with_skipna`]).
+    /// Cumulative maximum with an explicit `skipna` (see [`cumsum_with_skipna`](Self::cumsum_with_skipna)).
     pub fn cummax_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
         if skipna {
             self.cummax()
@@ -16262,7 +16261,7 @@ impl Series {
         }
     }
 
-    /// Cumulative minimum with an explicit `skipna` (see [`cumsum_with_skipna`]).
+    /// Cumulative minimum with an explicit `skipna` (see [`cumsum_with_skipna`](Self::cumsum_with_skipna)).
     pub fn cummin_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
         if skipna {
             self.cummin()
@@ -20161,7 +20160,7 @@ impl Series {
     /// `fill_method='pad'` (forward-fill) BEFORE computing — so an interior
     /// missing value uses the last valid observation, e.g.
     /// `[1.0, nan, 4.0].pct_change()` is `[NaN, 0.0, 3.0]`, not all-NaN.
-    /// (br-frankenpandas-5ioai) Use [`pct_change_with_fill`] with
+    /// (br-frankenpandas-5ioai) Use [`pct_change_with_fill`](Self::pct_change_with_fill) with
     /// `fill_method=None` for the no-fill variant.
     pub fn pct_change(&self, periods: i64) -> Result<Self, FrameError> {
         self.pct_change_with_fill(periods, Some("pad"), None)
@@ -20279,7 +20278,7 @@ impl Series {
     ///
     /// Matches `series.pct_change(periods, fill_method=..., limit=...)`.
     /// `fill_method` is `"ffill"` / `"pad"` (forward-fill missing values, the
-    /// pandas 2.2.3 default used by [`pct_change`]), `"bfill"` / `"backfill"`
+    /// pandas 2.2.3 default used by [`pct_change`](Self::pct_change)), `"bfill"` / `"backfill"`
     /// (backward-fill), or `None` (no fill — interior NaN propagates). `limit`
     /// caps consecutive fills; it is ignored when `fill_method` is `None`.
     pub fn pct_change_with_fill(
@@ -36823,10 +36822,7 @@ impl SeriesGroupBy<'_> {
             columns.insert("open".to_owned(), Column::from_f64_values_owned(opens));
             columns.insert("high".to_owned(), Column::from_f64_values_owned(highs));
             columns.insert("low".to_owned(), Column::from_f64_values_owned(lows));
-            columns.insert(
-                "close".to_owned(),
-                Column::from_f64_values_owned(closes),
-            );
+            columns.insert("close".to_owned(), Column::from_f64_values_owned(closes));
 
             let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
@@ -39986,13 +39982,17 @@ impl SeriesGroupByExpanding<'_, '_> {
             } else {
                 let mut group_values = Vec::with_capacity(row_indices.len());
                 for &idx in row_indices {
-                    let value = self.groupby.series.values().get(idx).cloned().ok_or_else(
-                        || {
-                            FrameError::CompatibilityRejected(
-                                "SeriesGroupBy expanding source index out of bounds".to_owned(),
-                            )
-                        },
-                    )?;
+                    let value =
+                        self.groupby
+                            .series
+                            .values()
+                            .get(idx)
+                            .cloned()
+                            .ok_or_else(|| {
+                                FrameError::CompatibilityRejected(
+                                    "SeriesGroupBy expanding source index out of bounds".to_owned(),
+                                )
+                            })?;
                     group_values.push(value);
                 }
                 Series::from_values(self.groupby.series.name(), group_index, group_values)
@@ -40178,13 +40178,17 @@ impl SeriesGroupByRolling<'_, '_> {
             } else {
                 let mut group_values = Vec::with_capacity(row_indices.len());
                 for &idx in row_indices {
-                    let value = self.groupby.series.values().get(idx).cloned().ok_or_else(
-                        || {
-                            FrameError::CompatibilityRejected(
-                                "SeriesGroupBy rolling source index out of bounds".to_owned(),
-                            )
-                        },
-                    )?;
+                    let value =
+                        self.groupby
+                            .series
+                            .values()
+                            .get(idx)
+                            .cloned()
+                            .ok_or_else(|| {
+                                FrameError::CompatibilityRejected(
+                                    "SeriesGroupBy rolling source index out of bounds".to_owned(),
+                                )
+                            })?;
                     group_values.push(value);
                 }
                 Series::from_values(self.groupby.series.name(), group_index, group_values)
@@ -42021,10 +42025,7 @@ impl StringAccessor<'_> {
     /// offsets are copied once unchanged; there are no worker-local output
     /// buffers, allocator contention, locks, or merge pass. Non-ASCII input
     /// returns `None` so the Unicode-aware row kernel remains authoritative.
-    fn apply_ascii_case_contiguous(
-        &self,
-        uppercase: bool,
-    ) -> Option<Result<Series, FrameError>> {
+    fn apply_ascii_case_contiguous(&self, uppercase: bool) -> Option<Result<Series, FrameError>> {
         let (in_bytes, in_offsets) = self.series.column().as_utf8_contiguous()?;
         if !in_bytes.is_ascii() {
             return None;
@@ -42207,36 +42208,35 @@ impl StringAccessor<'_> {
                 // and end at semantic row boundaries, so no valid match can
                 // cross between workers. Each worker owns its result buffer;
                 // concatenation is ordered and needs no locks or atomics.
-                let scan_rows =
-                    |re: &regex::bytes::Regex, start_row: usize, end_row: usize| {
-                        let byte_base = offsets[start_row];
-                        let chunk_bytes = &bytes[byte_base..offsets[end_row]];
-                        let chunk_offsets = &offsets[start_row..=end_row];
-                        let mut chunk_out = vec![false; end_row - start_row];
-                        let mut pos = 0usize;
-                        let mut row = 0usize;
-                        while pos < chunk_bytes.len() {
-                            let Some(m) = re.find_at(chunk_bytes, pos) else {
-                                break;
-                            };
-                            let absolute_start = byte_base + m.start();
-                            // Advance through every row boundary at or before
-                            // the match. `<=` skips empty rows and selects the
-                            // last row beginning at this byte, exactly matching
-                            // `partition_point(...)-1` for duplicate offsets.
-                            while chunk_offsets[row + 1] <= absolute_start {
-                                row += 1;
-                            }
-                            let row_end = chunk_offsets[row + 1] - byte_base;
-                            if m.end() <= row_end {
-                                chunk_out[row] = true;
-                                pos = row_end;
-                            } else {
-                                pos = m.start() + 1;
-                            }
+                let scan_rows = |re: &regex::bytes::Regex, start_row: usize, end_row: usize| {
+                    let byte_base = offsets[start_row];
+                    let chunk_bytes = &bytes[byte_base..offsets[end_row]];
+                    let chunk_offsets = &offsets[start_row..=end_row];
+                    let mut chunk_out = vec![false; end_row - start_row];
+                    let mut pos = 0usize;
+                    let mut row = 0usize;
+                    while pos < chunk_bytes.len() {
+                        let Some(m) = re.find_at(chunk_bytes, pos) else {
+                            break;
+                        };
+                        let absolute_start = byte_base + m.start();
+                        // Advance through every row boundary at or before
+                        // the match. `<=` skips empty rows and selects the
+                        // last row beginning at this byte, exactly matching
+                        // `partition_point(...)-1` for duplicate offsets.
+                        while chunk_offsets[row + 1] <= absolute_start {
+                            row += 1;
                         }
-                        chunk_out
-                    };
+                        let row_end = chunk_offsets[row + 1] - byte_base;
+                        if m.end() <= row_end {
+                            chunk_out[row] = true;
+                            pos = row_end;
+                        } else {
+                            pos = m.start() + 1;
+                        }
+                    }
+                    chunk_out
+                };
 
                 const PARALLEL_MIN_BYTES: usize = 8 * 1024 * 1024;
                 const MIN_ROWS_PER_WORKER: usize = 131_072;
@@ -42261,9 +42261,9 @@ impl StringAccessor<'_> {
                             // remains shared while mutable search state is local.
                             let worker_re = re.clone();
                             let scan_rows = &scan_rows;
-                            handles.push(scope.spawn(move || {
-                                scan_rows(&worker_re, start_row, end_row)
-                            }));
+                            handles.push(
+                                scope.spawn(move || scan_rows(&worker_re, start_row, end_row)),
+                            );
                         }
                         handles
                             .into_iter()
@@ -49000,7 +49000,7 @@ pub struct ToDatetimeOptions<'a> {
     pub origin: Option<ToDatetimeOrigin<'a>>,
     pub infer_mixed_timezone: bool,
     /// When a string column mixes tz-naive and tz-aware values, pandas
-    /// `read_csv(parse_dates=...)` cannot unify them into datetime64[ns] and
+    /// `read_csv(parse_dates=...)` cannot unify them into `datetime64[ns]` and
     /// keeps the column as `object` (a Series of mixed Timestamp objects). With
     /// this set, FrankenPandas reproduces that: instead of coercing to
     /// Datetime64, each value is normalized to its pandas `str(Timestamp)` form
@@ -60798,8 +60798,7 @@ impl DataFrame {
         // output column as contiguous-Utf8 directly. Eager-Utf8 sources
         // (plain `from_values` construction) have no contiguous view and keep
         // the eager fallback.
-        let mut utf8_columns: Vec<(&[u8], &[usize])> =
-            Vec::with_capacity(self.column_order.len());
+        let mut utf8_columns: Vec<(&[u8], &[usize])> = Vec::with_capacity(self.column_order.len());
         for name in &self.column_order {
             let Some(column) = self.columns.get(name) else {
                 return Ok(None);
@@ -62128,7 +62127,10 @@ impl DataFrame {
             let row: Vec<(&str, Scalar)> = cols
                 .iter()
                 .map(|(name, values)| {
-                    (*name, values.map_or(Scalar::Null(NullKind::Null), |col| col[i].clone()))
+                    (
+                        *name,
+                        values.map_or(Scalar::Null(NullKind::Null), |col| col[i].clone()),
+                    )
                 })
                 .collect();
             rows.push((label, row));
@@ -64843,7 +64845,10 @@ impl DataFrame {
             let ss = Series::new(name.to_string(), self.index.clone(), sc.clone())?;
             let so = Series::new(name.to_string(), other.index.clone(), oc.clone())?;
             let r = ss.corr(&so)?;
-            Ok(Some((IndexLabel::Utf8(name.to_string()), Scalar::Float64(r))))
+            Ok(Some((
+                IndexLabel::Utf8(name.to_string()),
+                Scalar::Float64(r),
+            )))
         };
 
         // par_map_columns keeps small/single-column frames serial (16384-cell,
@@ -65046,8 +65051,7 @@ impl DataFrame {
                 } else {
                     Arc::from(slice.to_vec())
                 };
-                let column =
-                    Column::from_f64_all_valid_dot_product_shared(&a_panel, b_values, m);
+                let column = Column::from_f64_all_valid_dot_product_shared(&a_panel, b_values, m);
                 result_cols.insert(name.clone(), column);
                 col_order.push(name.clone());
             }
@@ -72958,19 +72962,19 @@ impl DataFrame {
     }
 
     /// Per-column cumulative product with an explicit `skipna`
-    /// (see [`cumsum_with_skipna`]).
+    /// (see [`cumsum_with_skipna`](Self::cumsum_with_skipna)).
     pub fn cumprod_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.cumprod_with_skipna(skipna))
     }
 
     /// Per-column cumulative maximum with an explicit `skipna`
-    /// (see [`cumsum_with_skipna`]).
+    /// (see [`cumsum_with_skipna`](Self::cumsum_with_skipna)).
     pub fn cummax_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.cummax_with_skipna(skipna))
     }
 
     /// Per-column cumulative minimum with an explicit `skipna`
-    /// (see [`cumsum_with_skipna`]).
+    /// (see [`cumsum_with_skipna`](Self::cumsum_with_skipna)).
     pub fn cummin_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.cummin_with_skipna(skipna))
     }
@@ -80800,14 +80804,7 @@ impl DataFrameGroupBy<'_> {
 
         let mut result_cols = BTreeMap::new();
         result_cols.insert(value_cols[0].clone(), Column::from_values(agg_vals).ok()?);
-        DataFrame::new_with_axes(
-            out_index,
-            None,
-            result_cols,
-            value_cols.to_vec(),
-            None,
-        )
-        .ok()
+        DataFrame::new_with_axes(out_index, None, result_cols, value_cols.to_vec(), None).ok()
     }
 
     /// Stable shared-nothing variance/std for a bounded Int64 key and all-valid
@@ -80857,8 +80854,7 @@ impl DataFrameGroupBy<'_> {
             value_slices.push(values);
         }
 
-        let available = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get);
+        let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         let worker_count = available
             .min((keys.len() / MIN_ROWS_PER_WORKER).max(1))
             .min(range.div_ceil(MIN_SLOTS_PER_WORKER).max(1));
@@ -80871,50 +80867,49 @@ impl DataFrameGroupBy<'_> {
         // One flat, group-major row-id buffer per morsel. A u32 id is enough for
         // this gated path and is six times smaller than copying three f64 value
         // columns; stage two gathers the shared typed columns by these stable ids.
-        let partitions: Vec<(Vec<u32>, Vec<usize>, Vec<usize>)> =
-            std::thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(worker_count);
-                for (worker, key_chunk) in keys.chunks(row_chunk).enumerate() {
-                    let start = worker * row_chunk;
-                    handles.push(scope.spawn(move || {
-                        let mut counts = vec![0usize; range];
-                        let mut first = vec![usize::MAX; range];
-                        for (local_row, &key) in key_chunk.iter().enumerate() {
-                            let slot = (key as i128 - min as i128) as usize;
-                            counts[slot] += 1;
-                            if first[slot] == usize::MAX {
-                                first[slot] = start + local_row;
-                            }
+        let partitions: Vec<(Vec<u32>, Vec<usize>, Vec<usize>)> = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(worker_count);
+            for (worker, key_chunk) in keys.chunks(row_chunk).enumerate() {
+                let start = worker * row_chunk;
+                handles.push(scope.spawn(move || {
+                    let mut counts = vec![0usize; range];
+                    let mut first = vec![usize::MAX; range];
+                    for (local_row, &key) in key_chunk.iter().enumerate() {
+                        let slot = (key as i128 - min as i128) as usize;
+                        counts[slot] += 1;
+                        if first[slot] == usize::MAX {
+                            first[slot] = start + local_row;
                         }
+                    }
 
-                        let mut offsets = Vec::with_capacity(range + 1);
-                        offsets.push(0usize);
-                        for &count in &counts {
-                            offsets.push(offsets.last().copied().unwrap_or(0) + count);
-                        }
-                        let mut cursor = offsets[..range].to_vec();
-                        let mut row_ids = vec![0_u32; key_chunk.len()];
-                        for (local_row, &key) in key_chunk.iter().enumerate() {
-                            let global_row = start + local_row;
-                            let slot = (key as i128 - min as i128) as usize;
-                            let dst = cursor[slot];
-                            cursor[slot] += 1;
-                            row_ids[dst] = global_row as u32;
-                        }
-                        (row_ids, offsets, first)
-                    }));
-                }
-                handles
-                    .into_iter()
-                    .map(|handle| {
-                        handle.join().map_err(|_| {
-                            FrameError::CompatibilityRejected(
-                                "dense variance partition worker panicked".into(),
-                            )
-                        })
+                    let mut offsets = Vec::with_capacity(range + 1);
+                    offsets.push(0usize);
+                    for &count in &counts {
+                        offsets.push(offsets.last().copied().unwrap_or(0) + count);
+                    }
+                    let mut cursor = offsets[..range].to_vec();
+                    let mut row_ids = vec![0_u32; key_chunk.len()];
+                    for (local_row, &key) in key_chunk.iter().enumerate() {
+                        let global_row = start + local_row;
+                        let slot = (key as i128 - min as i128) as usize;
+                        let dst = cursor[slot];
+                        cursor[slot] += 1;
+                        row_ids[dst] = global_row as u32;
+                    }
+                    (row_ids, offsets, first)
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().map_err(|_| {
+                        FrameError::CompatibilityRejected(
+                            "dense variance partition worker panicked".into(),
+                        )
                     })
-                    .collect::<Result<Vec<_>, FrameError>>()
-            })?;
+                })
+                .collect::<Result<Vec<_>, FrameError>>()
+        })?;
 
         let mut first_row = vec![usize::MAX; range];
         for (_, _, local_first) in &partitions {
@@ -80935,71 +80930,69 @@ impl DataFrameGroupBy<'_> {
 
         let group_workers = worker_count.min(slots.len()).max(1);
         let next = std::sync::atomic::AtomicUsize::new(0);
-        let partial_results: Vec<Vec<(usize, usize, Vec<f64>)>> =
-            std::thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(group_workers);
-                for _ in 0..group_workers {
-                    let next = &next;
-                    let partitions = &partitions;
-                    let slots = &slots;
-                    let value_slices = &value_slices;
-                    handles.push(scope.spawn(move || {
-                        let mut results = Vec::new();
-                        loop {
-                            let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let Some(&slot) = slots.get(index) else {
-                                break;
-                            };
-                            let mut count = 0usize;
-                            let mut sums = vec![0.0_f64; ncols];
-                            for (row_ids, offsets, _) in partitions {
-                                let rows = &row_ids[offsets[slot]..offsets[slot + 1]];
-                                count += rows.len();
-                                for &row in rows {
-                                    let row = row as usize;
-                                    for column in 0..ncols {
-                                        sums[column] += value_slices[column][row];
-                                    }
+        let partial_results: Vec<Vec<(usize, usize, Vec<f64>)>> = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(group_workers);
+            for _ in 0..group_workers {
+                let next = &next;
+                let partitions = &partitions;
+                let slots = &slots;
+                let value_slices = &value_slices;
+                handles.push(scope.spawn(move || {
+                    let mut results = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&slot) = slots.get(index) else {
+                            break;
+                        };
+                        let mut count = 0usize;
+                        let mut sums = vec![0.0_f64; ncols];
+                        for (row_ids, offsets, _) in partitions {
+                            let rows = &row_ids[offsets[slot]..offsets[slot + 1]];
+                            count += rows.len();
+                            for &row in rows {
+                                let row = row as usize;
+                                for column in 0..ncols {
+                                    sums[column] += value_slices[column][row];
                                 }
                             }
-                            let means: Vec<f64> =
-                                sums.iter().map(|sum| *sum / count as f64).collect();
-                            let mut sumsq = vec![0.0_f64; ncols];
-                            for (row_ids, offsets, _) in partitions {
-                                let rows = &row_ids[offsets[slot]..offsets[slot + 1]];
-                                for &row in rows {
-                                    let row = row as usize;
-                                    for column in 0..ncols {
-                                        sumsq[column] +=
-                                            (value_slices[column][row] - means[column]).powi(2);
-                                    }
-                                }
-                            }
-                            if func_name == "std" && count > 1 {
-                                for value in &mut sumsq {
-                                    *value = (*value / (count - 1) as f64).sqrt();
-                                }
-                            } else if count > 1 {
-                                for value in &mut sumsq {
-                                    *value /= (count - 1) as f64;
-                                }
-                            }
-                            results.push((slot, count, sumsq));
                         }
-                        results
-                    }));
-                }
-                handles
-                    .into_iter()
-                    .map(|handle| {
-                        handle.join().map_err(|_| {
-                            FrameError::CompatibilityRejected(
-                                "dense variance group worker panicked".into(),
-                            )
-                        })
+                        let means: Vec<f64> = sums.iter().map(|sum| *sum / count as f64).collect();
+                        let mut sumsq = vec![0.0_f64; ncols];
+                        for (row_ids, offsets, _) in partitions {
+                            let rows = &row_ids[offsets[slot]..offsets[slot + 1]];
+                            for &row in rows {
+                                let row = row as usize;
+                                for column in 0..ncols {
+                                    sumsq[column] +=
+                                        (value_slices[column][row] - means[column]).powi(2);
+                                }
+                            }
+                        }
+                        if func_name == "std" && count > 1 {
+                            for value in &mut sumsq {
+                                *value = (*value / (count - 1) as f64).sqrt();
+                            }
+                        } else if count > 1 {
+                            for value in &mut sumsq {
+                                *value /= (count - 1) as f64;
+                            }
+                        }
+                        results.push((slot, count, sumsq));
+                    }
+                    results
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().map_err(|_| {
+                        FrameError::CompatibilityRejected(
+                            "dense variance group worker panicked".into(),
+                        )
                     })
-                    .collect::<Result<Vec<_>, FrameError>>()
-            })?;
+                })
+                .collect::<Result<Vec<_>, FrameError>>()
+        })?;
 
         let mut by_slot: Vec<Option<(usize, Vec<f64>)>> =
             std::iter::repeat_with(|| None).take(range).collect();
@@ -81057,16 +81050,8 @@ impl DataFrameGroupBy<'_> {
         {
             fused
         } else {
-            let (gid_per_row, ng, order, out_index) =
-                self.int64_dense_grouping(keys, min, range);
-            self.dense_aggregate_emit(
-                value_cols,
-                &gid_per_row,
-                ng,
-                &order,
-                func_name,
-                out_index,
-            )?
+            let (gid_per_row, ng, order, out_index) = self.int64_dense_grouping(keys, min, range);
+            self.dense_aggregate_emit(value_cols, &gid_per_row, ng, &order, func_name, out_index)?
         };
         if self.as_index {
             return Ok(indexed);
@@ -85175,15 +85160,14 @@ impl DataFrameGroupBy<'_> {
         // Measured 200k rows / 2000 groups / 6 f64 cols: cumprod 3.35->1.62
         // (2.07x), cumsum 2.46->1.34 (1.84x), cummax 1.42x, cummin 1.24x. No regressions.
         let ncols = value_cols.len();
-        let worker_count = if ncols >= CUM_PAR_MIN_COLS
-            && ncols.saturating_mul(nrows) >= CUM_PAR_MIN_VALUES
-        {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(ncols)
-        } else {
-            1
-        };
+        let worker_count =
+            if ncols >= CUM_PAR_MIN_COLS && ncols.saturating_mul(nrows) >= CUM_PAR_MIN_VALUES {
+                std::thread::available_parallelism()
+                    .map_or(1, std::num::NonZeroUsize::get)
+                    .min(ncols)
+            } else {
+                1
+            };
 
         let columns: Vec<Option<Column>> = if worker_count >= 2 {
             let next = std::sync::atomic::AtomicUsize::new(0);
@@ -85291,7 +85275,9 @@ impl DataFrameGroupBy<'_> {
                     .collect();
                 let mut slots: Vec<Option<Column>> = (0..value_cols.len()).map(|_| None).collect();
                 for handle in handles {
-                    for (i, column) in handle.join().expect("dense transform worker thread panicked")
+                    for (i, column) in handle
+                        .join()
+                        .expect("dense transform worker thread panicked")
                     {
                         slots[i] = column;
                     }
@@ -85452,7 +85438,8 @@ impl DataFrameGroupBy<'_> {
                     if vals.iter().any(|x| x.is_nan()) {
                         return None;
                     }
-                    let (out, mask) = dense_groupby_shift_f64_by_key(keys, min, range, vals, periods);
+                    let (out, mask) =
+                        dense_groupby_shift_f64_by_key(keys, min, range, vals, periods);
                     Some(Column::from_f64_values_with_validity(out, mask))
                 } else if let Some((data, validity)) = col.as_f64_slice_with_validity() {
                     let (out, mask) = dense_groupby_shift_nullable_f64_by_key(
@@ -100990,7 +100977,9 @@ mod tests {
                             Some(j) if opt[i].is_some() && opt[j].is_some() => {
                                 assert_eq!(
                                     vals[i],
-                                    Scalar::Timedelta64(opt[i].unwrap().saturating_sub(opt[j].unwrap())),
+                                    Scalar::Timedelta64(
+                                        opt[i].unwrap().saturating_sub(opt[j].unwrap())
+                                    ),
                                     "nullable={nullable} trial {trial} periods={periods} i={i}"
                                 );
                             }
@@ -106324,13 +106313,21 @@ mod tests {
         // Same groups, ascending key order (groupby sort=True default).
         assert_eq!(
             indexed.index().labels(),
-            &[IndexLabel::Int64(3), IndexLabel::Int64(5), IndexLabel::Int64(7)]
+            &[
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(5),
+                IndexLabel::Int64(7)
+            ]
         );
         // as_index=False: key becomes the FIRST regular column, index is 0..ng.
         assert_eq!(flat.column_names(), &["store_id", "units", "amount"]);
         assert_eq!(
             flat.index().labels(),
-            &[IndexLabel::Int64(0), IndexLabel::Int64(1), IndexLabel::Int64(2)]
+            &[
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2)
+            ]
         );
         assert_eq!(
             flat.column("store_id").unwrap().values(),
@@ -106353,7 +106350,11 @@ mod tests {
         );
         assert_eq!(
             flat.column("amount").unwrap().values(),
-            &[Scalar::Float64(6.5), Scalar::Float64(0.5), Scalar::Float64(5.5)]
+            &[
+                Scalar::Float64(6.5),
+                Scalar::Float64(0.5),
+                Scalar::Float64(5.5)
+            ]
         );
     }
 
@@ -126728,11 +126729,7 @@ mod tests {
         let df = DataFrame::new_with_column_order(
             Index::new_known_unique_int64_unit_range(0, N),
             columns,
-            vec![
-                "key_a".to_owned(),
-                "key_b".to_owned(),
-                "payload".to_owned(),
-            ],
+            vec!["key_a".to_owned(), "key_b".to_owned(), "payload".to_owned()],
         )
         .expect("large all-valid Float64 frame");
 
@@ -126750,14 +126747,8 @@ mod tests {
             .expect("deferred payload materializes");
 
         for (output_row, &source_row) in expected_order.iter().enumerate() {
-            assert_eq!(
-                sorted_a[output_row].to_bits(),
-                key_a[source_row].to_bits()
-            );
-            assert_eq!(
-                sorted_b[output_row].to_bits(),
-                key_b[source_row].to_bits()
-            );
+            assert_eq!(sorted_a[output_row].to_bits(), key_a[source_row].to_bits());
+            assert_eq!(sorted_b[output_row].to_bits(), key_b[source_row].to_bits());
             assert_eq!(
                 sorted_payload[output_row].to_bits(),
                 payload[source_row].to_bits()
@@ -134274,7 +134265,11 @@ mod tests {
         assert_eq!(r.columns["x"].dtype(), DType::Bool);
         let v = r.columns["x"].values();
         assert_eq!(v[0], Scalar::Bool(true));
-        assert_eq!(v[1], Scalar::Bool(false), "missing ⇒ not in Int64 needle set");
+        assert_eq!(
+            v[1],
+            Scalar::Bool(false),
+            "missing ⇒ not in Int64 needle set"
+        );
         assert_eq!(v[2], Scalar::Bool(false));
         assert_eq!(v[3], Scalar::Bool(true));
         assert_eq!(v[4], Scalar::Bool(false));
@@ -136302,10 +136297,7 @@ mod tests {
             )],
         )
         .unwrap();
-        for reduced in [
-            single.min_axis1().unwrap(),
-            single.max_axis1().unwrap(),
-        ] {
+        for reduced in [single.min_axis1().unwrap(), single.max_axis1().unwrap()] {
             assert_eq!(reduced.column().dtype(), DType::Int64);
             assert_eq!(reduced.column().values()[0], Scalar::Int64(7));
             assert_eq!(reduced.column().values()[1], Scalar::Int64(-7));
@@ -141010,9 +141002,7 @@ mod tests {
             vec![
                 (
                     "a",
-                    (0..ROWS)
-                        .map(|row| Scalar::Int64(row as i64))
-                        .collect(),
+                    (0..ROWS).map(|row| Scalar::Int64(row as i64)).collect(),
                 ),
                 (
                     "b",
@@ -141043,10 +141033,7 @@ mod tests {
 
         assert_eq!(result.column_names(), &["a", "b", "c"]);
         assert_eq!(result.columns["a"].values()[0], Scalar::Bool(true));
-        assert_eq!(
-            result.columns["a"].values()[ROWS - 1],
-            Scalar::Bool(true)
-        );
+        assert_eq!(result.columns["a"].values()[ROWS - 1], Scalar::Bool(true));
         assert_eq!(result.columns["a"].values()[257], Scalar::Bool(false));
         assert!(
             result.columns["b"]
@@ -143932,8 +143919,7 @@ mod tests {
         fn assert_matches_fallback(values: Column, keys: &[i64]) -> Result<(), FrameError> {
             let len = keys.len();
             let labels: Vec<IndexLabel> = (0..len as i64).map(IndexLabel::Int64).collect();
-            let value_series =
-                Series::new("price".to_owned(), Index::new(labels.clone()), values)?;
+            let value_series = Series::new("price".to_owned(), Index::new(labels.clone()), values)?;
             let typed_keys = Series::new(
                 "grp".to_owned(),
                 Index::new(labels.clone()),
@@ -143959,8 +143945,7 @@ mod tests {
                     .column(column_name)
                     .expect("fallback OHLC column should exist")
                     .values();
-                for (typed_value, fallback_value) in
-                    typed_values.iter().zip(fallback_values.iter())
+                for (typed_value, fallback_value) in typed_values.iter().zip(fallback_values.iter())
                 {
                     assert_eq!(
                         typed_value
@@ -155152,7 +155137,11 @@ mod tests {
             .unwrap()
             .to_numpy();
         assert_eq!(sums.len(), 2, "two groups");
-        assert_eq!(sums[0], 0.0, "all-NaN group sum should be 0.0, got {}", sums[0]);
+        assert_eq!(
+            sums[0], 0.0,
+            "all-NaN group sum should be 0.0, got {}",
+            sums[0]
+        );
         assert_eq!(sums[1], 5.0);
         let means = df
             .groupby(&["k"])
@@ -155162,7 +155151,11 @@ mod tests {
             .column_as_series("v")
             .unwrap()
             .to_numpy();
-        assert!(means[0].is_nan(), "all-NaN group mean should be NaN, got {}", means[0]);
+        assert!(
+            means[0].is_nan(),
+            "all-NaN group mean should be NaN, got {}",
+            means[0]
+        );
         assert_eq!(means[1], 5.0);
     }
 
@@ -155176,26 +155169,42 @@ mod tests {
                 (
                     "k",
                     vec![
-                        Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2),
-                        Scalar::Int64(1), Scalar::Int64(3),
+                        Scalar::Int64(3),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(3),
                     ],
                 ),
                 (
                     "v",
                     vec![
-                        Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30),
-                        Scalar::Int64(40), Scalar::Int64(50),
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                        Scalar::Int64(50),
                     ],
                 ),
             ],
         )
         .unwrap();
         let g = df.groupby(&["k"]).unwrap().sum().unwrap();
-        let keys: Vec<i64> = g.index().labels().iter().map(|l| match l {
-            IndexLabel::Int64(v) => *v, other => panic!("key {other:?}"),
-        }).collect();
+        let keys: Vec<i64> = g
+            .index()
+            .labels()
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Int64(v) => *v,
+                other => panic!("key {other:?}"),
+            })
+            .collect();
         let vals = g.column_as_series("v").unwrap().to_numpy();
-        assert_eq!(keys, vec![1, 2, 3], "groups must be sorted ascending by key");
+        assert_eq!(
+            keys,
+            vec![1, 2, 3],
+            "groups must be sorted ascending by key"
+        );
         assert_eq!(vals, vec![60.0, 30.0, 60.0]);
     }
 
@@ -169628,10 +169637,7 @@ mod tests {
             Column::from_f64_values(vec![1.5, 42.0, -3.25]),
         );
         cols.insert("i".to_owned(), Column::from_i64_values_owned(vec![7, 8, 9]));
-        cols.insert(
-            "g".to_owned(),
-            Column::from_f64_values(vec![0.5, 1.0, 2.0]),
-        );
+        cols.insert("g".to_owned(), Column::from_f64_values(vec![0.5, 1.0, 2.0]));
         let mixed = frame(cols, vec!["f", "i", "g"], 3);
 
         let view = mixed.transpose_view().unwrap().expect("promoted view");
@@ -169686,10 +169692,7 @@ mod tests {
         // eager fallback stays authoritative (no NaN/Null representation
         // question ever reaches the promoted arm).
         let mut with_nan = BTreeMap::new();
-        with_nan.insert(
-            "f".to_owned(),
-            Column::from_f64_values(vec![1.0, f64::NAN]),
-        );
+        with_nan.insert("f".to_owned(), Column::from_f64_values(vec![1.0, f64::NAN]));
         with_nan.insert("i".to_owned(), Column::from_i64_values_owned(vec![3, 4]));
         let with_nan = frame(with_nan, vec!["f", "i"], 2);
         assert!(with_nan.transpose_view().unwrap().is_none());
@@ -169885,7 +169888,11 @@ mod tests {
                         _ => a == b,
                     };
                     assert!(same, "cell {name}[{i}]: {a:?} vs {b:?}");
-                    assert_eq!(l.validity().get(i), r.validity().get(i), "validity {name}[{i}]");
+                    assert_eq!(
+                        l.validity().get(i),
+                        r.validity().get(i),
+                        "validity {name}[{i}]"
+                    );
                 }
             }
         }
@@ -169908,8 +169915,20 @@ mod tests {
             .unwrap(),
         );
         let source = frame(cols, vec!["a", "b"], 3);
-        assert!(source.column("a").unwrap().as_canonical_nullable_f64().is_some());
-        assert!(source.column("b").unwrap().as_canonical_nullable_f64().is_some());
+        assert!(
+            source
+                .column("a")
+                .unwrap()
+                .as_canonical_nullable_f64()
+                .is_some()
+        );
+        assert!(
+            source
+                .column("b")
+                .unwrap()
+                .as_canonical_nullable_f64()
+                .is_some()
+        );
 
         let view = source.transpose_view().unwrap().expect("nullable f64 view");
         assert_eq!(view.dtype(), DType::Float64);
@@ -183800,9 +183819,7 @@ mod series_groupby_utf8_cache_profile_cod_fp {
             "value".to_owned(),
             index,
             Column::from_f64_values_owned(
-                (0..rows)
-                    .map(|row| ((row * 17) % 10_003) as f64)
-                    .collect(),
+                (0..rows).map(|row| ((row * 17) % 10_003) as f64).collect(),
             ),
         )
         .expect("Float64 values");
@@ -184094,8 +184111,7 @@ mod series_groupby_utf8_cache_profile_cod_fp {
 
 #[cfg(all(test, feature = "block-storage"))]
 mod block_storage_cod_fp {
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use fp_columnar::Column;
     use fp_index::Index;

@@ -4173,8 +4173,7 @@ impl Index {
         // witness gives the exact dropna-aware count without materializing the
         // IndexLabel vector or allocating a temporary nanosecond buffer.
         if let Some(affine) = self.labels.datetime64_affine_range() {
-            return affine.len
-                - usize::from(dropna && affine.position(i64::MIN).is_some());
+            return affine.len - usize::from(dropna && affine.position(i64::MIN).is_some());
         }
         if let Some(values) = self.labels.int64_view() {
             return Self::nunique_i64(&values);
@@ -7586,13 +7585,13 @@ impl DatetimeIndex {
         out
     }
 
-    /// Alias for [`isna`], matching `pd.DatetimeIndex.isnull()`.
+    /// Alias for [`isna`](Self::isna), matching `pd.DatetimeIndex.isnull()`.
     #[must_use]
     pub fn isnull(&self) -> Vec<bool> {
         self.isna()
     }
 
-    /// Alias for [`notna`], matching `pd.DatetimeIndex.notnull()`.
+    /// Alias for [`notna`](Self::notna), matching `pd.DatetimeIndex.notnull()`.
     #[must_use]
     pub fn notnull(&self) -> Vec<bool> {
         self.notna()
@@ -7671,7 +7670,7 @@ impl DatetimeIndex {
         None
     }
 
-    /// Alias for [`tz`], matching `pd.DatetimeIndex.tzinfo`.
+    /// Alias for [`tz`](Self::tz), matching `pd.DatetimeIndex.tzinfo`.
     #[must_use]
     pub fn tzinfo(&self) -> Option<String> {
         self.tz()
@@ -7796,7 +7795,7 @@ impl DatetimeIndex {
         (positions, missing)
     }
 
-    /// Alias for [`get_indexer`], matching
+    /// Alias for [`get_indexer`](Self::get_indexer), matching
     /// `pd.DatetimeIndex.get_indexer_for(targets)`.
     #[must_use]
     pub fn get_indexer_for(&self, targets: &[i64]) -> Vec<isize> {
@@ -8134,7 +8133,7 @@ impl DatetimeIndex {
         })
     }
 
-    /// Alias for [`week`], matching `pd.DatetimeIndex.weekofyear`.
+    /// Alias for [`week`](Self::week), matching `pd.DatetimeIndex.weekofyear`.
     #[must_use]
     pub fn weekofyear(&self) -> Vec<Option<u32>> {
         self.week()
@@ -8147,7 +8146,7 @@ impl DatetimeIndex {
         map_datetime_labels(self.index.labels(), |dt| dt.ordinal())
     }
 
-    /// Alias for [`dayofyear`], matching `pd.DatetimeIndex.day_of_year`.
+    /// Alias for [`dayofyear`](Self::dayofyear), matching `pd.DatetimeIndex.day_of_year`.
     #[must_use]
     pub fn day_of_year(&self) -> Vec<Option<u32>> {
         self.dayofyear()
@@ -8163,13 +8162,13 @@ impl DatetimeIndex {
         })
     }
 
-    /// Alias for [`dayofweek`], matching `pd.DatetimeIndex.day_of_week`.
+    /// Alias for [`dayofweek`](Self::dayofweek), matching `pd.DatetimeIndex.day_of_week`.
     #[must_use]
     pub fn day_of_week(&self) -> Vec<Option<u32>> {
         self.dayofweek()
     }
 
-    /// Alias for [`dayofweek`], matching `pd.DatetimeIndex.weekday`.
+    /// Alias for [`dayofweek`](Self::dayofweek), matching `pd.DatetimeIndex.weekday`.
     #[must_use]
     pub fn weekday(&self) -> Vec<Option<u32>> {
         self.dayofweek()
@@ -8202,7 +8201,7 @@ impl DatetimeIndex {
         })
     }
 
-    /// Alias for [`days_in_month`], matching `pd.DatetimeIndex.daysinmonth`.
+    /// Alias for [`days_in_month`](Self::days_in_month), matching `pd.DatetimeIndex.daysinmonth`.
     #[must_use]
     pub fn daysinmonth(&self) -> Vec<Option<u32>> {
         self.days_in_month()
@@ -8906,13 +8905,13 @@ impl TimedeltaIndex {
         out
     }
 
-    /// Alias for [`isna`], matching `pd.TimedeltaIndex.isnull()`.
+    /// Alias for [`isna`](Self::isna), matching `pd.TimedeltaIndex.isnull()`.
     #[must_use]
     pub fn isnull(&self) -> Vec<bool> {
         self.isna()
     }
 
-    /// Alias for [`notna`], matching `pd.TimedeltaIndex.notnull()`.
+    /// Alias for [`notna`](Self::notna), matching `pd.TimedeltaIndex.notnull()`.
     #[must_use]
     pub fn notnull(&self) -> Vec<bool> {
         self.notna()
@@ -9041,7 +9040,7 @@ impl TimedeltaIndex {
         (positions, missing)
     }
 
-    /// Alias for [`get_indexer`], matching
+    /// Alias for [`get_indexer`](Self::get_indexer), matching
     /// `pd.TimedeltaIndex.get_indexer_for(targets)`.
     #[must_use]
     pub fn get_indexer_for(&self, targets: &[i64]) -> Vec<isize> {
@@ -10759,7 +10758,7 @@ impl PeriodIndex {
         (positions, missing)
     }
 
-    /// Alias for [`get_indexer`], matching
+    /// Alias for [`get_indexer`](Self::get_indexer), matching
     /// `pd.PeriodIndex.get_indexer_for(targets)`.
     #[must_use]
     pub fn get_indexer_for(&self, targets: &[Period]) -> Vec<isize> {
@@ -11053,7 +11052,7 @@ impl PeriodIndex {
         self.transpose()
     }
 
-    /// Flatten periods to a Vec<Period>, matching
+    /// Flatten periods to a `Vec<Period>`, matching
     /// `pd.PeriodIndex.ravel()`.
     #[must_use]
     pub fn ravel(&self) -> Vec<Period> {
@@ -11890,7 +11889,7 @@ impl RangeIndex {
         vec![false; self.len()]
     }
 
-    /// Alias for [`isna`], matching `pd.RangeIndex.isnull()`.
+    /// Alias for [`isna`](Self::isna), matching `pd.RangeIndex.isnull()`.
     #[must_use]
     pub fn isnull(&self) -> Vec<bool> {
         self.isna()
@@ -11902,7 +11901,7 @@ impl RangeIndex {
         vec![true; self.len()]
     }
 
-    /// Alias for [`notna`], matching `pd.RangeIndex.notnull()`.
+    /// Alias for [`notna`](Self::notna), matching `pd.RangeIndex.notnull()`.
     #[must_use]
     pub fn notnull(&self) -> Vec<bool> {
         self.notna()
@@ -12664,7 +12663,7 @@ impl RangeIndex {
         self.transpose()
     }
 
-    /// Flatten the range to a Vec<i64>, matching `pd.RangeIndex.ravel()`.
+    /// Flatten the range to a `Vec<i64>`, matching `pd.RangeIndex.ravel()`.
     #[must_use]
     pub fn ravel(&self) -> Vec<i64> {
         self.values()
@@ -12784,7 +12783,7 @@ impl RangeIndex {
         (positions, missing)
     }
 
-    /// Alias for [`get_indexer`], matching
+    /// Alias for [`get_indexer`](Self::get_indexer), matching
     /// `pd.RangeIndex.get_indexer_for(targets)`.
     #[must_use]
     pub fn get_indexer_for(&self, targets: &[i64]) -> Vec<isize> {
@@ -12947,8 +12946,7 @@ impl RangeIndex {
         let len = self.len();
         len == other.len()
             && (len == 0
-                || (self.value_at(0) == other.value_at(0)
-                    && (len == 1 || self.step == other.step)))
+                || (self.value_at(0) == other.value_at(0) && (len == 1 || self.step == other.step)))
     }
 
     /// Union of the two ranges, matching `pd.RangeIndex.union(other)`. pandas
@@ -14350,13 +14348,13 @@ impl CategoricalIndex {
         ))
     }
 
-    /// Alias for [`isna`], matching `pd.CategoricalIndex.isnull()`.
+    /// Alias for [`isna`](Self::isna), matching `pd.CategoricalIndex.isnull()`.
     #[must_use]
     pub fn isnull(&self) -> Vec<bool> {
         self.isna()
     }
 
-    /// Alias for [`notna`], matching `pd.CategoricalIndex.notnull()`.
+    /// Alias for [`notna`](Self::notna), matching `pd.CategoricalIndex.notnull()`.
     #[must_use]
     pub fn notnull(&self) -> Vec<bool> {
         self.notna()
@@ -14690,7 +14688,7 @@ impl CategoricalIndex {
         self.transpose()
     }
 
-    /// Flatten labels to a Vec<String>, matching
+    /// Flatten labels to a `Vec<String>`, matching
     /// `pd.CategoricalIndex.ravel()`.
     #[must_use]
     pub fn ravel(&self) -> Vec<String> {
@@ -15048,7 +15046,7 @@ impl CategoricalIndex {
             .collect()
     }
 
-    /// Alias for [`get_indexer`], matching
+    /// Alias for [`get_indexer`](Self::get_indexer), matching
     /// `pd.CategoricalIndex.get_indexer_for(targets)`.
     #[must_use]
     pub fn get_indexer_for(&self, targets: &[String]) -> Vec<isize> {
@@ -19415,8 +19413,8 @@ mod tests {
     use super::{
         CategoricalIndex, DateOffset, DateRangeError, DatetimeIndex, Index, IndexLabel,
         Int64AffineLabels, MultiIndex, PeriodFields, PeriodIndex, RangeIndex, TimedeltaIndex,
-        TimedeltaRangeError, align_union, apply_date_offset, bdate_range, date_range,
-        infer_freq, infer_freq_from_timestamps, timedelta_range, validate_alignment_plan,
+        TimedeltaRangeError, align_union, apply_date_offset, bdate_range, date_range, infer_freq,
+        infer_freq_from_timestamps, timedelta_range, validate_alignment_plan,
     };
 
     fn int64_labels(index: &Index) -> Vec<i64> {
@@ -19681,10 +19679,7 @@ mod tests {
             let affine = Index::from_datetime64_affine_range(start, step, len)
                 .expect("valid affine test range");
             let eager_values = (0..len)
-                .map(|offset| {
-                    start
-                        + i64::try_from(offset).expect("small test offset") * step
-                })
+                .map(|offset| start + i64::try_from(offset).expect("small test offset") * step)
                 .collect();
             let eager = Index::from_datetime64(eager_values);
             let affine_result = infer_freq(&affine);
@@ -24024,14 +24019,8 @@ mod tests {
         );
         assert!(candidate_a.labels.materialized.get().is_none());
         for _ in 0..3 {
-            std::hint::black_box(datetime64_nunique_former_body_uls13(
-                &reference_a,
-                true,
-            ));
-            std::hint::black_box(datetime64_nunique_former_body_uls13(
-                &reference_b,
-                true,
-            ));
+            std::hint::black_box(datetime64_nunique_former_body_uls13(&reference_a, true));
+            std::hint::black_box(datetime64_nunique_former_body_uls13(&reference_b, true));
             std::hint::black_box(candidate_a.nunique());
             std::hint::black_box(candidate_b.nunique());
         }
@@ -24072,7 +24061,10 @@ mod tests {
         println!("affine Datetime64 nunique, len={LEN}, samples={SAMPLES}");
         println!("former body p50 A/B: {former_a_p50} / {former_b_p50} ns");
         println!("affine witness p50 A/B: {witness_a_p50} / {witness_b_p50} ns");
-        println!("former/witness p50 ratio: {:.3}x", former_mean / witness_mean);
+        println!(
+            "former/witness p50 ratio: {:.3}x",
+            former_mean / witness_mean
+        );
         assert!(candidate_a.labels.materialized.get().is_none());
         assert!(candidate_b.labels.materialized.get().is_none());
     }
@@ -24200,7 +24192,10 @@ mod tests {
         println!("affine Datetime64 min, len={LEN}, samples={SAMPLES}");
         println!("former body p50 A/B: {former_a_p50} / {former_b_p50} ns");
         println!("affine witness p50 A/B: {witness_a_p50} / {witness_b_p50} ns");
-        println!("former/witness p50 ratio: {:.3}x", former_mean / witness_mean);
+        println!(
+            "former/witness p50 ratio: {:.3}x",
+            former_mean / witness_mean
+        );
         assert!(candidate_a.labels.materialized.get().is_none());
         assert!(candidate_b.labels.materialized.get().is_none());
     }
@@ -24328,7 +24323,10 @@ mod tests {
         println!("affine Datetime64 max, len={LEN}, samples={SAMPLES}");
         println!("former body p50 A/B: {former_a_p50} / {former_b_p50} ns");
         println!("affine witness p50 A/B: {witness_a_p50} / {witness_b_p50} ns");
-        println!("former/witness p50 ratio: {:.3}x", former_mean / witness_mean);
+        println!(
+            "former/witness p50 ratio: {:.3}x",
+            former_mean / witness_mean
+        );
         assert!(candidate_a.labels.materialized.get().is_none());
         assert!(candidate_b.labels.materialized.get().is_none());
     }
@@ -24461,7 +24459,10 @@ mod tests {
         println!("affine Datetime64 argmin, len={LEN}, samples={SAMPLES}");
         println!("former body p50 A/B: {former_a_p50} / {former_b_p50} ns");
         println!("affine witness p50 A/B: {witness_a_p50} / {witness_b_p50} ns");
-        println!("former/witness p50 ratio: {:.3}x", former_mean / witness_mean);
+        println!(
+            "former/witness p50 ratio: {:.3}x",
+            former_mean / witness_mean
+        );
         assert!(candidate_a.labels.materialized.get().is_none());
         assert!(candidate_b.labels.materialized.get().is_none());
     }
@@ -24587,7 +24588,10 @@ mod tests {
         println!("affine Datetime64 argmax, len={LEN}, samples={SAMPLES}");
         println!("former body p50 A/B: {former_a_p50} / {former_b_p50} ns");
         println!("affine witness p50 A/B: {witness_a_p50} / {witness_b_p50} ns");
-        println!("former/witness p50 ratio: {:.3}x", former_mean / witness_mean);
+        println!(
+            "former/witness p50 ratio: {:.3}x",
+            former_mean / witness_mean
+        );
     }
 
     #[test]
@@ -29012,8 +29016,14 @@ mod tests {
         assert_eq!(asc.argsort(), vec![0, 1, 2, 3, 4]);
 
         // sort_values: ascending (descending rebuilds an ascending range).
-        assert_eq!(vals(&desc.sort_values().to_flat_index()), vec![2, 4, 6, 8, 10]);
-        assert_eq!(vals(&asc.sort_values().to_flat_index()), vec![0, 2, 4, 6, 8]);
+        assert_eq!(
+            vals(&desc.sort_values().to_flat_index()),
+            vec![2, 4, 6, 8, 10]
+        );
+        assert_eq!(
+            vals(&asc.sort_values().to_flat_index()),
+            vec![0, 2, 4, 6, 8]
+        );
 
         // factorize: identity codes; uniques preserve the (descending) order.
         let (codes, uniques) = desc.factorize();
@@ -29022,10 +29032,7 @@ mod tests {
 
         // take / repeat: order-preserving over the descending values.
         assert_eq!(vals(&desc.take(&[0, 2, 4]).unwrap()), vec![10, 6, 2]);
-        assert_eq!(
-            vals(&desc.repeat(2)),
-            vec![10, 10, 8, 8, 6, 6, 4, 4, 2, 2]
-        );
+        assert_eq!(vals(&desc.repeat(2)), vec![10, 10, 8, 8, 6, 6, 4, 4, 2, 2]);
 
         // where keeps the value where cond is TRUE (replaces where false);
         // putmask replaces where the mask is TRUE — opposite conventions.
@@ -29046,8 +29053,14 @@ mod tests {
         // operands, value-equal operands, disjoint / overlapping / subset
         // overlaps. Expected values were computed by real pandas; see
         // testdata_rangeset_pandas_cases.rs.
-        let cases: &[((i64, i64, i64), (i64, i64, i64), &[i64], &[i64], &[i64], &[i64])] =
-            &include!("testdata_rangeset_pandas_cases.rs");
+        let cases: &[(
+            (i64, i64, i64),
+            (i64, i64, i64),
+            &[i64],
+            &[i64],
+            &[i64],
+            &[i64],
+        )] = &include!("testdata_rangeset_pandas_cases.rs");
 
         let vals = |idx: &super::Index| -> Vec<i64> {
             idx.labels()
@@ -29068,16 +29081,24 @@ mod tests {
             let got_d = vals(&ra.difference(&rb));
             let got_s = vals(&ra.symmetric_difference(&rb));
             if got_i != *want_i {
-                fails.push(format!("#{i} inter {a:?}∩{b:?}: got {got_i:?} want {want_i:?}"));
+                fails.push(format!(
+                    "#{i} inter {a:?}∩{b:?}: got {got_i:?} want {want_i:?}"
+                ));
             }
             if got_u != *want_u {
-                fails.push(format!("#{i} union {a:?}∪{b:?}: got {got_u:?} want {want_u:?}"));
+                fails.push(format!(
+                    "#{i} union {a:?}∪{b:?}: got {got_u:?} want {want_u:?}"
+                ));
             }
             if got_d != *want_d {
-                fails.push(format!("#{i} diff {a:?}∖{b:?}: got {got_d:?} want {want_d:?}"));
+                fails.push(format!(
+                    "#{i} diff {a:?}∖{b:?}: got {got_d:?} want {want_d:?}"
+                ));
             }
             if got_s != *want_s {
-                fails.push(format!("#{i} symm {a:?}∆{b:?}: got {got_s:?} want {want_s:?}"));
+                fails.push(format!(
+                    "#{i} symm {a:?}∆{b:?}: got {got_s:?} want {want_s:?}"
+                ));
             }
         }
         assert!(
