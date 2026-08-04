@@ -3702,23 +3702,30 @@ pub fn nansem(values: &[Scalar], ddof: usize) -> Scalar {
 /// Matches `np.ptp` behavior on nan-safe inputs. Returns `Null(NaN)`
 /// for empty or all-missing inputs.
 pub fn nanptp(values: &[Scalar]) -> Scalar {
-    // Per br-frankenpandas-u2g0r: Timedelta64 peak-to-peak returns
-    // Timedelta64 (max - min in ns). collect_timedelta_ns_f64 is defined
-    // in the cumulative-aggregations section below.
-    if let Some(td) = collect_timedelta_ns_f64(values) {
-        if td.is_empty() {
-            return Scalar::Timedelta64(Timedelta::NAT);
+    // Preserve every nanosecond in the uniformly-Timedelta64 case. Converting
+    // to f64 before subtracting loses ranges below one f64 ULP beyond 104 days.
+    // The Scalar fallback below retains mixed-family behavior.
+    let (mut td_lo, mut td_hi) = (i64::MAX, i64::MIN);
+    let mut saw_timedelta = false;
+    let mut all_timedelta = true;
+    for value in values {
+        if value.is_missing() {
+            continue;
         }
-        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-        for x in &td {
-            if *x < lo {
-                lo = *x;
+        match value {
+            Scalar::Timedelta64(ns) => {
+                saw_timedelta = true;
+                td_lo = td_lo.min(*ns);
+                td_hi = td_hi.max(*ns);
             }
-            if *x > hi {
-                hi = *x;
+            _ => {
+                all_timedelta = false;
+                break;
             }
         }
-        return float_ns_to_timedelta(hi - lo);
+    }
+    if all_timedelta && saw_timedelta {
+        return Scalar::Timedelta64(td_hi.saturating_sub(td_lo));
     }
     // Fused single-pass min/max (see `nansum`): track lo/hi while filtering, no
     // intermediate Vec<f64>. Bit-identical to the prior collect_finite two-pass:
@@ -9264,6 +9271,17 @@ mod tests {
             "timedelta_all_missing",
             &[Scalar::Timedelta64(i64::MIN), Scalar::Null(NullKind::NaN)],
             Scalar::Null(NullKind::NaN),
+        );
+        let beyond_f64_exact_ns = 200 * Timedelta::NANOS_PER_DAY;
+        assert_ptp(
+            usize::MAX - 2,
+            "timedelta_one_ns_range_beyond_f64_exactness",
+            &[
+                Scalar::Timedelta64(beyond_f64_exact_ns),
+                Scalar::Timedelta64(beyond_f64_exact_ns - 1),
+                Scalar::Timedelta64(Timedelta::NAT),
+            ],
+            Scalar::Timedelta64(1),
         );
 
         let mut seed = 0xa22f_17ed_57a7_15e5_u64;
